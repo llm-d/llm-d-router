@@ -19,11 +19,11 @@ package steps
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -47,99 +47,23 @@ func TestReadErrorBody_ReturnsSmallBodyVerbatim(t *testing.T) {
 	}
 }
 
-func TestCapSingleTokenOutput(t *testing.T) {
+func TestResolveFormat(t *testing.T) {
 	tests := []struct {
-		name   string
-		format gateway.RequestFormat
-		body   map[string]any
-		want   map[string]any
+		name            string
+		useOpenAIFormat bool
+		path            string
+		want            reqcommon.APIType
 	}{
-		{
-			name:   "chat completions caps output fields and forces non-streaming",
-			format: gateway.FormatChatCompletions,
-			body: map[string]any{
-				"model":                 "m",
-				"max_tokens":            100,
-				"min_tokens":            5,
-				"max_completion_tokens": 100,
-				"stream":                true,
-				"stream_options":        map[string]any{"include_usage": true},
-			},
-			want: map[string]any{
-				"model":                 "m",
-				"max_tokens":            1,
-				"max_completion_tokens": 1,
-				"stream":                false,
-			},
-		},
-		{
-			name:   "max_completion_tokens is not added when the client omitted it",
-			format: gateway.FormatChatCompletions,
-			body:   map[string]any{"model": "m"},
-			want: map[string]any{
-				"model":      "m",
-				"max_tokens": 1,
-				"stream":     false,
-			},
-		},
-		{
-			name:   "completions caps max_tokens, strips min_tokens, forces non-streaming",
-			format: gateway.FormatCompletions,
-			body:   map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5},
-			want:   map[string]any{"model": "m", "max_tokens": 1, "stream": false},
-		},
-		{
-			name:   "streaming is forced false and stream_options stripped",
-			format: gateway.FormatCompletions,
-			body:   map[string]any{"stream": true, "stream_options": map[string]any{"include_usage": true}},
-			want:   map[string]any{"stream": false, "max_tokens": 1},
-		},
-		{
-			name:   "generate caps max_tokens and strips min_tokens inside sampling_params",
-			format: gateway.FormatGenerate,
-			body: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 100, "min_tokens": 5},
-			},
-			want: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 1},
-				"stream":          false,
-			},
-		},
-		{
-			name:   "generate synthesizes sampling_params when absent",
-			format: gateway.FormatGenerate,
-			body:   map[string]any{"model": "m"},
-			want: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 1},
-				"stream":          false,
-			},
-		},
-		{
-			name:   "generate preserves other sampling_params entries",
-			format: gateway.FormatGenerate,
-			body: map[string]any{
-				"sampling_params": map[string]any{
-					"extra_args": map[string]any{"kv_transfer_params": "x"},
-				},
-			},
-			want: map[string]any{
-				"sampling_params": map[string]any{
-					"max_tokens": 1,
-					"extra_args": map[string]any{"kv_transfer_params": "x"},
-				},
-				"stream": false,
-			},
-		},
+		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
+		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
+		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
+		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
+		{name: "responses collapses to generate", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			capSingleTokenOutput(tt.body, tt.format)
-			if !reflect.DeepEqual(tt.body, tt.want) {
-				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			if got := resolveFormat(tt.useOpenAIFormat, tt.path); got != tt.want {
+				t.Errorf("resolveFormat(%t, %q) = %v, want %v", tt.useOpenAIFormat, tt.path, got, tt.want)
 			}
 		})
 	}
@@ -476,41 +400,6 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			_, err := extractMultimodalEntries(features)
 			if !errors.Is(err, pipeline.ErrBadRequest) {
 				t.Errorf("expected ErrBadRequest, got %v", err)
-			}
-		})
-	}
-}
-
-func TestValidateSamplingParams(t *testing.T) {
-	obj := func(m map[string]any) map[string]any { return m }
-	tests := []struct {
-		name    string
-		body    map[string]any
-		wantErr bool
-	}{
-		{name: "absent", body: map[string]any{}},
-		{name: "null", body: map[string]any{"sampling_params": nil}},
-		{name: "valid_object", body: map[string]any{"sampling_params": obj(map[string]any{"max_tokens": float64(16)})}},
-		{name: "valid_with_extra_args", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": obj(map[string]any{})})}},
-		{name: "extra_args_null", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": nil})}},
-		{name: "sampling_params_array", body: map[string]any{"sampling_params": []any{float64(1), float64(2)}}, wantErr: true},
-		{name: "sampling_params_string", body: map[string]any{"sampling_params": "greedy"}, wantErr: true},
-		{name: "extra_args_array", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": []any{float64(1)}})}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateSamplingParams(tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !errors.Is(err, pipeline.ErrBadRequest) {
-					t.Errorf("expected ErrBadRequest, got %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

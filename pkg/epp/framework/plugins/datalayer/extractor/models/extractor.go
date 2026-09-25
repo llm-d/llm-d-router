@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package models
 
 import (
@@ -25,16 +41,19 @@ type ModelResponse struct {
 type ModelExtractor struct {
 	typedName fwkplugin.TypedName
 	dk        fwkplugin.DataKey
+	slot      *fwkdl.Slot[attrmodels.ModelDataCollection]
 }
 
 // NewModelExtractor returns a new model extractor.
 func NewModelExtractor() *ModelExtractor {
+	dk := attrmodels.ModelsAttributeKey
 	return &ModelExtractor{
 		typedName: fwkplugin.TypedName{
 			Type: attrmodels.ModelsExtractorType,
 			Name: attrmodels.ModelsExtractorType,
 		},
-		dk: attrmodels.ModelsAttributeKey,
+		dk:   dk,
+		slot: fwkdl.NewSlot[attrmodels.ModelDataCollection](dk),
 	}
 }
 
@@ -53,7 +72,7 @@ func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handl
 
 // Extract stores the model list as an endpoint attribute.
 func (me *ModelExtractor) Extract(_ context.Context, in fwkdl.PollInput[*ModelResponse]) error {
-	in.Endpoint.GetAttributes().Put(me.dk, attrmodels.ModelDataCollection(in.Payload.Data))
+	me.slot.Put(in.Endpoint.GetAttributes(), attrmodels.ModelDataCollection(in.Payload.Data))
 	return nil
 }
 

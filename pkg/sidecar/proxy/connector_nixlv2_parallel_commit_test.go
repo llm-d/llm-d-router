@@ -28,13 +28,14 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // parallelCommitEnv is a minimal proxy harness for the MoRI-IO parallel WRITE
 // dispatch commit-point tests. Unlike startMoRIProxy (which wires the shared
 // mock ChatCompletionHandler), it accepts arbitrary prefill/decode handlers so
-// a leg can fail, block, or stream on demand.
+// a request can fail, block, or stream on demand.
 type parallelCommitEnv struct {
 	proxy       *Server
 	baseAddr    string
@@ -97,7 +98,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 // the proxy surfaces as a client error and fails the test deterministically
 // rather than blocking the suite forever.
 func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Header, string, error) {
-	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(chatCompletionsRequestBody))
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, env.prefillHost)
 
@@ -136,7 +137,7 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 	})
 
 	It("does not hang when prefill and decode both block: the KV-wait backstop returns 504", func() {
-		// Both legs block (KV that never arrives) until either the sidecar
+		// Both requests block (KV that never arrives) until either the sidecar
 		// cancels their request context or the test tears down. The bounded
 		// backstop timeout plus the shared cancelable context must abort and
 		// return 504 rather than hang.

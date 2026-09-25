@@ -8,6 +8,7 @@
   - [Core Design Principles](#core-design-principles)
   - [Routing Flow](#routing-flow)
 - [Configuration](#configuration)
+  - [API versions](#api-versions)
   - [`Plugins` Configuration](#plugins-configuration)
   - [`SchedulingProfiles` Configuration](#schedulingprofiles-configuration)
   - [Available plugins](#available-plugins)
@@ -108,7 +109,7 @@ Specifically, this configuration establishes the following components:
 The configuration text has the following form:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - ....
@@ -119,6 +120,48 @@ schedulingProfiles:
 ```
 
 The first two lines of the configuration are constant and must appear as is.
+
+### API versions
+
+The EPP accepts two configuration API versions:
+
+| `apiVersion` | Status |
+|---|---|
+| `llm-d.ai/v1` | Current. |
+| `llm-d.ai/v1alpha1` | Deprecated, reported on startup. Support ends in a later release. |
+
+The deprecated version is read as `v1` and yields the same configuration as the equivalent `v1` document. The field placements that differ are all under `dataLayer`:
+
+| `v1alpha1` | `v1` |
+|---|---|
+| `crossReplicaSyncerPluginRef` | `crossReplica.syncerPluginRef` |
+| `crossReplicaSyncInterval` | `crossReplica.syncInterval` |
+| `crossReplicaPublishTimeout` | `crossReplica.publishTimeout` |
+| `discovery.pluginRef` | `discovery.endpoints.pluginRef` |
+
+Moving a configuration to `v1` means changing the `apiVersion` line, and, where these fields are set, writing them in their `v1` placement:
+
+```yaml
+# v1alpha1
+dataLayer:
+  discovery:
+    pluginRef: my-discovery
+  crossReplicaSyncerPluginRef: my-syncer
+  crossReplicaSyncInterval: 500ms
+  crossReplicaPublishTimeout: 2s
+
+# v1
+dataLayer:
+  discovery:
+    endpoints:
+      pluginRef: my-discovery
+  crossReplica:
+    syncerPluginRef: my-syncer
+    syncInterval: 500ms
+    publishTimeout: 2s
+```
+
+All other fields keep their names, defaults, and meaning.
 
 ### `Plugins` Configuration
 
@@ -167,7 +210,7 @@ The fields in a schedulingProfile entry are:
 A complete configuration might look like this:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: precise-prefix-cache-producer

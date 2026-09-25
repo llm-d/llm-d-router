@@ -21,6 +21,7 @@ import (
 
 	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
@@ -377,6 +378,7 @@ func (v *VLLMAdapter) convertAllBlocksClearedEvent(_ []any) (kvevents.GenericEve
 }
 
 // toUint32Slice converts a msgpack-decoded []any of integers to []uint32.
+// Token IDs are vLLM vocabulary indices, always well within uint32 range.
 func toUint32Slice(raw any) ([]uint32, error) {
 	arr, ok := raw.([]any)
 	if !ok {
@@ -388,19 +390,20 @@ func toUint32Slice(raw any) ([]uint32, error) {
 		if err != nil {
 			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		//nolint:gosec // token IDs fit in uint32
-		result[i] = uint32(n)
+		result[i] = clamp.Uint32(n)
 	}
 	return result, nil
 }
 
 // toInt converts a msgpack-decoded numeric value to int.
+// Callers use it for token IDs and lora IDs, which fit in int with room to
+// spare, so the uint64 case below cannot overflow in practice.
 func toInt(raw any) (int, error) {
 	switch v := raw.(type) {
 	case int64:
 		return int(v), nil
 	case uint64:
-		//nolint:gosec // token IDs and lora IDs fit in int; overflow is not a concern here
+		//nolint:gosec // token IDs and lora IDs fit in int; see func doc
 		return int(v), nil
 	case int8:
 		return int(v), nil

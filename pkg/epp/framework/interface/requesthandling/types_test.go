@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -265,6 +266,11 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 
 	empty, _ := Prompt{}.MarshalJSON()
 	assert.Equal(t, `""`, string(empty))
+}
+
+func TestTextToSpeechRequest_String(t *testing.T) {
+	assert.Equal(t, "{InputLength: 5}", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
 }
 
 func TestGenerateRequest_UnmarshalJSON(t *testing.T) {

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -78,6 +79,12 @@ var (
 			CreationTimestamp(metav1.Unix(1000, 0)).
 			PoolName(inferencePool.Name).
 			PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
+	infObjective2Defaulted = testutil.MakeInferenceObjective(infObjective2.Name).
+				Namespace(infObjective2.Namespace).
+				Priority(int32(0)).
+				CreationTimestamp(metav1.Unix(1000, 0)).
+				PoolName(inferencePool.Name).
+				PoolGroup(routing.InferencePoolAPIGroup).ObjRef()
 )
 
 func TestInferenceObjectiveReconciler(t *testing.T) {
@@ -129,7 +136,12 @@ func TestInferenceObjectiveReconciler(t *testing.T) {
 			name:               "Add to existing",
 			objectivessInStore: []*v1alpha2.InferenceObjective{infObjective1},
 			objective:          infObjective2,
-			wantObjectives:     []*v1alpha2.InferenceObjective{infObjective1, infObjective2},
+			wantObjectives:     []*v1alpha2.InferenceObjective{infObjective1, infObjective2Defaulted},
+		},
+		{
+			name:           "Objective without priority is stored with priority 0",
+			objective:      infObjective2,
+			wantObjectives: []*v1alpha2.InferenceObjective{infObjective2Defaulted},
 		},
 		{
 			name:               "Objective deleted due to group mismatch for the inference inferencePool",

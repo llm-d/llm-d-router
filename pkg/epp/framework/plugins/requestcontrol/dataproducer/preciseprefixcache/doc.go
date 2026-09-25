@@ -1,4 +1,5 @@
 /*
+Copyright 2025 The Kubernetes Authors.
 Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");

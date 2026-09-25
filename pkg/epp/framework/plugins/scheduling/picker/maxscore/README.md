@@ -9,14 +9,14 @@ Selects the endpoint(s) with the highest score calculated during the scoring pha
 
 ## What it does
 
-1.  Receives a list of `ScoredEndpoint` candidates.
-2.  Shuffles the list in-place to ensure random tie-breaking when multiple endpoints share the same maximum score.
-3.  Sorts the candidates by score in descending order.
-4.  Returns the top `maxNumOfEndpoints` candidates.
+1. Receives a list of `ScoredEndpoint` candidates.
+2. Sorts candidates by score in descending order using stable sort.
+3. Rotates candidates within each equal-score tier up to `maxNumOfEndpoints` using round-robin rotation for deterministic tie-breaking.
+4. Returns the top `maxNumOfEndpoints` candidates.
 
 ## Behavioral Intent
 
-This picker maximizes the adherence to scoring objectives (e.g., cache affinity, lowest load). However, it is susceptible to **hot-spotting** if many concurrent requests produce identical scores for the same endpoint (e.g., identical prompts targeting a specific cache hit).
+This picker maximizes adherence to scoring objectives (such as cache affinity or lowest load). For candidates with equal scores, deterministic round-robin rotation distributes requests across tied endpoints to prevent traffic concentration on a single winner.
 
 ## Inputs consumed
 

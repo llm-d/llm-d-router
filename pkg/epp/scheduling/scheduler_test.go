@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -63,6 +65,7 @@ func TestSchedule(t *testing.T) {
 	profileHandler := single.NewSingleProfileHandler()
 
 	schedulerConfig := NewSchedulerConfig(profileHandler, map[string]fwksched.SchedulerProfile{"default": defaultProfile})
+	scrapedAt := time.Now()
 
 	tests := []struct {
 		name    string
@@ -100,6 +103,7 @@ func TestSchedule(t *testing.T) {
 							"foo": 1,
 							"bar": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}},
@@ -111,6 +115,7 @@ func TestSchedule(t *testing.T) {
 							"foo":      1,
 							"critical": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 				fwksched.NewEndpoint(
 					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}},
@@ -121,6 +126,7 @@ func TestSchedule(t *testing.T) {
 						ActiveModels: map[string]int{
 							"foo": 1,
 						},
+						UpdateTime: scrapedAt,
 					}, nil),
 			},
 			wantRes: &fwksched.SchedulingResult{
@@ -138,6 +144,7 @@ func TestSchedule(t *testing.T) {
 											"foo":      1,
 											"critical": 1,
 										},
+										UpdateTime: scrapedAt,
 									}, nil),
 								Score: 2.8,
 							},
@@ -167,8 +174,6 @@ func TestSchedule(t *testing.T) {
 	}
 }
 
-// Tests that a filter draining the candidate set surfaces a typed capacity
-// rejection from Schedule.
 func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
 	drainingFilter := &testPlugin{typedName: fwkplugin.TypedName{Type: "drain-filter", Name: "drain-filter"}} // empty FilterRes drops every endpoint
 
@@ -195,6 +200,6 @@ func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
 	if !errors.As(err, &typedErr) {
 		t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
 	}
-	assert.Equal(t, errcommon.ResourceExhausted, typedErr.Code)
-	assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+	assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }

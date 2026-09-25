@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ func (n *discoveryNotifier) Delete(id types.NamespacedName) {
 
 // EndpointDiscovery discovers inference endpoints and drives their lifecycle in the datastore.
 // Implementations are registered in the plugin registry and selected via
-// EndpointPickerConfig.discovery.pluginRef.
+// dataLayer.discovery.endpoints.pluginRef.
 type EndpointDiscovery interface {
 	fwkplugin.Plugin
 

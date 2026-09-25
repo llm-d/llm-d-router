@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 )
@@ -38,11 +38,11 @@ func newHandleWithPlugin(t *testing.T, name string, p fwkplugin.Plugin) fwkplugi
 	return h
 }
 
-func discoveryConfigRef(ref string) *configapi.EndpointPickerConfig {
-	return &configapi.EndpointPickerConfig{
-		DataLayer: &configapi.DataLayerConfig{
-			Discovery: &configapi.DiscoveryConfig{
-				Endpoints: &configapi.EndpointDiscoveryConfig{PluginRef: ref},
+func discoveryConfigRef(ref string) *configapiv1.EndpointPickerConfig {
+	return &configapiv1.EndpointPickerConfig{
+		DataLayer: &configapiv1.DataLayerConfig{
+			Discovery: &configapiv1.DiscoveryConfig{
+				Endpoints: &configapiv1.EndpointDiscoveryConfig{PluginRef: ref},
 			},
 		},
 	}

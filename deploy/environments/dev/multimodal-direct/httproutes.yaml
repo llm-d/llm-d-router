@@ -1,0 +1,79 @@
+# HTTPRoutes for multimodal inference — separate InferencePool per modality.
+#
+# Each modality-specific path routes to a dedicated InferencePool via
+# exact-path matching. This follows the upstream convention of one model
+# per InferencePool, with the Gateway handling path-based routing.
+#
+# Architecture:
+#   Client → Gateway → HTTPRoute (path match) → InferencePool → pods
+#
+# Example multi-pool layout:
+#   /v1/audio/speech        (Exact)   → ${OMNI_POOL_NAME}     (omni pods)
+#   /v1/audio/transcriptions(Exact)   → ${OMNI_POOL_NAME}     (omni pods)
+#   /v1/images/generations  (Exact)   → ${OMNI_POOL_NAME}     (omni pods)
+#   /v1/chat/completions              → via InferenceModel CR  (model-name routing)
+#   /                       (Prefix)  → ${TEXT_POOL_NAME}      (text pods)
+#
+# To add a text-only pool, deploy a second InferencePool + EPP and add
+# a catch-all PathPrefix rule pointing to it. Exact-path rules take
+# precedence per Gateway API route-precedence specification.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${OMNI_POOL_NAME}-audio-speech
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/audio/speech
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${OMNI_POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 300s
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${OMNI_POOL_NAME}-audio-transcriptions
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/audio/transcriptions
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${OMNI_POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 300s
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${OMNI_POOL_NAME}-images-generations
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /v1/images/generations
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: ${OMNI_POOL_NAME}
+      port: 8000
+    timeouts:
+      request: 600s

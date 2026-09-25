@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // This file holds the encoder fan-out scaffolding shared by every EC
 // connector: deduplicated multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
@@ -12,8 +28,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 
+	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"golang.org/x/sync/errgroup"
@@ -53,17 +71,18 @@ func truncateLongStrings(v any, maxLen int) any {
 }
 
 // extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(requestData map[string]any) []map[string]any {
+func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string]any {
 	var items []map[string]any
 
-	messages, ok := requestData["messages"].([]any)
-	if !ok {
+	messages, err := requestMessages(requestData)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("cannot read request messages for multimodal extraction", "error", err)
 		return items
 	}
 
 	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
+		var msgMap map[string]any
+		if err := json.Unmarshal(msg, &msgMap); err != nil {
 			continue
 		}
 
@@ -93,15 +112,11 @@ func extractMMItems(requestData map[string]any) []map[string]any {
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a deep copy of the
-// original chat-completions request with only the multimodal item in
-// messages[0].content (text removed), capped to a single output token, and
-// stream disabled.
+// buildEncoderRequest creates a per-item encoder request: a one-level copy of
+// the client's request carrying only the multimodal item in messages[0].content
+// (text removed), capped to a single output token, and stream disabled.
 func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := make(map[string]any)
-	for k, v := range originalRequest {
-		encoderRequest[k] = v
-	}
+	encoderRequest := maps.Clone(originalRequest)
 
 	messages := []map[string]any{
 		{
@@ -113,7 +128,10 @@ func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) 
 	}
 
 	encoderRequest["messages"] = messages
-	reqcommon.PrimeSingleTokenRequest(encoderRequest, originalRequest)
+	// The encoder request carries the item in messages and is sent to
+	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
+	// is capped as chat completions.
+	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
 
 	return encoderRequest
 }
@@ -139,7 +157,7 @@ func mmItemURL(item map[string]any) string {
 // there is no multimodal content. The caller should skip the encoder
 // stage in that case.
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
-	raw := extractMMItems(originalRequest)
+	raw := extractMMItems(s.logger, originalRequest)
 	if len(raw) == 0 {
 		return nil
 	}
@@ -202,7 +220,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 
-			req, err := http.NewRequestWithContext(gctx, "POST", ChatCompletionsPath, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", reqcommon.PathChatCompletions, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
@@ -239,19 +257,20 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// completionRequest. On JSON-marshal failure, runPDPipeline writes the error
+// body. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
-	completionRequest map[string]any,
+	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
+	apiType reqcommon.APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	completionRequest[requestFieldCacheHitThreshold] = 0
+	body[requestFieldCacheHitThreshold] = 0
 
-	modifiedBody, err := json.Marshal(completionRequest)
+	modifiedBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -275,7 +294,7 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := completionRequest[requestFieldECTransferParams]; ok {
+		if ec, ok := body[requestFieldECTransferParams]; ok {
 			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
 		}
 		v.Info("forwarding request after encoder", kv...)
@@ -286,7 +305,7 @@ func (s *Server) runPDPipeline(
 		// The encoder path does not carry a KV cache source: the P2P prefix pull
 		// is not wired through encoder disaggregation. The empty source skips the
 		// p2p injection regardless of --enable-p2p-pull.
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", APITypeChatCompletions)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", apiType)
 		return
 	}
 

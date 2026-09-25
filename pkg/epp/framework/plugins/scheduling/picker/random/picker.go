@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -84,8 +85,11 @@ func (p *RandomPicker) TypedName() fwkplugin.TypedName {
 
 // Pick selects random endpoint(s) from the list of candidates.
 func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates randomly", "max-num-of-endpoints", p.maxNumOfEndpoints,
-		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	logger := log.FromContext(ctx)
+	if logger.V(logutil.DEBUG).Enabled() {
+		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates randomly", "max-num-of-endpoints", p.maxNumOfEndpoints,
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	}
 
 	// Shuffle to ensure uniform random selection.
 	picker.ShuffleScoredEndpoints(scoredEndpoints)

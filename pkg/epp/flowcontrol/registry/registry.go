@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +29,7 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/queue"
@@ -432,8 +434,8 @@ func (fr *FlowRegistry) CapacitySnapshot(priority int) (contracts.CapacitySnapsh
 // globalCapacityDimension returns the registry-wide occupancy against the configured global limits.
 func (fr *FlowRegistry) globalCapacityDimension() contracts.CapacityDimension {
 	return contracts.CapacityDimension{
-		Len:              uint64(fr.totals.len.Load()),
-		ByteSize:         uint64(fr.totals.byteSize.Load()),
+		Len:              clamp.Uint64(fr.totals.len.Load()),
+		ByteSize:         clamp.Uint64(fr.totals.byteSize.Load()),
 		CapacityRequests: fr.config.MaxRequests,
 		CapacityBytes:    fr.config.MaxBytes,
 	}

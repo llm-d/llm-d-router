@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	contractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
@@ -390,7 +391,7 @@ func TestFairnessRoundRobin(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().Global.Len == uint64(total)
+		return h.reg.Stats().Global.Len == clamp.Uint64(total)
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 

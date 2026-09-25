@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,7 +47,8 @@ const (
 type RequestPayload interface {
 	isRequestPayload()
 	IsParsed() bool
-	// AsMap returns the parsed JSON map
+	// AsMap returns the JSON envelope. Content may be opaque json.RawMessage;
+	// use the protocol projections to inspect it.
 	AsMap() (PayloadMap, bool)
 }
 
@@ -89,8 +91,8 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
-// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
-// ImagesGenerationsRequest, or MessagesRequest.
+// An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
+// TextToSpeechRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, ImagesGenerationsRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -100,6 +102,8 @@ type InferenceRequestBody struct {
 	Messages *MessagesRequest `json:"messages,omitempty"`
 	// ResponsesRequest is the representation of the OpenAI /v1/responses request body.
 	Responses *ResponsesRequest `json:"responses,omitempty"`
+	// TextToSpeechRequest is the representation of the OpenAI /v1/audio/speech request body.
+	TextToSpeech *TextToSpeechRequest `json:"text_to_speech,omitempty"`
 	// ConversationsRequest is the representation of the OpenAI /v1/conversations request body.
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
@@ -114,6 +118,12 @@ type InferenceRequestBody struct {
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
 	Payload RequestPayload `json:"-"`
+	// RawBody retains the parser's JSON input for rendering: handlers.Request.RawBody
+	// for HTTP, or embedded HttpBody.Data for Vertex AI. Repackaging updates the
+	// handler body while this snapshot remains unchanged.
+	RawBody []byte `json:"-"`
+	// RenderRequest bypasses token production while retaining model routing.
+	RenderRequest bool `json:"-"`
 	// TokenizedRequest contains parser-derived tokenization results when available.
 	// It is nil when the request was not already tokenized.
 	TokenizedRequest *TokenizedRequest `json:"-"`
@@ -139,6 +149,14 @@ type InferenceRequestBody struct {
 	// true themselves; it is not inferred or enforced -- see MutatePayloadMap for the one
 	// in-place-edit case the codebase needs today.
 	Mutated bool
+}
+
+// WirePayload is the body used for both rendering and forwarding.
+func (b *InferenceRequestBody) WirePayload() RequestPayload {
+	if !b.Mutated && b.RawBody != nil {
+		return RawPayload(b.RawBody)
+	}
+	return b.Payload
 }
 
 // MutatePayloadMap edits Payload in place via fn when Payload is a PayloadMap, and marks the
@@ -455,6 +473,19 @@ func (r *ResponsesRequest) String() string {
 	return fmt.Sprintf("{InputType: %T, InstructionsType: %T}", r.Input, r.Instructions)
 }
 
+// TextToSpeechRequest represents the fields parsed from an OpenAI /v1/audio/speech request.
+type TextToSpeechRequest struct {
+	// Input is the text to synthesize.
+	Input string `json:"input"`
+}
+
+func (r *TextToSpeechRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{InputLength: %d}", len(r.Input))
+}
+
 // ConversationsRequest represents the OpenAI /v1/conversations request body structure
 type ConversationsRequest struct {
 	// Items is the array of conversation items (messages, files, etc.)
@@ -718,14 +749,19 @@ type Content struct {
 }
 
 type ContentBlock struct {
-	Type       string     `json:"type"`
-	Text       string     `json:"text,omitempty"`
-	ImageURL   ImageBlock `json:"image_url"`
-	InputAudio AudioBlock `json:"input_audio"`
-	VideoURL   VideoBlock `json:"video_url"`
+	Type       string        `json:"type"`
+	Text       string        `json:"text,omitempty"`
+	ImageURL   ImageBlock    `json:"image_url"`
+	AudioURL   AudioURLBlock `json:"audio_url"`
+	InputAudio AudioBlock    `json:"input_audio"`
+	VideoURL   VideoBlock    `json:"video_url"`
 }
 
 type ImageBlock struct {
+	URL string `json:"url,omitempty"`
+}
+
+type AudioURLBlock struct {
 	URL string `json:"url,omitempty"`
 }
 

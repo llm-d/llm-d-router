@@ -1,0 +1,45 @@
+# TokenSpeed /metrics fixture consumed by the C1 router-side mapping test.
+#
+# PROVENANCE (read this before treating any number below as measured):
+#   The metric *names*, *types*, *units* and *labels* are transcribed from the
+#   pinned TokenSpeed source, not from memory:
+#     repo   : https://github.com/lightseekorg/tokenspeed
+#     commit : fb2d6bcff64bfeb99f2b8980714622ec5281b197  (origin/main)
+#     file   : python/tokenspeed/runtime/metrics/collector.py
+#     lines  : 175-199 (num_requests_running / num_requests_waiting /
+#               kv_cache_usage_perc), 330-460 (counters + histograms)
+#     route  : python/tokenspeed/runtime/utils/common.py:681 Mount("/metrics", ...)
+#   The *values* are synthetic and only chosen to exercise the mapping:
+#   they are NOT a capture from a running TokenSpeed server.
+#
+# STATUS: no live TokenSpeed `/metrics` capture exists at this commit, because
+# the engine did not reach a serving state on this host (see capability_matrix.md,
+# C1-E0 = BLOCKED). This file must be replaced by a raw capture before the
+# mapping is claimed to be validated against a real server.
+#
+# Unit note that the mapping depends on:
+#   collector.py:190-193 documents tokenspeed:kv_cache_usage_perc as
+#   "Fraction of device KV pages in use (0-1)" -- a RATIO, despite the
+#   "_perc" suffix that vLLM uses for a 0-100 percentage.
+
+# HELP tokenspeed:num_requests_running Requests with scheduler-side generation state (decode path).
+# TYPE tokenspeed:num_requests_running gauge
+tokenspeed:num_requests_running{model_name="gpt-oss-20b"} 2.0
+# HELP tokenspeed:num_requests_waiting Requests waiting in the C++ scheduler queue.
+# TYPE tokenspeed:num_requests_waiting gauge
+tokenspeed:num_requests_waiting{model_name="gpt-oss-20b"} 5.0
+# HELP tokenspeed:kv_cache_usage_perc Fraction of device KV pages in use (0-1).
+# TYPE tokenspeed:kv_cache_usage_perc gauge
+tokenspeed:kv_cache_usage_perc{model_name="gpt-oss-20b"} 0.375
+# HELP tokenspeed:prefix_cache_hits Number of prefix cache hits.
+# TYPE tokenspeed:prefix_cache_hits counter
+tokenspeed:prefix_cache_hits_total{model_name="gpt-oss-20b"} 128.0
+# HELP tokenspeed:prompt_tokens Number of prompt tokens processed.
+# TYPE tokenspeed:prompt_tokens counter
+tokenspeed:prompt_tokens_total{model_name="gpt-oss-20b"} 4096.0
+# HELP tokenspeed:generation_tokens Number of generation tokens produced.
+# TYPE tokenspeed:generation_tokens counter
+tokenspeed:generation_tokens_total{model_name="gpt-oss-20b"} 512.0
+# HELP tokenspeed:num_requests Number of requests processed.
+# TYPE tokenspeed:num_requests counter
+tokenspeed:num_requests_total{model_name="gpt-oss-20b"} 16.0

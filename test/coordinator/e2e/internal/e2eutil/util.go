@@ -31,6 +31,7 @@ import (
 // RunKustomize runs `kubectl kustomize <dir>` and returns the YAML documents
 // as a string slice split on `\n---`.
 func RunKustomize(kustomizeDir string) []string {
+	// #nosec G204 -- Fixed kubectl executable; kustomizeDir is a test-controlled path, without a shell.
 	command := exec.Command("kubectl", "kustomize", kustomizeDir)
 	session, err := gexec.Start(command, nil, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())

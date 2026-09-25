@@ -274,18 +274,18 @@ func setupK8sStyleCertDir(t *testing.T, certPEM, keyPEM []byte) string {
 	// Create initial timestamped directory
 	timestamp := time.Now().Format("..2006_01_02_15_04_05.000000000")
 	dataDir := filepath.Join(baseDir, timestamp)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		t.Fatalf("failed to create data directory: %v", err)
 	}
 
 	// Write certificates to the timestamped directory
 	certPath := filepath.Join(dataDir, "tls.crt")
-	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		t.Fatalf("failed to write certificate: %v", err)
 	}
 
 	keyPath := filepath.Join(dataDir, "tls.key")
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		t.Fatalf("failed to write key: %v", err)
 	}
 
@@ -319,18 +319,18 @@ func updateK8sStyleCerts(t *testing.T, baseDir string, newCertPEM, newKeyPEM []b
 	// Create new timestamped directory
 	newTimestamp := time.Now().Format("..2006_01_02_15_04_05.000000000")
 	newDataDir := filepath.Join(baseDir, newTimestamp)
-	if err := os.MkdirAll(newDataDir, 0755); err != nil {
+	if err := os.MkdirAll(newDataDir, 0o750); err != nil {
 		t.Fatalf("failed to create new data directory: %v", err)
 	}
 
 	// Write new certificates
 	certPath := filepath.Join(newDataDir, "tls.crt")
-	if err := os.WriteFile(certPath, newCertPEM, 0644); err != nil {
+	if err := os.WriteFile(certPath, newCertPEM, 0o600); err != nil {
 		t.Fatalf("failed to write new certificate: %v", err)
 	}
 
 	keyPath := filepath.Join(newDataDir, "tls.key")
-	if err := os.WriteFile(keyPath, newKeyPEM, 0600); err != nil {
+	if err := os.WriteFile(keyPath, newKeyPEM, 0o600); err != nil {
 		t.Fatalf("failed to write new key: %v", err)
 	}
 

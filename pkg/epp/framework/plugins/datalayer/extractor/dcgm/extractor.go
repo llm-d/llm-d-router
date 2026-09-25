@@ -44,16 +44,19 @@ var _ fwkdl.PollingExtractor[sourcemetrics.PrometheusMetricMap] = &Extractor{}
 type Extractor struct {
 	typedName fwkplugin.TypedName
 	dk        fwkplugin.DataKey
+	slot      *fwkdl.Slot[attrmetrics.ScalarMetricValue]
 }
 
 // NewDCGMExtractor returns a new DCGM metrics extractor.
 func NewDCGMExtractor() *Extractor {
+	dk := attrgpu.GPUUtilizationDataKey
 	return &Extractor{
 		typedName: fwkplugin.TypedName{
 			Type: attrgpu.DCGMExtractorType,
 			Name: attrgpu.DCGMExtractorType,
 		},
-		dk: attrgpu.GPUUtilizationDataKey,
+		dk:   dk,
+		slot: fwkdl.NewSlot[attrmetrics.ScalarMetricValue](dk),
 	}
 }
 
@@ -103,7 +106,7 @@ func (e *Extractor) Extract(_ context.Context, in fwkdl.PollInput[sourcemetrics.
 	}
 
 	normalized := attrmetrics.ScalarMetricValue(maxUtil / 100.0)
-	in.Endpoint.GetAttributes().Put(e.dk, normalized)
+	e.slot.Put(in.Endpoint.GetAttributes(), normalized)
 	return nil
 }
 

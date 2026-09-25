@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -39,21 +39,8 @@ const (
 )
 
 var (
-	// SchedulerDisaggDecisionCount records disaggregation routing decisions,
-	// covering all stages: decode-only, prefill-decode, encode-decode, encode-prefill-decode.
-	//
-	// Deprecated: Use llm_d_epp_disagg_decision_total instead.
-	// Tracked in: https://github.com/llm-d/llm-d-inference-scheduler/issues/1070
-	SchedulerDisaggDecisionCount = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: eppmetrics.SchedulerSubsystem,
-			Name:      "disagg_decision_total",
-			Help:      metricsutil.HelpMsgWithStability("[Deprecated: Use llm_d_epp_disagg_decision_total] Total number of disaggregation routing decisions made", compbasemetrics.ALPHA),
-		},
-		[]string{"model_name", "decision_type"},
-	)
-
-	// LlmdDisaggDecisionCount records disaggregation routing decisions.
+	// LlmdDisaggDecisionCount records disaggregation routing decisions, covering all stages:
+	// decode-only, prefill-decode, encode-decode, encode-prefill-decode.
 	LlmdDisaggDecisionCount = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -69,7 +56,6 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		return errors.New("disagg metrics registerer is required")
 	}
 	for _, collector := range []prometheus.Collector{
-		SchedulerDisaggDecisionCount,
 		LlmdDisaggDecisionCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
@@ -91,7 +77,6 @@ func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string
 	if modelName == "" {
 		modelName = "unknown"
 	}
-	SchedulerDisaggDecisionCount.WithLabelValues(modelName, decisionType).Inc()
 	LlmdDisaggDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
 }
 

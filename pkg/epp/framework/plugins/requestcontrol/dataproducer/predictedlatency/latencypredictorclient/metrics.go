@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ func (p *Predictor) GetMetrics(ctx context.Context) (*MetricsResponse, error) {
 		return nil, fmt.Errorf("failed to create metrics request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //nolint:gosec // URL is operator-configured in config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to call training server /metrics endpoint: %w", err)
 	}

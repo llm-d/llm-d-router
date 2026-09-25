@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -109,10 +110,10 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 
 			stepConfigs := []config.StepConfig{
 				{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
-				{Type: "render", Params: map[string]any{"endpoint": gateway.PathChatCompletions + "/render"}},
+				{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 				{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: tc.ecConnector}},
 				{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector, steps.ParamECConnector: tc.ecConnector}},
-				{Type: "decode", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector}},
+				{Type: "decode", Params: map[string]any{steps.ParamKVConnector: tc.kvConnector}},
 			}
 
 			pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -138,7 +139,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "test-" + tc.kvConnector + "+" + tc.ecConnector,
-				OriginalPath:     gateway.PathChatCompletions,
+				OriginalPath:     reqcommon.PathChatCompletions,
 				OriginalBody:     []byte(requestBody),
 				Model:            "test-model",
 				KVTransferParams: make(map[string]any),
@@ -174,18 +175,13 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			if captured == nil {
 				t.Fatal("prefill was not called")
 			}
-			// Generate format nests transfer params in sampling_params.extra_args.
-			var hasEC bool
-			if sp, ok := captured["sampling_params"].(map[string]any); ok {
-				if ea, ok := sp["extra_args"].(map[string]any); ok {
-					_, hasEC = ea["ec_transfer_params"]
-				}
-			}
+			// Generate format carries transfer params at the top level of the body.
+			_, hasEC := captured["ec_transfer_params"]
 			if tc.wantECInPrefill && !hasEC {
-				t.Error("expected ec_transfer_params in prefill body sampling_params.extra_args")
+				t.Error("expected top-level ec_transfer_params in prefill body")
 			}
 			if !tc.wantECInPrefill && hasEC {
-				t.Error("unexpected ec_transfer_params in prefill body sampling_params.extra_args")
+				t.Error("unexpected top-level ec_transfer_params in prefill body")
 			}
 		})
 	}
@@ -203,6 +199,9 @@ func TestFullPipeline_Integration(t *testing.T) {
 		})
 	}))
 	defer renderServer.Close()
+
+	var mu sync.Mutex
+	var capturedDecodeBody map[string]any
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phase := r.Header.Get(gateway.EPPProfileHeader)
@@ -229,6 +228,12 @@ func TestFullPipeline_Integration(t *testing.T) {
 				},
 			})
 		case gateway.PhaseDecode:
+			body, _ := io.ReadAll(r.Body)
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			mu.Lock()
+			capturedDecodeBody = parsed
+			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "Hello!"}},
@@ -247,10 +252,10 @@ func TestFullPipeline_Integration(t *testing.T) {
 
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
-		{Type: "render", Params: map[string]any{"endpoint": gateway.PathChatCompletions + "/render"}},
+		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
 		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
-		{Type: "decode", Params: map[string]any{"use_openai_format": false}},
+		{Type: "decode"},
 	}
 
 	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -286,7 +291,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "test-123",
-		OriginalPath:     gateway.PathChatCompletions,
+		OriginalPath:     reqcommon.PathChatCompletions,
 		OriginalBody:     []byte(requestBody),
 		Stream:           false,
 		Model:            "test-model",
@@ -316,5 +321,27 @@ func TestFullPipeline_Integration(t *testing.T) {
 	}
 	if len(reqCtx.KVTransferParams) == 0 {
 		t.Fatal("expected KVTransferParams to be populated")
+	}
+
+	// The decode step's body format must track the request's original path
+	// (/v1/chat/completions) rather than the pipeline's use_openai_format
+	// setting, which decode ignores. A regression here would nest
+	// kv_transfer_params under sampling_params.extra_args instead, the
+	// generate-shaped body a chat-completions endpoint does not read.
+	mu.Lock()
+	decodeBody := capturedDecodeBody
+	mu.Unlock()
+	if decodeBody == nil {
+		t.Fatal("decode was not called")
+	}
+	if _, ok := decodeBody["kv_transfer_params"]; !ok {
+		t.Error("expected top-level kv_transfer_params in decode body for /v1/chat/completions")
+	}
+	if sp, ok := decodeBody["sampling_params"].(map[string]any); ok {
+		if ea, ok := sp["extra_args"].(map[string]any); ok {
+			if _, ok := ea["kv_transfer_params"]; ok {
+				t.Error("kv_transfer_params must not be nested under sampling_params.extra_args for chat completions")
+			}
+		}
 	}
 }

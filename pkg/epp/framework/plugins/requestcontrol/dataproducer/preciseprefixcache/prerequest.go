@@ -29,6 +29,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 )
 
 const (
@@ -62,6 +64,36 @@ func (s *blockKeysState) Clone() plugin.StateData {
 		copy(cp[i], keys)
 	}
 	return &blockKeysState{perPromptKeys: cp}
+}
+
+// recordPrediction reports the prompt tokens the index expects the scheduler's
+// chosen endpoint to serve from its prefix cache. It reads the unweighted
+// cached-block count rather than the tier-weighted match score, so a RAM-tier
+// hit contributes its full token count, and it counts speculative entries
+// because those are part of what the router acted on. The token processor drops
+// a prompt's trailing partial block, so the block-to-token conversion cannot
+// exceed the prompt length.
+func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
+		return
+	}
+	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if primary == nil || len(primary.TargetEndpoints) == 0 {
+		return
+	}
+	raw, ok := primary.TargetEndpoints[0].Get(p.dk)
+	if !ok {
+		return
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		return
+	}
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return
+	}
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+		info.CachedBlockCount()*info.BlockSizeTokens(), request.Body.TokenizedRequest.TokenCount())
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -111,14 +143,17 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	return cache, ttl, nil
 }
 
-// PreRequest seeds speculative KV-block index entries for the endpoint(s)
-// selected by the scheduler, so the next same-prefix request hits without
-// waiting for confirmed KV-events from the engine. Entries are tracked in
-// a TTL cache and evicted automatically. No-op when speculativeIndexing
+// PreRequest records the prefix-cache hit predicted for the selected endpoint,
+// then seeds speculative KV-block index entries for the endpoint(s) selected by
+// the scheduler, so the next same-prefix request hits without waiting for
+// confirmed KV-events from the engine. Speculative entries are tracked in a TTL
+// cache and evicted automatically; seeding is skipped when speculativeIndexing
 // is disabled.
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
+	p.recordPrediction(request, schedulingResult)
+
 	if !p.speculativeEnabled {
 		return nil
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,14 +20,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/version"
 )
@@ -452,7 +456,7 @@ func TestNewTraceExporter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.exporterType, func(t *testing.T) {
-			exporter, err := newTraceExporter(context.Background(), tc.exporterType)
+			exporter, err := newTraceExporter(context.Background(), &errorHandler{logger: testr.New(t)}, tc.exporterType)
 			if err != nil {
 				t.Fatalf("newTraceExporter(%q) error = %v", tc.exporterType, err)
 			}
@@ -462,6 +466,21 @@ func TestNewTraceExporter(t *testing.T) {
 				t.Errorf("newTraceExporter(%q) = %s, want %s", tc.exporterType, got, tc.wantType)
 			}
 		})
+	}
+}
+
+func TestInitTextMapPropagator(t *testing.T) {
+	orig := otel.GetTextMapPropagator()
+	t.Cleanup(func() { otel.SetTextMapPropagator(orig) })
+
+	InitTextMapPropagator()
+
+	carrier := propagation.MapCarrier{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01",
+	}
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		t.Fatal("expected InitTextMapPropagator to install a working TraceContext propagator")
 	}
 }
 
@@ -498,4 +517,40 @@ func TestNoneExporterStillCreatesSpans(t *testing.T) {
 		t.Error("span is not sampled, want the sampler to be unaffected by the exporter")
 	}
 	span.End()
+}
+
+// "none" exports nothing, so the line naming the selected exporter is the only
+// evidence that tracing initialised rather than failed silently.
+func TestNoneExporterReportsSelection(t *testing.T) {
+	clearEnv(t, "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG")
+	t.Setenv("OTEL_TRACES_EXPORTER", "none")
+
+	origTP, origHandler, origProp := otel.GetTracerProvider(), otel.GetErrorHandler(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetErrorHandler(origHandler)
+		otel.SetTextMapPropagator(origProp)
+	})
+
+	var logged []string
+	logger := funcr.New(func(_, args string) {
+		logged = append(logged, args)
+	}, funcr.Options{})
+
+	shutdown, err := InitTracing(context.Background(), logger, testServiceName)
+	if err != nil {
+		t.Fatalf("InitTracing() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+
+	for _, line := range logged {
+		if strings.Contains(line, "init OTel trace exporter") && strings.Contains(line, exporterTypeNone) {
+			return
+		}
+	}
+	t.Errorf("logged %q, want the selected exporter type reported", logged)
 }

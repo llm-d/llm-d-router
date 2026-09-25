@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -36,18 +37,97 @@ import (
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
 
+// Content-block types read by the estimate backend.
+const (
+	blockTypeText       = "text"
+	blockTypeImage      = "image"
+	blockTypeImageURL   = "image_url"
+	blockTypeThinking   = "thinking"
+	blockTypeToolUse    = "tool_use"
+	blockTypeToolResult = "tool_result"
+)
+
+const (
+	// Per-request billing hashes must not defeat prefix caching.
+	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
+	// The base64 image fallback matches vLLM's Anthropic conversion.
+	defaultImageMediaType = "image/jpeg"
+)
+
+func anthropicSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
+}
+
+func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.AnthropicImageSource) []tokenizerTypes.ContentBlock {
+	if url := anthropicImageToURL(src); url != "" {
+		blocks = append(blocks, tokenizerTypes.ContentBlock{
+			Type:     blockTypeImageURL,
+			ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		})
+	}
+	return blocks
+}
+
+func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
+	if b.Content.Raw != "" {
+		return b.Content.Raw, nil
+	}
+	var parts []string
+	var imageBlocks []tokenizerTypes.ContentBlock
+	for _, item := range b.Content.Structured {
+		switch item.Type {
+		case blockTypeText:
+			parts = append(parts, item.Text)
+		case blockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.Source)
+		}
+	}
+	return strings.Join(parts, "\n"), imageBlocks
+}
+
+func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
+	if src == nil {
+		return ""
+	}
+	if src.Type == "url" || src.URL != "" {
+		return src.URL
+	}
+	if src.Data == "" {
+		return ""
+	}
+	mediaType := src.MediaType
+	if mediaType == "" {
+		mediaType = defaultImageMediaType
+	}
+	return "data:" + mediaType + ";base64," + src.Data
+}
+
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
 type estimateBackend struct {
 	img imageEstimator
 	vid videoEstimator
+	aud audioEstimator
 }
 
 // parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
-// Only video is populated today; image and audio parsing slot in here later.
+// Video and audio are populated from headers; image parsing follows the same
+// pattern when its headers are added.
 func parseMMMetadataHeaders(headers map[string]string) mmMetadata {
-	return mmMetadata{video: parseVideoMetadataHeaders(headers)}
+	return mmMetadata{
+		video: parseVideoMetadataHeaders(headers),
+		audio: parseAudioMetadataHeaders(headers),
+	}
 }
 
 // mmMetadataCtxKey keys the request-scoped mmMetadata on the context, carrying it
@@ -84,6 +164,20 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 	}
 	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.VideoResolutionHeaderKey); ok {
 		meta.width, meta.height = parseResolution(s)
+	}
+	return meta
+}
+
+// parseAudioMetadataHeaders reads the x-llm-d-audio- request headers into an
+// audioMetadata, using metadata.GetLowerCaseHeaderValue so aliases resolve the
+// same way as the SLO headers. Missing or malformed values leave their field zero
+// so the estimator falls back per field to config and then defaults.
+func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
+	var meta audioMetadata
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioDurationHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.duration = v
+		}
 	}
 	return meta
 }
@@ -229,9 +323,11 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
-		case "input_audio", "audio_url":
+		case "audio_url":
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount(false, meta.audio))
+		case "input_audio":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(true, meta.audio))
 		}
 	}
 	return out, features
@@ -306,15 +402,6 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 		Length:   count,
 	})
 	return out, features
-}
-
-// assetPlaceholderCount derives a deterministic placeholder count (>= 1) from an
-// asset's byte length for modalities without a dedicated estimator.
-func assetPlaceholderCount(dataLen int) int {
-	if n := (dataLen + bytesPerToken - 1) / bytesPerToken; n > 0 {
-		return n
-	}
-	return 1
 }
 
 // packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).

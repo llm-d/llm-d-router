@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -38,19 +39,17 @@ func init() {
 }
 
 type ConditionalDecodeStep struct {
-	useOpenAIFormat bool
-	gwClient        *gateway.Client
+	gwClient *gateway.Client
 }
 
 func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("conditional-decode: gateway client is required")
 	}
-	useOpenAI, err := parseUseOpenAIFormat(params)
-	if err != nil {
+	if err := rejectUseOpenAIFormatOverride(ConditionalDecodeStepName, params); err != nil {
 		return nil, err
 	}
-	return &ConditionalDecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient}, nil
+	return &ConditionalDecodeStep{gwClient: gwClient}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
@@ -58,8 +57,10 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 
-	body := maps.Clone(reqCtx.Body)
-	s.prepareBody(reqCtx, body)
+	body, err := s.prepareBody(reqCtx)
+	if err != nil {
+		return err
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
@@ -103,22 +104,21 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
-func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext, body map[string]any) {
-	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (map[string]any, error) {
+	body := maps.Clone(reqCtx.Body)
+	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+
 	switch format {
-	case gateway.FormatChatCompletions:
-		if len(reqCtx.TokenIDs) > 0 {
-			tokens := map[string]any{
-				"token_ids": reqCtx.TokenIDs,
-			}
-			if features := buildMMFeatures(reqCtx.MultimodalEntries, false); features != nil {
-				tokens["features"] = features
-			}
-			body["tokens"] = tokens
-		}
-	case gateway.FormatCompletions:
+	case reqcommon.APITypeChatCompletions:
+		// The client's chat-completions body is forwarded as-is.
+	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs
 		}
+	case reqcommon.APITypeVLLMGenerate:
+		// The client's generate body already carries token_ids.
+	default:
+		return nil, unreachableFormatError(format)
 	}
+	return body, nil
 }

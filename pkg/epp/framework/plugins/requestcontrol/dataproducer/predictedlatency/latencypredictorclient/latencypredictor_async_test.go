@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package latencypredictorclient
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -1551,24 +1551,25 @@ func testLightGBMMetrics(ctx context.Context, t *testing.T, predictor *Predictor
 	}
 }
 
-// generateTrainingEntries creates random training data for testing with prefix cache scores
+// generateTrainingEntries creates random training data for testing with prefix cache scores.
+//
+//nolint:gosec // G404: math/rand/v2 is non-cryptographic PRNG used only for test fixture values
 func generateTrainingEntries(count int) []TrainingEntry {
 	entries := make([]TrainingEntry, count)
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for i := range count {
 		// Generate TTFT and TPOT using a simple equation based on features, plus some noise
-		kv := rng.Float64() // 0.0 to 1.0
-		inputLen := rng.Intn(2048) + 1
-		waiting := rng.Intn(20)
-		running := rng.Intn(10) + 1
-		generated := rng.Intn(500) + 1
-		prefixCache := rng.Float64() // 0.0 to 1.0
+		kv := rand.Float64() // 0.0 to 1.0
+		inputLen := rand.IntN(2048) + 1
+		waiting := rand.IntN(20)
+		running := rand.IntN(10) + 1
+		generated := rand.IntN(500) + 1
+		prefixCache := rand.Float64() // 0.0 to 1.0
 
 		// Updated equations to include prefix cache impact on TTFT:
 		// TTFT includes prefix cache, TPOT does not
-		ttft := 100 + 2*float64(inputLen) + 10*kv + 5*float64(waiting) + 30*prefixCache + rng.NormFloat64()*20
-		tpot := 20 + 0.5*float64(generated) + 2*float64(running) + rng.NormFloat64()*5 + 9*kv
+		ttft := 100 + 2*float64(inputLen) + 10*kv + 5*float64(waiting) + 30*prefixCache + rand.NormFloat64()*20
+		tpot := 20 + 0.5*float64(generated) + 2*float64(running) + rand.NormFloat64()*5 + 9*kv
 
 		entries[i] = TrainingEntry{
 			KVCachePercentage:  kv,
@@ -1579,7 +1580,7 @@ func generateTrainingEntries(count int) []TrainingEntry {
 			ActualTTFT:         ttft,
 			ActualTPOT:         tpot,
 			PrefixCacheScore:   prefixCache, // Added prefix cache score
-			Timestamp:          time.Now().Add(-time.Duration(rng.Intn(3600)) * time.Second),
+			Timestamp:          time.Now().Add(-time.Duration(rand.IntN(3600)) * time.Second),
 		}
 	}
 

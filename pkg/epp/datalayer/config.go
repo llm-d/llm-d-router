@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,6 +36,9 @@ type Config struct {
 	// A SyncInterval of zero (i.e. left unset) causes the publisher to fall
 	// back to its own default cadence.
 	SyncInterval time.Duration
+	// PublishTimeout bounds one endpoint publish, including all concurrent
+	// contributor writes. A zero value causes the publisher to use its default.
+	PublishTimeout time.Duration
 }
 
 func (c *Config) String() string {

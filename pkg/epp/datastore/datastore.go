@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -77,6 +78,8 @@ type Datastore interface {
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *v1alpha2.InferenceObjective)
+	// ObjectiveGet and ObjectiveGetAll return the stored objectives, which are
+	// shared with concurrent readers and must not be modified.
 	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
 	ObjectiveDelete(namespacedName types.NamespacedName)
 	ObjectiveGetAll() []*v1alpha2.InferenceObjective

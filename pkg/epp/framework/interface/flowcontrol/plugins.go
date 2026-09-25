@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -124,6 +125,27 @@ type SaturationDetector interface {
 	//   - If Saturation() >= 1.0: Stop dispatching and apply backpressure (buffer requests).
 	//   - If Saturation() < 1.0: Continue dispatching traffic to the pool.
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
+}
+
+// Pipeline stages named by WithSaturationStage.
+const (
+	SaturationStagePrefill = "prefill"
+	SaturationStageDecode  = "decode"
+)
+
+type saturationStageKey struct{}
+
+// WithSaturationStage returns a context naming the pipeline stage (SaturationStagePrefill or
+// SaturationStageDecode) whose endpoints a SaturationDetector.Saturation call evaluates.
+func WithSaturationStage(ctx context.Context, stage string) context.Context {
+	return context.WithValue(ctx, saturationStageKey{}, stage)
+}
+
+// SaturationStageFromContext returns the stage set by WithSaturationStage, or "" when the
+// endpoints were not partitioned by stage.
+func SaturationStageFromContext(ctx context.Context) string {
+	stage, _ := ctx.Value(saturationStageKey{}).(string)
+	return stage
 }
 
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
