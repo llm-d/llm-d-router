@@ -192,6 +192,7 @@ in this section has the following form:
 
 ```yaml
 - name: aName
+  injectSaturationFilter: false
   plugins:
   - pluginRef: plugin1
   - pluginRef: plugin2
@@ -204,6 +205,7 @@ The fields in a schedulingProfile entry are:
 
 - **name**: specifies the scheduling profile's name.
 - **plugins**: specifies the set of plugins to be used when this scheduling profile is chosen for a request.
+- **injectSaturationFilter** (optional): controls automatic saturation-filter injection independently for each profile. Defaults to `true`; setting it to `false` skips injection only for that profile and leaves explicitly listed plugins unchanged.
 - **pluginRef**: reference to the name of the plugin instance to be used
 - **weight**: weight to be used if the referenced plugin is a scorer.
 
