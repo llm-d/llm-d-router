@@ -173,7 +173,7 @@ if [[ "$CLEAN" == "true" ]]; then
   # Delete the ConfigMAp created for the EPP configuration
   kubectl -n "${NAMESPACE}" delete --ignore-not-found=true ConfigMap epp-config
   # Delete inference schedulare and gateway resources.
-  kubectl kustomize deploy/environments/dev/kubernetes-kgateway | envsubst | kubectl -n "${NAMESPACE}" delete --ignore-not-found=true -f -
+  kubectl kustomize test/e2e/artifacts/environments/dev/kubernetes-kgateway | envsubst | kubectl -n "${NAMESPACE}" delete --ignore-not-found=true -f -
   # Delete vllm resources.
   helm uninstall vllm --namespace ${NAMESPACE} --ignore-not-found
   exit 0
@@ -213,7 +213,7 @@ helm upgrade --install "$VLLM_HELM_RELEASE_NAME" "$VLLM_CHART_DIR" \
 
 echo "INFO: Deploying Gateway Environment in namespace ${NAMESPACE}, ${POOL_NAME}"
 kubectl -n "${NAMESPACE}" create configmap epp-config --from-file=epp-config.yaml=<(envsubst < "${EPP_CONFIG}") --dry-run=client -o yaml | kubectl apply -f -
-kubectl kustomize deploy/environments/dev/kubernetes-kgateway | envsubst | kubectl -n "${NAMESPACE}" apply -f -
+kubectl kustomize test/e2e/artifacts/environments/dev/kubernetes-kgateway | envsubst | kubectl -n "${NAMESPACE}" apply -f -
 echo "INFO: Waiting for resources in namespace ${NAMESPACE} to become ready"
 # Wait for gateway resources
 kubectl -n "${NAMESPACE}" wait deployment/${EPP_NAME} --for=condition=Available --timeout=60s
