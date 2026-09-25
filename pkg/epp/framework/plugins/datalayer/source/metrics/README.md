@@ -29,6 +29,13 @@ The plugin config supports:
 -   `interval` (string, optional): Scrape period (e.g. `"1s"`). Rounded to the nearest
     multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
     base tick.
+-   `families` (list of strings, optional): Metric families to keep. Every other line of the
+    response is dropped before parsing, which cuts the scrape's CPU and allocations when the
+    model server exposes far more families than the extractors read. A family's samples may
+    carry the `_bucket`, `_sum`, `_count`, `_total` or `_created` suffix. The list must cover
+    every family the source's extractors read; `core-metrics-extractor` reads the engine's
+    queued requests, running requests, KV cache usage, LoRA info and cache info metrics.
+    Omit to parse the whole response.
 
 ### Example Configuration
 
@@ -39,6 +46,19 @@ parameters:
   path: "/metrics"
   insecureSkipVerify: true
   interval: "1s"
+```
+
+Parsing only what the core metrics extractor reads from vLLM:
+
+```yaml
+type: metrics-data-source
+parameters:
+  families:
+  - vllm:num_requests_waiting
+  - vllm:num_requests_running
+  - vllm:kv_cache_usage_perc
+  - vllm:lora_requests_info
+  - vllm:cache_config_info
 ```
 
 ## Multi-cluster support
