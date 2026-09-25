@@ -67,9 +67,10 @@ var (
 
 // detector implements a saturation detector and scheduling filter based on active request concurrency.
 type detector struct {
-	config              config
-	typedName           fwkplugin.TypedName
-	inFlightLoadDataKey fwkplugin.DataKey
+	config                       config
+	typedName                    fwkplugin.TypedName
+	inFlightLoadDataKey          fwkplugin.DataKey
+	uncachedRequestTokensDataKey fwkplugin.DataKey
 }
 
 // newDetector creates a new instance of the Concurrency Detector.
@@ -93,9 +94,10 @@ func newDetector(name string, cfg config, logger logr.Logger) *detector {
 	}
 
 	return &detector{
-		config:              cfg,
-		typedName:           typedName,
-		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.inFlightLoadProducerName),
+		config:                       cfg,
+		typedName:                    typedName,
+		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.inFlightLoadProducerName),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(cfg.inFlightLoadProducerName),
 	}
 }
 
@@ -106,7 +108,10 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 
 func (d *detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Required: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+		Required: map[fwkplugin.DataKey]any{
+			d.inFlightLoadDataKey:          attrconcurrency.InFlightLoad{},
+			d.uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokens{},
+		},
 	}
 }
 
@@ -118,6 +123,16 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 	}
 
 	return &attrconcurrency.InFlightLoad{}
+}
+
+func (d *detector) getUncachedRequestTokens(m datalayer.AttributeMap) int64 {
+	if val, ok := m.Get(d.uncachedRequestTokensDataKey); ok {
+		if tokens, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && tokens != nil {
+			return tokens.Tokens
+		}
+	}
+
+	return 0
 }
 
 // Saturation calculates the saturation level of the pool.
@@ -202,8 +217,9 @@ func (d *detector) Filter(
 			continue
 		}
 		load := d.getLoad(e)
+		tokens := load.Tokens + d.getUncachedRequestTokens(e)
 
-		if d.admits(load, reqLimit, tokLimit) {
+		if d.admits(load.Requests, tokens, reqLimit, tokLimit) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -218,13 +234,13 @@ func (d *detector) Filter(
 }
 
 // admits reports whether an endpoint is below its safety limit for the active mode.
-func (d *detector) admits(load *attrconcurrency.InFlightLoad, reqLimit, tokLimit int64) bool {
+func (d *detector) admits(requests, tokens, reqLimit, tokLimit int64) bool {
 	switch d.config.mode {
 	case modeTokens:
-		return load.Tokens < tokLimit
+		return tokens < tokLimit
 	case modeHybrid:
-		return load.Requests < reqLimit && load.Tokens < tokLimit
+		return requests < reqLimit && tokens < tokLimit
 	default:
-		return load.Requests < reqLimit
+		return requests < reqLimit
 	}
 }
