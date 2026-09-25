@@ -500,7 +500,7 @@ requires a vLLM version with the `return_mm_kwargs` render field; other
 versions ignore the field and return the tensors. It is false by default and
 works with `vllm.url` and `vllm.endpointDiscovery`.
 
-A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
 ## Live verification
 
