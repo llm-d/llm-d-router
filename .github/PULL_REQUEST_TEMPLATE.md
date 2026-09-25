@@ -5,6 +5,9 @@ Add one of the following kinds:
 /kind cleanup
 /kind documentation
 /kind feature
+/kind flake
+/kind performance
+/kind release
 /kind test
 
 Optionally add one or more of the following kinds if applicable:
