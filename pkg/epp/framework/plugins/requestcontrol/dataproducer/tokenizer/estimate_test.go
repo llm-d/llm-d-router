@@ -165,6 +165,56 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_ResponsesImageFeature mirrors
+// TestEstimateBackend_ChatImageFeature for a /v1/responses body: an
+// input_image content part must report a multimodal feature, since the
+// disagg profile handler selects the encode profile from
+// MultiModalFeatures alone.
+func TestEstimateBackend_ResponsesImageFeature(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "Describe what you see."},
+				map[string]any{"type": "input_image", "image_url": pngBase64DataURL},
+			},
+		}},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	f := tp.Prompts[0].MultiModalFeatures[0]
+	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
+}
+
+//nolint:goconst // "role"/"content"/"type" JSON keys read clearly inline; not worth naming
+func TestEstimateBackend_ResponsesTextOnlyNoFeatures(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{map[string]any{"role": "user", "content": "hello there"}},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
+	assert.NotEmpty(t, tp.Prompts[0].TokenIDs)
+}
+
+//nolint:goconst // "role"/"content"/"type" JSON keys read clearly inline; not worth naming
+func TestEstimateBackend_ResponsesSkipsUnrecognizedItems(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{
+			map[string]any{"type": "function_call", "call_id": "call_1"},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
+	assert.NotEmpty(t, tp.Prompts[0].TokenIDs)
+}
+
 func TestEstimateBackend_ChatModalityLabels(t *testing.T) {
 	chat := func(block fwkrh.ContentBlock) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{

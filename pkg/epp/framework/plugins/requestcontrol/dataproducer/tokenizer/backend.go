@@ -155,6 +155,8 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
+	case body.Responses != nil:
+		return b.renderResponses(ctx, body.Responses)
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")
 	}

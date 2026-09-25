@@ -240,6 +240,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Responses != nil {
+		raw, features := b.responsesBytes(body.Responses)
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
 		return estimateMultiStringCompletions(body.Completions)
@@ -268,16 +275,6 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	switch {
 	case body.Conversations != nil:
 		return json.Marshal(body.Conversations.Items)
-	case body.Responses != nil:
-		var combined []map[string]any
-		if body.Responses.Instructions != nil {
-			combined = append(combined, map[string]any{"instructions": body.Responses.Instructions})
-		}
-		if body.Responses.Tools != nil {
-			combined = append(combined, map[string]any{"tools": body.Responses.Tools})
-		}
-		combined = append(combined, map[string]any{"input": body.Responses.Input})
-		return json.Marshal(combined)
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
@@ -376,6 +373,93 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
+		}
+	}
+	return out, features
+}
+
+// responsesBytes flattens a /v1/responses request into pseudo-token bytes,
+// folding multimodal placeholders in on aligned boundaries. Input is a
+// string or an array of items; only items shaped like a plain
+// {role, content} message contribute, matching renderBackend's coverage.
+// Content is a string or an array of parts: input_text/output_text parts
+// contribute their text, input_image parts fold in an image placeholder.
+// input_audio is left for a follow-up.
+func (b estimateBackend) responsesBytes(r *fwkrh.ResponsesRequest) ([]byte, []fwkrh.MultiModalFeature) {
+	var out []byte
+	var features []fwkrh.MultiModalFeature
+	if r.Tools != nil {
+		if raw, err := json.Marshal(r.Tools); err == nil {
+			out = append(out, raw...)
+		}
+	}
+	if sys, ok := r.Instructions.(string); ok && sys != "" {
+		out = append(out, []byte(sys)...)
+	}
+	return b.appendResponsesInput(out, features, r.Input)
+}
+
+// appendResponsesInput flattens the Responses Input field: a plain string, or
+// an array of items.
+func (b estimateBackend) appendResponsesInput(out []byte, features []fwkrh.MultiModalFeature, input any) ([]byte, []fwkrh.MultiModalFeature) {
+	switch v := input.(type) {
+	case string:
+		out = append(out, []byte(v)...)
+	case []any:
+		for _, item := range v {
+			out, features = b.appendResponsesItem(out, features, item)
+		}
+	}
+	return out, features
+}
+
+// appendResponsesItem flattens one Input item shaped like a plain chat
+// message: {"role": ..., "content": ...}, with an optional "type": "message".
+// Items carrying any other "type" contribute nothing.
+func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiModalFeature, item any) ([]byte, []fwkrh.MultiModalFeature) {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return out, features
+	}
+	if t, ok := m["type"].(string); ok && t != "" && t != responsesItemTypeMessage {
+		return out, features
+	}
+	if role, ok := m["role"].(string); ok {
+		out = append(out, []byte(role)...)
+	}
+	return b.appendResponsesContent(out, features, m["content"])
+}
+
+// appendResponsesContent flattens an Input item's "content" field: a plain
+// string, or an array of content parts.
+func (b estimateBackend) appendResponsesContent(out []byte, features []fwkrh.MultiModalFeature, content any) ([]byte, []fwkrh.MultiModalFeature) {
+	switch v := content.(type) {
+	case string:
+		out = append(out, []byte(v)...)
+	case []any:
+		for _, part := range v {
+			out, features = b.appendResponsesContentPart(out, features, part)
+		}
+	}
+	return out, features
+}
+
+// appendResponsesContentPart flattens one content part. input_image carries
+// its URL as a bare string field, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape.
+func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh.MultiModalFeature, part any) ([]byte, []fwkrh.MultiModalFeature) {
+	p, ok := part.(map[string]any)
+	if !ok {
+		return out, features
+	}
+	switch p["type"] {
+	case "input_text", "output_text":
+		if text, ok := p["text"].(string); ok {
+			out = append(out, []byte(text)...)
+		}
+	case "input_image":
+		if url, ok := p["image_url"].(string); ok && url != "" {
+			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
 		}
 	}
 	return out, features
