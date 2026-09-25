@@ -229,3 +229,52 @@ func TestStagedSnapshotMatchesDirectApplication(t *testing.T) {
 		require.Empty(t, got[owned.key])
 	}
 }
+
+func TestCompactSnapshotStateKeepsLiveBookkeeping(t *testing.T) {
+	ctx := context.Background()
+	pool, index, tokens := newTestPool(t, 4)
+	pool.strict = true
+	pool.ownsEntries = true
+	// A replay stores every retained source event, then removes the excess.
+	replay := &EventBatch{}
+	prompts := make(map[uint64][]uint32)
+	for i := range uint64(64) {
+		prompt := []uint32{uint32(4 * i), uint32(4*i + 1), uint32(4*i + 2), uint32(4*i + 3)}
+		prompts[100+i] = prompt
+		replay.Events = append(replay.Events,
+			&BlockStoredEvent{BlockHashes: []uint64{100 + i}, Tokens: prompt, BlockSize: 4, DeviceTier: "GPU"})
+	}
+	for i := range uint64(60) {
+		replay.Events = append(replay.Events, &BlockRemovedEvent{BlockHashes: []uint64{100 + i}, DeviceTier: "GPU"})
+	}
+	require.NoError(t, pool.processEventBatch(ctx, replay, "generation", "model"))
+	entries := make(map[snapshotOwnedEntry]struct{}, len(pool.snapshotEntries))
+	for owned := range pool.snapshotEntries {
+		entries[owned] = struct{}{}
+	}
+	refs := make(map[string]map[dedupKey]int)
+	for pod, bucket := range pool.dedup.refs {
+		refs[pod] = make(map[dedupKey]int)
+		for key, count := range bucket {
+			refs[pod][key] = count
+		}
+	}
+
+	pool.compactSnapshotState()
+	require.Equal(t, entries, pool.snapshotEntries)
+	require.Equal(t, refs, pool.dedup.refs)
+	require.Len(t, pool.snapshotEntries, 4)
+	require.Len(t, pool.dedup.refs["generation"], 4)
+
+	// Live events after compaction keep updating the rebuilt bookkeeping.
+	require.NoError(t, pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{BlockHashes: []uint64{160}, DeviceTier: "GPU"},
+	}}, "generation", "model"))
+	keys, err := tokens.TokensToKVBlockKeys(0, prompts[160], "model", nil)
+	require.NoError(t, err)
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Empty(t, found[keys[0]])
+	require.Len(t, pool.snapshotEntries, 3)
+	require.Len(t, pool.dedup.refs["generation"], 3)
+}

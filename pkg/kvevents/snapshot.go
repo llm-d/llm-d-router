@@ -688,9 +688,12 @@ waiting:
 			return err
 		}
 	}
+	// Only the publisher identity outlives the replay: a closure over the
+	// reply frames would pin the whole snapshot for the subscriber's life.
+	epoch := bytes.Clone(f[1])
 	next := uint64(cut + 1)
 	advance := func(msg snapshotLive) error {
-		if msg.topic != first.topic || !bytes.Equal(msg.epoch, f[1]) {
+		if msg.topic != first.topic || !bytes.Equal(msg.epoch, epoch) {
 			return fmt.Errorf("publisher identity changed")
 		}
 		if msg.sequence < next {
@@ -726,6 +729,7 @@ waiting:
 	if err := s.activate(ctx, generation, false); err != nil {
 		return err
 	}
+	pool.compactSnapshotState()
 	metrics.SnapshotRecoveries.WithLabelValues("success", "none").Inc()
 	metrics.SnapshotBootstrapDuration.Observe(time.Since(bootstrapStarted).Seconds())
 	release()
@@ -827,6 +831,18 @@ func (p *Pool) untrackSnapshotStore(keys []kvblock.BlockHash, entries []kvblock.
 			delete(p.snapshotEntries, snapshotOwnedEntry{key: key, entry: entry})
 		}
 	}
+}
+
+// compactSnapshotState rebuilds the generation's bookkeeping at its live
+// size. A replay stores every retained source event before it removes the
+// excess, so the maps grow to that peak, and Go maps never shrink.
+func (p *Pool) compactSnapshotState() {
+	entries := make(map[snapshotOwnedEntry]struct{}, len(p.snapshotEntries))
+	for owned := range p.snapshotEntries {
+		entries[owned] = struct{}{}
+	}
+	p.snapshotEntries = entries
+	p.dedup.compact()
 }
 
 func (p *Pool) clearSnapshotGeneration(ctx context.Context) error {
