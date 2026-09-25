@@ -16,7 +16,10 @@ limitations under the License.
 
 package server
 
-import "net/http"
+import (
+	"io"
+	"net/http"
+)
 
 // countingResponseWriter counts bytes written to the client so
 // response_size_bytes can include partial writes on cancellation or disconnect.
@@ -43,4 +46,23 @@ func (w *countingResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// ReadFrom implements io.ReaderFrom so io.Copy(dst, src) reaches the inner
+// writer's optimized copy path (net/http's response writer supports
+// sendfile-style copies once the response is streaming) instead of degrading
+// to a per-chunk Write through this wrapper. Bytes copied are still counted
+// so response_size_bytes stays exact, including the partial count on a
+// mid-copy failure.
+func (w *countingResponseWriter) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(r)
+		w.n += int(n)
+		return n, err
+	}
+	// The inner writer has no optimized path; copy straight into it and count
+	// here, which still skips the per-chunk Write-wrapper indirection.
+	n, err := io.Copy(w.ResponseWriter, r)
+	w.n += int(n)
+	return n, err
 }

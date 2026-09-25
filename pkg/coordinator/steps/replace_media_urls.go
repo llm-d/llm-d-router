@@ -254,11 +254,6 @@ func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 str
 }
 
 func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) (data []byte, contentType string, err error) {
-	start := time.Now()
-	defer func() {
-		coordmetrics.RecordMediaDownloadDuration(coordmetrics.ClassifyDownloadResult(ctx, err), time.Since(start))
-	}()
-
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid URL: %w: %w", err, pipeline.ErrBadRequest)
@@ -271,6 +266,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) (dat
 			"rejecting media URL: host not in allowed_domains", "host", parsed.Hostname())
 		return nil, "", fmt.Errorf("host %q not allowed: %w", parsed.Hostname(), pipeline.ErrBadRequest)
 	}
+
+	// Timing starts after pre-dial validation: URL parse, scheme, and
+	// allowed_domains rejections are not download attempts, so they must not
+	// drag the error bucket's duration distribution toward zero.
+	start := time.Now()
+	defer func() {
+		coordmetrics.RecordMediaDownloadDuration(coordmetrics.ClassifyDownloadResult(ctx, err), time.Since(start))
+	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -660,9 +661,17 @@ func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
 
 func TestExecute_AccumulatesStepDuration(t *testing.T) {
 	reqCtx := &RequestContext{}
+	// Each step sleeps briefly: with instantly-returning fns the measured
+	// durations can round to zero on coarse clocks and make the test flaky.
 	steps := []Step{
-		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
-		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
 	}
 	if err := New(steps).Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("unexpected error: %v", err)

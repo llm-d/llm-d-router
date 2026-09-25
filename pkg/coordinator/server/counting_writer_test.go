@@ -18,8 +18,10 @@ package server
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +71,66 @@ func TestCountingResponseWriter_CountsPartialWriteOnError(t *testing.T) {
 	}
 	if n != 3 {
 		t.Fatalf("partial n = %d, want 3", n)
+	}
+	if cw.BytesWritten() != 3 {
+		t.Fatalf("BytesWritten = %d, want 3", cw.BytesWritten())
+	}
+}
+
+// readerOnly hides any WriteTo on the wrapped source so io.Copy takes the
+// destination's ReadFrom path, matching real reverse-proxy response bodies.
+type readerOnly struct{ io.Reader }
+
+// readerFromSpy records whether its ReadFrom was reached, standing in for the
+// net/http response writer's sendfile-style optimized copy path.
+type readerFromSpy struct {
+	http.ResponseWriter
+	readFromUsed bool
+}
+
+func (w *readerFromSpy) ReadFrom(r io.Reader) (int64, error) {
+	w.readFromUsed = true
+	return io.Copy(w.ResponseWriter, r)
+}
+
+func TestCountingResponseWriter_ReadFrom_DelegatesToInnerReaderFrom(t *testing.T) {
+	inner := &readerFromSpy{ResponseWriter: httptest.NewRecorder()}
+	cw := newCountingResponseWriter(inner)
+	n, err := io.Copy(cw, readerOnly{strings.NewReader("hello world")})
+	if err != nil || n != 11 {
+		t.Fatalf("io.Copy = %d, %v", n, err)
+	}
+	if !inner.readFromUsed {
+		t.Fatal("expected the inner writer's ReadFrom to be used")
+	}
+	if cw.BytesWritten() != 11 {
+		t.Fatalf("BytesWritten = %d, want 11", cw.BytesWritten())
+	}
+}
+
+func TestCountingResponseWriter_ReadFrom_FallbackWithoutInnerReaderFrom(t *testing.T) {
+	// failingWriter does not implement io.ReaderFrom, so ReadFrom falls back
+	// to a buffered copy through it. failAfter is high enough to succeed.
+	inner := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 1 << 20}
+	cw := newCountingResponseWriter(inner)
+	n, err := io.Copy(cw, readerOnly{strings.NewReader("fallback copy path")})
+	if err != nil || n != int64(len("fallback copy path")) {
+		t.Fatalf("io.Copy = %d, %v", n, err)
+	}
+	if cw.BytesWritten() != int(n) {
+		t.Fatalf("BytesWritten = %d, want %d", cw.BytesWritten(), n)
+	}
+}
+
+func TestCountingResponseWriter_ReadFrom_CountsPartialCopyOnError(t *testing.T) {
+	inner := &failingWriter{ResponseWriter: httptest.NewRecorder(), failAfter: 3}
+	cw := newCountingResponseWriter(inner)
+	n, err := io.Copy(cw, readerOnly{strings.NewReader("abcdef")})
+	if err == nil {
+		t.Fatal("expected copy error")
+	}
+	if n != 3 {
+		t.Fatalf("partial copy n = %d, want 3", n)
 	}
 	if cw.BytesWritten() != 3 {
 		t.Fatalf("BytesWritten = %d, want 3", cw.BytesWritten())

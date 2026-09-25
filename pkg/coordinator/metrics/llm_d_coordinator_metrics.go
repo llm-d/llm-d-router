@@ -209,7 +209,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "media_download_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts; data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts. Requests rejected before the dial (invalid URL, disallowed scheme, or host not in allowed_domains) and data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		resultLabel,

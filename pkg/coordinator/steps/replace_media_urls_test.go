@@ -1336,6 +1336,47 @@ func TestReplaceMediaURLsStep_DataURIDoesNotRecordDownloadDuration(t *testing.T)
 	require.Zero(t, stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": coordmetrics.DownloadResultSuccess}))
 }
 
+func TestReplaceMediaURLsStep_PreDialRejectionDoesNotRecordDownloadDuration(t *testing.T) {
+	reg := newStepMetricsRegistry(t)
+	// The allowlist excludes the URL's host, so the fetch is refused before
+	// the dial: not a download attempt, and must not be recorded as one.
+	step, err := NewReplaceMediaURLsStep(nil, map[string]any{
+		"allowed_domains": []string{"images.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": "http://other.example.com/photo.jpg"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err == nil {
+		t.Fatal("expected host-not-allowed error")
+	}
+	// The media inventory still counts the image part...
+	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
+	// ...but no download attempt started, so no observation exists under any
+	// result label.
+	for _, result := range []string{
+		coordmetrics.DownloadResultSuccess,
+		coordmetrics.DownloadResultError,
+		coordmetrics.DownloadResultCancelled,
+	} {
+		require.Zero(t, stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": result}), result)
+	}
+}
+
 func TestReplaceMediaURLsStep_NoImagesRecordsZero(t *testing.T) {
 	reg := newStepMetricsRegistry(t)
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
