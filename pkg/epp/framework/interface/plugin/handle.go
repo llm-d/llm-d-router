@@ -20,6 +20,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -45,6 +46,11 @@ type Handle interface {
 	// SetCrossReplicaSyncer makes the configured cross-replica syncer available
 	// to plugins through the handle.
 	SetCrossReplicaSyncer(Plugin)
+
+	// RefreshMetricsInterval returns the base polling tick configured by
+	// --refresh-metrics-interval, after the minimum-interval clamp. Data sources
+	// that set their own interval may poll less often than this. Zero when unset.
+	RefreshMetricsInterval() time.Duration
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -69,9 +75,10 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList            PodListFunc
-	metricsRecorder    MetricsRecorder
-	crossReplicaSyncer Plugin
+	podList                PodListFunc
+	metricsRecorder        MetricsRecorder
+	crossReplicaSyncer     Plugin
+	refreshMetricsInterval time.Duration
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -131,6 +138,11 @@ func (h *eppHandle) SetCrossReplicaSyncer(syncer Plugin) {
 	h.crossReplicaSyncer = syncer
 }
 
+// RefreshMetricsInterval returns the data-layer polling cadence.
+func (h *eppHandle) RefreshMetricsInterval() time.Duration {
+	return h.refreshMetricsInterval
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -141,6 +153,14 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 		if recorder != nil {
 			h.metricsRecorder = recorder
 		}
+	}
+}
+
+// WithRefreshMetricsInterval sets the base polling tick advertised to plugins
+// via Handle.RefreshMetricsInterval.
+func WithRefreshMetricsInterval(interval time.Duration) HandleOption {
+	return func(h *eppHandle) {
+		h.refreshMetricsInterval = interval
 	}
 }
 
