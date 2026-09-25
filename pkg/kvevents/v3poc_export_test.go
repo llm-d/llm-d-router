@@ -11,7 +11,7 @@ import (
 // FollowSnapshotForTest loads snapshot chunks into a strict generation pool
 // as bootstrap does, then applies live payloads in the same strict pool, as a
 // snapshot publisher's pool does for its whole life. It returns the owned
-// index entries and dedup counts as sorted lines, the entry count after the
+// index entries, dedup counts and learned group metadata as sorted lines, the entry count after the
 // snapshot, the number of live payloads applied, and the first live error.
 func FollowSnapshotForTest(ctx context.Context, index kvblock.Index, tokens kvblock.TokenProcessor,
 	adapter EngineAdapter, topic, pod string, chunks, live [][]byte,
@@ -50,6 +50,13 @@ func FollowSnapshotForTest(ctx context.Context, index kvblock.Index, tokens kvbl
 	}
 	for key, count := range pool.dedup.refs[pod] {
 		lines = append(lines, fmt.Sprintf("R %s %d %016x %d", key.deviceTier, key.groupIdx, key.blockHash, count))
+	}
+	// Groups the engine can announce; a snapshot must leave their learned
+	// metadata as live traffic does.
+	for g := range 4 {
+		if meta, found := pool.groupCatalog.Get(pod, kvblock.GroupID(g)); found {
+			lines = append(lines, fmt.Sprintf("G %d %s %d %v", g, meta.Kind, meta.BlockSize, meta.SlidingWindowSize))
+		}
 	}
 	sort.Strings(lines)
 	return lines, loaded, applied, liveErr, nil

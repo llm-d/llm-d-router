@@ -152,4 +152,10 @@ func TestV3PoCReplay(t *testing.T) {
 	}
 	t.Logf("RESULT cut=%d chunks=%d loaded_entries=%d live_applied=%d last_seq=%d lines=%d status=%s",
 		cut, len(chunks), loaded, applied, cut+int64(applied), len(lines), status)
+	if liveErr != nil {
+		t.Fatalf("live replay failed: %v", liveErr)
+	}
+	if os.Getenv("V3POC_UNTIL") != "" && cut+int64(applied) != until {
+		t.Fatalf("live replay stopped at %d, want %d", cut+int64(applied), until)
+	}
 }
