@@ -572,14 +572,88 @@ func TestZMQSubscriber_ProactiveReplayAcceptsEndAfterProgress(t *testing.T) {
 	require.Len(t, hits[key], 1, "terminal marker after replay progress must preserve the rebuilt index")
 }
 
-func TestZMQSubscriber_ProactiveReplayRejectsTruncatedHistory(t *testing.T) {
+// A publisher's replay ring is bounded, so a cold start against a pod that has
+// been serving for a while gets a window that begins long after sequence 0. The
+// window is applied and lastSeq is seeded from its end, which is what lets the
+// following live event be accepted directly instead of asking for a full replay
+// again.
+func TestZMQSubscriber_ProactiveReplayAnchorsPastRetentionWindow(t *testing.T) {
 	h := newReplayHarness(t, []replayMessage{
-		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 5000, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 5001, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 5002, payload: buildDistinctBlockStoredPayload(t, 300)},
 	}, false)
 
-	time.Sleep(300 * time.Millisecond)
-	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
-	require.Error(t, err, "replay starting after the requested sequence must not populate the index")
+	require.Eventually(t, func() bool {
+		key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		if err != nil {
+			return false
+		}
+		hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
+		return err == nil && len(hits[key]) == 1
+	}, 5*time.Second, 50*time.Millisecond,
+		"a retention-truncated cold-start window must still rebuild the index")
+	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	require.NoError(t, err, "every event in the offered window must be applied")
+
+	// Contiguous with the window's end: accepted without another replay, which
+	// only holds if the replay seeded lastSeq = 5002.
+	h.send(t, 5003, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(400))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	assert.Equal(t, int32(1), h.buffer.requests.Load(),
+		"a seeded subscriber must not re-request a full replay")
+}
+
+// The leniency is scoped to the cold start. A gap-fill resumes from a sequence
+// already applied, so a window that starts later than requested has lost events
+// for good and must invalidate rather than silently skip them.
+func TestZMQSubscriber_GapReplayRejectsTruncatedHistory(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	firstKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+
+	// Sequence 1 is gone, so the gap replay from 1 is answered starting at 2.
+	h.buffer.set(replayMessage{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)})
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 400))
+
+	require.Eventually(t, func() bool { return h.buffer.requests.Load() == 2 },
+		5*time.Second, 50*time.Millisecond, "gap replay expected")
+	require.Equal(t, uint64(1), h.buffer.lastStartSeq.Load())
+	require.Eventually(t, func() bool {
+		hits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{firstKey}, nil)
+		return lookupErr == nil && len(hits[firstKey]) == 0
+	}, 5*time.Second, 50*time.Millisecond,
+		"a truncated gap replay must clear the pod's index state")
+	_, err = h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	require.Error(t, err, "a gap replay starting after the requested sequence must not populate the index")
+}
+
+// A publisher with nothing retained answers the cold start with the terminal
+// marker alone. That is a success with nothing to apply, so the subscriber stays
+// unseeded and takes its sequence from the next live event, however high.
+func TestZMQSubscriber_ProactiveReplayOnEmptyPublisherSeedsFromLiveEvent(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+
+	h.send(t, 9000, buildDistinctBlockStoredPayload(t, 500))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(500))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond,
+		"an empty publisher must not block the mid-stream join")
+
+	h.send(t, 9001, buildDistinctBlockStoredPayload(t, 600))
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(600))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
 }
 
 func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {

@@ -329,6 +329,24 @@ func (z *zmqSubscriber) invalidateReplay(topic string) {
 }
 
 // requestReplay requests buffered events starting from startSeq.
+//
+// startSeq == 0 is a cold start: "send everything you still retain". A
+// publisher's replay ring is bounded -- vLLM keeps only the last N events per
+// rank -- so once a pod has been serving for a while its oldest retained
+// sequence is far above 0, and no reply can begin at the requested sequence.
+// The first frame of a cold start therefore anchors the expected sequence
+// instead of being checked against it, and contiguity is enforced from that
+// anchor onwards. A gap-fill replay (startSeq > 0) resumes from a sequence this
+// subscriber has already applied, so its first frame must match exactly: a
+// window that starts later than requested means the events in between are gone
+// for good and the index state ahead of the gap is not trustworthy.
+//
+// Anchoring can only ever narrow what a cold start learns. The index starts
+// empty, so a block-removed event for a block whose store event fell out of the
+// window resolves to a no-op, and a store event never seen leaves the pod
+// looking colder than it is. Rejecting the whole window instead leaves the index
+// empty AND unseeded: lastSeq is never set, so the next live event takes the
+// cold-start branch again and the subscriber never converges.
 func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool {
 	logger := log.FromContext(ctx).WithName("zmq-replay")
 	debugLogger := logger.V(logging.DEBUG)
@@ -340,6 +358,9 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	nextSeq := startSeq
 	attempt := 0
 	noProgressAttempts := 0
+	// Consumed by the first accepted frame, so a resumed attempt after partial
+	// progress is strict even though startSeq is still 0.
+	anchorPending := startSeq == 0
 	for {
 		if replayCtx.Err() != nil {
 			z.invalidateReplay(z.topicFilter)
@@ -423,9 +444,15 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				break
 			}
 			if seq != expectedSeq {
-				terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
-				break
+				if !anchorPending {
+					terminalErr = fmt.Errorf("incomplete replay: expected sequence %d, got %d", expectedSeq, seq)
+					break
+				}
+				logger.Info("Cold-start replay anchored at the publisher's oldest retained event",
+					"firstAvailableSeq", seq, "replayEndpoint", z.replayEndpoint)
+				expectedSeq = seq
 			}
+			anchorPending = false
 
 			z.addTask(ctx, topic, seq, payload)
 			z.lastSeq = seq
