@@ -74,8 +74,13 @@ func TestInMemoryIndexSize(t *testing.T) {
 	err = index.Add(ctx, []BlockHash{engineKey3}, []BlockHash{requestKey3}, []PodEntry{{PodIdentifier: "pod3", DeviceTier: "cpu"}})
 	require.NoError(t, err)
 
-	// Lookup should only return the last two keys
-	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	// Verify requestKey1 was evicted
+	evicted, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, evicted)
+
+	// Lookup should return the remaining keys
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey2, requestKey3}, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, podsPerKey, 2) // Only key2 and key3 should be present
