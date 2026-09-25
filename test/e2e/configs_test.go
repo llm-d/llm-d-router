@@ -183,6 +183,52 @@ schedulingProfiles:
     weight: 2
 `
 
+// aggregatedFallbackConfig routes to an aggregated worker when Decode or required Prefill has no endpoints.
+const aggregatedFallbackConfig = `apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: decode-only
+  type: label-selector-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: decode
+- name: full-capability-fallback
+  type: label-selector-filter
+  parameters:
+    matchExpressions:
+    - key: llm-d.ai/role
+      operator: In
+      values: [prefill-decode, encode-prefill-decode]
+- name: prefill-only
+  type: label-selector-filter
+  parameters:
+    matchLabels:
+      llm-d.ai/role: prefill
+- type: max-score-picker
+- type: always-disagg-pd-decider
+- type: disagg-profile-handler
+  parameters:
+    profiles:
+      decode: decode
+      prefill: prefill
+      fallback: aggregated-fallback
+    deciders:
+      prefill: always-disagg-pd-decider
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: decode-only
+  - pluginRef: max-score-picker
+- name: prefill
+  plugins:
+  - pluginRef: prefill-only
+  - pluginRef: max-score-picker
+- name: aggregated-fallback
+  plugins:
+  - pluginRef: full-capability-fallback
+  - pluginRef: max-score-picker
+`
+
 // EPP configuration for running decode-only using disagg-profile-handler (no prefill, no encode)
 const decodeOnlyConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
