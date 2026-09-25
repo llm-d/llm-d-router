@@ -779,30 +779,19 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 				},
 			}
 
-<<<<<<< HEAD
 			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if gatewayCallCount != 0 {
 				t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
 			}
+			if reqCtx.EncodeFanout != 0 {
+				t.Fatalf("expected EncodeFanout=0 for generate skip, got %d", reqCtx.EncodeFanout)
+			}
 			if reqCtx.ECTransferParams != nil {
 				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
 			}
 		})
-=======
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gatewayCallCount != 0 {
-		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
-	}
-	if reqCtx.EncodeFanout != 0 {
-		t.Fatalf("expected EncodeFanout=0 for generate skip, got %d", reqCtx.EncodeFanout)
-	}
-	if reqCtx.ECTransferParams != nil {
-		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
->>>>>>> bc235004 (feat(coordinator): add pipeline amplification and media metrics)
 	}
 }
 
