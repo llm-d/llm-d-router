@@ -109,7 +109,7 @@ flowControl:
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
-A complete sample is shipped at [`deploy/config/sim-program-aware-config.yaml`](../../../../../../../deploy/config/sim-program-aware-config.yaml).
+A complete sample is shipped at [`test/e2e/artifacts/config/sim-program-aware-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-program-aware-config.yaml).
 
 ## Observability
 

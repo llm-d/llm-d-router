@@ -15,13 +15,13 @@ clean-env-dev-kubernetes: check-kubectl check-envsubst ## Clean up full dev envi
 
 .PHONY: install-rbac
 install-rbac: check-kubectl check-envsubst ## Apply RBAC configuration to cluster
-	@echo "Applying RBAC configuration from deploy/rbac..."
-	kubectl kustomize deploy/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl apply -f -
+	@echo "Applying RBAC configuration from test/e2e/artifacts/rbac..."
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl apply -f -
 
 .PHONY: uninstall-rbac
 uninstall-rbac: check-kubectl check-envsubst ## Remove RBAC configuration from cluster
-	@echo "Removing RBAC configuration from deploy/rbac..."
-	kubectl kustomize deploy/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl delete -f - || true
+	@echo "Removing RBAC configuration from test/e2e/artifacts/rbac..."
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base/rbac | envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' | kubectl delete -f - || true
 
 ##@ Kubernetes Targets
 
@@ -30,9 +30,9 @@ install-k8s: check-kubectl check-envsubst ## Deploy resources to Kubernetes
 	@echo "Creating namespace (if needed) and setting context to $(NAMESPACE)..."
 	kubectl create namespace $(NAMESPACE) 2>/dev/null || true
 	kubectl config set-context --current --namespace=$(NAMESPACE)
-	@echo "Deploying resources from deploy/ ..."
+	@echo "Deploying resources from test/e2e/artifacts/ ..."
 	# Build the kustomization from deploy, substitute variables, and apply the YAML
-	kubectl kustomize deploy/environments/kubernetes-base | envsubst | kubectl apply -f -
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst | kubectl apply -f -
 	@echo "Waiting for pod to become ready..."
 	sleep 5
 	@POD=$$(kubectl get pod -l app=$(PROJECT_NAME)-statefulset -o jsonpath='{.items[0].metadata.name}'); \
@@ -43,7 +43,7 @@ install-k8s: check-kubectl check-envsubst ## Deploy resources to Kubernetes
 .PHONY: uninstall-k8s
 uninstall-k8s: check-kubectl check-envsubst ## Remove resources from Kubernetes
 	@echo "Removing resources from Kubernetes..."
-	kubectl kustomize deploy/environments/kubernetes-base | envsubst | kubectl delete --force -f - || true
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst | kubectl delete --force -f - || true
 	POD=$$(kubectl get pod -l app=$(PROJECT_NAME)-statefulset -o jsonpath='{.items[0].metadata.name}'); \
 	echo "Deleting pod: $$POD"; \
 	kubectl delete pod "$$POD" --force --grace-period=0 || true; \
@@ -56,9 +56,9 @@ install-openshift: check-kubectl check-envsubst ## Deploy resources to OpenShift
 	@echo $$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE_TAG_BASE $$VERSION
 	@echo "Creating namespace $(NAMESPACE)..."
 	kubectl create namespace $(NAMESPACE) 2>/dev/null || true
-	@echo "Deploying common resources from deploy/ ..."
+	@echo "Deploying common resources from test/e2e/artifacts/ ..."
 	# Build and substitute the base manifests from deploy, then apply them
-	kubectl kustomize deploy/environments/kubernetes-base | envsubst '$$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE $$VERSION' | kubectl apply -n $(NAMESPACE) -f -
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst '$$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE $$VERSION' | kubectl apply -n $(NAMESPACE) -f -
 	@echo "Waiting for pod to become ready..."
 	sleep 5
 	@POD=$$(kubectl get pod -l app=$(PROJECT_NAME)-statefulset -n $(NAMESPACE) -o jsonpath='{.items[0].metadata.name}'); \
@@ -69,9 +69,9 @@ install-openshift: check-kubectl check-envsubst ## Deploy resources to OpenShift
 .PHONY: uninstall-openshift
 uninstall-openshift: check-kubectl check-envsubst ## Remove resources from OpenShift
 	@echo "Removing resources from OpenShift..."
-	kubectl kustomize deploy/environments/kubernetes-base | envsubst '$$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE $$VERSION' | kubectl delete --force -f - || true
+	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst '$$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE $$VERSION' | kubectl delete --force -f - || true
 	# @if kubectl api-resources --api-group=route.openshift.io | grep -q Route; then \
-	#   envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' < deploy/openshift/route.yaml | kubectl delete --force -f - || true; \
+	#   envsubst '$$PROJECT_NAME $$NAMESPACE $$VERSION' < test/e2e/artifacts/openshift/route.yaml | kubectl delete --force -f - || true; \
 	# fi
 	@POD=$$(kubectl get pod -l app=$(PROJECT_NAME)-statefulset -n $(NAMESPACE) -o jsonpath='{.items[0].metadata.name}'); \
 	echo "Deleting pod: $$POD"; \

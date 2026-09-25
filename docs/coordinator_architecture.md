@@ -316,7 +316,7 @@ each EPP call is single-phase scheduling.
 Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
-[deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
+[test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml](../test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml).
 That file targets the sidecar model, though, so it picks profiles via
 `disagg-profile-handler` deciders rather than the `EPP-Profile` header; header-based
 selection swaps in `header-profile-handler` for that one plugin.

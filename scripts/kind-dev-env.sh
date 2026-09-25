@@ -172,15 +172,15 @@ fi
 # Determine EPP config file based on disaggregation flags
 # KV cache and data parallel are independent options that work with any mode
 if [ "${KV_CACHE_ENABLED}" == "true" ]; then
-  DEFAULT_EPP_CONFIG="deploy/config/sim-epp-kvcache-config.yaml"
+  DEFAULT_EPP_CONFIG="test/e2e/artifacts/config/sim-epp-kvcache-config.yaml"
 elif [ "${DISAGG_E}" == "true" ] && [ "${DISAGG_P}" == "true" ]; then
-  DEFAULT_EPP_CONFIG="deploy/config/sim-e-p-d-epp-config.yaml"
+  DEFAULT_EPP_CONFIG="test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml"
 elif [ "${DISAGG_E}" == "true" ]; then
-  DEFAULT_EPP_CONFIG="deploy/config/sim-e-pd-epp-config.yaml"
+  DEFAULT_EPP_CONFIG="test/e2e/artifacts/config/sim-e-pd-epp-config.yaml"
 elif [ "${DISAGG_P}" == "true" ]; then
-  DEFAULT_EPP_CONFIG="deploy/config/sim-pd-epp-config.yaml"
+  DEFAULT_EPP_CONFIG="test/e2e/artifacts/config/sim-pd-epp-config.yaml"
 else
-  DEFAULT_EPP_CONFIG="deploy/config/sim-epp-config.yaml"
+  DEFAULT_EPP_CONFIG="test/e2e/artifacts/config/sim-epp-config.yaml"
 fi
 
 export EPP_CONFIG="${EPP_CONFIG:-${DEFAULT_EPP_CONFIG}}"
@@ -242,7 +242,7 @@ if [ "${PROM_ENABLED}" == "true" ] && [ -r /proc/sys/fs/inotify/max_user_instanc
 fi
 
 # TARGET_PORTS is substituted directly into the `targetPorts: ${TARGET_PORTS}` field
-# in deploy/components/inference-gateway/inference-pools.yaml. Each item must be
+# in test/e2e/artifacts/components/inference-gateway/inference-pools.yaml. Each item must be
 # indented with exactly 2 spaces to match the indentation of that field. If the
 # field is ever reindented in inference-pools.yaml, update the indentation here too.
 NEW_LINE=$'\n'
@@ -390,16 +390,16 @@ apply_crds() {
     return 1
 }
 
-apply_crds ""               deploy/components/crds-gateway-api
-apply_crds ""               deploy/components/crds-gie
+apply_crds ""               test/e2e/artifacts/components/crds-gateway-api
+apply_crds ""               test/e2e/artifacts/components/crds-gie
 apply_crds ""               config/crd
-apply_crds "--enable-helm"  deploy/components/crds-istio
+apply_crds "--enable-helm"  test/e2e/artifacts/components/crds-istio
 
 # ------------------------------------------------------------------------------
 # Development Environment
 # ------------------------------------------------------------------------------
 
-ENV_BASE="deploy/environments/dev"
+ENV_BASE="test/e2e/artifacts/environments/dev"
 
 if [ "${DISAGG_E}" == "true" ] && [ "${DISAGG_P}" == "true" ]; then
   KUSTOMIZE_DIR="${ENV_BASE}/e-p-d"
@@ -425,7 +425,7 @@ export EPP_REPLICA_COUNT=1
 export ENABLE_LEADER_ELECTION=false
 
 # Deploy Istio base (shared infrastructure)
-kubectl kustomize --enable-helm deploy/environments/dev/base-kind-istio \
+kubectl kustomize --enable-helm test/e2e/artifacts/environments/dev/base-kind-istio \
   | envsubst '${POOL_NAME} ${MODEL_NAME} ${MODEL_NAME_SAFE} ${EPP_NAME} ${EPP_IMAGE} ${VLLM_IMAGE} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${VLLM_RENDER_MAX_MODEL_LEN} ${TARGET_PORTS} ${NAMESPACE} ${METRICS_ENDPOINT_AUTH} \
   ${EPP_REPLICA_COUNT} ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} \
@@ -501,7 +501,7 @@ if [ "${PROM_ENABLED}" == "true" ]; then
     --kube-context ${KUBE_CONTEXT} \
     --wait --timeout 300s
 
-  kubectl kustomize deploy/components/monitoring \
+  kubectl kustomize test/e2e/artifacts/components/monitoring \
     | envsubst '${EPP_NAME} ${POOL_NAME}' \
     | kubectl --context ${KUBE_CONTEXT} apply -f -
 

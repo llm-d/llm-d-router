@@ -175,8 +175,8 @@ See [Observability Setup](https://github.com/llm-d/llm-d/blob/main/docs/operatio
 for install and import instructions.
 
 > [!NOTE]
-> For significant customization beyond the standard deployment, use the `deploy/components`
-> directory with `kubectl kustomize`. The `deploy/environments/kind` deployment is a useful
+> For significant customization beyond the standard deployment, use the `test/e2e/artifacts/components`
+> directory with `kubectl kustomize`. The `test/e2e/artifacts/environments/kind` deployment is a useful
 > reference.
 
 ### Development Cycle
@@ -308,7 +308,7 @@ Data parallel and KV cache are orthogonal options that can be combined with any 
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags appended to the Decode vLLM container args. Use `--flag=value` format. Example: `--tensor-parallel-size=2` |
 
 For technical details, refer to [docs/disaggregation.md](docs/disaggregation.md) and
-[deploy/environments/dev/README.md](deploy/environments/dev/README.md).
+[test/e2e/artifacts/environments/dev/README.md](test/e2e/artifacts/environments/dev/README.md).
 
 #### 1. EPD — No Disaggregation (default)
 
@@ -431,7 +431,7 @@ DISAGG_E=true DISAGG_P=true VLLM_DATA_PARALLEL_SIZE=2 KV_CACHE_ENABLED=true make
 
 ### Simulator vs Real vLLM
 
-The `deploy/components/` directory contains all reusable Kustomize components:
+The `test/e2e/artifacts/components/` directory contains all reusable Kustomize components:
 
 **vLLM workload components** — the base pods, split into three atomic building blocks:
 - `vllm-encode/` — Encoder pod (multimodal, `--mm-encoder-only`)
@@ -477,13 +477,13 @@ DISAGG_P=true VLLM_DATA_PARALLEL_SIZE=2 make env-dev-kind
 > [!NOTE]
 > The section will be updated soon
 
-The `deploy/components/overlays/real-vllm/` component is ready to use. It provides
+The `test/e2e/artifacts/components/overlays/real-vllm/` component is ready to use. It provides
 all the real vLLM-specific configuration (KV events, EC transfer, shared PVC). To use
 it, create a scenario overlay that includes it instead of the simulator overlay.
 For example, to deploy P/D with real vLLM:
 
 ```yaml
-# deploy/environments/prod/p-d/kustomization.yaml
+# test/e2e/artifacts/environments/prod/p-d/kustomization.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -502,7 +502,7 @@ Then deploy with:
 
 ```bash
 VLLM_IMAGE=vllm/vllm-openai:v0.21.0 \
-  kubectl kustomize deploy/environments/prod/p-d \
+  kubectl kustomize test/e2e/artifacts/environments/prod/p-d \
   | envsubst | kubectl apply -f -
 ```
 
