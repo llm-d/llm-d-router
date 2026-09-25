@@ -578,7 +578,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 				},
 			}
 
-if err := step.Execute(context.Background(), reqCtx); err != nil {
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if gatewayCallCount != 0 {

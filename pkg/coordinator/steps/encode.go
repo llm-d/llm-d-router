@@ -101,7 +101,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
-reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
+	reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
 
 	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
 	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
