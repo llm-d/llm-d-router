@@ -118,6 +118,19 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		inflightModel = model
 	}
 
+	if r.URL.Path == reqcommon.PathResponses {
+		// Stateful Responses fields are unsupported regardless of deployment
+		// topology: the router handles only stateless Responses requests,
+		// disaggregated or not. They are expected to be resolved upstream of
+		// the router. The error names a field from a fixed list, so echoing
+		// it reflects no client-controlled content.
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
 	requestIDReplaced := !validRequestID.MatchString(requestID)
