@@ -99,6 +99,43 @@ func TestLongestPrefixScorerDifferentTiers(t *testing.T) {
 	}
 }
 
+func TestLongestPrefixScorerStorageTier(t *testing.T) {
+	mediumWeights := map[string]float64{
+		"gpu":     1.0,
+		"cpu":     0.8,
+		"storage": 0.3,
+	}
+
+	scorer := &kvcache.LongestPrefixScorer{
+		MediumWeights: mediumWeights,
+	}
+	blockKeys := int64KeysToKVBlockKeys([]uint64{1001, 1002, 1003, 1004})
+
+	hitmap := map[kvblock.BlockHash][]kvblock.PodEntry{
+		1001: {
+			{PodIdentifier: podA, DeviceTier: "cpu"},
+			{PodIdentifier: podB, DeviceTier: "gpu"},
+		},
+		1002: {
+			{PodIdentifier: podA, DeviceTier: "cpu"},
+			{PodIdentifier: podB, DeviceTier: "gpu"},
+		},
+		1003: {{PodIdentifier: podA, DeviceTier: "storage"}},
+		1004: {{PodIdentifier: podA, DeviceTier: "storage"}},
+	}
+
+	expected := map[string]float64{
+		podA: 2.2,
+		podB: 2.0,
+	}
+
+	scored, err := scorer.Score(context.Background(), blockKeys, hitmap)
+	assert.NoError(t, err)
+	for pod, score := range scored {
+		assert.InDelta(t, expected[pod], score, 0.0001)
+	}
+}
+
 func int64KeysToKVBlockKeys(keys []uint64) []kvblock.BlockHash {
 	kvKeys := make([]kvblock.BlockHash, len(keys))
 	for i, key := range keys {
