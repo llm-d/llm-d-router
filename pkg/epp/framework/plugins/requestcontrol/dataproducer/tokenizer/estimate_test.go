@@ -786,13 +786,14 @@ func TestAudioEstimator_DurationHeaderBeatsByteRate(t *testing.T) {
 	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
 }
 
-// TestAudioEstimator_MaxAudioTokens asserts the cap bounds a long clip, the way
-// maxVideoTokens bounds a long video.
+// TestAudioEstimator_MaxAudioTokens asserts the cap bounds the tower's tokens for
+// a long clip, the way maxVideoTokens bounds a long video, with the overhead
+// added on top, as models add their markers outside their own limit.
 func TestAudioEstimator_MaxAudioTokens(t *testing.T) {
 	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{MaxAudioTokens: 10}})}
 	tp, err := b.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 48000), "wav"))
 	require.NoError(t, err)
-	assert.Equal(t, 10, tp.Prompts[0].MultiModalFeatures[0].Length, "uncapped this clip is %d", audioTokens(1.5))
+	assert.Equal(t, 10+defaultAudioOverheadTokens, tp.Prompts[0].MultiModalFeatures[0].Length, "uncapped this clip is %d", audioTokens(1.5))
 }
 
 // TestAudioEstimator_HeaderDurationOverridesPayload asserts a header-provided
@@ -828,8 +829,8 @@ func TestAudioEstimator_MalformedPayloadStillCounts(t *testing.T) {
 // TestAudioEstimator_Qwen3OmniAndGemma4 asserts the two model shapes the issue
 // calls out are reachable by configuration alone. Both are dynamic mode and
 // differ only in rate: gemma4's mel front end takes 20ms frames at a 10ms hop
-// through two stride-2 convolutions, a token per 40ms, while Qwen3-Omni's AuT
-// encoder downsamples 8x to a token per 80ms. Qwen3-VL has no audio tower, so
+// through two stride-2 convolutions, a token per 40ms, while Qwen3-Omni's
+// encoder turns each 1s chunk into 13 tokens. Qwen3-VL has no audio tower, so
 // Qwen3-Omni is the audio member of that family. Both wrap a clip in begin/end
 // markers, which is the per-clip overhead of 2.
 func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
@@ -844,12 +845,11 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	assert.Equal(t, 3*25+2, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped audio length")
 
 	qwen3omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{TokensPerSecond: 12.5, OverheadTokens: 2},
+		Dynamic: &dynamicAudioConfig{TokensPerSecond: 13, OverheadTokens: 2},
 	}})}
 	tp, err = qwen3omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))
 	require.NoError(t, err)
-	// 3s at 12.5 tokens/s is 37.5, truncated to 37, plus the two markers.
-	assert.Equal(t, 39, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
+	assert.Equal(t, 3*13+2, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
 }
 
 // TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different

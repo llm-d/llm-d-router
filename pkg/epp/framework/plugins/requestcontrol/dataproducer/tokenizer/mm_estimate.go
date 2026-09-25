@@ -359,10 +359,10 @@ func (e videoEstimator) tokensPerFrame(meta videoMetadata) int {
 
 const (
 	defaultAudioDuration = 10 // seconds
-	// defaultAudioTokensPerSecond is Qwen3-Omni's audio encoder rate, a token per
-	// 80ms. Per-model rates belong in configuration; this is only the no-config
-	// fallback.
-	defaultAudioTokensPerSecond = 12.5
+	// defaultAudioTokensPerSecond is Qwen3-Omni's rate: its encoder takes audio in
+	// 1s chunks and turns each into 13 tokens. Per-model rates belong in
+	// configuration; this is only the no-config fallback.
+	defaultAudioTokensPerSecond = 13
 	defaultAudioOverheadTokens  = 14 // prompt template + text tokens
 	// defaultAudioBytesPerSecond converts a payload length into seconds for clips
 	// that are not PCM WAV, modeling ~128kbps compressed audio.
@@ -377,7 +377,7 @@ const (
 )
 
 // audioEstimator estimates an audio clip's placeholder-token count as
-// min(duration*tokensPerSecond + overheadTokens, maxAudioTokens). Audio towers
+// min(duration*tokensPerSecond, maxAudioTokens) + overheadTokens. Audio towers
 // convert a clip to encoder frames at a fixed rate and pool them into tokens, so
 // the count tracks duration rather than payload size. Duration is resolved per
 // clip: a header value wins, then the payload itself, then configuration, then
@@ -423,10 +423,13 @@ func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
 		overhead = defaultAudioOverheadTokens
 	}
 
-	tokens := overhead + int(tokensPerSec*e.durationSeconds(data, meta))
+	// The cap applies to the tower's tokens only. Models add their begin/end
+	// markers outside their own limit, so the overhead goes on after it.
+	tokens := int(tokensPerSec * e.durationSeconds(data, meta))
 	if e.maxTokens > 0 {
 		tokens = min(tokens, e.maxTokens)
 	}
+	tokens += overhead
 	if tokens < 1 {
 		tokens = 1
 	}

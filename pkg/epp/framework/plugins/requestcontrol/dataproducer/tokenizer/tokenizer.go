@@ -100,7 +100,7 @@ type estimateConfig struct {
 }
 
 // audioEstimateConfig tunes how an audio's placeholder-token count is estimated:
-// min(durationSeconds*tokensPerSecond + overheadTokens, maxAudioTokens). Clip
+// min(durationSeconds*tokensPerSecond, maxAudioTokens) + overheadTokens. Clip
 // duration is resolved per clip rather than configured: the
 // x-llm-d-audio-duration-seconds header wins, then the payload itself, then
 // defaultDuration.
@@ -110,16 +110,16 @@ type audioEstimateConfig struct {
 	DefaultDuration float64 `json:"defaultDuration,omitempty"`
 	// Dynamic configures the per-tower rate parameters.
 	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
-	// MaxAudioTokens caps the total placeholder count, mirroring maxVideoTokens.
+	// MaxAudioTokens caps the audio tower's tokens for a clip, before the
+	// overhead is added, so it matches the model's own limit (750 for gemma4).
 	// Zero means uncapped.
 	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
 // dynamicAudioConfig holds the per-tower rate parameters.
 type dynamicAudioConfig struct {
-	// TokensPerSecond is the placeholder tokens per second of audio. It is
-	// fractional because audio towers do not land on whole rates: Qwen3-Omni is
-	// 12.5 tokens/s.
+	// TokensPerSecond is the placeholder tokens per second of audio, 25 for
+	// gemma4 and 13 for Qwen3-Omni.
 	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
 	// OverheadTokens is the fixed prompt template + text token overhead added
 	// to every audio estimate.
