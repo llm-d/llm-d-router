@@ -44,4 +44,4 @@ flowControl:
     pluginRef: pool-saturation
 ```
 
-A complete P/D configuration using this plugin is in [`deploy/config/pd-hybrid-saturation-epp-config.yaml`](../../../../../../../deploy/config/pd-hybrid-saturation-epp-config.yaml).
+A complete P/D configuration using this plugin is in [`test/e2e/artifacts/config/pd-hybrid-saturation-epp-config.yaml`](../../../../../../../test/e2e/artifacts/config/pd-hybrid-saturation-epp-config.yaml).

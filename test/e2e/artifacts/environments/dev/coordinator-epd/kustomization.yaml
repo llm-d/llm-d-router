@@ -8,7 +8,7 @@ resources:
 
 # patch-decode.yaml removes the routing-sidecar that proxies 8000->8200 for
 # connector-based P/D disaggregation, which the coordinator's own pipeline
-# orchestration doesn't use. Mirrors deploy/environments/dev/epd/, the router's
+# orchestration doesn't use. Mirrors test/e2e/artifacts/environments/dev/epd/, the router's
 # own no-disaggregation scenario.
 #
 # The vLLM workers' extra args (including the raised --max-model-len that the
