@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // runConcurrentPD fires the prefill and decode requests of a concurrent-dispatch
@@ -87,11 +88,13 @@ func (s *Server) runConcurrentPD(
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
+			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		}
 		s.logger.V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
@@ -110,9 +113,18 @@ func (s *Server) runConcurrentPD(
 	decodeStart := time.Now()
 
 	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	decodeWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if decodeWriter.failed() {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(
 		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
 		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
@@ -136,5 +148,17 @@ func (s *Server) runConcurrentPD(
 			semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
 			semconv.LLMDPDProxyConcurrentPD(true),
 		)
+	}
+}
+
+// recordDecodeAbort records decode duration and a decode error when decode
+// dispatch did not return normally. The reverse proxy panics with
+// http.ErrAbortHandler when a stream breaks after headers were sent (client
+// disconnect, load balancer timeout), which skips the metrics recorded after
+// dispatch. Deferred without recover, so the panic still propagates.
+func recordDecodeAbort(returned *bool, start time.Time) {
+	if !*returned {
+		metrics.RecordDecodeDuration(time.Since(start))
+		metrics.RecordError(metrics.StageDecode)
 	}
 }

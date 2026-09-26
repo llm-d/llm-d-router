@@ -302,7 +302,7 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requestCount.Store(0)
-			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
+			_, err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
 		})

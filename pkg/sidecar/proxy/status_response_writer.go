@@ -55,6 +55,48 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 	return w.buffer.Bytes()
 }
 
+// statusCapturingResponseWriter passes writes straight through to the
+// underlying http.ResponseWriter while recording the first status code written
+// and whether any body write failed, so a streamed response (SSE included) can
+// still be observed for error metrics without buffering its body.
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	writeFailed bool
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode == 0 {
+		w.statusCode = statusCode
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	if err != nil {
+		w.writeFailed = true
+	}
+	return n, err
+}
+
+// failed reports whether the response carried an error status or could not be
+// delivered to the client.
+func (w *statusCapturingResponseWriter) failed() bool {
+	return isHTTPError(w.statusCode) || w.writeFailed
+}
+
+// Flush relays to the underlying writer's Flusher so SSE streaming through
+// this wrapper keeps working; a no-op if the underlying writer can't flush.
+func (w *statusCapturingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
 // until the caller decides the outcome (the "commit point"). It is used by the
 // MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill
@@ -220,6 +262,13 @@ func (w *deferredCommitWriter) abort() {
 	}
 	w.aborted = true
 	w.buffer.Reset()
+}
+
+// status returns the status code decode produced, or 0 if it wrote nothing.
+func (w *deferredCommitWriter) status() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.statusCode
 }
 
 // responseStarted reports whether decode's status/headers have reached the

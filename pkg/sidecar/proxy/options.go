@@ -293,7 +293,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
-	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
+	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
