@@ -70,3 +70,95 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+## vLLM snapshot recovery
+
+Set `kvEventsConfig.snapshotPort` to the vLLM snapshot service port. Zero disables
+snapshot recovery. This requires the vLLM snapshot protocol with publisher UUIDs
+and idle heartbeats, per-pod discovery, and the in-memory index. Each DP rank
+uses `socketPort + RankIndex` for live events and `snapshotPort + RankIndex` for
+snapshots. The two port ranges must not overlap and must remain at or below
+65535. Replay, shared subscriber sockets, speculative indexing, and non-vLLM
+engines are rejected. Events with locality or ownership scopes are rejected
+until the router can preserve those dimensions.
+
+The recovery index raises its per-key entry capacity to 1,048,576 so the
+ordinary request index's small `podCacheSize` cannot silently discard snapshot
+generations. Entries are allocated only when a publisher reports a matching
+block; the configured key-count limit still bounds the number of indexed keys.
+Each recovery generation keeps at most 1,048,576 engine-to-canonical mappings
+so publishers cannot overwrite each other's reconstruction metadata. If a live
+event references mapping history older than this bound, that generation is
+removed from routing and rebuilt from a fresh snapshot.
+At most 16 publishers fetch and install snapshots concurrently. A publisher
+takes a recovery slot after its first live frame, buffers live frames while it
+waits, and remains non-routable until its snapshot installs.
+
+```yaml
+- type: precise-prefix-cache-producer
+  parameters:
+    speculativeIndexing: false
+    kvEventsConfig:
+      discoverPods: true
+      topicFilter: "kv@"
+      snapshotPort: 6000
+      podDiscoveryConfig:
+        socketPort: 5557
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+```
+
+Configure each engine's topic as `kv@<pod-IP>:<serving-port>@<model-name>`. The
+model name must match the model requested through the EPP. Endpoint attribution
+uses the discovered serving address. The live and snapshot ports must be
+reachable from the EPP.
+
+The producer subscribes before requesting a snapshot and reconstructs the
+publisher generation outside the shared index, so concurrent recoveries do not
+contend on index writes. It applies consecutive buffered live events after the
+snapshot cut, then publishes the generation to the shared index and activates it
+only after reconstruction succeeds. A sequence gap, publisher UUID
+change, malformed event, missing reconstruction metadata, or heartbeat timeout
+removes that publisher's cache affinity and triggers another snapshot request.
+Other publishers remain independently available. Endpoint deletion removes its
+snapshot state. Ordinary routing remains available during recovery.
+
+Snapshot recovery applies per publisher, only where the engine serves a
+snapshot endpoint. The first live frame decides: vLLM appends its 16-byte
+publisher identity to the sequence number, and heartbeats, only when
+`snapshot_endpoint` is set. A publisher with 8-byte sequence frames is indexed
+from live events alone, as without `snapshotPort`: its cache affinity is usable
+immediately, idle periods are allowed, and sequence gaps are not recovered. A
+change of frame format restarts the subscriber in the other mode, so engines and
+the router can be upgraded or rolled back in any order.
+`kv_cache_events_live_only_publishers` counts publishers indexed from live events alone.
+
+GPU resets preserve CPU residency. Duplicate stores retain their reference
+counts, and tokenless offload events preserve every router block covered by an
+engine block. The prefix scorer retains its configured device-tier weights.
+
+Snapshot requests time out after 10 seconds. A publisher is unavailable after
+5 seconds without a live message. Recovery retries start after 1 second and use
+jittered exponential backoff capped at 30 seconds. Bootstrap buffering is
+bounded to 4,096 messages and 64 MiB; the receive queue is bounded to 256
+messages and 64 MiB. Snapshot replies are limited to 256 MiB. vLLM reports a
+snapshot unavailable from the first recorder failure until the engine restarts,
+so an unavailable reply moves that publisher to live-only indexing until its
+identity changes: blocks stored before the fallback have no cache affinity,
+later blocks do, and `kv_cache_events_snapshot_recoveries_total` records
+`result="live_only"`.
+
+The cross-language regression starts the real vLLM publisher and recorder from
+an installed feature checkout. It generates KV events without loading a model:
+
+```bash
+VLLM_PYTHON=/path/to/vllm/.venv/bin/python \
+PYTHONPATH=/path/to/vllm \
+VLLM_TEST_BLOCK_SIZE=8 \
+go test -race ./pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache \
+  -run TestSnapshotVLLMPublisher -count=1
+```
+
+The ordinary Go suite exercises recovery faults with controlled ZMQ publishers.
+Neither test starts Envoy, Kubernetes, or GPU inference.

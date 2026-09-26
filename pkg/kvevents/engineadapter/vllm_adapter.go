@@ -34,6 +34,7 @@ import (
 // []any layout, extracted with length guards instead of fixed structs, so the
 // converters stay encoding-agnostic and tolerate appended or omitted fields.
 type VLLMAdapter struct {
+	SnapshotMode    bool
 	eventConverters map[string]func([]any) (kvevents.GenericEvent, error)
 }
 
@@ -102,6 +103,16 @@ func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEve
 	case []any:
 		fields = ev
 	case map[string]any:
+		if v.SnapshotMode {
+			for _, key := range []string{"locality", "ownership"} {
+				if value := ev[key]; value != nil {
+					if text, ok := value.(string); ok && text == "" {
+						continue
+					}
+					return nil, fmt.Errorf("snapshot recovery does not support %s", key)
+				}
+			}
+		}
 		var err error
 		if fields, err = mapEventToFields(ev); err != nil {
 			return nil, err

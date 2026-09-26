@@ -96,6 +96,7 @@ type Producer struct {
 
 	subscribersManager subscriberManager
 	kvEventsConfig     *kvevents.Config
+	snapshots          *kvevents.SnapshotManager
 	podSelector        labels.Selector // nil matches every endpoint.
 
 	dk plugin.DataKey
@@ -156,6 +157,22 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		config.KVEventsConfig = kvevents.DefaultConfig()
 	}
 
+	if config.KVEventsConfig.SnapshotPort != 0 {
+		kc := config.KVEventsConfig
+		if config.SpeculativeIndexing || !kc.DiscoverPods || kc.ZMQEndpoint != "" || kc.PodDiscoveryConfig == nil || kc.PodDiscoveryConfig.EffectiveReplayPort() > 0 {
+			return nil, errors.New("snapshot recovery requires per-pod discovery without replay or speculative indexing")
+		}
+		if kc.EngineType != "" && kc.EngineType != "vllm" {
+			return nil, errors.New("snapshot recovery requires vllm")
+		}
+		if config.IndexerConfig == nil {
+			return nil, errors.New("indexerConfig is required")
+		}
+		if ic := config.IndexerConfig.KVBlockIndexConfig; ic != nil && (ic.InMemoryConfig == nil || ic.RedisConfig != nil || ic.CostAwareMemoryConfig != nil) {
+			return nil, errors.New("snapshot recovery requires the in-memory index")
+		}
+	}
+
 	var podSelector labels.Selector
 	if kc := config.KVEventsConfig; kc.DiscoverPods && kc.PodDiscoveryConfig != nil && kc.PodDiscoveryConfig.PodLabelSelector != "" {
 		sel, err := labels.Parse(kc.PodDiscoveryConfig.PodLabelSelector)
@@ -177,21 +194,33 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	}
 	go indexer.Run(ctx)
 
-	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
-	}
-	pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
-	}
-	pool.Start(ctx)
+	var snapshots *kvevents.SnapshotManager
+	var subscribersManager subscriberManager
+	if config.KVEventsConfig.SnapshotPort != 0 {
+		adapter := engineadapter.NewVLLMAdapter()
+		adapter.SnapshotMode = true
+		snapshots, err = kvevents.NewSnapshotManager(config.KVEventsConfig, config.IndexerConfig.KVBlockIndexConfig, tokenProcessor, adapter, indexer)
+		if err != nil {
+			return nil, err
+		}
+		subscribersManager = snapshots
+	} else {
+		adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+		}
+		pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
+		}
+		pool.Start(ctx)
 
-	subscribersManager := kvevents.NewSubscriberManager(pool)
-	if config.KVEventsConfig.ZMQEndpoint != "" {
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
-			config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
-			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+		subscribersManager = kvevents.NewSubscriberManager(pool)
+		if config.KVEventsConfig.ZMQEndpoint != "" {
+			if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
+				config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
+				return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+			}
 		}
 	}
 
@@ -207,6 +236,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		kvCacheIndexer:     indexer,
 		subscribersManager: subscribersManager,
 		kvEventsConfig:     config.KVEventsConfig,
+		snapshots:          snapshots,
 		podSelector:        podSelector,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
@@ -232,12 +262,18 @@ const (
 
 // precisePrefixState is the snapshot returned by DumpState. The KV-block index
 // is keyed by prompt-derived block hashes and is not enumerable, so it is not
-// reported; the active subscriber pod identities and the live speculative
-// request ids are enumerated (sorted and capped) for debugging.
+// reported. Snapshot mode reports only publishers with a complete current
+// index. Subscriber pod identities and live speculative request ids are
+// enumerated, sorted, and capped for debugging.
 type precisePrefixState struct {
 	Subscribers             []string `json:"subscribers"`
 	TotalSubscribers        int      `json:"totalSubscribers"`
 	MaxSubscribers          int      `json:"maxSubscribers"`
+	SnapshotRegistered      int      `json:"snapshotRegistered,omitempty"`
+	SnapshotReady           int      `json:"snapshotReady,omitempty"`
+	SnapshotLiveOnly        int      `json:"snapshotLiveOnly,omitempty"`
+	SnapshotRecovering      int      `json:"snapshotRecovering,omitempty"`
+	SnapshotStale           int      `json:"snapshotStale,omitempty"`
 	SpeculativeIndexing     bool     `json:"speculativeIndexing"`
 	SpeculativeEntries      []string `json:"speculativeEntries"`
 	TotalSpeculativeEntries int      `json:"totalSpeculativeEntries"`
@@ -254,6 +290,9 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 	var totalSubscribers int
 	if p.subscribersManager != nil {
 		ids, _ := p.subscribersManager.GetActiveSubscribers()
+		if p.snapshots != nil {
+			ids, _ = p.snapshots.GetReadySubscribers()
+		}
 		totalSubscribers = len(ids)
 		subscribers = sortedCapped(ids, maxDumpSubscribers)
 	}
@@ -264,10 +303,19 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 		totalSpeculativeEntries = len(keys)
 		speculativeEntries = sortedCapped(keys, maxDumpSpeculativeEntries)
 	}
+	snapshotStatus := kvevents.SnapshotStatus{}
+	if p.snapshots != nil {
+		snapshotStatus = p.snapshots.Status()
+	}
 	return json.Marshal(precisePrefixState{
 		Subscribers:             subscribers,
 		TotalSubscribers:        totalSubscribers,
 		MaxSubscribers:          maxDumpSubscribers,
+		SnapshotRegistered:      snapshotStatus.Registered,
+		SnapshotReady:           snapshotStatus.Ready,
+		SnapshotLiveOnly:        snapshotStatus.LiveOnly,
+		SnapshotRecovering:      snapshotStatus.Recovering,
+		SnapshotStale:           snapshotStatus.Stale,
 		SpeculativeIndexing:     p.speculativeEnabled,
 		SpeculativeEntries:      speculativeEntries,
 		TotalSpeculativeEntries: totalSpeculativeEntries,
@@ -350,7 +398,11 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	var matches map[string]kvcache.PodMatch
 	totalBlocks := 0
 	for _, blockKeys := range perPromptKeys {
-		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, endpointSet)
+		match := p.kvCacheIndexer.MatchBlockKeys
+		if p.snapshots != nil {
+			match = p.snapshots.MatchBlockKeys
+		}
+		promptMatches, err := match(ctx, blockKeys, endpointSet)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to match block keys: %w", err)

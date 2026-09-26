@@ -179,6 +179,21 @@ func (f *eventDedupFilter) filterRemove(scope blockScope, blockHashes []uint64) 
 	return kept
 }
 
+// compact rebuilds every bucket at its live size (see Pool.compactSnapshotState).
+func (f *eventDedupFilter) compact() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	refs := make(map[string]map[dedupKey]int, len(f.refs))
+	for pod, bucket := range f.refs {
+		compacted := make(map[dedupKey]int, len(bucket))
+		for key, count := range bucket {
+			compacted[key] = count
+		}
+		refs[pod] = compacted
+	}
+	f.refs = refs
+}
+
 // clear drops all reference counts for a pod. It is invoked on
 // AllBlocksCleared, in lockstep with the index's pod-wide eager clear, so the
 // filter does not retain stale references after the engine resets its prefix

@@ -207,3 +207,12 @@ func (k *Indexer) ScoreTokens(
 
 	return podScores, nil
 }
+
+// WithIndex returns a matcher with the same token and scoring configuration over index.
+// Configuration is immutable; the returned matcher owns no lifecycle goroutines.
+func (k *Indexer) WithIndex(index kvblock.Index) *Indexer {
+	matcher := *k
+	matcher.kvBlockIndex = index
+	matcher.keyWalker, _ = index.(kvblock.KeyWalker)
+	return &matcher
+}

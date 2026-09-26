@@ -20,6 +20,8 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/vmihailenco/msgpack/v5"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,4 +78,14 @@ func TestGetHashAsUint64(t *testing.T) {
 		_, err := getHashAsUint64("not a hash")
 		assert.Error(t, err)
 	})
+}
+
+func TestCompactMessagePackBlockHashes(t *testing.T) {
+	// msgspec uses the smallest integer representation on the wire.
+	for _, wire := range [][]byte{{0x65}, {0xcc, 0xff}, {0xcd, 0x01, 0x00}, {0xce, 0, 1, 0, 0}, {0xd0, 0x65}, {0xd1, 0, 0x65}, {0xd2, 0, 0, 0, 0x65}} {
+		var value any
+		require.NoError(t, msgpack.Unmarshal(wire, &value))
+		_, err := getHashAsUint64(value)
+		require.NoError(t, err, "wire %x decoded as %T", wire, value)
+	}
 }
