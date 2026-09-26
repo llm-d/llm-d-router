@@ -321,11 +321,6 @@ func (p *Pool) AddTask(task *RawMessage) {
 	p.addQueueDepth(1)
 }
 
-// resetForSource queues a pod reset on the same shard as its event stream.
-func (p *Pool) resetForSource(topic, sourceEndpoint string) {
-	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
-}
-
 // worker is the main processing loop for a single worker goroutine.
 // It processes messages from its dedicated queue using the workqueue pattern.
 func (p *Pool) worker(ctx context.Context, workerIndex int) {
@@ -363,7 +358,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		if podID == "" {
 			podID = p.adapter.ShardingKey(msg)
 		}
-		p.clearPod(ctx, podID)
+		p.clearPod(ctx, podID, msg.retire)
 		return
 	}
 
@@ -434,13 +429,16 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 	return podID, modelName, batch, nil
 }
 
-func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
+func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
 	}
 	p.dedup.clear(podIdentifier)
+	if retire {
+		p.groupCatalog.Clear(podIdentifier)
+	}
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -780,7 +778,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"anyway (tier-scoped clear is not supported)",
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
-			p.clearPod(ctx, podIdentifier)
+			p.clearPod(ctx, podIdentifier, false)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)
