@@ -17,6 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+    env:
+      # Removes HTML comments from the body so text hidden in the rendered view
+      # is not parsed. Fenced code blocks are kept.
+      STRIP_HTML_COMMENTS: |
+        s{
+          ( ^[ ]{0,3}(`{3,}|~{3,}) .*? (?:\n[ ]{0,3}\2|\z) )  # fenced code block: keep
+          | ^[ ]{0,3}<!-- (?:-?>|.*?(?:-->|\z))               # comment block: ends at --> or end of body
+          | <!-- (?:-?>|(?:(?!\n[ \t]*\n|<!--).)*?-->)       # inline comment: must close before a blank line
+        }{$1 // ""}gmsex
     steps:
       - name: Sync kind labels
         env:
@@ -31,7 +40,7 @@ jobs:
 
           # Extract /kind values from PR body. Absence of a directive is a no-op
           # to avoid wiping kind/* labels set by maintainers through the UI.
-          kinds=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | \
+          kinds=$(printf '%s' "$PR_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | sed -n 's|^/kind[[:space:]][[:space:]]*||p' | \
             sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
           [ -z "$kinds" ] && exit 0
 
@@ -72,7 +81,7 @@ jobs:
 
           # Absence of a directive is a no-op. Area labels are also set by the
           # /area comment command and clearing here would wipe those.
-          areas=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
+          areas=$(printf '%s' "$PR_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | sed -n 's|^/area[[:space:]][[:space:]]*||p' | \
             sed 's|[[:space:]]*$||' | sed '/^$/d' | sort -u)
           [ -z "$areas" ] && exit 0
 
@@ -110,7 +119,7 @@ jobs:
           esc() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
 
           # Use the last /milestone directive in the PR body
-          milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
+          milestone=$(printf '%s' "$PR_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | sed -n 's|^/milestone[[:space:]][[:space:]]*||p' | \
              sed 's|[[:space:]]*$||' | sed '/^$/d' | tail -n 1)
           [ -z "$milestone" ] && exit 0
           gh pr edit "$PR_NUMBER" --repo "$REPO" --milestone "$milestone" || \

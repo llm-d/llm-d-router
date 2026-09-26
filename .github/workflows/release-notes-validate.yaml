@@ -23,6 +23,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # Removes HTML comments from the body so text hidden in the rendered view
+      # is not parsed. Fenced code blocks are kept.
+      STRIP_HTML_COMMENTS: |
+        s{
+          ( ^[ ]{0,3}(`{3,}|~{3,}) .*? (?:\n[ ]{0,3}\2|\z) )  # fenced code block: keep
+          | ^[ ]{0,3}<!-- (?:-?>|.*?(?:-->|\z))               # comment block: ends at --> or end of body
+          | <!-- (?:-?>|(?:(?!\n[ \t]*\n|<!--).)*?-->)       # inline comment: must close before a blank line
+        }{$1 // ""}gmsex
     steps:
       - name: Validate release-note block
         env:
@@ -34,7 +43,7 @@ jobs:
           # Avoid `xargs` here: with no command it runs `echo` which interprets
           # quotes, so notes containing apostrophes (e.g. "Don't ...") would
           # error and the note would be silently dropped.
-          NOTE=$(printf '%s' "$PR_BODY" | tr -d '\r' | \
+          NOTE=$(printf '%s' "$PR_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | \
             sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | \
             tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
 
