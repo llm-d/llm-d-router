@@ -190,9 +190,9 @@ per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
 
 | Parameter                                       | Default   | Description                                                                  |
 | ----------------------------------------------- | --------- | ---------------------------------------------------------------------------- |
-| `estimate.audio.dynamic.tokensPerSecond`        | `13`      | The audio tower's placeholder tokens per second of audio.                     |
-| `estimate.audio.dynamic.overheadTokens`         | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
-| `estimate.audio.dynamic.defaultBytesPerSecond`  | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
+| `estimate.audio.tokensPerSecond`                | `13`      | The audio tower's placeholder tokens per second of audio.                     |
+| `estimate.audio.overheadTokens`                 | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
+| `estimate.audio.defaultBytesPerSecond`          | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
 | `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
 | `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
 

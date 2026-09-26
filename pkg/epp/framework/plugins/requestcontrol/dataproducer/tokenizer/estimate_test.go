@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -755,7 +756,7 @@ func TestAudioEstimator_NonWAVUsesByteRate(t *testing.T) {
 // rate changes the duration read out of a non-WAV payload.
 func TestAudioEstimator_DefaultBytesPerSecond(t *testing.T) {
 	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{DefaultBytesPerSecond: 32000},
+		DefaultBytesPerSecond: 32000,
 	}})}
 	tp, err := b.produce(context.Background(), chatInputAudioBody(rawAudioBase64(32000), "mp3"))
 	require.NoError(t, err)
@@ -767,7 +768,7 @@ func TestAudioEstimator_DefaultBytesPerSecond(t *testing.T) {
 // deployment are each measured with their own rate.
 func TestAudioEstimator_HeaderBytesPerSecondWins(t *testing.T) {
 	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{DefaultBytesPerSecond: 32000},
+		DefaultBytesPerSecond: 32000,
 	}})}
 	body := chatInputAudioBody(rawAudioBase64(32000), "mp3")
 
@@ -784,6 +785,22 @@ func TestAudioEstimator_DurationHeaderBeatsByteRate(t *testing.T) {
 		chatInputAudioBody(rawAudioBase64(32000), "mp3"))
 	require.NoError(t, err)
 	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestAudioEstimateConfig_FlatShape checks the audio fields load directly under
+// estimate.audio and the old dynamic block is rejected.
+func TestAudioEstimateConfig_FlatShape(t *testing.T) {
+	handle := plugin.NewEppHandle(context.Background(), nil)
+	p, err := PluginFactory("estimate", plugin.StrictDecoder(json.RawMessage(
+		`{"estimate":{"audio":{"tokensPerSecond":25,"overheadTokens":2,"defaultBytesPerSecond":32000,"defaultDuration":5,"maxAudioTokens":750}}}`)), handle)
+	require.NoError(t, err)
+	assert.Equal(t,
+		audioEstimator{tokensPerSec: 25, overheadTokens: 2, defBytesPerSec: 32000, defDuration: 5, maxTokens: 750},
+		p.(*Plugin).backend.(estimateBackend).aud)
+
+	_, err = PluginFactory("estimate", plugin.StrictDecoder(json.RawMessage(
+		`{"estimate":{"audio":{"dynamic":{"tokensPerSecond":25}}}}`)), handle)
+	require.ErrorContains(t, err, `unknown field "dynamic"`)
 }
 
 // TestAudioEstimator_MaxAudioTokens asserts the cap bounds the tower's tokens for
@@ -837,15 +854,17 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	clip := wavBase64(16000, 1, 96000) // 96000 bytes at 32000 B/s is 3s
 
 	gemma4 := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
-		MaxAudioTokens: 100000,
+		TokensPerSecond: 25,
+		OverheadTokens:  2,
+		MaxAudioTokens:  100000,
 	}})}
 	tp, err := gemma4.produce(context.Background(), chatInputAudioBody(clip, "wav"))
 	require.NoError(t, err)
 	assert.Equal(t, 3*25+2, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped audio length")
 
 	qwen3omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{TokensPerSecond: 13, OverheadTokens: 2},
+		TokensPerSecond: 13,
+		OverheadTokens:  2,
 	}})}
 	tp, err = qwen3omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))
 	require.NoError(t, err)

@@ -397,16 +397,13 @@ func newAudioEstimator(cfg *estimateConfig) audioEstimator {
 		return audioEstimator{}
 	}
 	aud := cfg.Audio
-	est := audioEstimator{
-		defDuration: aud.DefaultDuration,
-		maxTokens:   aud.MaxAudioTokens,
+	return audioEstimator{
+		tokensPerSec:   aud.TokensPerSecond,
+		overheadTokens: aud.OverheadTokens,
+		defBytesPerSec: aud.DefaultBytesPerSecond,
+		defDuration:    aud.DefaultDuration,
+		maxTokens:      aud.MaxAudioTokens,
 	}
-	if aud.Dynamic != nil {
-		est.tokensPerSec = aud.Dynamic.TokensPerSecond
-		est.overheadTokens = aud.Dynamic.OverheadTokens
-		est.defBytesPerSec = aud.Dynamic.DefaultBytesPerSecond
-	}
-	return est
 }
 
 // placeholderCount estimates placeholder tokens for audio content. data is the

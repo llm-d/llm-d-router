@@ -198,7 +198,8 @@ var qwen3OmniAudioCase = audioModelCase{
 	name:  "qwen3omni",
 	model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
 	cfg: &estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic: &dynamicAudioConfig{TokensPerSecond: 13, OverheadTokens: 2},
+		TokensPerSecond: 13,
+		OverheadTokens:  2,
 	}},
 }
 
@@ -212,8 +213,9 @@ var gemma4AudioCase = audioModelCase{
 	name:  "gemma4",
 	model: "google/gemma-4-E2B-it",
 	cfg: &estimateConfig{Audio: &audioEstimateConfig{
-		Dynamic:        &dynamicAudioConfig{TokensPerSecond: 25, OverheadTokens: 2},
-		MaxAudioTokens: 750,
+		TokensPerSecond: 25,
+		OverheadTokens:  2,
+		MaxAudioTokens:  750,
 	}},
 }
 
