@@ -66,7 +66,11 @@ func TestResponsesPayloadWire_InstructionsAndMessages(t *testing.T) {
 	]}`, string(body))
 }
 
-func TestResponsesPayloadWire_SkipsComplexInputItems(t *testing.T) {
+// TestResponsesPayloadWire_ComplexInputItemsFailClosed covers input mixing
+// convertible items with item types this code cannot represent: dropping
+// the unsupported items would tokenize a prompt shorter than the one vLLM
+// serves, so the whole conversion fails instead.
+func TestResponsesPayloadWire_ComplexInputItemsFailClosed(t *testing.T) {
 	r := &fwkrh.ResponsesRequest{
 		Input: []any{
 			map[string]any{"role": "user", "content": "before"},
@@ -75,14 +79,9 @@ func TestResponsesPayloadWire_SkipsComplexInputItems(t *testing.T) {
 			map[string]any{"role": "user", "content": "after"},
 		},
 	}
-	got, err := responsesPayload(r)
-	require.NoError(t, err)
-	body, err := got.Marshal()
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"messages":[
-		{"role":"user","content":"before"},
-		{"role":"user","content":"after"}
-	]}`, string(body))
+	_, err := responsesPayload(r)
+	assert.ErrorContains(t, err, `"function_call"`)
+	assert.ErrorContains(t, err, "not supported")
 }
 
 func TestResponsesPayloadWire_ArrayContentTextParts(t *testing.T) {
@@ -128,26 +127,23 @@ func TestResponsesPayloadWire_ArrayContentMultipleTextParts(t *testing.T) {
 	]}`, string(body))
 }
 
-func TestResponsesPayloadWire_ArrayContentSkipsNonTextParts(t *testing.T) {
+// TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed covers a
+// content part this code cannot represent as text (for example
+// input_image): dropping it would tokenize a prompt shorter than the one
+// vLLM serves, so the conversion fails even when a text part sits alongside
+// it in the same message.
+func TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed(t *testing.T) {
 	r := &fwkrh.ResponsesRequest{
 		Input: []any{
-			// A text part alongside a non-text part keeps only the text part.
 			map[string]any{"role": "user", "content": []any{
 				map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
 				map[string]any{"type": "input_text", "text": "describe this"},
 			}},
-			// An item whose content is entirely non-text parts has no
-			// renderable text and is skipped, like other unhandled shapes.
-			map[string]any{"role": "user", "content": []any{
-				map[string]any{"type": "input_image", "image_url": "http://example.com/y.png"},
-			}},
 		},
 	}
-	got, err := responsesPayload(r)
-	require.NoError(t, err)
-	body, err := got.Marshal()
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"messages":[{"role":"user","content":"describe this"}]}`, string(body))
+	_, err := responsesPayload(r)
+	assert.ErrorContains(t, err, `"input_image"`)
+	assert.ErrorContains(t, err, "not supported")
 }
 
 func TestResponsesPayloadWire_Tools(t *testing.T) {
@@ -187,17 +183,24 @@ func TestResponsesPayloadWire_EmptyInputErrors(t *testing.T) {
 	_, err := responsesPayload(&fwkrh.ResponsesRequest{})
 	assert.ErrorContains(t, err, "no renderable input")
 
+	_, err = responsesPayload(&fwkrh.ResponsesRequest{Input: []any{}})
+	assert.ErrorContains(t, err, "no renderable input")
+
+	// An unsupported item or content part fails closed with its own error
+	// rather than "no renderable input": see
+	// TestResponsesPayloadWire_ComplexInputItemsFailClosed and
+	// TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed.
 	_, err = responsesPayload(&fwkrh.ResponsesRequest{
 		Input: []any{map[string]any{"type": "function_call", "call_id": "call_1"}},
 	})
-	assert.ErrorContains(t, err, "no renderable input")
+	assert.ErrorContains(t, err, `"function_call"`)
 
 	_, err = responsesPayload(&fwkrh.ResponsesRequest{
 		Input: []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
 		}}},
 	})
-	assert.ErrorContains(t, err, "no renderable input")
+	assert.ErrorContains(t, err, `"input_image"`)
 }
 
 // legacyResponsesForced forces the legacy chat-completions translation path,
@@ -252,13 +255,13 @@ func TestProduce_ResponsesTokenizerError(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
-// TestProduce_ResponsesNoRenderableInputErrors exercises the legacy
+// TestProduce_ResponsesUnsupportedInputErrors exercises the legacy
 // translation path's own validation; the native path has no such check and
 // forwards whatever content it is given.
-func TestProduce_ResponsesNoRenderableInputErrors(t *testing.T) {
+func TestProduce_ResponsesUnsupportedInputErrors(t *testing.T) {
 	tok := &mockTokenizer{
 		renderChatFunc: func(fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
-			t.Fatal("must not call RenderChat with no renderable input")
+			t.Fatal("must not call RenderChat with unsupported input")
 			return nil, nil, nil
 		},
 	}
@@ -277,7 +280,7 @@ func TestProduce_ResponsesNoRenderableInputErrors(t *testing.T) {
 	// caller can tell tokenization was skipped rather than run successfully.
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no renderable input")
+	assert.Contains(t, err.Error(), `"function_call"`)
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
@@ -316,7 +319,7 @@ func TestResponsesRenderMode(t *testing.T) {
 				require.NoError(t, readErr)
 				if auto && calls == 1 {
 					require.Equal(t, responsesRenderPath, r.URL.Path)
-					require.JSONEq(t, `{"model":"configured-model","max_tokens":1,"input":"warmup"}`, string(body))
+					require.JSONEq(t, `{"model":"configured-model","max_output_tokens":1,"input":"warmup"}`, string(body))
 					_, _ = io.WriteString(w, `{"token_ids":[1]}`)
 					return
 				}
@@ -420,6 +423,48 @@ func TestResponsesRenderModeChatOnlyRenderer(t *testing.T) {
 				require.Nil(t, req.Body.TokenizedRequest)
 				require.Equal(t, []string{responsesRenderPath}, paths)
 			}
+		})
+	}
+}
+
+// TestResponsesAutoDiscoveryFallsBackOnUnsupportedStatus covers every status
+// vLLM uses to signal /v1/responses/render is unavailable: 404 and 405 when
+// the route itself is absent, and 501 when the route is registered but the
+// model has no Responses render handler. Auto discovery falls back to the
+// legacy chat-completions translation on all three rather than failing
+// tokenization.
+func TestResponsesAutoDiscoveryFallsBackOnUnsupportedStatus(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path == responsesRenderPath {
+					w.WriteHeader(status)
+					return
+				}
+				require.Equal(t, chatRenderPath, r.URL.Path)
+				_, _ = io.WriteString(w, `{"token_ids":[1,2,3]}`)
+			}))
+			defer srv.Close()
+			renderer := newHTTPRenderer(t, srv)
+			p := newTestPlugin(renderer)
+			backend := p.backend.(renderBackend)
+			backend.legacyResponses = &legacyResponsesMode{name: "test", discovery: make(chan struct{}, 1)}
+			backend.modelName = "configured-model"
+			p.backend = backend
+			req := &scheduling.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+					Payload:   fwkrh.PayloadMap{},
+				},
+			}
+			require.NoError(t, p.Produce(context.Background(), req, nil))
+			require.NotNil(t, req.Body.TokenizedRequest)
+			assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+			// One chat call confirms the legacy path renders during discovery,
+			// a second serves the request itself.
+			assert.Equal(t, []string{responsesRenderPath, chatRenderPath, chatRenderPath}, paths)
 		})
 	}
 }
