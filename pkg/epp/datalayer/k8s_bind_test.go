@@ -167,3 +167,41 @@ func TestNotificationDispatchRecordsExtractErrorMetric(t *testing.T) {
 		t.Fatalf("datalayer_extract_errors_total = %v, want 1", got)
 	}
 }
+
+// TestNotificationDispatchRecoversPanickingExtractor verifies that a panicking
+// notification extractor is recovered, recorded in datalayer_extract_errors_total,
+// and does not stop the dispatch loop.
+func TestNotificationDispatchRecoversPanickingExtractor(t *testing.T) {
+	metrics.Reset()
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+	panicking := extractormocks.NewNotificationExtractor("panicking").WithExtractPanic("boom")
+	working := extractormocks.NewNotificationExtractor("working")
+	src := sourcenotifications.NewK8sNotificationSource(sourcenotifications.NotificationSourceType, "pods", gvk)
+	reconciler := &notificationReconciler{
+		src:        src,
+		extractors: []fwkdl.NotificationExtractor{panicking, working},
+		log:        logr.Discard(),
+	}
+	event := &fwkdl.NotificationEvent{Object: &unstructured.Unstructured{}}
+
+	var panicked any
+	var dispatchErr error
+	func() {
+		defer func() { panicked = recover() }()
+		dispatchErr = reconciler.dispatch(context.Background(), logr.Discard(), event)
+	}()
+	if panicked != nil {
+		t.Fatalf("dispatch panicked: %v", panicked)
+	}
+	if dispatchErr == nil {
+		t.Fatalf("dispatch() = nil, want an error so the reconcile is retried after a panicking extractor")
+	}
+
+	if got := promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(src.TypedName().Type, panicking.TypedName().Type)); got != 1.0 {
+		t.Fatalf("datalayer_extract_errors_total = %v, want 1", got)
+	}
+	if got := len(working.GetEvents()); got != 1 {
+		t.Fatalf("working extractor received %d events, want 1", got)
+	}
+}

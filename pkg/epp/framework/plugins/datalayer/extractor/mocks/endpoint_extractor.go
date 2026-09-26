@@ -30,11 +30,12 @@ var _ fwkdl.EndpointExtractor = (*EndpointExtractor)(nil)
 // EndpointExtractor is a mock EndpointExtractor for testing.
 // It records all events it receives and provides helper methods for test assertions.
 type EndpointExtractor struct {
-	name       string
-	typeName   string
-	events     []fwkdl.EndpointEvent
-	mu         sync.Mutex
-	extractErr error
+	name         string
+	typeName     string
+	events       []fwkdl.EndpointEvent
+	mu           sync.Mutex
+	extractErr   error
+	extractPanic any
 }
 
 // NewEndpointExtractor creates a new mock EndpointExtractor with the given name.
@@ -45,6 +46,12 @@ func NewEndpointExtractor(name string) *EndpointExtractor {
 // WithExtractError configures the extractor to return an error on Extract.
 func (m *EndpointExtractor) WithExtractError(err error) *EndpointExtractor {
 	m.extractErr = err
+	return m
+}
+
+// WithExtractPanic configures the extractor to panic on Extract.
+func (m *EndpointExtractor) WithExtractPanic(v any) *EndpointExtractor {
+	m.extractPanic = v
 	return m
 }
 
@@ -59,8 +66,12 @@ func (m *EndpointExtractor) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: m.typeName, Name: m.name}
 }
 
-// Extract records the event and returns any configured error.
+// Extract records the event and returns any configured error, or panics first
+// when WithExtractPanic was configured.
 func (m *EndpointExtractor) Extract(_ context.Context, event fwkdl.EndpointEvent) error {
+	if m.extractPanic != nil {
+		panic(m.extractPanic)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = append(m.events, event)
