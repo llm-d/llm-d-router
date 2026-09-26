@@ -200,6 +200,17 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
+		// dataParallelHandler and the decoder passthrough forward r unread, so
+		// the guard in readJSONBody would never run on those branches.
+		// decodeWithP2PSource reads the body itself and re-runs it.
+		// readJSONBody consumes r.Body, so r is rebuilt over the same bytes.
+		if apiType == reqcommon.APITypeResponses {
+			raw, _, ok := s.readJSONBody(r, w)
+			if !ok {
+				return
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)

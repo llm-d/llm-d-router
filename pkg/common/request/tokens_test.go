@@ -17,6 +17,7 @@ limitations under the License.
 package request
 
 import (
+	"encoding/json"
 	"maps"
 	"reflect"
 	"strings"
@@ -227,10 +228,14 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
-			name:    "responses caps max_output_tokens",
+			// store is pinned false so the synthetic leg leaves no stored
+			// response object; vLLM defaults an absent store to true. The
+			// client's own store on a Responses body is overwritten, since
+			// only prefill and priming legs are capped.
+			name:    "responses caps max_output_tokens and pins store",
 			apiType: APITypeResponses,
-			body:    map[string]any{"model": "m", "max_output_tokens": 800},
-			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
+			body:    map[string]any{"model": "m", "max_output_tokens": 800, "store": true},
+			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
 			// The Responses API has no max_tokens field; vLLM's ResponsesRequest
@@ -239,7 +244,7 @@ func TestCapSingleToken(t *testing.T) {
 			name:    "responses caps max_output_tokens even when the client omitted it",
 			apiType: APITypeResponses,
 			body:    map[string]any{"model": "m"},
-			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false},
+			want:    map[string]any{"model": "m", "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
 			// max_tokens and max_completion_tokens are not Responses fields, so
@@ -248,7 +253,7 @@ func TestCapSingleToken(t *testing.T) {
 			name:    "responses leaves fields the API does not use",
 			apiType: APITypeResponses,
 			body:    map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5, "max_output_tokens": 800},
-			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false},
+			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
 			name:    "generate preserves other sampling_params entries",
@@ -298,6 +303,30 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 			body:      map[string]any{"input": "hi", FieldConversation: "conv-123"},
 			wantField: FieldConversation,
 		},
+		// An SDK that serializes an unset optional as null sends the key with a
+		// null value, which leaves the turn as stateless as omitting it.
+		{
+			name: "previous_response_id null as raw bytes is unset",
+			body: map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`null`)},
+		},
+		{
+			name: "previous_response_id null decoded is unset",
+			body: map[string]any{"input": "hi", FieldPreviousResponseID: nil},
+		},
+		{
+			name: "conversation null as raw bytes is unset",
+			body: map[string]any{"input": "hi", FieldConversation: json.RawMessage(`null`)},
+		},
+		{
+			name:      "previous_response_id as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`"resp-123"`)},
+			wantField: FieldPreviousResponseID,
+		},
+		{
+			name:      "undecodable previous_response_id bytes are rejected",
+			body:      map[string]any{"input": "hi", FieldPreviousResponseID: json.RawMessage(`"resp`)},
+			wantField: FieldPreviousResponseID,
+		},
 		{
 			name: "background false is the default, not rejected",
 			body: map[string]any{"input": "hi", FieldBackground: false},
@@ -328,9 +357,206 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 			}},
 			wantField: FieldFileID,
 		},
+		// The Responses input schema carries file_id outside a message's content
+		// too: on a computer_call_output's output object, and inside a
+		// function_call_output's output array. Both are input item types, so a
+		// walk fixed to input[].content[] forwards the request the guard exists
+		// to catch.
+		{
+			name: "function_call_output output array references a file_id",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "function_call_output", "call_id": "c1", "output": []any{
+					map[string]any{"type": "input_image", FieldFileID: "file-123", "detail": "auto"},
+				}},
+			}},
+			wantField: FieldFileID,
+		},
+		{
+			name: "computer_call_output output object references a file_id",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "computer_call_output", "call_id": "c1", "output": map[string]any{
+					"type": "computer_screenshot", FieldFileID: "file-123",
+				}},
+			}},
+			wantField: FieldFileID,
+		},
+		// Replaying a prior response's output items is the only multi-turn
+		// path left once previous_response_id and conversation are refused, so
+		// a citation the completed turn reported has to survive the replay.
+		// vLLM reads the text of such an item and nothing else.
+		{
+			name: "a replayed file citation annotation is served",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "assistant", "content": []any{
+					map[string]any{"type": "output_text", "text": "see the chart", "annotations": []any{
+						map[string]any{"type": "file_citation", FieldFileID: "file-123"},
+					}},
+				}},
+			}},
+		},
+		{
+			name: "an input_file part references a file_id",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "input_file", FieldFileID: "file-123"},
+				}},
+			}},
+			wantField: FieldFileID,
+		},
+		// A nullable file_id the client left unset is serialized as null by an
+		// SDK that emits every field, and by the server on a computer_screenshot
+		// a client replays from a prior response.
+		{
+			name: "an input_image with a null file_id is served",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "input_image", "image_url": "https://example.com/a.png", FieldFileID: nil},
+				}},
+			}},
+		},
+		{
+			name: "a replayed computer_screenshot with a null file_id is served",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "computer_call_output", "call_id": "c1", "output": map[string]any{
+					"type": "computer_screenshot", "image_url": "https://example.com/s.png", FieldFileID: nil,
+				}},
+			}},
+		},
+		// A file_id on an object the input schema gives no content part type is
+		// not a hydration request.
+		{
+			name: "a file_id on an untyped object is served",
+			body: map[string]any{"input": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "input_text", "text": "hi", "source": map[string]any{FieldFileID: "file-123"}},
+				}},
+			}},
+		},
+		{
+			name: "a tool output carrying no file reference is served",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "function_call_output", "call_id": "c1", "output": "42"},
+			}},
+		},
 		{
 			name: "malformed input array does not panic",
 			body: map[string]any{"input": []any{"not a map", 42, map[string]any{"content": "not an array"}}},
+		},
+		// A caller that decodes a body selectively, as the sidecar proxy does,
+		// leaves the fields it does not read as raw bytes. Skipping those would
+		// report the request as supported without having inspected it.
+		{
+			name:      "background true as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`true`)},
+			wantField: FieldBackground,
+		},
+		{
+			name: "background false as raw bytes is the default",
+			body: map[string]any{"input": "hi", FieldBackground: json.RawMessage(`false`)},
+		},
+		{
+			name: "background null as raw bytes is the default",
+			body: map[string]any{"input": "hi", FieldBackground: json.RawMessage(`null`)},
+		},
+		{
+			name: "background null decoded is the default",
+			body: map[string]any{"input": "hi", FieldBackground: nil},
+		},
+		// vLLM's request model coerces these to true, so a value this package
+		// cannot read as false asks for the unsupported behavior.
+		{
+			name:      "background 1 as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`1`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "background 1.0 as raw bytes is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`1.0`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      `background "true" as raw bytes is rejected`,
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`"true"`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      `background "yes" as raw bytes is rejected`,
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`"yes"`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "background decoded as a number is rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: float64(1)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "undecodable background bytes are rejected",
+			body:      map[string]any{"input": "hi", FieldBackground: json.RawMessage(`{`)},
+			wantField: FieldBackground,
+		},
+		{
+			name:      "file_id in an input array of raw bytes is rejected",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]`)},
+			wantField: FieldFileID,
+		},
+		{
+			name: "input array of raw bytes with no file_id",
+			body: map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]`)},
+		},
+		{
+			name: "input string as raw bytes has nothing to walk",
+			body: map[string]any{FieldInput: json.RawMessage(`"hi"`)},
+		},
+		// An input the walk cannot decode is refused rather than reported as
+		// carrying no file_id.
+		{
+			name:      "input bytes that decode as neither array nor string are refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":`)},
+			wantField: FieldInput,
+		},
+		// A number outside float64 range is not an uninspectable input: the
+		// model server parses it, so the walk has to reach the file_id beside
+		// it and name that field rather than the whole input.
+		{
+			name:      "file_id beside an out-of-range number is named as file_id",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]`)},
+			wantField: FieldFileID,
+		},
+		{
+			name:      "out-of-range number nested in the content part still finds file_id",
+			body:      map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file-123","detail":1e999}]}]`)},
+			wantField: FieldFileID,
+		},
+		{
+			name: "an out-of-range number with no file_id is served",
+			body: map[string]any{FieldInput: json.RawMessage(`[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/a.jpg","detail":"auto"}],"pinned":1e999}]`)},
+		},
+		{
+			name:      "input as a bare number is refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`42`)},
+			wantField: FieldInput,
+		},
+		{
+			name:      "input as an object is refused",
+			body:      map[string]any{FieldInput: json.RawMessage(`{"role":"user"}`)},
+			wantField: FieldInput,
+		},
+		// The same values already decoded. A caller passing a fully decoded
+		// body gets the same verdict as one leaving the field raw, so the
+		// walk is never skipped over an input it could not inspect.
+		{
+			name:      "a decoded input object is refused",
+			body:      map[string]any{FieldInput: map[string]any{"role": "user"}},
+			wantField: FieldInput,
+		},
+		{
+			name:      "a decoded input number is refused",
+			body:      map[string]any{FieldInput: float64(42)},
+			wantField: FieldInput,
+		},
+		{
+			name: "an absent input is accepted",
+			body: map[string]any{FieldModel: "m"},
 		},
 	}
 

@@ -472,6 +472,52 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should refuse a Responses request carrying stateful fields", func() {
+		By("starting the proxy")
+		go func() {
+			defer GinkgoRecover()
+
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			err := testInfo.proxy.Start(testInfo.ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			testInfo.stoppedCh <- struct{}{}
+		}()
+
+		<-testInfo.proxy.readyCh
+		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+
+		By("sending a /v1/responses request carrying stateful fields")
+		body := `{
+				"model": "gpt-4o",
+				"input": "Hello, how are you?",
+				"previous_response_id": "resp-123",
+				"conversation": "conv-123",
+				"store": true,
+				"background": true
+			}`
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathResponses, strings.NewReader(body))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+
+		By("verifying the client got a 400 naming the field")
+		Expect(rp.StatusCode).To(Equal(http.StatusBadRequest))
+		bp, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(bp)).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
+
+		By("verifying neither backend was dispatched")
+		Expect(testInfo.prefillHandler.CompletionRequests).To(BeEmpty())
+		Expect(testInfo.decodeHandler.CompletionRequests).To(BeEmpty())
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should set max_output_tokens=1 in prefill and restore original value in decode", func() {
 		By("starting the proxy")
 		go func() {
@@ -513,12 +559,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(prefillReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 1)))
 
+		By("verifying prefill request pins store=false so it leaves no stored response object")
+		Expect(prefillReq).To(HaveKeyWithValue("store", false))
+
 		By("verifying decode request has original max_output_tokens=100")
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 
 		Expect(decodeReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 100)))
+
+		By("verifying decode request carries no store, the pin being prefill-only")
+		Expect(decodeReq).ToNot(HaveKey("store"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -564,12 +616,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(prefillReq).To(HaveKeyWithValue("max_output_tokens", BeNumerically("==", 1)))
 
+		By("verifying prefill request pins store=false so it leaves no stored response object")
+		Expect(prefillReq).To(HaveKeyWithValue("store", false))
+
 		By("verifying decode request does not have max_output_tokens since it wasn't in original request")
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
 		decodeReq := testInfo.decodeHandler.CompletionRequests[0]
 
 		Expect(decodeReq).ToNot(HaveKey("max_output_tokens"))
+
+		By("verifying decode request carries no store, the pin being prefill-only")
+		Expect(decodeReq).ToNot(HaveKey("store"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

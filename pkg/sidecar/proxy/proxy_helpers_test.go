@@ -189,6 +189,119 @@ var _ = Describe("readJSONBody", func() {
 		Expect(ok).To(BeFalse())
 		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
 	})
+
+	// The stateful-fields check is gated on the request path, not on which
+	// fields happen to be present, so this proves the gate itself: the same
+	// body is refused on the Responses path and forwarded elsewhere.
+	statefulBody := `{"model":"m","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
+
+	It("rejects unsupported Responses fields on the Responses path", func() {
+		w := httptest.NewRecorder()
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
+	})
+
+	It("leaves those fields untouched on the chat-completions path", func() {
+		w := httptest.NewRecorder()
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldPreviousResponseID))
+		Expect(parsed).To(HaveKey(reqcommon.FieldConversation))
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
+
+	// input stays raw in parsed, so the file_id walk decodes the array itself.
+	It("rejects a file_id nested in an input content part", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
+	})
+
+	// background is the only stateful field here on purpose: the helper returns
+	// on the first field it finds, so a body that also carries
+	// previous_response_id would pass this gate on a presence check alone and
+	// never exercise the bool decode.
+	It("rejects background when it is the only stateful field", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":true}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldBackground))
+	})
+
+	It("forwards background false, which is the default", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":false}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
+
+	// decodeRequestBody leaves input raw, so the file_id walk decodes the array
+	// itself. A number outside float64 range must not stop that walk: the model
+	// server parses the same body, so the file_id beside it has to be found.
+	It("finds a file_id beside an out-of-range number", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
+	})
+
+	It("forwards an input carrying an out-of-range number and no file_id", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}],"pinned":1e999}]}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue(), "body=%s", w.Body.String())
+		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
+	})
+
+	It("forwards an input array with no file_id", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
+	})
+
+	// Unlike a malformed body, this refusal is the router overriding a request
+	// the model server would have served, so an operator has to see it without
+	// raising verbosity first.
+	It("logs the Responses refusal at default verbosity", func() {
+		logged := captureLogs(proxy, 0)
+
+		_, _, ok := proxy.readJSONBody(
+			httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), httptest.NewRecorder())
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).To(ContainElement(And(
+			ContainSubstring("rejecting unsupported responses field"),
+			ContainSubstring(reqcommon.FieldPreviousResponseID),
+		)))
+	})
 })
 
 // captureLogs points the proxy logger at the returned slice, keeping entries up

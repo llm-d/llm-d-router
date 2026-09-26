@@ -39,6 +39,7 @@ import (
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -274,6 +275,20 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
+	}
+	// createRoutes registers one route per path in DetectAPIType's mapping and
+	// derives each route's apiType from the same call, so a path added to that
+	// list is guarded here without a second edit. Coverage stops at the
+	// registered routes: a request on any other path reaches the decoder proxy
+	// through the catch-all and its body is never read.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+				s.logger.Error(writeErr, "failed to send error response to client")
+			}
+			return nil, nil, false
+		}
 	}
 	return raw, parsed, true
 }

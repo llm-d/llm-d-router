@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // This file holds the encoder fan-out scaffolding shared by every EC
-// connector: deduplicated multimodal-item extraction and the parallel
+// connector: multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
 // (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect)
 // supplies its own per-response perItem callback and otherwise reuses
@@ -28,7 +28,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -39,10 +38,35 @@ import (
 
 // Multimodal content types that need encoder processing.
 var mmTypes = map[string]bool{
-	"image_url":   true,
-	"audio_url":   true,
-	"video_url":   true,
-	"input_audio": true,
+	reqcommon.PartTypeImageURL:   true,
+	reqcommon.PartTypeAudioURL:   true,
+	reqcommon.PartTypeVideoURL:   true,
+	reqcommon.PartTypeInputAudio: true,
+	reqcommon.PartTypeInputImage: true,
+}
+
+// requestInput returns the request's Responses input items. A bare JSON string
+// (a single text turn), an explicit null and an absent field all yield a nil
+// slice and no error. Nothing writes a decoded slice back under input, so the
+// raw form is the only one that arrives; requestMessages accepts a decoded
+// slice because chunked decode writes one back.
+func requestInput(req map[string]any) ([]json.RawMessage, error) {
+	switch v := req[reqcommon.FieldInput].(type) {
+	case nil:
+		return nil, nil
+	case json.RawMessage:
+		var items []json.RawMessage
+		if err := json.Unmarshal(v, &items); err != nil {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return items, nil
+	default:
+		return nil, fmt.Errorf("input is %T, want a JSON array or string", v)
+	}
 }
 
 // truncateLongStrings recursively shortens long string values for logging.
@@ -70,132 +94,151 @@ func truncateLongStrings(v any, maxLen int) any {
 	}
 }
 
-// extractMMItems extracts all multimodal items from the request messages.
-func extractMMItems(logger logr.Logger, requestData map[string]any) []map[string]any {
+// extractMMItems extracts all multimodal content parts from the request:
+// chat-completions' messages array, or a Responses input array. Which field to
+// walk is gated on apiType rather than presence, since a client could send a
+// stray field the other format does not use. Within a turn the parts sit under
+// content, and for Responses under an input item's output as well.
+//
+// One item is returned per content part, repeats included. A part's modality and
+// its client-supplied uuid both move the serving engine's multimodal hash, so
+// collapsing two parts that share a URL can leave the prefiller looking up a
+// hash nothing primed.
+func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqcommon.APIType) []map[string]any {
 	var items []map[string]any
 
-	messages, err := requestMessages(requestData)
+	var wrapped []json.RawMessage
+	var err error
+	switch apiType {
+	case reqcommon.APITypeResponses:
+		wrapped, err = requestInput(requestData)
+	default:
+		wrapped, err = requestMessages(requestData)
+	}
 	if err != nil {
-		logger.V(logging.DEBUG).Info("cannot read request messages for multimodal extraction", "error", err)
+		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", err)
 		return items
 	}
 
-	for _, msg := range messages {
-		var msgMap map[string]any
-		if err := json.Unmarshal(msg, &msgMap); err != nil {
-			continue
-		}
-
-		content := msgMap["content"]
-		contentList, ok := content.([]any)
-		if !ok {
-			continue
-		}
-
-		for _, item := range contentList {
-			itemMap, ok := item.(map[string]any)
+	// A dropped part never enters items, so fanoutEncoderCollect's
+	// contributed/total pair cannot surface it and these counts are the only
+	// signal. A part of a type the encoder never primes goes uncounted, since
+	// counting it would fire the line on ordinary text traffic.
+	droppedParts := 0
+	// A turn that does not decode carries an unknown number of parts, so it is
+	// reported on its own line rather than added to droppedParts. Both a chat
+	// messages entry and a Responses input item land here, so the line names
+	// neither field and carries apiType instead.
+	droppedTurns := 0
+	collect := func(parts []any) {
+		for _, part := range parts {
+			partMap, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			partType, ok := partMap[reqcommon.FieldType].(string)
 			if !ok {
 				continue
 			}
 
-			itemType, ok := itemMap["type"].(string)
-			if !ok {
-				continue
+			// vLLM's chat-completions parser primes input_image and image_url
+			// through the same map, so an input_image on a chat request is
+			// extracted. A chat part type on a Responses request fails the model
+			// server's input validation, so the request never reaches a worker
+			// and priming it would only fail the fanout first.
+			switch partType {
+			case reqcommon.PartTypeInputImage:
+				if url := reqcommon.MediaPartURL(partMap); url == "" {
+					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL")
+					droppedParts++
+					continue
+				}
+			case reqcommon.PartTypeImageURL, reqcommon.PartTypeAudioURL, reqcommon.PartTypeVideoURL, reqcommon.PartTypeInputAudio:
+				if apiType == reqcommon.APITypeResponses {
+					logger.V(logging.DEBUG).Info("skipping content part the Responses input union does not define", "type", partType, "apiType", apiType)
+					droppedParts++
+					continue
+				}
 			}
 
-			if mmTypes[itemType] {
-				items = append(items, itemMap)
+			if mmTypes[partType] {
+				items = append(items, partMap)
 			}
 		}
+	}
+
+	for _, raw := range wrapped {
+		var turn map[string]any
+		// UseNumber keeps a number outside float64 range readable: Python's json
+		// parses it, so vLLM serves a body the default decoder would reject, and
+		// dropping the turn would leave its images unprimed. json.Number also
+		// re-marshals as the literal the client sent.
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&turn); err != nil {
+			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", err)
+			droppedTurns++
+			continue
+		}
+		if content, ok := turn[reqcommon.FieldContent].([]any); ok {
+			collect(content)
+		}
+		// A Responses function_call_output carries its parts under output rather
+		// than content, and vLLM forwards that array as a tool message's content,
+		// so media in it reaches the model like any other part and has to be
+		// primed. A computer_call_output's output is an object rather than an
+		// array and names no part type the encoder primes.
+		if apiType == reqcommon.APITypeResponses {
+			if output, ok := turn[reqcommon.FieldOutput].([]any); ok {
+				collect(output)
+			}
+		}
+	}
+
+	if droppedParts > 0 {
+		logger.Info("skipped multimodal content parts the encoder cannot be primed with",
+			"count", droppedParts, "extracted", len(items), "apiType", apiType)
+	}
+	if droppedTurns > 0 {
+		logger.Info("skipped turns that do not decode as an object",
+			"count", droppedTurns, "extracted", len(items), "apiType", apiType)
 	}
 
 	return items
 }
 
-// buildEncoderRequest creates a per-item encoder request: a one-level copy of
-// the client's request carrying only the multimodal item in messages[0].content
-// (text removed), capped to a single output token, and stream disabled.
-func buildEncoderRequest(originalRequest map[string]any, mmItem map[string]any) map[string]any {
-	encoderRequest := maps.Clone(originalRequest)
-
-	messages := []map[string]any{
-		{
-			"role": "user",
-			"content": []map[string]any{
-				mmItem,
-			},
-		},
-	}
-
-	encoderRequest["messages"] = messages
-	// The encoder request carries the item in messages and is sent to
-	// reqcommon.PathChatCompletions whatever API the client used (#2742), so it
-	// is capped as chat completions.
-	reqcommon.CapSingleToken(encoderRequest, reqcommon.APITypeChatCompletions)
-
-	return encoderRequest
-}
-
-// mmItemURL returns the URL string for a URL-based multimodal item, or
-// empty string when the item carries inline data instead.
-func mmItemURL(item map[string]any) string {
-	itemType, _ := item["type"].(string)
-	switch itemType {
-	case "image_url", "audio_url", "video_url":
-		if m, ok := item[itemType].(map[string]any); ok {
-			if u, ok := m["url"].(string); ok {
-				return u
-			}
-		}
-	}
-	return ""
-}
-
-// mmItemsForFanout extracts the multimodal items from a request body and
-// deduplicates URL-based items (image_url / audio_url / video_url). Non-URL
-// items (e.g. inline input_audio) are kept verbatim. Returns nil when
-// there is no multimodal content. The caller should skip the encoder
-// stage in that case.
-func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string) []map[string]any {
-	raw := extractMMItems(s.logger, originalRequest)
-	if len(raw) == 0 {
-		return nil
-	}
-	seenURLs := make(map[string]struct{})
-	items := make([]map[string]any, 0, len(raw))
-	for _, item := range raw {
-		if url := mmItemURL(item); url != "" {
-			if _, seen := seenURLs[url]; seen {
-				s.logger.V(logging.DEBUG).Info("skipping duplicate multimodal URL", "url", url, "requestID", requestID)
-				continue
-			}
-			seenURLs[url] = struct{}{}
-		}
-		items = append(items, item)
-	}
-	return items
+// mmItemsForFanout extracts the fanout items for one request, tagging the
+// extraction logs with requestID.
+func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
+	return extractMMItems(s.logger.WithValues("requestID", requestID), originalRequest, apiType)
 }
 
 // fanoutEncoder fans out one encoder request per item, in parallel, with
 // round-robin over encoderHostPorts. perItem is invoked once per item AFTER
 // the encoder has returned a 2xx response; it receives the item's
-// positional index (post-dedup) and the buffered encoder response. The
+// positional index and the buffered encoder response. The
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
 //
-// The first goroutine to fail cancels ctx so sibling encoder requests are
-// aborted at the transport layer. Every failure is logged before propagating;
-// grp.Wait returns the first non-nil error.
+// The first goroutine to fail cancels the group context so sibling encoder
+// requests are aborted at the transport layer. Every failure is logged before
+// propagating; grp.Wait returns the first non-nil error.
 func (s *Server) fanoutEncoder(
 	ctx context.Context,
 	originalRequest map[string]any,
 	items []map[string]any,
 	encoderHostPorts []string,
 	requestID string,
+	apiType reqcommon.APIType,
 	perItem func(idx int, pw *bufferedResponseWriter) error,
 ) error {
 	if len(encoderHostPorts) == 0 {
 		return fmt.Errorf("fanoutEncoder: no encoder hostPorts provided (requestID=%s)", requestID)
+	}
+
+	encoderPath := reqcommon.PathChatCompletions
+	if apiType == reqcommon.APITypeResponses {
+		encoderPath = reqcommon.PathResponses
 	}
 
 	s.logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
@@ -204,7 +247,7 @@ func (s *Server) fanoutEncoder(
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
 		grp.Go(func() error {
-			encoderRequest := buildEncoderRequest(originalRequest, mmItem)
+			encoderRequest := reqcommon.NewEncoderPrimingBody(originalRequest, mmItem, apiType)
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
@@ -220,7 +263,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 
-			req, err := http.NewRequestWithContext(gctx, "POST", reqcommon.PathChatCompletions, bytes.NewReader(body))
+			req, err := http.NewRequestWithContext(gctx, "POST", encoderPath, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
@@ -234,6 +277,8 @@ func (s *Server) fanoutEncoder(
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
 
+			// bufferedResponseWriter.Write back-fills 200, so statusCode 0 means
+			// the handler wrote nothing at all. isHTTPError treats it as an error.
 			if isHTTPError(pw.statusCode) {
 				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
@@ -272,8 +317,9 @@ func (s *Server) runPDPipeline(
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		s.logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return
 	}
