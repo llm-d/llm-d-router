@@ -154,6 +154,56 @@ func TestFilter_ExplorationProbability(t *testing.T) {
 	assert.Equal(t, 2, len(result), "epsilon=1.0 should always skip gate")
 }
 
+func TestFilter_StickyMissingSignalPredictor(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 0),
+		makeEndpoint("b", 10, 50, 0),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing sticky signal should return all endpoints")
+}
+
+func TestFilter_NonStickyMissingSignalPredictor(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, 5000, 0),
+		makeEndpoint("b", 10, -1, 0),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing non-sticky signal should return all endpoints")
+}
+
+func TestFilter_NonStickyMissingSignalThroughput(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 500),
+		makeEndpoint("b", 10, -1, -1),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing non-sticky signal should return all endpoints")
+}
+
+func TestFilter_StickyMissingSignalThroughput(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, -1),
+		makeEndpoint("b", 10, -1, 50),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing sticky signal should return all endpoints")
+}
+
+func TestFilter_MissingSignalBothPredictor(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 0),
+		makeEndpoint("b", 10, -1, 0),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing signals should return all endpoints")
+}
+
 func TestConsumes_ConditionalAttributes(t *testing.T) {
 	// Gate disabled: neither TTFT source is consumed.
 	p := newTestPlugin(Config{MaxTTFTPenaltyMs: 0})
