@@ -88,7 +88,34 @@ type Config struct {
 	// estimate TTFT from in-flight tokens when TTFTSource is prefillThroughput:
 	//   TTFT_ms = inFlightTokens / PeakPrefillThroughput * 1000
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
+	//
+	// Setting it here wins over a calibrated value, including when the value
+	// equals the built-in default: the key being present is what makes it the
+	// operator's choice. Leave it out to let a matching calibration apply.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
+
+	// PrefillCalibrationFile is the path to the structured peak prefill
+	// calibration record produced by the calibration recipe. It is read only when
+	// PeakPrefillThroughput is absent from the parameters, and applied only when
+	// the record is a complete measurement whose fingerprint matches
+	// PrefillCalibrationFingerprint.
+	PrefillCalibrationFile string `json:"prefillCalibrationFile,omitempty"`
+
+	// PrefillCalibrationFingerprint identifies the deployment a calibration
+	// record must have been measured on: model revision, engine image digest,
+	// dtype, accelerator, parallelism, batch and chunk limits, and the pool the
+	// measurement targeted. A record measured on anything else is not applied.
+	PrefillCalibrationFingerprint string `json:"prefillCalibrationFingerprint,omitempty"`
+
+	// PrefillCalibrationRequired turns a calibration that cannot be applied into
+	// a startup error instead of a fall back to the default. Unset (the default)
+	// keeps a calibration failure local to the calibration: the filter still runs
+	// on the default or explicitly configured value.
+	PrefillCalibrationRequired bool `json:"prefillCalibrationRequired,omitempty"`
+
+	// PeakPrefillThroughputSource reports where the effective
+	// PeakPrefillThroughput came from. It is a result, not a parameter.
+	PeakPrefillThroughputSource PrefillThroughputSource `json:"-"`
 
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
@@ -115,15 +142,37 @@ type Plugin struct {
 
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
+	explicitPeakPrefillThroughput := false
 	if rawParameters != nil {
-		if err := rawParameters.Decode(&config); err != nil {
+		var raw json.RawMessage
+		if err := rawParameters.Decode(&raw); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+		}
+		if decoder := fwkplugin.StrictDecoder(raw); decoder != nil {
+			if err := decoder.Decode(&config); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+			}
+			explicitPeakPrefillThroughput = parameterPresent(raw, "peakPrefillThroughput")
+		}
+	}
+	if err := config.applyCalibration(explicitPeakPrefillThroughput); err != nil {
+		if config.PrefillCalibrationRequired {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+		if handle != nil {
+			log.FromContext(handle.Context()).V(logutil.DEFAULT).Info(
+				"PrefixCacheAffinityFilter: calibration skipped, keeping peakPrefillThroughput default",
+				"peakPrefillThroughput", config.PeakPrefillThroughput, "reason", err.Error())
 		}
 	}
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	if handle != nil {
+		log.FromContext(handle.Context()).V(logutil.DEBUG).Info(
+			"PrefixCacheAffinityFilter: peak prefill throughput resolved",
+			"peakPrefillThroughput", config.PeakPrefillThroughput,
+			"source", config.PeakPrefillThroughputSource)
 		if err := registerMetrics(handle.Metrics()); err != nil {
 			return nil, err
 		}
