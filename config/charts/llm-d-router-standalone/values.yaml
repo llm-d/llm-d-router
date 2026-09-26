@@ -22,6 +22,16 @@ router:
     # Replica count for the proxy Deployment when mode=service.
     replicas: 2
 
+    # Shutdown drain for the proxy Deployment when mode=service. Envoy exits on SIGTERM, so
+    # the pod first leaves the Service endpoints for preStopSleepSeconds while Envoy closes
+    # each client connection after maxRequestsPerConnection responses, letting in-flight
+    # streams finish. Keep preStopSleepSeconds above a typical request, and
+    # terminationGracePeriodSeconds above preStopSleepSeconds. Streams longer than that are
+    # still cut.
+    maxRequestsPerConnection: 1
+    preStopSleepSeconds: 25
+    terminationGracePeriodSeconds: 45
+
     # Whether the proxy passes traffic through (fail-open) when EPP is
     # unreachable, for active/passive resiliency.
     failOpen: true
@@ -188,6 +198,9 @@ router:
                               server_header_transformation: PASS_THROUGH
                               common_http_protocol_options:
                                 headers_with_underscores_action: REJECT_REQUEST
+                                {{- with .Values.router.proxy.maxRequestsPerConnection }}
+                                max_requests_per_connection: {{ . }}
+                                {{- end }}
                               path_with_escaped_slashes_action: UNESCAPE_AND_REDIRECT
                               access_log:
                                 - name: envoy.access_loggers.file
@@ -265,7 +278,19 @@ router:
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
-              {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+                        {{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" }}
+                        # EPP's health port is plaintext even when ext_proc serves TLS.
+                        transport_socket_match_criteria:
+                          health: plaintext
+                    transport_socket_matches:
+                      - name: plaintext-health
+                        match:
+                          health: plaintext
+                        transport_socket:
+                          name: envoy.transport_sockets.raw_buffer
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+                        {{- end }}
               {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -298,6 +323,8 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                health_check_config:
+                                  port_value: {{ $.Values.router.epp.grpcHealthPort | default 9003 }}
                               load_balancing_weight: 1
                             {{- end }}
                         - locality:
@@ -313,6 +340,8 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                health_check_config:
+                                  port_value: {{ $.Values.router.epp.grpcHealthPort | default 9003 }}
                               load_balancing_weight: 1
                             {{- end }}
                         {{- else }}
@@ -324,6 +353,8 @@ router:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
+                                health_check_config:
+                                  port_value: {{ .Values.router.epp.grpcHealthPort | default 9003 }}
                               load_balancing_weight: 1
                         {{- end }}
         name: envoy-proxy

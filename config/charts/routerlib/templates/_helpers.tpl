@@ -177,18 +177,6 @@ true
 {{- end -}}
 
 {{/*
-Envoy health-check tls_options block for the ext_proc cluster.
-Emitted only when EPP runs with TLS (secure-serving != false).
-Callers must indent to match the surrounding YAML context.
-*/}}
-{{- define "llm-d-router.proxy.envoyExtProcTLSOptions" -}}
-{{- if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" -}}
-tls_options:
-  alpn_protocols: ["h2"]
-{{- end -}}
-{{- end -}}
-
-{{/*
 Envoy transport_socket block for the ext_proc cluster.
 Emitted only when EPP runs with TLS (secure-serving != false).
 Callers must indent to match the surrounding YAML context.
