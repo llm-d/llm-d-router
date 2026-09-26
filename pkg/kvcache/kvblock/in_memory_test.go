@@ -268,3 +268,109 @@ func TestAddWithNilEngineKeys(t *testing.T) {
 	_, err = index.GetRequestKey(ctx, requestKey)
 	assert.Error(t, err, "GetRequestKey should fail since no engineKey mapping was created")
 }
+
+func TestInMemoryIndexRecencyPromotion(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	requestKey1 := BlockHash(79215516)
+	requestKey2 := BlockHash(12871930)
+	requestKey3 := BlockHash(69914638)
+	engineKey1 := BlockHash(72735753)
+	engineKey2 := BlockHash(41341092)
+	engineKey3 := BlockHash(34012886)
+
+	tests := []struct {
+		name       string
+		engineKeys bool
+		touch      func(t *testing.T, index Index)
+		wantKey1   bool
+		wantKey2   bool
+	}{
+		{
+			name:       "request-key evict does not promote recency",
+			engineKeys: false,
+			touch: func(t *testing.T, index Index) {
+				require.NoError(t, index.Evict(ctx, requestKey1, RequestKey,
+					[]PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+			},
+			wantKey1: false,
+			wantKey2: true,
+		},
+		{
+			name:       "engine-key evict does not promote recency",
+			engineKeys: true,
+			touch: func(t *testing.T, index Index) {
+				require.NoError(t, index.Evict(ctx, engineKey1, EngineKey,
+					[]PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+			},
+			wantKey1: false,
+			wantKey2: true,
+		},
+		{
+			name:       "lookup still promotes recency",
+			engineKeys: false,
+			touch: func(t *testing.T, index Index) {
+				podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+				require.NoError(t, err)
+				assert.Contains(t, podsPerKey, requestKey1)
+			},
+			wantKey1: true,
+			wantKey2: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &InMemoryIndexConfig{
+				Size:         2,
+				PodCacheSize: 2,
+			}
+			index, err := NewInMemoryIndex(cfg)
+			require.NoError(t, err)
+
+			add := func(engineKey BlockHash, requestKey BlockHash, entries []PodEntry) {
+				engineKeys := []BlockHash(nil)
+				if tc.engineKeys {
+					engineKeys = []BlockHash{engineKey}
+				}
+				require.NoError(t, index.Add(ctx, engineKeys, []BlockHash{requestKey}, entries))
+			}
+
+			add(engineKey1, requestKey1, []PodEntry{
+				{PodIdentifier: "pod1", DeviceTier: "gpu"},
+				{PodIdentifier: "pod2", DeviceTier: "gpu"},
+			})
+			add(engineKey2, requestKey2, []PodEntry{
+				{PodIdentifier: "pod3", DeviceTier: "gpu"},
+			})
+
+			tc.touch(t, index)
+
+			add(engineKey3, requestKey3, []PodEntry{
+				{PodIdentifier: "pod4", DeviceTier: "gpu"},
+			})
+
+			podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+			require.NoError(t, err)
+
+			if tc.wantKey1 {
+				assert.Contains(t, podsPerKey, requestKey1)
+			} else {
+				assert.NotContains(t, podsPerKey, requestKey1)
+			}
+			if tc.wantKey2 {
+				assert.Contains(t, podsPerKey, requestKey2)
+			} else {
+				assert.NotContains(t, podsPerKey, requestKey2)
+			}
+			assert.Contains(t, podsPerKey, requestKey3)
+
+			if tc.engineKeys {
+				_, err := index.GetRequestKey(ctx, engineKey1)
+				assert.Error(t, err, "engineKey1's mapping should have been evicted as the oldest, not promoted by the evict")
+				_, err = index.GetRequestKey(ctx, engineKey2)
+				assert.NoError(t, err, "engineKey2's mapping should remain")
+			}
+		})
+	}
+}
