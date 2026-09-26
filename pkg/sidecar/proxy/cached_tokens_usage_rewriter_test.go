@@ -284,6 +284,122 @@ var _ = Describe("Cached token usage rewriter", func() {
 	})
 })
 
+var _ = Describe("Cached token usage rewriter with Anthropic usage", func() {
+	// A decode worker reports the whole prompt as a cache read when the KV arrived
+	// from a prefiller, collapsing input_tokens to 0. The prefiller's real count has
+	// to land in cache_read_input_tokens with input_tokens absorbing the remainder.
+	It("should rewrite cache_read_input_tokens and re-derive input_tokens", func() {
+		body := []byte(`{"usage":{"input_tokens":0,"output_tokens":16,"cache_creation_input_tokens":0,"cache_read_input_tokens":1710}}`)
+		updated := replaceCachedTokens(body, 448)
+
+		var response map[string]any
+		Expect(json.Unmarshal(updated, &response)).To(Succeed())
+		usage := response["usage"].(map[string]any)
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(448))
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(1262))
+		Expect(usage["output_tokens"]).To(BeEquivalentTo(16))
+	})
+
+	// Fabricating the OpenAI details object on an Anthropic response is what hid the
+	// bug: the response looked patched while the Anthropic fields still carried the
+	// decode worker's numbers.
+	It("should not fabricate prompt_tokens_details on an Anthropic response", func() {
+		body := []byte(`{"usage":{"input_tokens":0,"output_tokens":16,"cache_read_input_tokens":1710}}`)
+		updated := replaceCachedTokens(body, 0)
+
+		var response map[string]any
+		Expect(json.Unmarshal(updated, &response)).To(Succeed())
+		usage := response["usage"].(map[string]any)
+		Expect(usage).NotTo(HaveKey("prompt_tokens_details"))
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(0))
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(1710))
+	})
+
+	It("should preserve cache_creation_input_tokens", func() {
+		body := []byte(`{"usage":{"input_tokens":6,"output_tokens":16,"cache_creation_input_tokens":768,"cache_read_input_tokens":448}}`)
+		updated := replaceCachedTokens(body, 64)
+
+		var response map[string]any
+		Expect(json.Unmarshal(updated, &response)).To(Succeed())
+		usage := response["usage"].(map[string]any)
+		Expect(usage["cache_creation_input_tokens"]).To(BeEquivalentTo(768))
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(64))
+		// The prompt total (6+768+448=1222) is invariant: 1222-64-768=390.
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(390))
+	})
+
+	It("should rewrite usage nested under message on the message_start event", func() {
+		body := []byte(`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1214,"output_tokens":0}}}` + "\n")
+		updated := replaceCachedTokens(body, 448)
+
+		var event map[string]any
+		payload := bytes.TrimPrefix(bytes.TrimRight(updated, "\n"), []byte("data: "))
+		Expect(json.Unmarshal(payload, &event)).To(Succeed())
+		usage := event["message"].(map[string]any)["usage"].(map[string]any)
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(448))
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(766))
+	})
+
+	It("should rewrite the message_delta usage frame", func() {
+		body := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"output_tokens":24,"cache_creation_input_tokens":0,"cache_read_input_tokens":1713}}` + "\n")
+		updated := replaceCachedTokens(body, 0)
+
+		var event map[string]any
+		payload := bytes.TrimPrefix(bytes.TrimRight(updated, "\n"), []byte("data: "))
+		Expect(json.Unmarshal(payload, &event)).To(Succeed())
+		usage := event["usage"].(map[string]any)
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(0))
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(1713))
+		Expect(usage).NotTo(HaveKey("prompt_tokens_details"))
+	})
+
+	It("should clamp input_tokens at zero when cached tokens exceed the prompt", func() {
+		body := []byte(`{"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":0}}`)
+		updated := replaceCachedTokens(body, 99)
+
+		var response map[string]any
+		Expect(json.Unmarshal(updated, &response)).To(Succeed())
+		usage := response["usage"].(map[string]any)
+		Expect(usage["cache_read_input_tokens"]).To(BeEquivalentTo(99))
+		Expect(usage["input_tokens"]).To(BeEquivalentTo(0))
+	})
+
+	It("should leave an already-correct Anthropic response untouched", func() {
+		body := []byte(`{"usage":{"input_tokens":1710,"output_tokens":16,"cache_read_input_tokens":0}}`)
+		Expect(replaceCachedTokens(body, 0)).To(Equal(body))
+	})
+
+	// The OpenAI Responses API also carries a top-level input_tokens, so it must not
+	// be mistaken for the Anthropic shape.
+	It("should not treat OpenAI Responses usage as Anthropic", func() {
+		usage := map[string]any{
+			"input_tokens":         float64(100),
+			"input_tokens_details": map[string]any{"cached_tokens": float64(20)},
+			"output_tokens":        float64(8),
+		}
+		Expect(isAnthropicUsage(usage)).To(BeFalse())
+	})
+
+	It("should not treat OpenAI chat usage as Anthropic", func() {
+		usage := map[string]any{
+			"prompt_tokens":         float64(64),
+			"prompt_tokens_details": map[string]any{"cached_tokens": float64(49)},
+		}
+		Expect(isAnthropicUsage(usage)).To(BeFalse())
+	})
+
+	// Without this the sidecar cannot learn the prefiller's hit count for a
+	// /v1/messages request, so every such request looks like a cold cache.
+	It("should read cached tokens from an Anthropic prefiller response", func() {
+		var response map[string]any
+		Expect(json.Unmarshal([]byte(`{"usage":{"input_tokens":6,"output_tokens":1,"cache_read_input_tokens":448}}`), &response)).To(Succeed())
+
+		cachedTokens, ok := extractCachedTokens(response)
+		Expect(ok).To(BeTrue())
+		Expect(cachedTokens).To(Equal(448))
+	})
+})
+
 // Streamed responses send one SSE frame per token and only the final frame carries
 // usage, so these two benchmarks bracket the per-frame cost of the rewrite.
 var (
