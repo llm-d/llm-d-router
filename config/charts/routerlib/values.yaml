@@ -207,9 +207,11 @@ latencyPredictor:
     securityContext: {}
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-training-server-dev
+      repository: llm-d-latency-predictor-training-server
       tag: latest
       pullPolicy: Always
+    command: []
+    args: []
     port: 8000
     resources:
       requests:
@@ -249,9 +251,11 @@ latencyPredictor:
     securityContext: {}
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-prediction-server-dev
+      repository: llm-d-latency-predictor-prediction-server
       tag: latest
       pullPolicy: Always
+    command: ["uvicorn"]
+    args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]
     resources:
       requests:
         cpu: "8000m"
@@ -281,6 +285,8 @@ latencyPredictor:
       LOCAL_TPOT_MODEL_PATH: "/server_models/tpot.joblib"
       LOCAL_TTFT_SCALER_PATH: "/server_models/ttft_scaler.joblib"
       LOCAL_TPOT_SCALER_PATH: "/server_models/tpot_scaler.joblib"
+      LOCAL_TTFT_GATED_MODEL_PATH: "/server_models/ttft_gated.joblib"
+      LOCAL_TPOT_GATED_MODEL_PATH: "/server_models/tpot_gated.joblib"
       UVICORN_WORKERS: "28"
       OMP_NUM_THREADS: "1"
       MODEL_SYNC_INTERVAL_SEC: "30"

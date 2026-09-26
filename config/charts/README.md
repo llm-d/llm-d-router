@@ -510,6 +510,10 @@ Enables latency predictor containers inside the EPP deployment to feed metrics t
 | `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
 | `router.latencyPredictor.trainingServer.securityContext` | Container-level `securityContext` for the training server container. | `{}` |
 | `router.latencyPredictor.predictionServers.securityContext` | Container-level `securityContext` for each prediction server container. | `{}` |
+| `router.latencyPredictor.trainingServer.command` | Training server container command. Empty uses the image default. | `[]` |
+| `router.latencyPredictor.trainingServer.args` | Training server container arguments. Empty uses the image default. | `[]` |
+| `router.latencyPredictor.predictionServers.command` | Prediction server container command. | `["uvicorn"]` |
+| `router.latencyPredictor.predictionServers.args` | Prediction server container arguments. `$(PREDICT_PORT)` expands to the port of each replica. | `["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]` |
 | `router.latencyPredictor.eppEnv` | EPP tuning variables for Latency Predictor. | |
 
 #### Complete Latency Predictor Example
@@ -520,18 +524,27 @@ router:
     enabled: true
     trainingServer:
       image:
-        registry: my-company-docker.pkg.dev/k8s-staging-images
-        repository: latency-training-server
-        tag: latest
+        registry: ghcr.io/llm-d
+        repository: llm-d-latency-predictor-training-server
+        tag: "0.9.0"
     predictionServers:
       image:
-        registry: my-company-docker.pkg.dev/k8s-staging-images
-        repository: latency-prediction-server
-        tag: latest
+        registry: ghcr.io/llm-d
+        repository: llm-d-latency-predictor-prediction-server
+        tag: "0.9.0"
     eppEnv:
       LATENCY_MAX_SAMPLE_SIZE: "20000"
       LATENCY_MAX_CONCURRENT_DISPATCHES: "48"
       LATENCY_COALESCE_WINDOW_MS: "2"
+```
+
+Images with a different uvicorn module path need `args`. For the Gateway API Inference Extension `v1.5.0` prediction server:
+
+```yaml
+router:
+  latencyPredictor:
+    predictionServers:
+      args: ["prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]
 ```
 
 ---
