@@ -39,6 +39,27 @@ type cachedTokensUsageRewriter struct {
 // See: https://platform.openai.com/docs/guides/prompt-caching
 const usagePromptDetailsField = "prompt_tokens_details"
 
+// The Anthropic Messages API splits the prompt across three sibling fields
+// instead of nesting a details object, and reports cache hits in
+// cache_read_input_tokens. On a streamed response the message_start event nests
+// usage under message.
+// See: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
+const (
+	usageInputTokensField   = "input_tokens"
+	usageCacheReadField     = "cache_read_input_tokens"
+	usageCacheCreationField = "cache_creation_input_tokens"
+	anthropicMessageField   = "message"
+)
+
+// Fields that positively identify an OpenAI-compatible usage object: chat
+// completions always report prompt_tokens, and the Responses API reports cache
+// hits under input_tokens_details. Both are used to rule out the Anthropic shape,
+// which shares the input_tokens field name with the Responses API.
+const (
+	usagePromptTokensField = "prompt_tokens"
+	usageResponsesDetails  = "input_tokens_details"
+)
+
 // usageKey is the JSON key that must be present before a frame can carry usage.
 // Streamed responses send one frame per token and only the final frame has usage,
 // so scanning for this is much cheaper than unmarshalling every frame to find out.
@@ -218,15 +239,40 @@ func extractCachedTokens(response map[string]any) (int, bool) {
 }
 
 func cachedTokensFromUsage(usage map[string]any) (int, bool) {
-	// Only the documented OpenAI-compatible field is used as the source of truth.
-	details, ok := usage[usagePromptDetailsField].(map[string]any)
-	if !ok {
-		return 0, false
+	// The documented OpenAI-compatible field is the primary source of truth.
+	if details, ok := usage[usagePromptDetailsField].(map[string]any); ok {
+		if cachedTokens, ok := intValue(details["cached_tokens"]); ok {
+			return cachedTokens, true
+		}
 	}
-	if cachedTokens, ok := intValue(details["cached_tokens"]); ok {
-		return cachedTokens, true
+	// An Anthropic prefiller response has no prompt_tokens_details at all, so
+	// without this the prefiller's real hit count is invisible and every
+	// /v1/messages request looks like a cold cache.
+	if isAnthropicUsage(usage) {
+		if cachedTokens, ok := intValue(usage[usageCacheReadField]); ok {
+			return cachedTokens, true
+		}
 	}
 	return 0, false
+}
+
+// isAnthropicUsage reports whether usage came from the Anthropic Messages API
+// rather than an OpenAI-compatible endpoint. OpenAI chat usage always carries
+// prompt_tokens and the Responses API nests input_tokens_details, so neither is
+// mistaken for the Anthropic shape.
+func isAnthropicUsage(usage map[string]any) bool {
+	if _, ok := usage[usagePromptTokensField]; ok {
+		return false
+	}
+	if _, ok := usage[usageResponsesDetails]; ok {
+		return false
+	}
+	for _, field := range []string{usageInputTokensField, usageCacheReadField, usageCacheCreationField} {
+		if _, ok := usage[field]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func intValue(value any) (int, bool) {
@@ -327,11 +373,24 @@ func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 }
 
 func setCachedTokens(response map[string]any, cachedTokens int) bool {
-	usage, ok := response["usage"].(map[string]any)
-	if !ok {
-		return false
-	}
 	changed := false
+	// Anthropic streaming reports the prompt split on the message_start event,
+	// where usage is nested under message rather than at the top level.
+	if message, ok := response[anthropicMessageField].(map[string]any); ok {
+		if usage, ok := message["usage"].(map[string]any); ok {
+			changed = setUsageCachedTokens(usage, cachedTokens) || changed
+		}
+	}
+	if usage, ok := response["usage"].(map[string]any); ok {
+		changed = setUsageCachedTokens(usage, cachedTokens) || changed
+	}
+	return changed
+}
+
+func setUsageCachedTokens(usage map[string]any, cachedTokens int) bool {
+	if isAnthropicUsage(usage) {
+		return setAnthropicCachedTokens(usage, cachedTokens)
+	}
 	details, ok := usage[usagePromptDetailsField].(map[string]any)
 	if !ok {
 		// Some decoder chunks omit details entirely; create the standard field.
@@ -340,7 +399,33 @@ func setCachedTokens(response map[string]any, cachedTokens int) bool {
 	}
 	if current, ok := intValue(details["cached_tokens"]); !ok || current != cachedTokens {
 		details["cached_tokens"] = cachedTokens
-		changed = true
+		return true
 	}
-	return changed
+	return false
+}
+
+// setAnthropicCachedTokens moves the prefiller's real hit count into
+// cache_read_input_tokens. Anthropic defines the prompt total as
+// input_tokens + cache_read_input_tokens + cache_creation_input_tokens, so the
+// total is held fixed and input_tokens absorbs the correction. cache_creation is
+// left alone: it is a producer-side write count that the prefiller's
+// cached_tokens says nothing about.
+func setAnthropicCachedTokens(usage map[string]any, cachedTokens int) bool {
+	inputTokens, _ := intValue(usage[usageInputTokensField])
+	cacheRead, _ := intValue(usage[usageCacheReadField])
+	cacheCreation, _ := intValue(usage[usageCacheCreationField])
+
+	total := inputTokens + cacheRead + cacheCreation
+	newInput := total - cachedTokens - cacheCreation
+	if newInput < 0 {
+		// cachedTokens is authoritative, so an over-large value truncates
+		// input_tokens rather than making the fields sum to more than the prompt.
+		newInput = 0
+	}
+	if cacheRead == cachedTokens && inputTokens == newInput {
+		return false
+	}
+	usage[usageCacheReadField] = cachedTokens
+	usage[usageInputTokensField] = newInput
+	return true
 }
