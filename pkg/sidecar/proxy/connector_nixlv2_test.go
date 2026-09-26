@@ -1163,6 +1163,39 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
 	})
 
+	It("serial WRITE-mode 2P2D uses pod-local DP ranks in both HTTP headers", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIODPSize = 16
+			c.MoRIIODPSizeLocal = 8
+			c.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
+			c.MoRIIODecodeHosts = []string{testDecodeHostIP, testDecodeHostIP2}
+		})
+		env.proxy.nixlRequestIDFn = func() (string, error) {
+			return "00000000-0000-0000-0000-000000000002", nil
+		}
+		env.send()
+
+		prefillRank, err := strconv.Atoi(dpRankHeader(env.prefillHandler, 0))
+		Expect(err).ToNot(HaveOccurred())
+		decodeRank, err := strconv.Atoi(dpRankHeader(env.decodeHandler, 0))
+		Expect(err).ToNot(HaveOccurred())
+
+		requestID := env.prefillHandler.GetCompletionHeaders()[0].Get(requestHeaderRequestID)
+		expectedGlobalRank, expectedLocalRank := pickDPRanks(requestID, 16, 8)
+		Expect(expectedGlobalRank).To(Equal(15))
+		Expect(expectedLocalRank).To(Equal(7))
+		Expect(prefillRank).To(Equal(expectedLocalRank))
+		Expect(decodeRank).To(Equal(expectedLocalRank))
+
+		prefillBodyRank, ok := kvParams(env.prefillHandler, 0)[requestFieldRemoteDPRank].(float64)
+		Expect(ok).To(BeTrue())
+		Expect(prefillBodyRank).To(BeNumerically("==", expectedGlobalRank))
+
+		decodeBodyRank, ok := kvParams(env.decodeHandler, 0)[requestFieldRemoteDPRank].(float64)
+		Expect(ok).To(BeTrue())
+		Expect(decodeBodyRank).To(BeNumerically("==", expectedGlobalRank))
+	})
+
 	// Flags-off path: the sidecar must produce the legacy NIXLv2 wire shape
 	// (remote_host nil, no transfer_id / remote_dp_size) with no DP-rank header.
 	It("keeps the legacy NIXLv2 wire shape and omits the DP-rank header when MoRI flags are off", func() {

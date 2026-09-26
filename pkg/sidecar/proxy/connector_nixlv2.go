@@ -39,6 +39,14 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+func newNIXLV2RequestID() (string, error) {
+	id, err := uuid.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
+
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
 
@@ -48,14 +56,13 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Generate unique request UUID
-	uuid, err := uuid.NewUUID()
+	uuidStr, err := s.nixlRequestIDFn()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	uuidStr := uuid.String()
 
 	// Parallel-dispatch path synthesises decode's kv_transfer_params from config
 	// instead of the prefill response. The serial path below is unchanged when off.
@@ -85,10 +92,19 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	preq.Header.Add(requestHeaderRequestID, uuidStr)
 
-	// Pin both requests to the same DP rank; the header is skipped for single-DP.
-	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
+	// KV metadata uses the global DP rank for cross-pod routing. WRITE-mode HTTP
+	// dispatch uses the pod-local equivalent accepted by multi-pod frontends.
+	globalDPRank, localDPRank := pickDPRanks(
+		uuidStr,
+		s.config.MoRIIODPSize,
+		s.config.MoRIIODPSizeLocal,
+	)
+	headerDPRank := globalDPRank
+	if s.config.MoRIIOWriteMode {
+		headerDPRank = localDPRank
+	}
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(headerDPRank))
 	}
 
 	// Keeps the client's body intact for the decode request below.
@@ -107,7 +123,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemoteHost:           s.currentDecodePodIP(ctx),
 			requestFieldRemotePort:           nil,
 			requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
-			requestFieldRemoteDPRank:         dpRank,
+			requestFieldRemoteDPRank:         globalDPRank,
 			requestFieldRemoteDPRankOverride: true,
 			requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 			requestFieldTransferID:           transferID,
@@ -277,15 +293,16 @@ retryLoop:
 	dreq.Header.Add(requestHeaderRequestID, uuidStr)
 
 	// Decode's DP rank is propagated from kv_transfer_params in the prefill
-	// response (remote_dp_rank = the rank prefill actually ran on),
+	// response (remote_dp_rank = the global rank prefill actually ran on),
 	// not independently re-derived here. This is the router-applies-the-
 	// connector-returned-rank model (PR #45043 review, njhill): the prefill
-	// connector returns the rank, the router pins the decode request to it, so both
-	// requests agree without each hashing the request id. The returned remote_dp_rank is
-	// validated to be in [0, dp_size); an omitted, non-numeric, or out-of-range
-	// value falls back to the deterministic hash. The header AND the decode
-	// body's remote_dp_rank are then pinned to the SAME validated value so they
-	// cannot target different ranks and hang the transfer.
+	// connector returns the rank, the router pins the decode request to its
+	// pod-local equivalent, so both requests agree without each hashing the
+	// request id. The returned remote_dp_rank is validated to be in
+	// [0, dp_size); an omitted, non-numeric, or out-of-range value falls back to
+	// the deterministic hash. The body retains the global rank for cross-pod
+	// notify routing while the HTTP header uses the pod-local rank accepted by
+	// the selected frontend.
 	// DP-rank propagation is a MoRI-IO WRITE-mode concern only. In standard
 	// NIXLv2 READ mode the decode body's remote_dp_rank / remote_dp_rank_override
 	// and the x-data-parallel-rank header are left untouched, matching the legacy
@@ -302,7 +319,12 @@ retryLoop:
 			pkv[requestFieldRemoteDPRankOverride] = true
 		}
 		if s.config.MoRIIODPSize > 1 {
-			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeDPRank))
+			decodeLocalDPRank := foldDPRankToLocal(
+				decodeDPRank,
+				s.config.MoRIIODPSize,
+				s.config.MoRIIODPSizeLocal,
+			)
+			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeLocalDPRank))
 		}
 	}
 
@@ -440,7 +462,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	if dpLocal <= 0 {
 		dpLocal = 1
 	}
-	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize) % dpLocal
+	_, dpRank := pickDPRanks(
+		uuidStr,
+		s.config.MoRIIODPSize,
+		s.config.MoRIIODPSizeLocal,
+	)
 
 	decodePodIP := s.currentDecodePodIP(parentCtx)
 	decodeHosts := s.currentDecodeHosts(parentCtx)
