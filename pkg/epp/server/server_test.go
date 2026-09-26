@@ -33,7 +33,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -119,11 +119,11 @@ func TestServer(t *testing.T) {
 }
 
 func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
-	model := testutil.MakeInferenceObjective("v1").
+	model := testutil.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
-	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*apixv1.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
@@ -224,11 +224,11 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := testutil.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
-	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*apixv1.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
@@ -529,10 +529,10 @@ func TestServer_Skip(t *testing.T) {
 	director := &testDirector{}
 	mockPar := &mockParser{skip: true}
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := testutil.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
-	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*apixv1.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{mockPar}, logr.Discard()), 0)
 
@@ -604,11 +604,11 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	// We will send a request body that is larger than 4MB (e.g., 5MB).
 	// Since the test gRPC server defaults to 4MB receive limit, EPP should reject it.
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := testutil.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
-	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
+	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*apixv1.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)

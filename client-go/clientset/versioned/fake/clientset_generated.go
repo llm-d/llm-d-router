@@ -5,6 +5,8 @@ package fake
 import (
 	applyconfiguration "github.com/llm-d/llm-d-router/client-go/applyconfiguration"
 	clientset "github.com/llm-d/llm-d-router/client-go/clientset/versioned"
+	xinferencev1 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1"
+	fakexinferencev1 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1/fake"
 	xinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2"
 	fakexinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,6 +121,11 @@ var (
 	_ clientset.Interface = &Clientset{}
 	_ testing.FakeClient  = &Clientset{}
 )
+
+// XInferenceV1 retrieves the XInferenceV1Client
+func (c *Clientset) XInferenceV1() xinferencev1.XInferenceV1Interface {
+	return &fakexinferencev1.FakeXInferenceV1{Fake: &c.Fake}
+}
 
 // XInferenceV1alpha2 retrieves the XInferenceV1alpha2Client
 func (c *Clientset) XInferenceV1alpha2() xinferencev1alpha2.XInferenceV1alpha2Interface {

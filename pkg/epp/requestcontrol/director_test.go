@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -162,7 +163,7 @@ type mockDatastore struct {
 func (ds *mockDatastore) PoolGet() (*datalayer.EndpointPool, error) {
 	return nil, errors.New("sentinel error for mock datastore")
 }
-func (ds *mockDatastore) ObjectiveGet(_ string) *v1alpha2.InferenceObjective {
+func (ds *mockDatastore) ObjectiveGet(_ string) *apixv1.InferenceObjective {
 	return nil
 }
 func (ds *mockDatastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint {
@@ -322,15 +323,15 @@ func TestDirector_HandleRequest(t *testing.T) {
 	objectiveNameSheddable := "imFoodReviewSheddable"
 	objectiveNameResolve := "imFoodReviewResolve"
 	// InferenceObjective definitions
-	ioFoodReview := testutil.MakeInferenceObjective("ioFoodReview").
+	ioFoodReview := testutil.MakeV1InferenceObjective("ioFoodReview").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(2).
 		ObjRef()
-	ioFoodReviewSheddable := testutil.MakeInferenceObjective("imFoodReviewSheddable").
+	ioFoodReviewSheddable := testutil.MakeV1InferenceObjective("imFoodReviewSheddable").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(-1).
 		ObjRef()
-	ioFoodReviewResolve := testutil.MakeInferenceObjective("imFoodReviewResolve").
+	ioFoodReviewResolve := testutil.MakeV1InferenceObjective("imFoodReviewResolve").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(1).
 		ObjRef()

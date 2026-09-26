@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -77,12 +78,12 @@ type Datastore interface {
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
 
 	// InferenceObjective operations
-	ObjectiveSet(infObjective *v1alpha2.InferenceObjective)
+	ObjectiveSet(infObjective *apixv1.InferenceObjective)
 	// ObjectiveGet and ObjectiveGetAll return the stored objectives, which are
 	// shared with concurrent readers and must not be modified.
-	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
+	ObjectiveGet(objectiveName string) *apixv1.InferenceObjective
 	ObjectiveDelete(namespacedName types.NamespacedName)
-	ObjectiveGetAll() []*v1alpha2.InferenceObjective
+	ObjectiveGetAll() []*apixv1.InferenceObjective
 
 	// InferenceModelRewrite operations
 	ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite)
@@ -122,7 +123,7 @@ func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory
 		parentCtx:     parentCtx,
 		pool:          nil,
 		mu:            sync.RWMutex{},
-		objectives:    make(map[string]*v1alpha2.InferenceObjective),
+		objectives:    make(map[string]*apixv1.InferenceObjective),
 		modelRewrites: newModelRewriteStore(),
 		pods:          &sync.Map{},
 		epf:           epFactory,
@@ -136,7 +137,7 @@ type datastore struct {
 	mu   sync.RWMutex
 	pool *datalayer.EndpointPool
 	// key: InferenceObjective name, value: *InferenceObjective
-	objectives map[string]*v1alpha2.InferenceObjective
+	objectives map[string]*apixv1.InferenceObjective
 	// modelRewrites store for InferenceModelRewrite objects.
 	modelRewrites *modelRewriteStore
 	// key: types.NamespacedName, value: fwkdl.Endpoint
@@ -158,7 +159,7 @@ func (ds *datastore) Clear() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.pool = nil
-	ds.objectives = make(map[string]*v1alpha2.InferenceObjective)
+	ds.objectives = make(map[string]*apixv1.InferenceObjective)
 	ds.modelRewrites = newModelRewriteStore()
 	// stop all pods go routines before clearing the pods map.
 	ds.pods.Range(func(_, v any) bool {
@@ -229,13 +230,13 @@ func (ds *datastore) PoolLabelsMatch(podLabels map[string]string) bool {
 }
 
 // /// InferenceObjective APIs ///
-func (ds *datastore) ObjectiveSet(infObjective *v1alpha2.InferenceObjective) {
+func (ds *datastore) ObjectiveSet(infObjective *apixv1.InferenceObjective) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.objectives[infObjective.Name] = infObjective
 }
 
-func (ds *datastore) ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective {
+func (ds *datastore) ObjectiveGet(objectiveName string) *apixv1.InferenceObjective {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	return ds.objectives[objectiveName]
@@ -247,10 +248,10 @@ func (ds *datastore) ObjectiveDelete(namespacedName types.NamespacedName) {
 	delete(ds.objectives, namespacedName.Name)
 }
 
-func (ds *datastore) ObjectiveGetAll() []*v1alpha2.InferenceObjective {
+func (ds *datastore) ObjectiveGetAll() []*apixv1.InferenceObjective {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
-	res := make([]*v1alpha2.InferenceObjective, 0, len(ds.objectives))
+	res := make([]*apixv1.InferenceObjective, 0, len(ds.objectives))
 	for _, v := range ds.objectives {
 		res = append(res, v)
 	}

@@ -41,7 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
@@ -197,21 +197,21 @@ func TestPool(t *testing.T) {
 func TestObjective(t *testing.T) {
 	chatModel := "chat"
 	tsModel := "food-review"
-	model1ts := testutil.MakeInferenceObjective("model1").ObjRef()
+	model1ts := testutil.MakeV1InferenceObjective("model1").ObjRef()
 	// Same model name as model1ts, different object name.
-	model2ts := testutil.MakeInferenceObjective("model2").ObjRef()
+	model2ts := testutil.MakeV1InferenceObjective("model2").ObjRef()
 	// Same model name as model1ts, newer timestamp
-	model1tsCritical := testutil.MakeInferenceObjective("model1").
+	model1tsCritical := testutil.MakeV1InferenceObjective("model1").
 		Priority(2).ObjRef()
 	// Same object name as model2ts, different model name.
-	model2chat := testutil.MakeInferenceObjective(model2ts.Name).ObjRef()
+	model2chat := testutil.MakeV1InferenceObjective(model2ts.Name).ObjRef()
 
 	tests := []struct {
 		name           string
-		existingModels []*v1alpha2.InferenceObjective
+		existingModels []*apixv1.InferenceObjective
 		op             func(ds Datastore) bool
 		wantOpResult   bool
-		wantModels     []*v1alpha2.InferenceObjective
+		wantModels     []*apixv1.InferenceObjective
 	}{
 		{
 			name: "Add model1 with food-review as modelName",
@@ -219,52 +219,52 @@ func TestObjective(t *testing.T) {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
-			wantModels:   []*v1alpha2.InferenceObjective{model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model1ts},
 			wantOpResult: true,
 		},
 		{
 			name:           "Set model1 with the same modelName, but with diff priority, should update.",
-			existingModels: []*v1alpha2.InferenceObjective{model1ts},
+			existingModels: []*apixv1.InferenceObjective{model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1tsCritical)
 				return cmp.Diff(ds.ObjectiveGet(model1tsCritical.Name), model1tsCritical) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model1tsCritical},
+			wantModels:   []*apixv1.InferenceObjective{model1tsCritical},
 		},
 		{
 			name:           "Set model1 with the food-review modelName, both models should exist",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat},
+			existingModels: []*apixv1.InferenceObjective{model2chat},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Set model1 with the food-review modelName, both models should exist",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Getting by model name, chat -> model2",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				gotChat := ds.ObjectiveGet(chatModel)
 				return gotChat != nil && cmp.Diff(model2chat, gotChat) == ""
 			},
 			wantOpResult: false,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Delete the model",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveDelete(types.NamespacedName{Name: model1ts.Name, Namespace: model1ts.Namespace})
 				got := ds.ObjectiveGet(tsModel)
@@ -272,7 +272,7 @@ func TestObjective(t *testing.T) {
 
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat},
+			wantModels:   []*apixv1.InferenceObjective{model2chat},
 		},
 	}
 	for _, test := range tests {
@@ -292,7 +292,7 @@ func TestObjective(t *testing.T) {
 					t.Errorf("Unexpected operation result, want: %v, got: %v", test.wantOpResult, gotOpResult)
 				}
 
-				if diff := cmp.Diff(test.wantModels, ds.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
+				if diff := cmp.Diff(test.wantModels, ds.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *apixv1.InferenceObjective) bool {
 					return a.Name < b.Name
 				})); diff != "" {
 					t.Errorf("Unexpected models diff: %s", diff)

@@ -144,8 +144,9 @@ func NewDefaultExtProcServerRunner() *ExtProcServerRunner {
 		startCrdReconcilers:       true,
 		hasInferenceObjective:     true,
 		hasInferenceModelRewrites: true,
-		InferenceObjectiveGV:      inferenceAPIGV,
+		InferenceObjectiveGV:      inferenceObjectiveV1GV,
 		InferenceModelRewriteGV:   inferenceAPIGV,
+		hasV1InferenceObjective:   true,
 	}, nil, nil, nil, nil, nil)
 }
 
@@ -171,6 +172,7 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 				PoolGKNN:                 r.GKNN,
 				PriorityBandControlPlane: r.PriorityBandControlPlane,
 				RunOnNonLeaders:          runOnNonLeaders,
+				PrimaryV1:                r.ControllerCfg.hasV1InferenceObjective,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceObjectiveReconciler - %w", err)
 			}

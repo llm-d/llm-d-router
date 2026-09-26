@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -162,6 +163,55 @@ func (m *InferenceObjectiveWrapper) DeletionTimestamp() *InferenceObjectiveWrapp
 }
 
 func (m *InferenceObjectiveWrapper) CreationTimestamp(t metav1.Time) *InferenceObjectiveWrapper {
+	m.ObjectMeta.CreationTimestamp = t
+	return m
+}
+
+// V1InferenceObjectiveWrapper wraps a v1 InferenceObjective for tests that
+// exercise datastore-direct behavior. Cluster-shape fixtures stay on the
+// v1alpha2 wrapper above and convert at the reconciler edge.
+type V1InferenceObjectiveWrapper struct {
+	apixv1.InferenceObjective
+}
+
+// MakeV1InferenceObjective creates a wrapper for a v1 InferenceObjective.
+func MakeV1InferenceObjective(name string) *V1InferenceObjectiveWrapper {
+	return &V1InferenceObjectiveWrapper{
+		apixv1.InferenceObjective{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name,
+			},
+			Spec: apixv1.InferenceObjectiveSpec{},
+		},
+	}
+}
+
+func (m *V1InferenceObjectiveWrapper) Namespace(ns string) *V1InferenceObjectiveWrapper {
+	m.ObjectMeta.Namespace = ns
+	return m
+}
+
+// Obj returns the wrapped v1 InferenceObjective.
+func (m *V1InferenceObjectiveWrapper) ObjRef() *apixv1.InferenceObjective {
+	return &m.InferenceObjective
+}
+
+func (m *V1InferenceObjectiveWrapper) Priority(priority int32) *V1InferenceObjectiveWrapper {
+	m.Spec.Priority = &priority
+	return m
+}
+
+func (m *V1InferenceObjectiveWrapper) PoolRefs(refs ...apixv1.PoolObjectReference) *V1InferenceObjectiveWrapper {
+	m.Spec.PoolRefs = refs
+	return m
+}
+
+func (m *V1InferenceObjectiveWrapper) PoolSelector(sel *metav1.LabelSelector) *V1InferenceObjectiveWrapper {
+	m.Spec.PoolSelector = sel
+	return m
+}
+
+func (m *V1InferenceObjectiveWrapper) CreationTimestamp(t metav1.Time) *V1InferenceObjectiveWrapper {
 	m.ObjectMeta.CreationTimestamp = t
 	return m
 }

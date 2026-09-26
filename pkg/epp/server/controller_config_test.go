@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
@@ -48,6 +49,7 @@ func TestPopulateWithDiscovery(t *testing.T) {
 		wantInferenceModelRewrite   bool
 		wantInferenceObjectiveGV    schema.GroupVersion
 		wantInferenceModelRewriteGV schema.GroupVersion
+		wantV1InferenceObjective    bool
 	}{
 		{
 			name: "Both resources exist in llm-d group",
@@ -149,6 +151,50 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			wantInferenceObjectiveGV:    schema.GroupVersion{},
 			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
+		{
+			name: "v1 InferenceObjective served alongside v1alpha2",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+				{
+					GroupVersion: apixv1.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceObjectiveV1GV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+			wantV1InferenceObjective:    true,
+		},
+		{
+			name: "v1 group present without InferenceObjective kind",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+				{
+					GroupVersion: apixv1.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+			wantV1InferenceObjective:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -172,6 +218,9 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			}
 			if cc.InferenceModelRewriteGV != tt.wantInferenceModelRewriteGV {
 				t.Errorf("populateWithDiscovery() InferenceModelRewriteGV = %v, want %v", cc.InferenceModelRewriteGV, tt.wantInferenceModelRewriteGV)
+			}
+			if cc.hasV1InferenceObjective != tt.wantV1InferenceObjective {
+				t.Errorf("populateWithDiscovery() hasV1InferenceObjective = %v, want %v", cc.hasV1InferenceObjective, tt.wantV1InferenceObjective)
 			}
 		})
 	}

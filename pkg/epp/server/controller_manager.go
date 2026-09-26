@@ -33,6 +33,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common"
 )
@@ -45,10 +46,17 @@ func NewScheme(cfg ControllerConfig) *runtime.Scheme {
 
 	if cfg.startCrdReconcilers {
 		if cfg.hasInferenceObjective {
-			s.AddKnownTypes(cfg.InferenceObjectiveGV,
-				&v1alpha2.InferenceObjective{},
-				&v1alpha2.InferenceObjectiveList{},
-			)
+			if cfg.InferenceObjectiveGV == inferenceObjectiveV1GV {
+				s.AddKnownTypes(cfg.InferenceObjectiveGV,
+					&apixv1.InferenceObjective{},
+					&apixv1.InferenceObjectiveList{},
+				)
+			} else {
+				s.AddKnownTypes(cfg.InferenceObjectiveGV,
+					&v1alpha2.InferenceObjective{},
+					&v1alpha2.InferenceObjectiveList{},
+				)
+			}
 			metav1.AddToGroupVersion(s, cfg.InferenceObjectiveGV)
 		}
 		if cfg.hasInferenceModelRewrites {
@@ -79,9 +87,15 @@ func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServer
 	}
 	if cfg.startCrdReconcilers {
 		if cfg.hasInferenceObjective {
-			opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
-				gknn.Namespace: {},
-			}}
+			if cfg.InferenceObjectiveGV == inferenceObjectiveV1GV {
+				opt.Cache.ByObject[&apixv1.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+					gknn.Namespace: {},
+				}}
+			} else {
+				opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+					gknn.Namespace: {},
+				}}
+			}
 		} else {
 			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceObjective GVK does not exist on the server. Skipping its reconciler/cache.")
 		}

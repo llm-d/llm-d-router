@@ -35,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -65,7 +66,7 @@ const (
 // Datastore defines the interface required by the Director.
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
+	ObjectiveGet(objectiveName string) *apixv1.InferenceObjective
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
 	// model name (prioritizing exact matches over generic wildcard rules) and
@@ -173,15 +174,21 @@ type Director struct {
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
-func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *v1alpha2.InferenceObjective {
+func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *apixv1.InferenceObjective {
 	infObjective := d.datastore.ObjectiveGet(reqCtx.ObjectiveKey)
 	if infObjective == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("No associated InferenceObjective found, using default", "objectiveKey", reqCtx.ObjectiveKey)
-		infObjective = &v1alpha2.InferenceObjective{
-			Spec: v1alpha2.InferenceObjectiveSpec{
+		infObjective = &apixv1.InferenceObjective{
+			Spec: apixv1.InferenceObjectiveSpec{
 				Priority: &d.defaultPriority,
 			},
 		}
+	} else if infObjective.Spec.Priority == nil {
+		// The API defines an unset priority as 0. Copy before defaulting:
+		// stored objectives are shared with concurrent readers.
+		copied := *infObjective
+		copied.Spec.Priority = &d.defaultPriority
+		infObjective = &copied
 	}
 	return infObjective
 }

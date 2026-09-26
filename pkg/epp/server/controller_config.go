@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
@@ -35,19 +36,29 @@ const HAPopulateNonLeaderDatastoreFeatureGate = "haPopulateNonLeaderDatastore"
 
 var (
 	inferenceAPIGV           = schema.GroupVersion{Group: v1alpha2.GroupVersion.Group, Version: v1alpha2.GroupVersion.Version}
+	inferenceObjectiveV1GV   = schema.GroupVersion{Group: apixv1.GroupVersion.Group, Version: apixv1.GroupVersion.Version}
 	legacyInferenceAPIGV     = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: v1alpha2.GroupVersion.Version}
 	supportedInferenceAPIGVs = []schema.GroupVersion{
+		inferenceAPIGV,
+		legacyInferenceAPIGV,
+	}
+	supportedObjectiveAPIGVs = []schema.GroupVersion{
+		inferenceObjectiveV1GV,
 		inferenceAPIGV,
 		legacyInferenceAPIGV,
 	}
 )
 
 type ControllerConfig struct {
-	startCrdReconcilers        bool
-	hasInferenceObjective      bool
-	hasInferenceModelRewrites  bool
-	InferenceObjectiveGV       schema.GroupVersion
-	InferenceModelRewriteGV    schema.GroupVersion
+	startCrdReconcilers       bool
+	hasInferenceObjective     bool
+	hasInferenceModelRewrites bool
+	InferenceObjectiveGV      schema.GroupVersion
+	InferenceModelRewriteGV   schema.GroupVersion
+	// hasV1InferenceObjective reports whether llm-d.ai/v1 is the served
+	// primary for InferenceObjective. The v1 source and the pool-label
+	// requeue watch are set up only then.
+	hasV1InferenceObjective    bool
 	PopulateNonLeaderDatastore bool
 }
 
@@ -72,9 +83,10 @@ func (cc *ControllerConfig) PopulateControllerConfig(cfg *rest.Config) error {
 func (cc *ControllerConfig) populateWithDiscovery(dc discovery.DiscoveryInterface) {
 	log := ctrl.Log.WithName("controllerConfig")
 
-	if gv, found := findGroupVersion(dc, "InferenceObjective", supportedInferenceAPIGVs); found {
+	if gv, found := findGroupVersion(dc, "InferenceObjective", supportedObjectiveAPIGVs); found {
 		cc.hasInferenceObjective = true
 		cc.InferenceObjectiveGV = gv
+		cc.hasV1InferenceObjective = gv == inferenceObjectiveV1GV
 		if gv == inferenceAPIGV && gvkExists(dc, legacyInferenceAPIGV.WithKind("InferenceObjective")) {
 			log.Info("Warning: Both legacy (inference.networking.x-k8s.io) and new (llm-d.ai) InferenceObjective CRDs are installed. EPP will prefer the new group and IGNORE legacy resources.")
 		}

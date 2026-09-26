@@ -1,29 +1,29 @@
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: small-segment-lora
 spec:
   priority: 1
-  poolRef:
-    group: inference.networking.k8s.io
+  poolRefs:
+  - group: inference.networking.k8s.io
     name: vllm-qwen3-32b
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: base-model
 spec:
   priority: 2
-  poolRef:
-    group: inference.networking.k8s.io
+  poolRefs:
+  - group: inference.networking.k8s.io
     name: vllm-qwen3-32b
 ---
-apiVersion: llm-d.ai/v1alpha2
+apiVersion: llm-d.ai/v1
 kind: InferenceObjective
 metadata:
   name: base-model-cpu
 spec:
   priority: 2
-  poolRef:
-    group: inference.networking.k8s.io
+  poolRefs:
+  - group: inference.networking.k8s.io
     name: vllm-qwen3-32b
