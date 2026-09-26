@@ -421,7 +421,7 @@ this option does not enable partial matching or extend inference context limits.
 Requests with a non-null `truncate_prompt_tokens` retain their original output
 budget because automatic truncation depends on it.
 
-A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
 ## Live verification
 
