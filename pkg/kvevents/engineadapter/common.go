@@ -22,8 +22,6 @@ import (
 	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
-
-	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
 const (
@@ -77,34 +75,6 @@ func getHashAsUint64(raw any) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported hash type: %T", val)
 	}
-}
-
-// decodeEvent decodes a single msgpack event, extracts the tag, and dispatches to the appropriate converter.
-// Used by SGLang adapter. The vLLM adapter uses its own single-pass []any decoder.
-func decodeEvent(
-	rawEventBytes []byte,
-	converters map[string]func([]byte) (kvevents.GenericEvent, error),
-) (kvevents.GenericEvent, error) {
-	var taggedUnion []any
-	if err := msgpack.Unmarshal(rawEventBytes, &taggedUnion); err != nil {
-		return nil, fmt.Errorf("failed to decode tagged union: %w", err)
-	}
-
-	if len(taggedUnion) < 1 {
-		return nil, fmt.Errorf("malformed tagged union: no tag")
-	}
-
-	tag, ok := taggedUnion[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("event tag is not a string: %T", taggedUnion[0])
-	}
-
-	converter, exists := converters[tag]
-	if !exists {
-		return nil, fmt.Errorf("unknown event tag: %s", tag)
-	}
-
-	return converter(rawEventBytes)
 }
 
 // convertBlockHashes converts raw hash values to uint64 slice.
