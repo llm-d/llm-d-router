@@ -390,7 +390,7 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 
 	sum := xxhash.Sum64String(content)
 	token := make([]byte, bytesPerToken)
-	binary.LittleEndian.PutUint32(token, uint32(sum))
+	binary.LittleEndian.PutUint32(token, uint32(sum)) //nolint:gosec // G115: intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {
 		out = append(out, token...)
 	}

@@ -350,7 +350,7 @@ func ApplyYAMLFile(testConfig *TestConfig, filePath string, nsName string) []str
 // ReadYaml is a helper function to read in K8S YAML files and split by the --- separator
 func ReadYaml(filePath string) []string {
 	ginkgo.By("Reading YAML file: " + filePath)
-	yamlBytes, err := os.ReadFile(filePath)
+	yamlBytes, err := os.ReadFile(filePath) //nolint:gosec // G304: test helper reads a caller-provided fixture path
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Split multiple docs, if needed

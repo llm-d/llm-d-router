@@ -19,3 +19,7 @@ output:
       path: stdout
     sarif:
       path: gosec.sarif
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

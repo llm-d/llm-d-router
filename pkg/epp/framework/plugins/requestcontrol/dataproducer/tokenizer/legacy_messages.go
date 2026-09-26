@@ -473,7 +473,7 @@ func writeJSONString(sb *strings.Builder, s string) {
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(sb, `\u%04x`, r)
 		case r < utf8.RuneSelf:
-			sb.WriteByte(byte(r))
+			sb.WriteByte(byte(r)) //nolint:gosec // G115: r < utf8.RuneSelf guards the conversion above
 		case r > 0xFFFF:
 			r1, r2 := utf16.EncodeRune(r)
 			fmt.Fprintf(sb, `\u%04x\u%04x`, r1, r2)

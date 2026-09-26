@@ -49,7 +49,7 @@ func (b HashBlock) Hash() uint64 {
 		// because the length check above guarantees a valid backing array, and
 		// the byte length (len(Tokens) * 4) matches uint32's size exactly, so
 		// the resulting slice stays within the array's bounds.
-		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4)
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //nolint:gosec // G103: see comment above
 		return xxhash.Sum64(byteSlice)
 	}
 

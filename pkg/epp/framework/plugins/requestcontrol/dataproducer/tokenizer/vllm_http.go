@@ -57,7 +57,7 @@ const (
 	// vllmAPIKeyEnvVar names the environment variable holding the render
 	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
 	// paths forward the inbound client's Authorization header instead.
-	vllmAPIKeyEnvVar = "VLLM_API_KEY"
+	vllmAPIKeyEnvVar = "VLLM_API_KEY" //nolint:gosec // G101: environment variable name, not a credential value
 )
 
 // authHeaderCtxKey carries the inbound request's Authorization header from

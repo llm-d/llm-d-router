@@ -38,7 +38,7 @@ func hashTokens(t []uint32) uint64 {
 	if len(t) == 0 {
 		return 0
 	}
-	return xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&t[0])), len(t)*4))
+	return xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&t[0])), len(t)*4)) //nolint:gosec // G103: mirrors HashBlock's production reinterpretation, length guarded above
 }
 
 // TestPackBytes_KeyPreserving asserts packed-token hashing matches raw-byte
@@ -161,7 +161,7 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	assert.LessOrEqual(t, f.Offset+f.Length, len(tokens), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tokens))
 	// Placeholder tokens are the URL hash repeated; verify the span carries weight.
 	for i := f.Offset; i < f.Offset+f.Length; i++ {
-		assert.Equal(t, uint32(xxhash.Sum64String(pngBase64DataURL)), tokens[i], "token %d: got %d, want image placeholder token", i, tokens[i])
+		assert.Equal(t, uint32(xxhash.Sum64String(pngBase64DataURL)), tokens[i], "token %d: got %d, want image placeholder token", i, tokens[i]) //nolint:gosec // G115: same hash-truncation pattern as appendMMAsset, test-only
 	}
 }
 

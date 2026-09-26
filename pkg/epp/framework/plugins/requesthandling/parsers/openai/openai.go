@@ -67,16 +67,16 @@ const (
 	inputTokensField         = "input_tokens"
 	completionTokensField    = "completion_tokens"
 	outputTokensField        = "output_tokens"
-	promptTokensDetailsField = "prompt_tokens_details"
-	inputTokensDetailsField  = "input_tokens_details"
-	cachedTokensField        = "cached_tokens"
+	promptTokensDetailsField = "prompt_tokens_details" //nolint:gosec // G101: JSON field name, not a credential
+	inputTokensDetailsField  = "input_tokens_details"  //nolint:gosec // G101: JSON field name, not a credential
+	cachedTokensField        = "cached_tokens"         //nolint:gosec // G101: JSON field name, not a credential
 	totalTokensField         = "total_tokens"
 
 	// Text to speech api response format:
 	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
-	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"
-	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens"
-	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"
+	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"  //nolint:gosec // G101: HTTP header name, not a credential
+	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens" //nolint:gosec // G101: HTTP header name, not a credential
+	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"  //nolint:gosec // G101: HTTP header name, not a credential
 )
 
 // compile-time type validation
