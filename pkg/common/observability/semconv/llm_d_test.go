@@ -29,6 +29,20 @@ func TestLLMDSemanticConventions(t *testing.T) {
 		wantKey  string
 		wantType attribute.Type
 	}{
+		// EPP Fairness attribution
+		{
+			name:     "LLMDEPPFairnessID",
+			got:      LLMDEPPFairnessID("team-a"),
+			wantKey:  "llm_d.epp.fairness.id",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDEPPFairnessSource",
+			got:      LLMDEPPFairnessSource("header"),
+			wantKey:  "llm_d.epp.fairness.source",
+			wantType: attribute.STRING,
+		},
+
 		// EPP Scheduling
 		{
 			name:     "LLMDEPPProfileName",

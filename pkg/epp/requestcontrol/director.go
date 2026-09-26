@@ -238,14 +238,19 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
+	// Derive FairnessID from agent identity when no explicit header supplied it.
+	source := tracing.AttributionSourceHeader
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
 			reqCtx.SchedulingRequest.FairnessID = agentID
+			source = tracing.AttributionSourceAgentIdentity
 		} else {
 			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+			source = tracing.AttributionSourceDefault
 		}
 	}
+	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
+	tracing.AttributeRequest(ctx, span)
 
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {

@@ -32,6 +32,10 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,6 +49,8 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -488,6 +494,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
+		wantSource              string // If non-empty, asserted against request_orchestration span source.
 		rewrites                []*v1alpha2.InferenceModelRewrite
 	}{
 		{
@@ -591,6 +599,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 			fairnessIDHeader:       "user-123",
 			wantFairnessID:         "user-123",
+			wantSpanFairnessID:     "user-123",
+			wantSource:             tracing.AttributionSourceHeader,
 		},
 		{
 			name: "fairness ID falls back to default when header absent",
@@ -605,9 +615,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
 			wantFairnessID:         metadata.DefaultFairnessID,
+			wantSource:             tracing.AttributionSourceDefault,
 		},
 		{
-			name: "fairness ID derived from agent-identity attribute",
+			name: "agent identity resolves fairness ID and span source",
 			reqBodyMap: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
@@ -623,7 +634,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
-			wantFairnessID: "session-abc",
+			wantFairnessID:     "session-abc",
+			wantSpanFairnessID: "session-abc",
+			wantSource:         tracing.AttributionSourceAgentIdentity,
 		},
 		{
 			name: "explicit fairness header takes precedence over agent-identity attribute",
@@ -643,7 +656,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
-			wantFairnessID: "explicit-id",
+			wantFairnessID:     "explicit-id",
+			wantSpanFairnessID: "explicit-id",
+			wantSource:         tracing.AttributionSourceHeader,
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -1032,12 +1047,14 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName:  objectiveNameSheddable,
 			mockAdmissionController: &mockAdmissionController{admitErr: errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "simulated admission rejection"}},
 			wantErrCode:             errcommon.ResourceExhausted,
+			wantSource:              tracing.AttributionSourceDefault,
 		},
 		{
 			name:                    "model not found, expect err",
 			reqBodyMap:              map[string]any{"prompt": "p"},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
 			wantErrCode:             errcommon.BadRequest,
+			wantSource:              tracing.AttributionSourceDefault,
 		},
 		{
 			name:                    "missing model field resolved by generic rewrite",
@@ -1204,6 +1221,17 @@ func TestDirector_HandleRequest(t *testing.T) {
 					datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{test.dataProducerPlugin})
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
+				var recorder *tracetest.SpanRecorder
+				if test.wantSource != "" {
+					recorder = tracetest.NewSpanRecorder()
+					previousProvider := otel.GetTracerProvider()
+					provider := sdktrace.NewTracerProvider(
+						sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+						sdktrace.WithSpanProcessor(recorder),
+					)
+					otel.SetTracerProvider(provider)
+					t.Cleanup(func() { otel.SetTracerProvider(previousProvider); _ = provider.Shutdown(context.Background()) })
+				}
 				if test.screener != nil {
 					config = config.WithScreeners(test.screener)
 				}
@@ -1272,7 +1300,29 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
 				} else {
-					returnedReqCtx, err = director.HandleRequest(ctx, reqCtx, parseResult.Body)
+					// Production begins attribution at ext_proc ingress before calling the Director.
+					reqTraceCtx := tracing.BeginRequestAttribution(ctx, test.fairnessIDHeader)
+					returnedReqCtx, err = director.HandleRequest(reqTraceCtx, reqCtx, parseResult.Body)
+				}
+				if parseErr == nil && test.wantSource != "" {
+					wantID := test.wantSpanFairnessID
+					if wantID == "" {
+						wantID = metadata.DefaultFairnessID
+					}
+					found := false
+					for _, span := range recorder.Ended() {
+						if span.Name() != "request_orchestration" {
+							continue
+						}
+						found = true
+						attrs := attribute.NewSet(span.Attributes()...)
+						id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+						source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+						require.True(t, hasID && hasSource, "attribution must be paired")
+						assert.Equal(t, wantID, id.AsString())
+						assert.Equal(t, test.wantSource, source.AsString())
+					}
+					require.True(t, found, "request orchestration span must exist")
 				}
 
 				if test.wantErrCode != "" {

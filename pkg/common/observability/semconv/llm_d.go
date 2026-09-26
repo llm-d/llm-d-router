@@ -37,6 +37,14 @@ const (
 	LLMDEPPPickerTopEndpointsKey        = attribute.Key("llm_d.epp.picker.top_endpoints")
 	LLMDEPPPickerTopScoresKey           = attribute.Key("llm_d.epp.picker.top_scores")
 
+	// EPP Fairness attribution attributes
+	// LLMDEPPFairnessIDKey is the resolved fairness identity.
+	// Always paired with LLMDEPPFairnessSourceKey.
+	LLMDEPPFairnessIDKey = attribute.Key("llm_d.epp.fairness.id")
+	// LLMDEPPFairnessSourceKey is the branch that resolved the fairness identity.
+	// "header" is never evidence that the producer was authenticated.
+	LLMDEPPFairnessSourceKey = attribute.Key("llm_d.epp.fairness.source")
+
 	// EPP Scorer attributes
 	LLMDEPPScorerTypeKey               = attribute.Key("llm_d.epp.scorer.type")
 	LLMDEPPScorerNameKey               = attribute.Key("llm_d.epp.scorer.name")
@@ -155,6 +163,18 @@ const (
 )
 
 // Typed helper functions for llm-d internal attributes.
+
+// EPP Fairness attribution helpers
+
+// LLMDEPPFairnessID returns an attribute for the resolved fairness identity.
+func LLMDEPPFairnessID(id string) attribute.KeyValue {
+	return LLMDEPPFairnessIDKey.String(id)
+}
+
+// LLMDEPPFairnessSource returns an attribute for how the fairness identity was resolved.
+func LLMDEPPFairnessSource(source string) attribute.KeyValue {
+	return LLMDEPPFairnessSourceKey.String(source)
+}
 
 // EPP Scheduling helpers
 

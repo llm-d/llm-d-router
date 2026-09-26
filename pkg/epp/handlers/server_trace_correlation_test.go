@@ -18,23 +18,30 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
 const (
@@ -44,21 +51,21 @@ const (
 	upstreamTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 )
 
-// scriptedProcessServer replays one RequestHeaders message, then reports EOF so
+// scriptedProcessServer replays its messages in order, then reports EOF so
 // Process returns cleanly.
 type scriptedProcessServer struct {
 	mockProcessServer
 	ctx  context.Context
-	req  *extProcPb.ProcessingRequest
-	sent bool
+	reqs []*extProcPb.ProcessingRequest
 }
 
 func (m *scriptedProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
-	if m.sent {
+	if len(m.reqs) == 0 {
 		return nil, io.EOF
 	}
-	m.sent = true
-	return m.req, nil
+	req := m.reqs[0]
+	m.reqs = m.reqs[1:]
+	return req, nil
 }
 
 func (m *scriptedProcessServer) Context() context.Context { return m.ctx }
@@ -94,8 +101,8 @@ func runProcessWithContext(ctx context.Context, t *testing.T, headers map[string
 	}, funcr.Options{Verbosity: 2})
 
 	srv := &scriptedProcessServer{
-		ctx: log.IntoContext(ctx, capture),
-		req: newRequestHeaders(headers),
+		ctx:  log.IntoContext(ctx, capture),
+		reqs: []*extProcPb.ProcessingRequest{newRequestHeaders(headers)},
 	}
 	require.NoError(t, NewStreamingServer(nil, nil, nil, 0).Process(srv))
 
@@ -152,6 +159,63 @@ func TestProcessOmitsCorrelationWhenTracingDisabled(t *testing.T) {
 	require.Contains(t, entry, "req-correlation-2")
 	require.NotContains(t, entry, tracing.LogKeyTraceID)
 	require.NotContains(t, entry, tracing.LogKeySpanID)
+}
+
+// agentIdentityDirector resolves the fairness identity inside HandleRequest, as
+// the real Director does after the request span opened.
+type agentIdentityDirector struct {
+	mockDirector
+	err error
+}
+
+func (d *agentIdentityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+	tracing.SetRequestAttribution(ctx, "agent-7", tracing.AttributionSourceAgentIdentity)
+	return reqCtx, d.err
+}
+
+// The request span opens before the Director resolves the fairness identity, so
+// Process must refresh it afterwards on both the success and error paths.
+func TestProcessRefreshesRequestSpanAfterDirectorResolvesFairness(t *testing.T) {
+	for name, directorErr := range map[string]error{
+		"success": nil,
+		"error":   errors.New("stop after attribution"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+				sdktrace.WithSpanProcessor(recorder),
+			))
+
+			srv := &scriptedProcessServer{
+				ctx: context.Background(),
+				reqs: []*extProcPb.ProcessingRequest{
+					newRequestHeaders(map[string]string{":path": "/v1/completions"}),
+					{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+						Body:        []byte(`{"model":"m","prompt":"hi"}`),
+						EndOfStream: true,
+					}}},
+				},
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			_ = NewStreamingServer(nil, &agentIdentityDirector{err: directorErr}, registry, 0).Process(srv)
+
+			var requestSpans []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+
+			attrs := attribute.NewSet(requestSpans[0].Attributes()...)
+			id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+			source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+			require.True(t, hasID && hasSource, "fairness attribution must be paired")
+			require.Equal(t, "agent-7", id.AsString())
+			require.Equal(t, tracing.AttributionSourceAgentIdentity, source.AsString())
+		})
+	}
 }
 
 // useTracerProvider installs tp and the W3C propagator for the duration of the
