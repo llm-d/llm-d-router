@@ -24,6 +24,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
@@ -36,23 +37,26 @@ func TestNewConfig(t *testing.T) {
 		ctrl := &controller.Config{EnqueueChannelBufferSize: 42}
 		reg := &registry.Config{MaxBytes: 1024}
 		ulp := usagelimits.DefaultPolicy()
+		bsp := bandselection.DefaultPolicy()
 
-		cfg := NewConfig(ctrl, reg, ulp)
+		cfg := NewConfig(ctrl, reg, ulp, bsp)
 
 		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config")
 		assert.Same(t, ctrl, cfg.Controller, "Controller should be the same pointer passed in")
 		assert.Same(t, reg, cfg.Registry, "Registry should be the same pointer passed in")
 		assert.Same(t, ulp, cfg.UsageLimitPolicy, "UsageLimitPolicy should be the same pointer passed in")
+		assert.Same(t, bsp, cfg.BandSelectionPolicy, "BandSelectionPolicy should be the same pointer passed in")
 	})
 
 	t.Run("nil values are handled gracefully", func(t *testing.T) {
 		t.Parallel()
 
-		cfg := NewConfig(nil, nil, nil)
+		cfg := NewConfig(nil, nil, nil, nil)
 
 		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config even when all arguments are nil")
 		assert.Nil(t, cfg.Controller, "Controller should be nil when nil was passed")
 		assert.Nil(t, cfg.Registry, "Registry should be nil when nil was passed")
 		assert.Nil(t, cfg.UsageLimitPolicy, "UsageLimitPolicy should be nil when nil was passed")
+		assert.Nil(t, cfg.BandSelectionPolicy, "BandSelectionPolicy should be nil when nil was passed")
 	})
 }
