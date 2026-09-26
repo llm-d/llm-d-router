@@ -182,6 +182,18 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
+			// A per-endpoint subscriber reads a single publisher, so a backwards
+			// sequence means the engine restarted with an empty cache. The bound
+			// global socket interleaves many publishers, so its sequences move
+			// backwards without a restart.
+			if z.sourceEndpoint != "" && z.hasLastLiveSeq && seq < z.lastLiveSeq {
+				logger.Info("Detected event sequence reset, clearing pod state",
+					"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
+					"endpoint", z.endpoint)
+				z.resetForSource(topic)
+			}
+			z.lastLiveSeq = seq
+			z.hasLastLiveSeq = true
 			z.addTask(ctx, topic, seq, payload)
 			continue
 		}
