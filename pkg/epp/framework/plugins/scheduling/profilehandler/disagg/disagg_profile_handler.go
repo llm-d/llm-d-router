@@ -552,7 +552,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		return nil
 	}
 
-	var encodeHostPorts []string
+	encodeHostPorts := make([]string, 0, len(encodeProfileRunResult.TargetEndpoints))
 	for _, endpoint := range encodeProfileRunResult.TargetEndpoints {
 		targetEndpoint := endpoint.GetMetadata()
 		encodeHostPort := net.JoinHostPort(targetEndpoint.Address, targetEndpoint.Port)

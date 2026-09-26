@@ -323,9 +323,7 @@ func injectFilterIntoProfiles(profiles []configapiv1.SchedulingProfile, pluginRe
 	}
 }
 
-// ensureDataLayer additively injects the default metrics source and extractor unless opted out.
-// Unlike other ensureXxx functions, it checks for explicit opt-out via InjectDefaults and avoids
-// double-injection when the metrics source is already present in a user-supplied config.
+// ensureDataLayer injects the default metrics source and extractor unless opted out.
 func ensureDataLayer(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle, allPlugins map[string]fwkplugin.Plugin) error {
 	if cfg.DataLayer != nil && cfg.DataLayer.InjectDefaults != nil && !*cfg.DataLayer.InjectDefaults {
 		return nil

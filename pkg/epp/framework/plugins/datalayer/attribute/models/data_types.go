@@ -33,6 +33,12 @@ var ModelsAttributeKey = plugin.NewDataKey("/v1/models", ModelsExtractorType)
 // ModelDataCollection defines models' data returned from /v1/models API
 type ModelDataCollection []ModelData
 
+// ModelResponse is the OpenAI-compatible response from /v1/models API.
+type ModelResponse struct {
+	Object string      `json:"object"`
+	Data   []ModelData `json:"data"`
+}
+
 // ModelData defines model's data returned from /v1/models API
 type ModelData struct {
 	ID      string `json:"id"`

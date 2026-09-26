@@ -873,7 +873,7 @@ func testHTTPOnlyPerformance(ctx context.Context, t *testing.T) {
 	const numTests = 15
 	const targetMs = 250
 
-	var durations []time.Duration
+	durations := make([]time.Duration, 0, numTests)
 	var successful int
 
 	t.Logf("Running %d HTTP-only prediction tests...", numTests)
