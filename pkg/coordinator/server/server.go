@@ -25,6 +25,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	otelsemconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -75,6 +78,54 @@ func logRequestResponse(next http.Handler) http.Handler {
 			"path", r.URL.Path,
 			"status", ww.Status(),
 			"headers", pickHeaders(ww.Header(), loggedResponseHeaders))
+	})
+}
+
+// Probe routes, kept out of tracing by otelHandler.
+const (
+	pathHealthz = "/healthz"
+	pathReadyz  = "/readyz"
+)
+
+// otelHandler runs next under a server span whose parent is the W3C trace
+// context carried by the incoming request. It is installed unconditionally:
+// with span export disabled the spans are non-recording, and extraction still
+// has to happen so the context reaches outbound calls.
+//
+// Probe routes are skipped: the kubelet polls them for the life of the pod
+// and they reach no other service.
+//
+// The span starts under the method alone and routeSpanName renames it once a
+// route matches. Naming it after the raw path would give every passthrough
+// path and every async request ID its own span name.
+func otelHandler(next http.Handler) http.Handler {
+	return otelhttp.NewHandler(next, "coordinator",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method
+		}),
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL == nil || (r.URL.Path != pathHealthz && r.URL.Path != pathReadyz)
+		}),
+	)
+}
+
+// routeSpanName names the server span after the matched route template and
+// records it as http.route. otelhttp cannot do this itself: chi sets
+// Request.Pattern on its own copy of the request, and resets the route
+// context once the request finishes, so the pattern is only readable from
+// middleware inside the router. Passthrough requests match no route and keep
+// the method-only name.
+func routeSpanName(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		span := trace.SpanFromContext(r.Context())
+		if !span.IsRecording() {
+			return
+		}
+		if pattern := chi.RouteContext(r.Context()).RoutePattern(); pattern != "" {
+			span.SetName(r.Method + " " + pattern)
+			span.SetAttributes(otelsemconv.HTTPRoute(pattern))
+		}
 	})
 }
 
@@ -134,6 +185,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	}
 
 	r := chi.NewRouter()
+	// Outside Recoverer, so a request whose handler panicked is still renamed.
+	r.Use(routeSpanName)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP) //nolint:staticcheck // coordinator runs behind a trusted gateway that sets the forwarded-IP headers
 	r.Use(middleware.Recoverer)
@@ -143,8 +196,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(reqcommon.PathCompletions, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
-	r.Get("/healthz", s.handleHealth)
-	r.Get("/readyz", s.handleHealth)
+	r.Get(pathHealthz, s.handleHealth)
+	r.Get(pathReadyz, s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
 
 	for _, step := range p.Steps() {
@@ -155,7 +208,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      r,
+		Handler:      otelHandler(r),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	}

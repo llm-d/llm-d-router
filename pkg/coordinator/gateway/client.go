@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -44,7 +45,13 @@ type Client struct {
 // New creates a Client from a GatewayConfig, constructing an http.Transport
 // with the configured connection pool and timeout settings.
 func New(cfg config.GatewayConfig) *Client {
-	transport := &http.Transport{
+	return NewWithTransport(newTransport(cfg), cfg.Address)
+}
+
+// newTransport builds the connection pool for gateway traffic. Proxy is left
+// nil so in-cluster destinations are never routed through HTTP(S)_PROXY.
+func newTransport(cfg config.GatewayConfig) *http.Transport {
+	return &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -54,8 +61,6 @@ func New(cfg config.GatewayConfig) *Client {
 		ResponseHeaderTimeout: cfg.Timeout,
 		ForceAttemptHTTP2:     true,
 	}
-
-	return NewWithTransport(transport, cfg.Address)
 }
 
 // NewWithTransport creates a Client using the provided transport and base URL.
@@ -67,7 +72,12 @@ func NewWithTransport(transport *http.Transport, baseURL string) *Client {
 	// to a plain nil interface so both paths pick up http.DefaultTransport.
 	var rt http.RoundTripper
 	if transport != nil {
-		rt = transport
+		// otelhttp injects W3C trace context on every outbound request, so the
+		// gateway, EPP, and sidecar spans join the trace that started here.
+		// Transport() hands this wrapper to the decode and passthrough reverse
+		// proxies, which inject for the same reason. The default span name
+		// stays fixed per method: the passthrough forwards arbitrary paths.
+		rt = otelhttp.NewTransport(transport)
 	}
 	return &Client{
 		httpClient: &http.Client{Transport: rt},

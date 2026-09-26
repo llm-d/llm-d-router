@@ -1,8 +1,8 @@
 # OpenTelemetry JSON stdout logs
 
-The EPP and routing sidecar emit one JSON object per line to stdout using the
-OpenTelemetry Logs Data Model fields below. The output is not OTLP/JSON. A log
-collector must apply the mapping before exporting OTLP.
+The EPP, coordinator, and routing sidecar emit one JSON object per line to
+stdout using the OpenTelemetry Logs Data Model fields below. The output is not
+OTLP/JSON. A log collector must apply the mapping before exporting OTLP.
 
 ## Record contract
 

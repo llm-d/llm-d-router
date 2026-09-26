@@ -150,6 +150,10 @@ const (
 	LLMDECProxyEncoderCountKey             = attribute.Key("llm_d.ec_proxy.encoder_count")
 	LLMDECProxyEncoderCandidatesKey        = attribute.Key("llm_d.ec_proxy.encoder_candidates")
 
+	// Coordinator pipeline attributes
+	LLMDCoordinatorPipelineStepCountKey     = attribute.Key("llm_d.coordinator.pipeline.step_count")
+	LLMDCoordinatorPipelineExecutionPathKey = attribute.Key("llm_d.coordinator.pipeline.execution_path")
+
 	// OpenAI API attributes
 	LLMDOpenAIAPIKey = attribute.Key("llm_d.openai.api")
 )
@@ -719,6 +723,18 @@ func LLMDECProxyEncoderCount(count int) attribute.KeyValue {
 // LLMDECProxyEncoderCandidates returns an attribute for candidate encoder count in EC proxy.
 func LLMDECProxyEncoderCandidates(candidates int) attribute.KeyValue {
 	return LLMDECProxyEncoderCandidatesKey.Int(candidates)
+}
+
+// Coordinator pipeline helpers
+
+// LLMDCoordinatorPipelineStepCount returns an attribute for the number of steps configured in the pipeline.
+func LLMDCoordinatorPipelineStepCount(count int) attribute.KeyValue {
+	return LLMDCoordinatorPipelineStepCountKey.Int(count)
+}
+
+// LLMDCoordinatorPipelineExecutionPath returns an attribute for the step combination a request took.
+func LLMDCoordinatorPipelineExecutionPath(path string) attribute.KeyValue {
+	return LLMDCoordinatorPipelineExecutionPathKey.String(path)
 }
 
 // OpenAI API helpers

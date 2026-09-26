@@ -17,6 +17,20 @@
 # A compromised log store would expose them.
 log_level: 2
 
+# tracing exports the coordinator's own OpenTelemetry spans: one per request,
+# one for the pipeline, one per step, and one per outbound gateway call.
+# Health and readiness probes are never traced. Default false.
+# Trace context is extracted from incoming requests and injected into gateway
+# calls either way, so leaving this off keeps client and EPP spans in one trace
+# and only omits the coordinator's spans from it.
+# The exporter, sampler, and collector endpoint come from the standard OTEL_*
+# environment variables. Set OTEL_EXPORTER_OTLP_ENDPOINT to the collector; the
+# default is localhost:4317. Without OTEL_TRACES_SAMPLER, 10% of root traces
+# are sampled (parentbased_traceidratio, 0.1).
+# The --tracing CLI flag overrides this field.
+# env: COORDINATOR_TRACING
+# tracing: false
+
 # -------------------------------------------------------------------------------
 # server: listener for incoming OpenAI-compatible requests. Serves TLS unless
 # secure_serving is false.

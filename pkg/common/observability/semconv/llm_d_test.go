@@ -703,6 +703,20 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.INT64,
 		},
 
+		// Coordinator pipeline
+		{
+			name:     "LLMDCoordinatorPipelineStepCount",
+			got:      LLMDCoordinatorPipelineStepCount(4),
+			wantKey:  "llm_d.coordinator.pipeline.step_count",
+			wantType: attribute.INT64,
+		},
+		{
+			name:     "LLMDCoordinatorPipelineExecutionPath",
+			got:      LLMDCoordinatorPipelineExecutionPath("encode-prefill-decode"),
+			wantKey:  "llm_d.coordinator.pipeline.execution_path",
+			wantType: attribute.STRING,
+		},
+
 		// OpenAI API
 		{
 			name:     "LLMDOpenAIAPI",

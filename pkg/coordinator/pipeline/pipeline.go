@@ -24,9 +24,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 )
 
@@ -125,6 +129,25 @@ func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, e
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
+
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, pipelineSpanName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer func() {
+		if r := recover(); r != nil {
+			span.SetStatus(codes.Error, "step panicked")
+			span.End()
+			panic(r)
+		}
+		span.End()
+	}()
+	if span.IsRecording() {
+		span.SetAttributes(semconv.LLMDCoordinatorPipelineStepCount(len(p.steps)))
+		if reqCtx.Model != "" {
+			span.SetAttributes(semconv.GenAIRequestModel(reqCtx.Model))
+		}
+	}
+
 	reqCtx.forwardResponseHeaders = p.forwardResponseHeaders
 	if reqCtx.RevisionDecisionID == "" {
 		reqCtx.RevisionDecisionID = uuid.NewString()
@@ -147,9 +170,12 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 
 		// Classify path from steps that ran, success or failure, so a
 		// request that reached decode and failed there still contributes
-		// to path totals.
+		// to path totals. This defer is registered after the one that ends
+		// the span, so it runs first and the attribute lands while the span
+		// is still open.
 		if path, ok := classifyExecutionPath(started); ok {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
+			span.SetAttributes(semconv.LLMDCoordinatorPipelineExecutionPath(path))
 		}
 		// Render populates TokenIDs on every success path (including a valid
 		// empty prompt array in the completions branch), so gate on the step
@@ -161,7 +187,9 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 
 	for idx, step := range p.steps {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("pipeline cancelled: %w", err)
+			cancelled := fmt.Errorf("pipeline cancelled: %w", err)
+			span.SetStatus(codes.Error, cancelled.Error())
+			return cancelled
 		}
 		name := step.Name()
 		started[name] = true
@@ -173,7 +201,11 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 				return nil
 			}
 			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
-			return fmt.Errorf("step %q failed: %w", name, err)
+			failed := fmt.Errorf("step %q failed: %w", name, err)
+			// UpstreamError.Error omits the response body, so the status
+			// message carries no prompt or user data.
+			span.SetStatus(codes.Error, failed.Error())
+			return failed
 		}
 		executed[name] = true
 		logger.V(logutil.TRACE).Info("step complete", "step", name)
@@ -182,10 +214,13 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 }
 
 // runStep executes one step with per-iteration observability. The defer
-// covers all three step-observability signals on every exit path (normal
+// covers all four step-observability signals on every exit path (normal
 // return, error return, panic). On panic recovery, step_errors_total
 // records the failure under error_code=internal and the panic
 // re-propagates into the chi Recoverer at the server edge.
+//
+// The span is named after the step, which is why the step name is not also
+// recorded as an attribute.
 func (p *Pipeline) runStep(
 	ctx context.Context,
 	reqCtx *RequestContext,
@@ -194,6 +229,9 @@ func (p *Pipeline) runStep(
 	timings []stepTiming,
 ) error {
 	name := step.Name()
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
 	coordmetrics.IncStepRunning(name)
 	start := time.Now()
 	defer func() {
@@ -203,10 +241,21 @@ func (p *Pipeline) runStep(
 		timings[idx] = stepTiming{name: name, duration: d}
 		if r := recover(); r != nil {
 			coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
+			// The panic value can hold anything the step was working on, so
+			// only the fact of it is recorded.
+			span.SetStatus(codes.Error, "step panicked")
+			span.End()
 			panic(r)
 		}
+		span.End()
 	}()
-	return step.Execute(ctx, reqCtx)
+
+	err := step.Execute(ctx, reqCtx)
+	// ErrPipelineDone is the cache-hit early exit and must not show as failed.
+	if err != nil && !errors.Is(err, ErrPipelineDone) {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // classifyExecutionPath maps the set of steps that ran (success or failure)
