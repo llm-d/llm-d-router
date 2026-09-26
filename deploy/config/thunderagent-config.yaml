@@ -1,0 +1,66 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+
+# ThunderAgent scheduling for agentic workloads. Clients carry a program
+# (trajectory) identifier in the x-session-id header. One thunder-agent
+# instance is referenced from three slots: the scheduling profile (sticky
+# placement and least-token-load spreading), the flow-control saturation
+# detector (which feeds the plugin's per-pod fit view and never gates), and
+# the fairness policy (the actual gate: turns of admitted programs always
+# dispatch, new programs are admitted only when their projected footprint
+# fits a pod, smallest first).
+# The utilization-detector runs as a scheduling filter: an endpoint over its
+# safety limit is removed from the candidate set, so programs bound to it
+# rebind to the endpoint the request is routed to instead.
+
+featureGates:
+- flowControl
+
+plugins:
+- type: utilization-detector
+  parameters:
+    headroom: 0.2
+- type: agent-identity
+  parameters:
+    additionalSessionHeaders:
+    - x-session-id
+- type: thunder-agent
+  name: thunder
+  parameters:
+    capacityTokens: 524288            # fallback when cache_config_info is absent
+    utilThreshold: 0.9                # admission fit ceiling as a fraction of pod capacity
+    actingHalfLifeSeconds: 60         # 0 disables acting decay
+    bufferTokensPerProgram: 100       # growth room reserved per admitted program
+    shedIdleSeconds: 0                # >0 unbinds idle programs from over-ceiling pods; their next turn re-enters admission
+    headWaitStarvationMs: 30000
+    evictionTtlSeconds: 3600
+    evictionSweepSeconds: 300
+    sessionFinalHeader: x-session-final
+- type: kv-cache-utilization-scorer
+- type: queue-scorer
+- type: max-score-picker
+- type: single-profile-handler
+
+flowControl:
+  # The detector slot feeds the plugin its per-cycle view of the endpoint
+  # pool and always reports unsaturated; gating happens per program in the
+  # fairness policy, where an admitted program's turn can be told apart from
+  # a new program's first turn. Engine overload protection comes from the
+  # utilization-detector filter and the kv-cache and queue scorers in the
+  # scheduling profile.
+  saturationDetector:
+    pluginRef: thunder
+  defaultPriorityBand:
+    fairnessPolicyRef: thunder
+
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: utilization-detector
+  - pluginRef: thunder
+    weight: 3
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 1
+  - pluginRef: queue-scorer
+    weight: 1
+  - pluginRef: max-score-picker
