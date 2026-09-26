@@ -63,7 +63,7 @@ type AdmissionController interface {
 // flowController defines the minimal interface required by FlowControlAdmissionController for enqueuing requests and
 // waiting for an admission outcome.
 type flowController interface {
-	EnqueueAndWait(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, error)
+	EnqueueAndWaitWithEffectiveFlowKey(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, flowcontrol.FlowKey, error)
 }
 
 // rejectIfSheddableAndSaturated checks if a request should be immediately rejected.
@@ -196,10 +196,11 @@ func (fcac *FlowControlAdmissionController) Admit(
 	// and their durations carry no signal (a capacity rejection is ~0, a TTL eviction is the configured
 	// TTL, a cancellation is the client's disconnect time).
 	start := time.Now()
-	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
+	outcome, effectiveFlowKey, err := fcac.flowController.EnqueueAndWaitWithEffectiveFlowKey(ctx, fcReq)
 	if outcome == types.QueueOutcomeDispatched {
 		reqCtx.FlowControlQueueDuration = time.Since(start)
 		reqCtx.FlowControlAdmitted = true
+		reqCtx.FlowControlEffectivePriority = effectiveFlowKey.Priority
 	}
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)

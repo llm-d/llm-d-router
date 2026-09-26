@@ -1269,3 +1269,58 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 		"fallback request must be enqueued at priority 0, not its original unprovisioned priority")
 	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
 }
+
+func TestFlowController_EnqueueAndWaitWithEffectiveFlowKey_FallbackReturnsEffectivePriority(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var capturedKey flowcontrol.FlowKey
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			capturedKey = item.OriginalRequest().FlowKey()
+			go item.FinalizeWithError(nil)
+			return nil
+		},
+	}
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	registry.WithConnectionFunc = func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {
+		if key.Priority != 0 {
+			return fmt.Errorf("band %d: %w", key.Priority, contracts.ErrPriorityBandNotFound)
+		}
+		return fn(&mockActiveFlowConnection{RegistryV: registry, FlowKeyV: key})
+	}
+
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
+
+	outcome, effectiveFlowKey, err := h.fc.EnqueueAndWaitWithEffectiveFlowKey(ctx, newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: 5}))
+
+	require.NoError(t, err, "fallback request should be dispatched, not rejected")
+	assert.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, 0, capturedKey.Priority,
+		"fallback request must be enqueued at priority 0, not its requested priority")
+	assert.Equal(t, 0, effectiveFlowKey.Priority)
+}
+
+func TestFlowController_EnqueueAndWaitWithEffectiveFlowKey_PreservesRequestedPriority(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			go item.FinalizeWithError(nil)
+			return nil
+		},
+	}
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, nil, processor)
+
+	outcome, effectiveFlowKey, err := h.fc.EnqueueAndWaitWithEffectiveFlowKey(ctx, newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: 5}))
+
+	require.NoError(t, err)
+	assert.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, flowcontrol.FlowKey{ID: "batch", Priority: 5}, effectiveFlowKey)
+}
