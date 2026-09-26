@@ -130,7 +130,10 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	_, execErr := pipe.Exec(ctx)
-	if execErr != nil {
+	if execErr != nil && allCommandsErrored(results) {
+		// Every command failed the same way: the pipeline round-trip itself
+		// broke (for example the connection dropped), not just one key.
+		// There is no partial result worth salvaging.
 		return nil, fmt.Errorf("redis pipeline execution failed: %w", execErr)
 	}
 
@@ -169,6 +172,19 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	return podsPerKey, nil
+}
+
+// allCommandsErrored reports whether every command in a pipeline batch
+// failed. A connection-level failure (the pipeline round-trip could not
+// complete) sets the same error on every command; a single key's own
+// problem (for example a Redis type conflict) sets it on only that command.
+func allCommandsErrored(results []*redis.StringSliceCmd) bool {
+	for _, cmd := range results {
+		if cmd.Err() == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // Add adds a set of keys and their associated pod entries to the index backend.
