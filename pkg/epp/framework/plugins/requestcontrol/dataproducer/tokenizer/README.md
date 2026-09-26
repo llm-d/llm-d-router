@@ -171,6 +171,31 @@ apply to every video in the request.
 | `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header.                                                       |
 | `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                                                                                                         |
 
+Audio estimation is `min(duration × tokensPerSecond, maxAudioTokens) +
+overheadTokens`. Audio towers turn a clip into encoder frames at a fixed rate and
+pool them into tokens, so the count follows the clip's length rather than its
+payload size. Duration is resolved per clip: the `x-llm-d-audio-duration-seconds`
+header wins, then the payload itself — exact for PCM WAV, whose header declares a
+byte rate, and payload bytes ÷ the byte rate for anything else — then
+`defaultDuration`, which is what a clip carried by reference falls back to.
+The rate is the one knob a new tower needs: gemma4's mel front end emits a token
+per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
+(`tokensPerSecond: 13`), and both wrap a clip in begin/end markers
+(`overheadTokens: 2`).
+
+| Request header                    | Format        | Description                                                                          |
+| --------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `x-llm-d-audio-duration-seconds`  | float seconds | Clip length; overrides the payload and `defaultDuration`.                             |
+| `x-llm-d-audio-bytes-per-second`  | integer       | Byte rate of this clip's payload; overrides `defaultBytesPerSecond`. Ignored when the payload is PCM WAV or the duration header is set. |
+
+| Parameter                                       | Default   | Description                                                                  |
+| ----------------------------------------------- | --------- | ---------------------------------------------------------------------------- |
+| `estimate.audio.tokensPerSecond`                | `13`      | The audio tower's placeholder tokens per second of audio.                     |
+| `estimate.audio.overheadTokens`                 | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
+| `estimate.audio.defaultBytesPerSecond`          | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
+| `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
+| `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which logs and continues;

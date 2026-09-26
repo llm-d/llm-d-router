@@ -99,29 +99,29 @@ type estimateConfig struct {
 	Audio *audioEstimateConfig `json:"audio,omitempty"`
 }
 
-// audioEstimateConfig tunes how an audio's placeholder-token count is estimated.
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated:
+// min(durationSeconds*tokensPerSecond, maxAudioTokens) + overheadTokens. Clip
+// duration is resolved per clip rather than configured: the
+// x-llm-d-audio-duration-seconds header wins, then the payload itself, then
+// defaultDuration.
 type audioEstimateConfig struct {
-	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
-	Mode string `json:"mode,omitempty"`
-	// Static configures the static (constant per-audio) mode.
-	Static *staticAudioConfig `json:"static,omitempty"`
-	// Dynamic configures the dynamic (tokens-per-second) mode.
-	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
-}
-
-// staticAudioConfig is the static-mode parameter.
-type staticAudioConfig struct {
-	// NumTokens is the per-audio placeholder count.
-	NumTokens int `json:"numTokens,omitempty"`
-}
-
-// dynamicAudioConfig is the dynamic-mode parameter.
-type dynamicAudioConfig struct {
-	// TokensPerSecond is the placeholder tokens per second of audio.
-	TokensPerSecond int `json:"tokensPerSecond,omitempty"`
+	// TokensPerSecond is the placeholder tokens per second of audio, 25 for
+	// gemma4 and 13 for Qwen3-Omni.
+	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
 	// OverheadTokens is the fixed prompt template + text token overhead added
 	// to every audio estimate.
 	OverheadTokens int `json:"overheadTokens,omitempty"`
+	// DefaultBytesPerSecond converts a payload length to seconds when the clip is
+	// not PCM WAV, whose own header carries an exact byte rate, and the request
+	// does not carry an x-llm-d-audio-bytes-per-second header either.
+	DefaultBytesPerSecond int `json:"defaultBytesPerSecond,omitempty"`
+	// DefaultDuration is the clip length in seconds used when neither the header
+	// nor the payload provides one, as for a clip referenced by URL.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
+	// MaxAudioTokens caps the audio tower's tokens for a clip, before the
+	// overhead is added, so it matches the model's own limit (750 for gemma4).
+	// Zero means uncapped.
+	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.

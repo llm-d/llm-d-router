@@ -46,6 +46,8 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		metadata.AudioDurationHeaderKey,
+		metadata.AudioBytesPerSecondHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
 		metadata.DestinationEndpointKey,
 		metadata.DestinationEndpointServedKey,
