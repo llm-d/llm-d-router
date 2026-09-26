@@ -24,11 +24,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"strconv"
 	"strings"
 
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -46,12 +48,22 @@ const (
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
 	promptField        = "prompt"
-	embeddingsAPI      = "embeddings"
+
+	// Shared multipart form field names for image edits and videos.
+	formFieldModel             = "model"
+	formFieldNumInferenceSteps = "num_inference_steps"
+	embeddingsAPI              = "embeddings"
 	// imagesGenerationsAPI is the OpenAI-compatible image generation endpoint/
 	imagesGenerationsAPI = "images/generations"
 	// imagesEditsAPI is the OpenAI-compatible image edit (image-to-image) endpoint.
 	// Requests are multipart/form-data.
 	imagesEditsAPI = "images/edits"
+	// videosAPI is the OpenAI-compatible vLLM-Omni asynchronous video generation
+	// endpoint. Requests are multipart/form-data.
+	videosAPI = "videos"
+	// videosSyncAPI is the vLLM-Omni synchronous video generation endpoint, which
+	// takes the same form as videosAPI and returns raw video bytes.
+	videosSyncAPI  = "videos/sync"
 	audioSpeechAPI = "audio/speech"
 
 	streamingRespPrefix = "data: "
@@ -119,6 +131,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
 			imagesEditsAPI,
+			videosAPI,
+			videosSyncAPI,
 			audioSpeechAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
@@ -144,6 +158,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	if apiType == imagesEditsAPI {
 		return parseImagesEditsRequest(body, headers)
 	}
+	if apiType == videosAPI || apiType == videosSyncAPI {
+		return parseVideosRequest(body, headers)
+	}
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
 		return nil, fmt.Errorf("error extracting request body: %w", err)
@@ -168,7 +185,7 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	}
 
 	extractedBody.Payload = bodyMap
-	if model, ok := bodyMap["model"].(string); ok {
+	if model, ok := bodyMap[formFieldModel].(string); ok {
 		extractedBody.Model = model
 	}
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
@@ -198,12 +215,13 @@ func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 
 // RewriteModelName writes the resolved model into the request payload map.
 func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
-	if !ok {
+	switch m := payload.(type) {
+	case fwkrh.PayloadMap:
+		m[formFieldModel] = model
+		return m, nil
+	default:
 		return payload, nil
 	}
-	m["model"] = model
-	return m, nil
 }
 
 // RewritePriority removes any client-supplied priority from the
@@ -356,6 +374,14 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/images/edits") {
 		return imagesEditsAPI
 	}
+	// videos/sync ends with /videos as well, so the sync suffix is compared
+	// before the async one for the sync path to resolve to its own API type.
+	if request.MatchPathSuffix(path, "/"+videosSyncAPI) {
+		return videosSyncAPI
+	}
+	if request.MatchPathSuffix(path, "/"+videosAPI) {
+		return videosAPI
+	}
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
 	}
@@ -453,41 +479,52 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 	}
 }
 
-// parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
-func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+func parseMultipartFields(body []byte, headers map[string]string, kind string, visit func(string, []byte) error) error {
 	contentTypeValue, _ := headerValue(headers, contentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
-		return nil, errors.New("images edits request must have a multipart/form-data content-type")
+		return fmt.Errorf("%s request must have a multipart/form-data content-type", kind)
 	}
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, errors.New("images edits request: content-type is missing the multipart boundary")
+		return fmt.Errorf("%s request: content-type is missing the multipart boundary", kind)
 	}
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var field bytes.Buffer
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("error reading %s multipart body: %w", kind, err)
+		}
+		if part.FileName() != "" {
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
+			}
+			continue
+		}
+		field.Reset()
+		if _, err := field.ReadFrom(part); err != nil {
+			return fmt.Errorf("error reading %s form field %q: %w", kind, part.FormName(), err)
+		}
+		if err := visit(part.FormName(), field.Bytes()); err != nil {
+			return err
+		}
+	}
+}
 
+// parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
+func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	images := &fwkrh.ImagesGenerationsRequest{}
 	extractedBody := &fwkrh.InferenceRequestBody{
 		Images:  images,
 		Payload: fwkrh.RawPayload(body),
 	}
-	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("error reading images edits multipart body: %w", err)
-		}
-		if part.FileName() != "" {
-			continue
-		}
-		value, err := io.ReadAll(part)
-		if err != nil {
-			return nil, fmt.Errorf("error reading images edits form field %q: %w", part.FormName(), err)
-		}
-		switch part.FormName() {
-		case "model":
+	err := parseMultipartFields(body, headers, "images edits", func(name string, value []byte) error {
+		switch name {
+		case formFieldModel:
 			extractedBody.Model = string(value)
 		case "prompt":
 			images.Prompt = string(value)
@@ -496,27 +533,160 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		case "n":
 			n, err := strconv.ParseInt(string(value), 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("invalid images edits n field: %w", err)
+				return fmt.Errorf("invalid images edits n field: %w", err)
 			}
 			images.N = &n
-		case "num_inference_steps":
+		case formFieldNumInferenceSteps:
 			steps, err := strconv.ParseInt(string(value), 10, 64)
 			if err != nil {
-				return nil, fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
+				return fmt.Errorf("invalid images edits num_inference_steps field: %w", err)
 			}
 			images.NumInferenceSteps = &steps
 		case "stream":
 			stream, err := strconv.ParseBool(string(value))
 			if err != nil {
-				return nil, fmt.Errorf("invalid images edits stream field: %w", err)
+				return fmt.Errorf("invalid images edits stream field: %w", err)
 			}
 			extractedBody.Stream = stream
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if images.Prompt == "" {
 		return nil, errors.New("invalid images edits request: must have prompt field")
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// Bounds the pinned vLLM-Omni form and model declare on the video endpoints.
+// Values outside them are rejected here so a malformed request fails at the
+// router with the backend's own range rather than being silently clamped or
+// zeroed into the scheduling cost fields.
+const (
+	minVideoSteps = 1
+	maxVideoSteps = 200
+	minVideoN     = 1
+	maxVideoN     = 10
+)
+
+// parseVideosRequest parses a multipart/form-data /v1/videos or /v1/videos/sync
+// request. Scheduler-relevant scalar fields are read while the original body is
+// forwarded unchanged.
+func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	videos := &fwkrh.VideoGenerationRequest{NumOutputsPerPrompt: ptr.To[int64](1)}
+	extractedBody := &fwkrh.InferenceRequestBody{
+		Videos:  videos,
+		Payload: fwkrh.RawPayload(body),
+	}
+	err := parseMultipartFields(body, headers, "videos", func(name string, value []byte) error {
+		var err error
+		switch name {
+		case formFieldModel:
+			extractedBody.Model = string(value)
+		case "prompt":
+			videos.Prompt = string(value)
+		case "negative_prompt":
+			videos.NegativePrompt = string(value)
+		case "size":
+			videos.Size = string(value)
+		case "seconds":
+			videos.Seconds = string(value)
+		case "width":
+			if videos.Width, err = positiveIntForm("width", value); err != nil {
+				return err
+			}
+		case "height":
+			if videos.Height, err = positiveIntForm("height", value); err != nil {
+				return err
+			}
+		case "num_frames":
+			if videos.NumFrames, err = positiveIntForm("num_frames", value); err != nil {
+				return err
+			}
+		case "fps":
+			if videos.FPS, err = minFloatForm("fps", value, 1); err != nil {
+				return err
+			}
+		case formFieldNumInferenceSteps:
+			if videos.NumInferenceSteps, err = rangedIntForm(formFieldNumInferenceSteps, value, minVideoSteps, maxVideoSteps); err != nil {
+				return err
+			}
+		case "num_outputs_per_prompt":
+			if videos.NumOutputsPerPrompt, err = rangedIntForm("num_outputs_per_prompt", value, minVideoN, maxVideoN); err != nil {
+				return err
+			}
+		case "seed":
+			if videos.Seed, err = intForm("seed", value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if videos.Prompt == "" {
+		return nil, errors.New("invalid videos request: must have prompt field")
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// intForm parses a form value the backend declares as an integer. The backend accepts
+// surrounding whitespace and an integral float spelling such as "9.0", and rejects a
+// fractional one such as "9.5"; matching that keeps the router from refusing a request
+// the backend serves.
+func intForm(field string, value []byte) (*int64, error) {
+	text := strings.TrimSpace(string(value))
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err == nil {
+		return &parsed, nil
+	}
+	number, floatErr := strconv.ParseFloat(text, 64)
+	if floatErr != nil || math.IsNaN(number) || math.IsInf(number, 0) || number != math.Trunc(number) ||
+		number < math.MinInt64 || number >= math.MaxInt64 {
+		return nil, fmt.Errorf("invalid videos %s field: %w", field, err)
+	}
+	parsed = int64(number)
+	return &parsed, nil
+}
+
+// positiveIntForm parses a form value that the backend declares ge=1.
+func positiveIntForm(field string, value []byte) (*int64, error) {
+	parsed, err := intForm(field, value)
+	if err != nil {
+		return nil, err
+	}
+	if *parsed < 1 {
+		return nil, fmt.Errorf("invalid videos %s field: must be at least 1, got %d", field, *parsed)
+	}
+	return parsed, nil
+}
+
+// rangedIntForm parses a form value the backend bounds to [min, max].
+func rangedIntForm(field string, value []byte, min, max int64) (*int64, error) {
+	parsed, err := intForm(field, value)
+	if err != nil {
+		return nil, err
+	}
+	if *parsed < min || *parsed > max {
+		return nil, fmt.Errorf("invalid videos %s field: must be between %d and %d, got %d", field, min, max, *parsed)
+	}
+	return parsed, nil
+}
+
+// minFloatForm parses a form value the backend declares ge=min with no NaN or
+// infinity. Surrounding whitespace is trimmed for the same reason intForm trims it.
+func minFloatForm(field string, value []byte, min float64) (*float64, error) {
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(string(value)), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid videos %s field: %w", field, err)
+	}
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < min {
+		return nil, fmt.Errorf("invalid videos %s field: must be a finite number >= %g, got %s", field, min, value)
+	}
+	return &parsed, nil
 }
 
 func requestBodyDecodeError(err, validationErr error) error {

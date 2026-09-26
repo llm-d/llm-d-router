@@ -23,6 +23,10 @@ import (
 	"github.com/go-logr/logr"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 )
 
 // testParser is a simple mock parser for testing routing logic.
@@ -103,6 +107,37 @@ func TestParserRegistry(t *testing.T) {
 			}
 			if parser.TypedName().Name != tt.wantParser {
 				t.Errorf("Resolve(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+			}
+		})
+	}
+}
+
+func TestParserRegistryVideoPaths(t *testing.T) {
+	registry := NewParserRegistry([]fwkrh.Parser{
+		openai.NewOpenAIParser(),
+		anthropic.NewAnthropicParser(),
+		vllmhttp.NewVllmHTTPParser(),
+		passthrough.NewPassthroughParser(),
+	}, logr.Discard())
+	for _, tc := range []struct {
+		path, want string
+	}{
+		{"/v1/videos", openai.OpenAIParserType},
+		{"/v1/videos/sync", openai.OpenAIParserType},
+		{"/openai/v1/videos", openai.OpenAIParserType},
+		{"/v1/videos/", openai.OpenAIParserType},
+		{"/v1/images/edits", openai.OpenAIParserType},
+		{"/v1/messages", anthropic.AnthropicParserType},
+		{"/inference/v1/generate", vllmhttp.VllmHTTPParserType},
+		{"/v1/videos/video-123/content", passthrough.PassthroughParserType},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			parser, err := registry.Resolve(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := parser.TypedName().Type; got != tc.want {
+				t.Errorf("Resolve(%q) = %q, want %q", tc.path, got, tc.want)
 			}
 		})
 	}

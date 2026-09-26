@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"mime/multipart"
+	"net/textproto"
 	"strings"
 	"testing"
 
@@ -2017,6 +2018,8 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
 			imagesEditsAPI,
+			videosAPI,
+			videosSyncAPI,
 			audioSpeechAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
@@ -2241,6 +2244,209 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			}
 			if diff := cmp.Diff(tt.want, got.Body.MaxOutputTokens); diff != "" {
 				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+type videoFormPart struct {
+	name, value, filename, mediaType string
+}
+
+func buildVideoForm(tb testing.TB, parts ...videoFormPart) ([]byte, string) {
+	tb.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, part := range parts {
+		if part.filename == "" {
+			if err := writer.WriteField(part.name, part.value); err != nil {
+				tb.Fatal(err)
+			}
+			continue
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", "form-data; name=\""+part.name+"\"; filename=\""+part.filename+"\"")
+		header.Set("Content-Type", part.mediaType)
+		file, err := writer.CreatePart(header)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := file.Write([]byte(part.value)); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		tb.Fatal(err)
+	}
+	return body.Bytes(), writer.FormDataContentType()
+}
+
+func TestOpenAIParser_ParseRequestVideos(t *testing.T) {
+	media := string([]byte{0, 1, 255, '\r', '\n', '-', '-', 137})
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "a cinematic shot"},
+		videoFormPart{name: "model", value: "wan-t2v"},
+		videoFormPart{name: "negative_prompt", value: "blur"},
+		videoFormPart{name: "size", value: "832x480"},
+		videoFormPart{name: "seconds", value: "1"},
+		videoFormPart{name: "width", value: "832"},
+		videoFormPart{name: "height", value: "480"},
+		videoFormPart{name: "num_frames", value: "9.0"},
+		videoFormPart{name: "fps", value: "16"},
+		videoFormPart{name: "num_inference_steps", value: "4.0"},
+		videoFormPart{name: "num_outputs_per_prompt", value: "2"},
+		videoFormPart{name: "seed", value: "17"},
+		videoFormPart{name: "input_reference", value: media, filename: "reference.mp4", mediaType: "video/mp4"},
+		videoFormPart{name: "extra_params", value: "{\"preencode_mp4\":true}"},
+	)
+	want := &fwkrh.VideoGenerationRequest{
+		Prompt: "a cinematic shot", NegativePrompt: "blur", Size: "832x480", Seconds: "1",
+		Width: ptr.To[int64](832), Height: ptr.To[int64](480), NumFrames: ptr.To[int64](9),
+		FPS: ptr.To(16.0), NumInferenceSteps: ptr.To[int64](4),
+		NumOutputsPerPrompt: ptr.To[int64](2), Seed: ptr.To[int64](17),
+	}
+	parser := NewOpenAIParser()
+	for _, path := range []string{"/v1/videos", "/v1/videos/sync"} {
+		t.Run(path, func(t *testing.T) {
+			result, err := parser.ParseRequest(context.Background(), body,
+				map[string]string{":path": path, contentType: ct})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.Model != "wan-t2v" {
+				t.Errorf("Model = %q, want wan-t2v", result.Body.Model)
+			}
+			if diff := cmp.Diff(want, result.Body.Videos); diff != "" {
+				t.Errorf("Videos mismatch (-want +got):\n%s", diff)
+			}
+			raw, ok := result.Body.Payload.(fwkrh.RawPayload)
+			if !ok {
+				t.Fatalf("Payload = %T, want RawPayload", result.Body.Payload)
+			}
+			if !bytes.Equal(raw, body) {
+				t.Error("forwarded multipart body differs from the received body")
+			}
+			if result.SkipResponseProcessing {
+				t.Error("video response processing was skipped")
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_ParseRequestVideosOptionalAndDuplicateFields(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "model", value: "first"},
+		videoFormPart{name: "model", value: "uploaded bytes", filename: "model.mp4", mediaType: "video/mp4"},
+		videoFormPart{name: "prompt", value: "first prompt"},
+		videoFormPart{name: "model", value: "last"},
+		videoFormPart{name: "prompt", value: "海边日出"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/videos", contentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Body.Model != "last" || result.Body.Videos.Prompt != "海边日出" {
+		t.Errorf("duplicate fields: Model=%q Prompt=%q", result.Body.Model, result.Body.Videos.Prompt)
+	}
+	want := &fwkrh.VideoGenerationRequest{Prompt: "海边日出", NumOutputsPerPrompt: ptr.To[int64](1)}
+	if diff := cmp.Diff(want, result.Body.Videos); diff != "" {
+		t.Errorf("Videos mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_ParseRequestVideosInvalidForms(t *testing.T) {
+	parser := NewOpenAIParser()
+	for _, tc := range []struct {
+		name, field, value string
+	}{
+		{name: "missing prompt"},
+		{name: "width zero", field: "width", value: "0"},
+		{name: "fractional frames", field: "num_frames", value: "9.5"},
+		{name: "fps zero", field: "fps", value: "0"},
+		{name: "too many steps", field: "num_inference_steps", value: "201"},
+		{name: "too many outputs", field: "num_outputs_per_prompt", value: "11"},
+		{name: "seed overflow", field: "seed", value: "9223372036854775808"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := []videoFormPart{}
+			if tc.name != "missing prompt" {
+				parts = append(parts, videoFormPart{name: "prompt", value: "a cat"})
+			}
+			if tc.field != "" {
+				parts = append(parts, videoFormPart{name: tc.field, value: tc.value})
+			}
+			body, ct := buildVideoForm(t, parts...)
+			if _, err := parser.ParseRequest(context.Background(), body,
+				map[string]string{":path": "/v1/videos", contentType: ct}); err == nil {
+				t.Error("ParseRequest accepted invalid form")
+			}
+		})
+	}
+	body, ct := buildVideoForm(t, videoFormPart{name: "prompt", value: "a cat"})
+	for _, badCT := range []string{"application/json", "multipart/form-data"} {
+		if _, err := parser.ParseRequest(context.Background(), body,
+			map[string]string{":path": "/v1/videos", contentType: badCT}); err == nil {
+			t.Errorf("ParseRequest accepted content-type %q", badCT)
+		}
+	}
+	if _, err := parser.ParseRequest(context.Background(), body[:len(body)-20],
+		map[string]string{":path": "/v1/videos", contentType: ct}); err == nil {
+		t.Error("ParseRequest accepted a truncated form")
+	}
+}
+
+func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "add a hat"},
+		videoFormPart{name: "n", value: "2"},
+		videoFormPart{name: "image", value: string([]byte{0, 255, '\r', '\n'}), filename: "input.png", mediaType: "image/png"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", contentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &fwkrh.ImagesGenerationsRequest{Prompt: "add a hat", N: ptr.To[int64](2)}
+	if diff := cmp.Diff(want, result.Body.Images); diff != "" {
+		t.Errorf("Images mismatch (-want +got):\n%s", diff)
+	}
+	raw, ok := result.Body.Payload.(fwkrh.RawPayload)
+	if !ok || !bytes.Equal(raw, body) {
+		t.Errorf("Payload = %T, want unchanged RawPayload", result.Body.Payload)
+	}
+}
+
+func BenchmarkVideoParseRequest(b *testing.B) {
+	media := strings.Repeat("m", 1<<20)
+	for _, tc := range []struct {
+		name, path string
+		parts      []videoFormPart
+	}{
+		{name: "videos/1MiB-media", path: "/v1/videos", parts: []videoFormPart{
+			{name: "prompt", value: strings.Repeat("a cinematic shot ", 16)},
+			{name: "model", value: "wan-t2v"},
+			{name: "width", value: "1280"}, {name: "height", value: "720"},
+			{name: "num_frames", value: "80"}, {name: "fps", value: "16"},
+			{name: "num_inference_steps", value: "40"},
+			{name: "input_reference", value: media, filename: "ref.mp4", mediaType: "video/mp4"},
+		}},
+		{name: "images-edits/1MiB-media", path: "/v1/images/edits", parts: []videoFormPart{
+			{name: "prompt", value: strings.Repeat("a cinematic shot ", 16)},
+			{name: "n", value: "2"},
+			{name: "image", value: media, filename: "in.png", mediaType: "image/png"},
+		}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			body, ct := buildVideoForm(b, tc.parts...)
+			headers := map[string]string{":path": tc.path, contentType: ct}
+			parser := NewOpenAIParser()
+			b.SetBytes(int64(len(body)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.ParseRequest(context.Background(), body, headers); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

@@ -128,6 +128,29 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 	}
 }
 
+func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
+	raw := []byte("--test\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nalias\r\n" +
+		"--test\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat\r\n--test--\r\n")
+	parser := openai.NewOpenAIParser()
+	parsed, err := parser.ParseRequest(context.Background(), raw, map[string]string{
+		":path": "/v1/videos", "content-type": "multipart/form-data; boundary=test",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "alias", parsed.Body.Model)
+	require.IsType(t, fwkrh.RawPayload(nil), parsed.Body.Payload)
+
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{RawBody: raw}, Parser: parser,
+		IncomingModelName: "alias", TargetModelName: "backend",
+	}
+	director := &Director{}
+	require.NoError(t, director.modelRewriteIfNeeded(context.Background(), reqCtx, parsed.Body))
+	require.False(t, parsed.Body.Mutated)
+	require.NoError(t, director.repackage(context.Background(), reqCtx, parsed.Body))
+	require.Equal(t, raw, reqCtx.Request.RawBody)
+	require.Equal(t, len(raw), reqCtx.RequestSize)
+}
+
 // --- Mocks ---
 
 type mockAdmissionController struct {
