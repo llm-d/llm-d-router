@@ -35,8 +35,9 @@ import (
 )
 
 type mockTokenizer struct {
-	renderFunc     func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
-	renderChatFunc func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
+	renderFunc          func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
+	renderChatFunc      func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
+	renderResponsesFunc func(payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 func (m *mockTokenizer) Render(_ context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
@@ -48,6 +49,13 @@ func (m *mockTokenizer) RenderChat(_ context.Context, payload fwkrh.RequestPaylo
 }
 
 func (m *mockTokenizer) RenderMessages(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	return m.RenderChat(ctx, payload)
+}
+
+func (m *mockTokenizer) RenderResponses(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	if m.renderResponsesFunc != nil {
+		return m.renderResponsesFunc(payload)
+	}
 	return m.RenderChat(ctx, payload)
 }
 

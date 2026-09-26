@@ -48,6 +48,7 @@ const (
 	completionsRenderPath = "/v1/completions/render"
 	chatRenderPath        = "/v1/chat/completions/render"
 	messagesRenderPath    = "/v1/messages/render"
+	responsesRenderPath   = "/v1/responses/render"
 
 	// maxErrorBodySnippetBytes truncates non-2xx response bodies before
 	// embedding them in the returned error, so a misconfigured upstream that
@@ -106,6 +107,9 @@ type vllmConfig struct {
 	// MessagesRenderMode selects "auto" (default), "native" or "legacy" Messages rendering.
 	// The "legacy" value is deprecated.
 	MessagesRenderMode string `json:"messagesRenderMode,omitempty"`
+	// ResponsesRenderMode selects "auto" (default), "native" or "legacy" Responses rendering.
+	// The "legacy" value is deprecated.
+	ResponsesRenderMode string `json:"responsesRenderMode,omitempty"`
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
@@ -287,6 +291,11 @@ func (r *vllmHTTPRenderer) RenderChat(ctx context.Context, payload fwkrh.Request
 // RenderMessages leaves Anthropic conversion to vLLM.
 func (r *vllmHTTPRenderer) RenderMessages(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	return r.renderConversation(ctx, messagesRenderPath, payload)
+}
+
+// RenderResponses leaves Responses rendering to vLLM.
+func (r *vllmHTTPRenderer) RenderResponses(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	return r.renderConversation(ctx, responsesRenderPath, payload)
 }
 
 func (r *vllmHTTPRenderer) renderConversation(ctx context.Context, path string, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {

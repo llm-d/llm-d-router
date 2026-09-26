@@ -574,8 +574,8 @@ func TestAutoMessagesDiscoveryWarmup(t *testing.T) {
 	legacy, err := backend.legacyMessages.useLegacy(ctx, backend.tk, "main")
 	require.NoError(t, err)
 	require.False(t, legacy)
-	require.Equal(t, []string{messagesRenderPath, chatRenderPath, chatRenderPath}, calls)
-	require.Equal(t, []string{"Bearer warmup-secret", "Bearer warmup-secret", "Bearer warmup-secret"}, auth)
+	require.Equal(t, []string{messagesRenderPath, responsesRenderPath, chatRenderPath, chatRenderPath}, calls)
+	require.Equal(t, []string{"Bearer warmup-secret", "Bearer warmup-secret", "Bearer warmup-secret", "Bearer warmup-secret"}, auth)
 }
 
 func TestMessagesDiscoveryLive(t *testing.T) {
