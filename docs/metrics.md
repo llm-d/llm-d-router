@@ -202,9 +202,10 @@ candidate rather than the chosen one, which bounds the reuse available to any ro
 ### Multimodal encoder cache
 
 These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an
-EPP-side LRU of multimodal item hashes per endpoint to estimate model-server encoder-cache locality.
-It does not report raw encoder metrics from the model server. The metric families are registered
-when the producer is created; observations require multimodal cache lookups.
+EPP-side, reference-aware cache model of multimodal item hashes per endpoint to estimate
+model-server encoder-cache locality. It does not report raw encoder metrics from the model server.
+The metric families are registered when the producer is created; observations require multimodal
+cache lookups.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|

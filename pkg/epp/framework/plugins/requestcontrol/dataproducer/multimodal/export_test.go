@@ -17,6 +17,7 @@ limitations under the License.
 package multimodal
 
 import (
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
@@ -26,7 +27,7 @@ func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
 	defer p.mutex.RUnlock()
 	snapshot := map[string]map[string]struct{}{}
 	for pod, podCache := range p.caches {
-		for _, hash := range podCache.Keys() {
+		for _, hash := range podCache.keys() {
 			if snapshot[hash] == nil {
 				snapshot[hash] = map[string]struct{}{}
 			}
@@ -40,6 +41,6 @@ func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	for _, pod := range pods {
-		p.getOrCreatePodCache(pod.String()).Add(hash, struct{}{})
+		p.getOrCreatePodCache(pod.String()).commit(p.cacheItem(attrmm.MatchItem{Hash: hash, Size: 1}))
 	}
 }
