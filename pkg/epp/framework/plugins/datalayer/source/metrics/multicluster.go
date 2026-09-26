@@ -67,6 +67,13 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 	if err != nil {
 		return nil, err
 	}
+	parser := parseBoundedMetrics
+	if len(cfg.Families) > 0 {
+		filter := newFamilyFilter(cfg.Families)
+		parser = func(r io.Reader) (PrometheusMetricMap, error) {
+			return filter.parse(io.LimitReader(r, maxResponseBytes))
+		}
+	}
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
@@ -75,5 +82,5 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MultiClusterMetricsDataSourceType, name, parseBoundedMetrics, intervalOpt)
+		MultiClusterMetricsDataSourceType, name, parser, intervalOpt)
 }

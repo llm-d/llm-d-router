@@ -17,21 +17,26 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	sourcehttp "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 // The factory returns an HTTP metrics source under the distinct multicluster type.
 func TestMultiClusterMetricsDataSourceFactory(t *testing.T) {
 	p, err := MultiClusterMetricsDataSourceFactory("multicluster-metrics", nil, nil)
 	require.NoError(t, err)
-	require.IsType(t, &http.HTTPDataSource[PrometheusMetricMap]{}, p)
+	require.IsType(t, &sourcehttp.HTTPDataSource[PrometheusMetricMap]{}, p)
 	require.Equal(t, MultiClusterMetricsDataSourceType, p.TypedName().Type)
 	require.Equal(t, "multicluster-metrics", p.TypedName().Name)
 }
@@ -48,6 +53,24 @@ func TestMultiClusterMetricsDataSourceFactoryHonorsInterval(t *testing.T) {
 	dec := json.NewDecoder(strings.NewReader(`{"interval":"2s"}`))
 	p, err := MultiClusterMetricsDataSourceFactory("multicluster-metrics", dec, nil)
 	require.NoError(t, err)
-	src := p.(*http.HTTPDataSource[PrometheusMetricMap])
+	src := p.(*sourcehttp.HTTPDataSource[PrometheusMetricMap])
 	require.Equal(t, 2*time.Second, src.Interval())
+}
+
+func TestMultiClusterMetricsDataSourceFactoryFiltersFamilies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("# TYPE selected gauge\nselected 1\n# TYPE other gauge\nother 2\n"))
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	dec := json.NewDecoder(strings.NewReader(`{"scheme":"http","families":["selected"]}`))
+	p, err := MultiClusterMetricsDataSourceFactory("multicluster-metrics", dec, nil)
+	require.NoError(t, err)
+	src := p.(*sourcehttp.HTTPDataSource[PrometheusMetricMap])
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: u.Host}, nil)
+	got, err := src.Poll(context.Background(), ep)
+	require.NoError(t, err)
+	require.Equal(t, []string{"selected"}, sortedKeys(got))
 }
