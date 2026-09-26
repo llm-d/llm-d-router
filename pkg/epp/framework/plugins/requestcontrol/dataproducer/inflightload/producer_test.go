@@ -1515,3 +1515,164 @@ func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 
 	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
 }
+
+// testPromptTokens is the prompt length of every makeMultimodalRequest request.
+const testPromptTokens = 32
+
+// makeMultimodalRequest builds a single-prompt request of testPromptTokens token
+// IDs carrying the given multimodal placeholder spans.
+func makeMultimodalRequest(requestID string, features ...fwkrh.MultiModalFeature) *fwksched.InferenceRequest {
+	req := makeTokenRequest(requestID, testPromptTokens)
+	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = features
+	return req
+}
+
+// A 32-token prompt holding a 10-token image at [4,14) and a 6-token audio clip
+// at [20,26): 16 multimodal tokens, 16 text tokens.
+var (
+	testImage = fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Offset: 4, Length: 10}
+	testAudio = fwkrh.MultiModalFeature{Modality: fwkrh.ModalityAudio, Offset: 20, Length: 6}
+)
+
+func TestUncachedNonTextTokens(t *testing.T) {
+	t.Parallel()
+
+	withMatch := func(matchBlocks int) fwksched.Endpoint {
+		ep := newStubSchedulingEndpoint("ep")
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(matchBlocks, 8, 4))
+		return ep
+	}
+	twoPrompts := makeMultimodalRequest("two", testImage)
+	twoPrompts.Body.TokenizedRequest.Prompts = append(twoPrompts.Body.TokenizedRequest.Prompts,
+		fwkrh.PromptTokens{TokenIDs: make([]uint32, testPromptTokens), MultiModalFeatures: []fwkrh.MultiModalFeature{testAudio}})
+
+	tests := []struct {
+		name     string
+		endpoint fwksched.Endpoint
+		request  *fwksched.InferenceRequest
+		want     int64
+	}{
+		{"nil request", withMatch(0), nil, 0},
+		{"text-only request", withMatch(0), makeTokenRequest("text", testPromptTokens), 0},
+		{"no match info counts every placeholder", newStubSchedulingEndpoint("ep"), makeMultimodalRequest("r", testImage, testAudio), 16},
+		{"cached prefix ends inside the image", withMatch(2), makeMultimodalRequest("r", testImage, testAudio), 6 + 6},
+		{"cached prefix covers the image", withMatch(4), makeMultimodalRequest("r", testImage, testAudio), 6},
+		{"cached prefix covers everything", withMatch(8), makeMultimodalRequest("r", testImage, testAudio), 0},
+		{"several prompts count every placeholder", withMatch(8), twoPrompts, 16},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, uncachedNonTextTokens(tc.endpoint, tc.request, attrprefix.PrefixCacheMatchInfoDataKey))
+		})
+	}
+}
+
+func TestInFlightLoadProducer_NonTextTokensFollowTokens(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	newEndpoint := func(name string) *stubSchedulingEndpoint {
+		// 2 of 8 blocks of 4 cached: the first 8 tokens, which cut the image at 8.
+		ep := newStubSchedulingEndpoint(name)
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(2, 8, 4))
+		return ep
+	}
+	resultFor := func(ep fwksched.Endpoint) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
+			},
+		}
+	}
+
+	t.Run("added with the tokens and released at end of stream", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newEndpoint("mm-endpoint")
+		id := fullEndpointName("mm-endpoint")
+		require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: ep}))
+
+		req := makeMultimodalRequest("mm", testImage, testAudio)
+		res := resultFor(ep)
+		require.NoError(t, producer.PreRequest(ctx, req, res))
+
+		// Uncached: 24 input tokens, 12 of them placeholders, plus the text output estimate.
+		require.Equal(t, int64(24)+UnknownOutputTokens, producer.tokenTracker.get(id))
+		require.Equal(t, int64(12), producer.nonTextTokenTracker.get(id))
+		val, ok := ep.Get(producer.dk)
+		require.True(t, ok)
+		require.Equal(t, int64(12), val.(*attrconcurrency.InFlightLoad).NonTextTokens)
+
+		req.SchedulingResult = res
+		producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+		require.Equal(t, int64(0), producer.tokenTracker.get(id))
+		require.Equal(t, int64(0), producer.nonTextTokenTracker.get(id))
+	})
+
+	t.Run("released with the tokens at start of stream when output is excluded", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		producer.addEstimatedOutputTokens = false
+		ep := newEndpoint("mm-no-output")
+		id := fullEndpointName("mm-no-output")
+
+		req := makeMultimodalRequest("mm", testImage, testAudio)
+		res := resultFor(ep)
+		require.NoError(t, producer.PreRequest(ctx, req, res))
+		require.Equal(t, int64(12), producer.nonTextTokenTracker.get(id))
+
+		req.SchedulingResult = res
+		producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+		require.Equal(t, int64(1), producer.requestTracker.get(id), "request still in flight")
+		require.Equal(t, int64(0), producer.tokenTracker.get(id))
+		require.Equal(t, int64(0), producer.nonTextTokenTracker.get(id))
+	})
+
+	t.Run("projected for the request being scheduled", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newEndpoint("mm-produce")
+
+		require.NoError(t, producer.Produce(ctx, makeMultimodalRequest("mm", testImage, testAudio), []fwksched.Endpoint{ep}))
+		val, ok := ep.Get(producer.uncachedRequestTokensDk)
+		require.True(t, ok)
+		require.Equal(t, &attrconcurrency.UncachedRequestTokens{Tokens: 24 + UnknownOutputTokens, NonTextTokens: 12}, val)
+	})
+}
+
+// TestInFlightLoadProducer_NonTextTokensByRole mirrors the role split in
+// estimateRequestTokens: output is text, so an endpoint charged only for output
+// carries no multimodal tokens.
+func TestInFlightLoadProducer_NonTextTokensByRole(t *testing.T) {
+	t.Parallel()
+
+	req := makeMultimodalRequest("mm", testImage, testAudio)
+	producer := newTestProducer(t)
+
+	require.Equal(t, int64(16), producer.estimateRequestNonTextTokens(newStubSchedulingEndpointWithRole("p", bylabel.RolePrefill), req))
+	require.Equal(t, int64(16), producer.estimateRequestNonTextTokens(newStubSchedulingEndpoint("mono"), req))
+	require.Equal(t, int64(0), producer.estimateRequestNonTextTokens(newStubSchedulingEndpointWithRole("d", bylabel.RoleDecode), req),
+		"decode-only is charged the output estimate alone")
+
+	producer.addEstimatedOutputTokens = false
+	require.Equal(t, int64(16), producer.estimateRequestNonTextTokens(newStubSchedulingEndpointWithRole("d", bylabel.RoleDecode), req),
+		"without an output estimate decode-only is charged the prompt, placeholders included")
+}
+
+func TestInFlightLoadProducer_CrossReplicaNonTextTokens(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	id := fullEndpointName("replica-endpoint")
+	producer.tokenTracker.add(id, 30)
+	producer.nonTextTokenTracker.add(id, 12)
+
+	spec := producer.CrossReplicaState()
+	require.Equal(t, &attrconcurrency.InFlightLoad{Tokens: 30, NonTextTokens: 12}, spec.Supply(id)())
+	require.Equal(t, &attrconcurrency.InFlightLoad{Tokens: 40, Requests: 3, NonTextTokens: 15}, spec.Aggregate([]any{
+		&attrconcurrency.InFlightLoad{Tokens: 30, Requests: 2, NonTextTokens: 12},
+		&attrconcurrency.InFlightLoad{Tokens: 10, Requests: 1, NonTextTokens: 3},
+	}))
+}
