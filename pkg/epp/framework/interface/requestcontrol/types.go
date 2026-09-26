@@ -46,6 +46,9 @@ const (
 	// classified: a half-close that reaches the EPP before its cancellation propagates, or an
 	// EPP-side failure.
 	TerminationCauseError TerminationCause = "error"
+	// TerminationCauseAnswered is a request the EPP answered itself without forwarding it, such
+	// as a "Prefer: reserve-endpoint" request. No model server response exists.
+	TerminationCauseAnswered TerminationCause = "answered"
 )
 
 // Response contains information from the response received to be passed to the Response requestcontrol plugins
