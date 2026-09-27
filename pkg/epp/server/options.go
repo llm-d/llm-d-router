@@ -147,10 +147,11 @@ type Options struct {
 	//
 	// Configuration.
 	//
-	ConfigFile     string   // The path to the configuration file.
-	ConfigText     string   // The configuration specified as text, in lieu of a file.
-	ObjectivesFile string   // Objectives (name, priority) loaded in file-discovery mode.
-	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
+	ConfigFile      string   // The path to the configuration file.
+	ConfigText      string   // The configuration specified as text, in lieu of a file.
+	WatchConfigFile bool     // Watches ConfigFile and reloads supported changes.
+	ObjectivesFile  string   // Objectives (name, priority) loaded in file-discovery mode.
+	FeatureGates    []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
 	ValidateConfig           bool // Validates the configuration and exits without starting the EPP.
@@ -298,6 +299,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
 	fs.StringVar(&opts.ObjectivesFile, "objectives-file", opts.ObjectivesFile,
 		"YAML file of objectives (name, priority) loaded at startup. File-discovery mode only.")
+	fs.BoolVar(&opts.WatchConfigFile, "watch-config-file", opts.WatchConfigFile, "Watches --config-file and reloads supported scheduling profile changes.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
 		"Comma-separated list of feature gates to enable or disable, in kubelet style "+
 			"(e.g., 'flowControl=true'). A bare name enables the gate. Applied after the "+
@@ -472,6 +474,9 @@ func (opts *Options) Validate() error {
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
 		return fmt.Errorf("both the %q and %q flags cannot be set at the same time", "config-file", "config-text")
+	}
+	if opts.WatchConfigFile && opts.ConfigFile == "" {
+		return fmt.Errorf("flag %q requires %q", "watch-config-file", "config-file")
 	}
 
 	if opts.MetricsClientCAFile != "" && opts.MetricsCertDir == "" {

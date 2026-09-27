@@ -140,6 +140,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(LlmdCrossReplicaLastPublishTimestamp)
 		metrics.Registry.MustRegister(LlmdCrossReplicaPublishCycleDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
+		metrics.Registry.MustRegister(configReloadTotal)
+		metrics.Registry.MustRegister(configActiveGeneration)
+		metrics.Registry.MustRegister(configLastReloadSuccess)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -149,6 +152,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 // Just for integration test
 func Reset() {
 	// Reset other metrics
+	configReloadTotal.Reset()
+	configActiveGeneration.Set(0)
+	configLastReloadSuccess.Set(0)
 	llmdRequestCounter.Reset()
 	llmdRequestErrCounter.Reset()
 	llmdFairnessIDResolvedCounter.Reset()

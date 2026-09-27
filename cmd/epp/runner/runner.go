@@ -216,7 +216,10 @@ type Runner struct {
 	cancelServing context.CancelFunc
 	PluginHandle  fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
-	rawConfig *configapiv1.EndpointPickerConfig
+	rawConfig           *configapiv1.EndpointPickerConfig
+	startupSourceConfig *configapiv1.EndpointPickerConfig
+	startupConfigBytes  []byte
+	reloadableScheduler *scheduling.ReloadableScheduler
 
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
@@ -326,6 +329,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := validateKubernetesDiscoveryFlags(opts); err != nil {
 		setupLog.Error(err, "Failed to validate flags")
 		return err
+	}
+	if opts.WatchConfigFile {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
 	}
 
 	r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
@@ -555,7 +563,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := r.newRuntimeScheduler(opts, scheduling.NewSchedulerWithConfig(r.schedulerConfig))
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
 		setupLog.Error(err, "Plugin stability validation failed")
@@ -612,6 +620,9 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
+	if err := r.startConfigWatcher(ctx, opts); err != nil {
+		return nil, nil, err
+	}
 	return mgr, ds, nil
 }
 
@@ -926,6 +937,9 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	setupLog.Info("Data layer: ENABLED")
 
 	r.rawConfig = rawConfig
+	// Reload comparisons need a copy without the system defaults added during plugin setup.
+	r.startupSourceConfig = rawConfig.DeepCopy()
+	r.startupConfigBytes = append([]byte(nil), configBytes...)
 	return rawConfig, nil
 }
 
@@ -1357,6 +1371,11 @@ func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, ra
 // SIGTERM starts GracefulStop immediately, without a DrainTimeout window or
 // readiness draining. Only already-open streams finish.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	if opts.WatchConfigFile {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
 	r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
 	defer r.cancelServing()
 
@@ -1426,7 +1445,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := r.newRuntimeScheduler(opts, scheduling.NewSchedulerWithConfig(r.schedulerConfig))
 
 	// Per-request priority comes from --objectives-file; a request whose
 	// objective is not loaded gets Director.defaultPriority.
@@ -1486,6 +1505,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	})
 
 	g := newRunnableGroup()
+	if err := r.startConfigWatcher(ctx, opts); err != nil {
+		return err
+	}
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
