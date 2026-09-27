@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -262,4 +263,44 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(finalize()).To(Succeed())
 		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
+
+	It("should preserve streamed content chunks without usage", func() {
+		// The common streamed frame: the guard skips it before any unmarshalling.
+		body := []byte(`data: {"choices":[{"delta":{"content":" the"}}]}` + "\n\ndata: [DONE]\n")
+		Expect(bytes.Contains(body, usageKey)).To(BeFalse())
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
+
+	It("should preserve a streamed content chunk that gets past the guard", func() {
+		// JSON escapes any quote inside a string, so free text only produces the
+		// `"usage"` byte sequence when a whole string value is the word itself,
+		// which is what a model streaming that word one token at a time sends.
+		// This frame is valid JSON, so the guard matches and the parse does run;
+		// it must still come back byte-for-byte unchanged.
+		body := []byte(`data: {"choices":[{"delta":{"content":"usage"}}]}` + "\n")
+		Expect(bytes.Contains(body, usageKey)).To(BeTrue())
+		Expect(json.Valid(bytes.TrimPrefix(bytes.TrimRight(body, "\n"), []byte("data: ")))).To(BeTrue())
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
 })
+
+// Streamed responses send one SSE frame per token and only the final frame carries
+// usage, so these two benchmarks bracket the per-frame cost of the rewrite.
+var (
+	benchContentFrame = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[{"index":0,"delta":{"content":" the"},"logprobs":null,"finish_reason":null}]}` + "\n")
+	benchUsageFrame   = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[],"usage":{"prompt_tokens":1024,"completion_tokens":256,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}}` + "\n")
+)
+
+func BenchmarkReplaceCachedTokensSSELineContentFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchContentFrame, 512)
+	}
+}
+
+func BenchmarkReplaceCachedTokensSSELineUsageFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchUsageFrame, 512)
+	}
+}

@@ -51,7 +51,7 @@ var _ = Describe("Reverse Proxy", func() {
 	When("x-prefiller-url is not present", func() {
 		DescribeTable("should forward requests to decode server",
 
-			func(path string, secureProxy bool) {
+			func(path string, secureServing bool) {
 
 				ctx := newTestContext()
 
@@ -68,7 +68,7 @@ var _ = Describe("Reverse Proxy", func() {
 				cfg := Config{
 					Port:          "0",
 					DecoderURL:    targetURL,
-					SecureServing: secureProxy,
+					SecureServing: secureServing,
 				}
 				proxy := NewProxy(cfg)
 
@@ -86,9 +86,11 @@ var _ = Describe("Reverse Proxy", func() {
 
 				<-proxy.readyCh
 
+				// The proxy generates its own self-signed certificate when
+				// CertPath is unset, so the client has no CA to verify against.
 				tr := &http.Transport{
 					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, // Skip certificate verification
+						InsecureSkipVerify: true, //nolint:gosec // proxy's self-signed cert is not exposed to the test for trust
 					},
 				}
 				client := &http.Client{
@@ -97,7 +99,7 @@ var _ = Describe("Reverse Proxy", func() {
 				}
 
 				proxyAddr := proxy.addr.String() + path
-				if secureProxy {
+				if secureServing {
 					proxyAddr = "https://" + proxyAddr
 				} else {
 					proxyAddr = "http://" + proxyAddr
@@ -116,19 +118,19 @@ var _ = Describe("Reverse Proxy", func() {
 				<-stoppedCh
 			},
 
-			Entry("when the path is /v1/chat/completions and secure proxy is false", "/v1/chat/completions", false),
-			Entry("when the path is /v1/completions and secure proxy is false", "/v1/completions", false),
-			Entry("when the path is /v1/messages and secure proxy is false", "/v1/messages", false),
-			Entry("when the path is /v1/embeddings and secure proxy is false", "/v1/embeddings", false),
-			Entry("when the path is /score and secure proxy is false", "/score", false),
-			Entry("when the path is /healthz and secure proxy is false", "/healthz", false),
+			Entry("when the path is /v1/chat/completions and secure serving is false", "/v1/chat/completions", false),
+			Entry("when the path is /v1/completions and secure serving is false", "/v1/completions", false),
+			Entry("when the path is /v1/messages and secure serving is false", "/v1/messages", false),
+			Entry("when the path is /v1/embeddings and secure serving is false", "/v1/embeddings", false),
+			Entry("when the path is /score and secure serving is false", "/score", false),
+			Entry("when the path is /healthz and secure serving is false", "/healthz", false),
 
-			Entry("when the path is /v1/chat/completions and secure proxy is true", "/v1/chat/completions", true),
-			Entry("when the path is /v1/completions and secure proxy is true", "/v1/completions", true),
-			Entry("when the path is /v1/messages and secure proxy is true", "/v1/messages", true),
-			Entry("when the path is /v1/embeddings and secure proxy is true", "/v1/embeddings", true),
-			Entry("when the path is /score and secure proxy is true", "/score", true),
-			Entry("when the path is /healthz and secure proxy is true", "/healthz", true),
+			Entry("when the path is /v1/chat/completions and secure serving is true", "/v1/chat/completions", true),
+			Entry("when the path is /v1/completions and secure serving is true", "/v1/completions", true),
+			Entry("when the path is /v1/messages and secure serving is true", "/v1/messages", true),
+			Entry("when the path is /v1/embeddings and secure serving is true", "/v1/embeddings", true),
+			Entry("when the path is /score and secure serving is true", "/score", true),
+			Entry("when the path is /healthz and secure serving is true", "/healthz", true),
 		)
 	})
 

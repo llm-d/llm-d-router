@@ -19,7 +19,7 @@ log_level: 2
 
 # -------------------------------------------------------------------------------
 # server: listener for incoming OpenAI-compatible requests. Serves TLS unless
-# secure_coordinator is false.
+# secure_serving is false.
 # -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
@@ -38,10 +38,10 @@ server:
   # env: COORDINATOR_SERVER_METRICS_CERT_DIR
   # metrics_cert_dir: ""
 
-  # secure_coordinator serves the inference listener over TLS. Default true.
-  # The --secure-coordinator CLI flag overrides this field.
-  # env: COORDINATOR_SERVER_SECURE_COORDINATOR
-  # secure_coordinator: true
+  # secure_serving serves the inference listener over TLS. Default true.
+  # The --secure-serving CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_SERVING
+  # secure_serving: true
 
   # cert_path is the directory containing tls.crt and tls.key for the inference
   # listener. Empty generates a self-signed certificate, which is only suitable
@@ -272,11 +272,6 @@ pipeline:
     # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
-    #   params:
-    #     # use_openai_format mirrors gateway.use_openai_format but lets the
-    #     # step override per-pipeline if you want a different wire format
-    #     # for the text-only fast path.
-    #     use_openai_format: true
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -308,7 +303,10 @@ pipeline:
     # -------------------------------------------------------------------
     - type: prefill
       # params:
-      #   use_openai_format: true   # see notes above
+      #   use_openai_format mirrors gateway.use_openai_format but lets the
+      #   step override per-pipeline if you want a different wire format
+      #   for the text-only fast path.
+      #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
 
@@ -317,5 +315,4 @@ pipeline:
     # -------------------------------------------------------------------
     - type: decode
       # params:
-      #   use_openai_format: true   # see notes above
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector

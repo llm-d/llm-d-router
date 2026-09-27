@@ -41,7 +41,7 @@ import (
 // the second request (carrying that token) is pinned to the same endpoint.
 func TestSessionAffinityFilter_RequestFlow(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -90,7 +90,7 @@ dataLayer:
 // that token, pins to the same endpoint.
 func TestSessionAffinityScorer_RequestFlow(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -169,7 +169,7 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 // pdConfigBase is the shared EPP config skeleton for PD session-affinity tests.
 // The caller must supply the disagg-profile-handler parameters block (%s).
 const pdConfigBase = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -360,7 +360,7 @@ func headerValue(setHeaders []*configPb.HeaderValueOption, key string) string {
 // over the attribute when both are present.
 func TestSessionAffinityFilter_SessionIDHeaderStrategy(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -392,7 +392,7 @@ dataLayer:
 // rather than hard-narrowing candidates.
 func TestSessionAffinityScorer_SessionIDHeaderStrategy(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser

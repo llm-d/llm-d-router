@@ -69,7 +69,8 @@ const (
 	tlsInsecureSkipVerify     = "tls-insecure-skip-verify"
 	tlsMinVersion             = "tls-min-version"
 	tlsCipherSuites           = "tls-cipher-suites"
-	secureServing             = "secure-proxy"
+	secureServing             = "secure-serving"
+	secureProxy               = "secure-proxy"
 	certPath                  = "cert-path"
 	inferencePool             = "inference-pool"
 	poolGroup                 = "pool-group"
@@ -122,7 +123,8 @@ type yamlConfiguration struct {
 	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
 	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-proxy,omitempty"`
+	SecureServing           *bool    `json:"secure-serving,omitempty"`
+	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
 	CertPath                string   `json:"cert-path,omitempty"`
 	EnableTLS               []string `json:"enable-tls,omitempty"`
 	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
@@ -282,15 +284,17 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
-	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Enables secure proxy. Defaults to true.")
-	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "The path to the certificate for secure proxy. The certificate and private key files are assumed to be named tls.crt and tls.key, respectively. If not set, and secureProxy is enabled, then a self-signed certificate is used (for testing).")
+	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
+	fs.BoolVar(&opts.SecureServing, secureProxy, opts.SecureServing, "Deprecated: use --secure-serving instead.")
+	_ = fs.MarkDeprecated(secureProxy, "use --secure-serving instead")
+	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
-	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty (the default) serves metrics over plain HTTP. Independent of --secure-proxy/--cert-path, which apply to the data-plane listener.")
+	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -344,9 +348,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&opts.enableTLS, enableTLS, opts.enableTLS, "stages to enable TLS for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringSliceVar(&opts.tlsInsecureSkipVerify, tlsInsecureSkipVerify, opts.tlsInsecureSkipVerify, "stages to skip TLS verification for. Supported: "+supportedTLSStageNamesStr+". Can be specified multiple times or as comma-separated values.")
 	fs.StringVar(&opts.tlsMinVersion, tlsMinVersion, opts.tlsMinVersion,
-		"minimum TLS version for secure proxy (e.g., VersionTLS12, VersionTLS13)")
+		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12.")
 	fs.StringSliceVar(&opts.tlsCipherSuites, tlsCipherSuites, opts.tlsCipherSuites,
-		"comma-separated list of TLS cipher suites for secure proxy (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable")
+		"Comma-separated list of TLS cipher suites for secure serving (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.")
 	fs.StringVar(&opts.inferencePool, inferencePool, opts.inferencePool, "InferencePool in namespace/name or name format (e.g., default/my-pool or my-pool). A single name implies the 'default' namespace. Can also use INFERENCE_POOL env var.")
 
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
@@ -374,10 +378,14 @@ var tlsVersions = map[string]uint16{
 }
 
 func parseTLSVersion(version string) (uint16, error) {
-	if value, ok := tlsVersions[version]; ok {
-		return value, nil
+	value, ok := tlsVersions[version]
+	if !ok {
+		return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", version)
 	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", version)
+	if value < tls.VersionTLS12 {
+		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", version)
+	}
+	return value, nil
 }
 
 func parseCipherSuites(names []string) ([]uint16, error) {
@@ -843,8 +851,13 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
 	}
 
-	if cfg.SecureServing != nil && !opts.isFlagSet(secureServing) {
-		opts.SecureServing = *cfg.SecureServing
+	if !opts.isSecureServingFlagSet() {
+		switch {
+		case cfg.SecureServing != nil:
+			opts.SecureServing = *cfg.SecureServing
+		case cfg.SecureProxy != nil:
+			opts.SecureServing = *cfg.SecureProxy
+		}
 	}
 	if cfg.CertPath != "" && !opts.isFlagSet(certPath) {
 		opts.CertPath = cfg.CertPath
@@ -893,6 +906,10 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing
 	}
+}
+
+func (opts *Options) isSecureServingFlagSet() bool {
+	return opts.isFlagSet(secureServing) || opts.isFlagSet(secureProxy)
 }
 
 // isFlagSet returns true if flag was set by user

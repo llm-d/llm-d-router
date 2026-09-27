@@ -11,6 +11,10 @@
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
+      {{- with .Values.router.epp.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
@@ -135,6 +139,10 @@
           {{- if not .Values.router.monitoring.prometheus.auth.enabled }}
               - --metrics-endpoint-auth=false
           {{- end }}
+          {{- with .Values.router.epp.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.router.epp.resources }}
           resources:
             {{ toYaml . | nindent 12 }}
@@ -150,34 +158,24 @@
             {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}
           livenessProbe:
-          {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
               port: {{ $grpcHealthPort }}
               service: liveness
-          {{- else }}
-            grpc:
-              port: {{ $grpcHealthPort }}
-              service: inference-extension
-          {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-          {{- if gt (.Values.router.epp.replicas | int) 1 }}
             grpc:
               port: {{ $grpcHealthPort }}
               service: readiness
-          {{- else }}
-            grpc:
-              port: {{ $grpcHealthPort }}
-              service: inference-extension
-          {{- end }}
             periodSeconds: 2
-          # Allow in-flight gRPC streams to drain and give Envoy health checks
-          # time to detect termination and shift traffic to standby endpoints before SIGTERM.
+          {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+          # Give endpoint removal time to propagate before SIGTERM.
+          # Kubelet performs the delay without a shell in the distroless EPP image.
           lifecycle:
             preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
+              sleep:
+                seconds: 5
+          {{- end }}
           env:
             - name: NAMESPACE
               valueFrom:

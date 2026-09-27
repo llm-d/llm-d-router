@@ -37,7 +37,15 @@ type cachedTokensUsageRewriter struct {
 // OpenAI-compatible chat usage reports prompt cache hits at
 // usage.prompt_tokens_details.cached_tokens.
 // See: https://platform.openai.com/docs/guides/prompt-caching
-const promptTokensDetailsField = "prompt_tokens_details"
+const usagePromptDetailsField = "prompt_tokens_details"
+
+// usageKey is the JSON key that must be present before a frame can carry usage.
+// Streamed responses send one frame per token and only the final frame has usage,
+// so scanning for this is much cheaper than unmarshalling every frame to find out.
+// The openai and anthropic stream parsers scan for the same word without the
+// quotes; a JSON serializer always writes the key quoted, so keeping them here
+// skips more content frames.
+var usageKey = []byte(`"usage"`)
 
 func newCachedTokensResponseWriter(
 	w http.ResponseWriter, cachedTokens int, streaming bool,
@@ -211,7 +219,7 @@ func extractCachedTokens(response map[string]any) (int, bool) {
 
 func cachedTokensFromUsage(usage map[string]any) (int, bool) {
 	// Only the documented OpenAI-compatible field is used as the source of truth.
-	details, ok := usage[promptTokensDetailsField].(map[string]any)
+	details, ok := usage[usagePromptDetailsField].(map[string]any)
 	if !ok {
 		return 0, false
 	}
@@ -302,6 +310,10 @@ func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		return line, true
 	}
+	if !bytes.Contains(data, usageKey) {
+		// No usage in this frame, so unmarshalling it could not change anything.
+		return line, true
+	}
 	// Only JSON data frames can carry usage; other SSE frames pass through.
 	replacedData, isJSON := replaceCachedTokensJSON(data, cachedTokens)
 	if !isJSON {
@@ -320,10 +332,10 @@ func setCachedTokens(response map[string]any, cachedTokens int) bool {
 		return false
 	}
 	changed := false
-	details, ok := usage[promptTokensDetailsField].(map[string]any)
+	details, ok := usage[usagePromptDetailsField].(map[string]any)
 	if !ok {
 		// Some decoder chunks omit details entirely; create the standard field.
-		usage[promptTokensDetailsField] = map[string]any{"cached_tokens": cachedTokens}
+		usage[usagePromptDetailsField] = map[string]any{"cached_tokens": cachedTokens}
 		return true
 	}
 	if current, ok := intValue(details["cached_tokens"]); !ok || current != cachedTokens {

@@ -179,7 +179,7 @@ func registerInTreePlugins() {
 The EPP is configured via an `EndpointPickerConfig`. First declare the plugin instance in the `plugins` section (with optional `parameters`), then reference it by name in a `schedulingProfiles` entry:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: label-selector-filter

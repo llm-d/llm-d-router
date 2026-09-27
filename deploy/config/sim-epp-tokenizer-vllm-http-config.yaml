@@ -2,7 +2,7 @@
 # and the precise-prefix-cache-producer + prefix-cache-scorer. Sidecar:
 #   command: ["vllm", "launch", "render"]
 #   args:    ["${MODEL_NAME}", "--port=8000"]
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer

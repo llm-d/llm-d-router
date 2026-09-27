@@ -128,6 +128,14 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
+	if len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL {
+		// kv-nixl always requests a remote-decode handoff, so missing
+		// kv_transfer_params means decode will recompute the whole prompt.
+		// Older engines (< v0.29.0) silently drop top-level transfer params
+		// on this route, which is the most common cause.
+		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", s.kv.Name(), "path", path)
+	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
@@ -172,23 +180,26 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		return body, nil
 
 	case reqcommon.APITypeVLLMGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
 		body := map[string]any{
-			"request_id": reqCtx.RequestID,
-			"token_ids":  reqCtx.TokenIDs,
-			"model":      reqCtx.Model,
+			"request_id":                    reqCtx.RequestID,
+			"token_ids":                     reqCtx.TokenIDs,
+			"model":                         reqCtx.Model,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		setGenerateTransferParams(reqcommon.CapSingleToken(body, format), kvParams, ecParams)
+		reqcommon.CapSingleToken(body, format)
 		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
+		}
+		if len(ecParams) > 0 {
+			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
 	default:
-		// resolveFormat only ever yields the three formats above; a new value
-		// reaching here is a programming error, not a client fault.
-		return nil, fmt.Errorf("unsupported request format %v", format)
+		// resolveFormat above never returns anything but the formats handled
+		// here, so this case is unreachable unless resolveFormat's contract
+		// changes.
+		return nil, unreachableFormatError(format)
 	}
 }
 

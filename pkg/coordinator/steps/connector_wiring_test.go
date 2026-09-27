@@ -33,8 +33,7 @@ import (
 
 // TestPrefillStep_ConnectorShapesPrefillBody verifies that the connector
 // selected via params controls the kv_transfer_params shape on the prefill
-// request. In generate format, kv_transfer_params lives inside
-// sampling_params.extra_args due to the vLLM workaround.
+// request. In generate format, kv_transfer_params is a top-level field.
 func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 	cases := []struct {
 		connector  string
@@ -66,10 +65,8 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 				body, _ := io.ReadAll(r.Body)
 				var parsed map[string]any
 				_ = json.Unmarshal(body, &parsed)
-				// In generate format, kv_transfer_params is in sampling_params.extra_args
-				samplingParams, _ := parsed["sampling_params"].(map[string]any)
-				extraArgs, _ := samplingParams["extra_args"].(map[string]any)
-				captured, _ = extraArgs["kv_transfer_params"].(map[string]any)
+				// In generate format, kv_transfer_params is a top-level field.
+				captured, _ = parsed["kv_transfer_params"].(map[string]any)
 				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
 			}))
 			defer srv.Close()
@@ -94,7 +91,7 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			}
 
 			if captured == nil {
-				t.Fatal("kv_transfer_params not found in sampling_params.extra_args")
+				t.Fatal("kv_transfer_params not found at top level of prefill body")
 			}
 			for f, want := range tc.wantFields {
 				got, ok := captured[f]
@@ -221,5 +218,19 @@ func TestDecodeStep_UnknownConnectorRejected(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
 	if _, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: "bogus"}); err == nil {
 		t.Fatal("expected error for unknown connector")
+	}
+}
+
+func TestDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false}); err == nil {
+		t.Fatal("expected error overriding use_openai_format")
+	}
+}
+
+func TestConditionalDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewConditionalDecodeStep(gwClient, map[string]any{"use_openai_format": true}); err == nil {
+		t.Fatal("expected error overriding use_openai_format")
 	}
 }

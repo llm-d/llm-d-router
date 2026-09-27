@@ -36,20 +36,23 @@ type tlsProfile struct {
 }
 
 // parseTLSProfile resolves TLS version and cipher suite names to their crypto/tls values.
-// An empty version uses TLS 1.2.
+// An empty version uses TLS 1.2. A version below TLS 1.2 is rejected.
 // An empty suite list uses the crypto/tls default.
 func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, error) {
 	profile := tlsProfile{minVersion: tls.VersionTLS12}
 	if minVersion != "" {
 		version, err := flag.TLSVersion(minVersion)
 		if err != nil {
-			return tlsProfile{}, fmt.Errorf("server: invalid tls_min_version %q: %w", minVersion, err)
+			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", minVersion, minVersion)
+		}
+		if version < tls.VersionTLS12 {
+			return tlsProfile{}, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", minVersion)
 		}
 		profile.minVersion = version
 	}
 	suites, err := flag.TLSCipherSuites(cipherSuites)
 	if err != nil {
-		return tlsProfile{}, fmt.Errorf("server: invalid tls_cipher_suites: %w", err)
+		return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: %w", err)
 	}
 	profile.cipherSuites = suites
 	return profile, nil
@@ -61,14 +64,19 @@ func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, erro
 // certificate is generated, which is often used for testing.
 func (s *Server) listenerTLSConfig(ctx context.Context) (*tls.Config, error) {
 	cfg := &tls.Config{
-		MinVersion:   s.tls.minVersion,
+		MinVersion:   tls.VersionTLS12,
 		CipherSuites: s.tls.cipherSuites,
+	}
+	// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+	// parseTLSProfile already rejects a configured version below TLS 1.2.
+	if s.tls.minVersion > tls.VersionTLS12 {
+		cfg.MinVersion = s.tls.minVersion
 	}
 
 	if s.certPath == "" {
 		cert, err := tlsutil.CreateSelfSignedTLSCertificate(serverLog)
 		if err != nil {
-			return nil, fmt.Errorf("server: create self-signed certificate: %w", err)
+			return nil, fmt.Errorf("create self-signed certificate: %w", err)
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 		return cfg, nil
@@ -78,12 +86,12 @@ func (s *Server) listenerTLSConfig(ctx context.Context) (*tls.Config, error) {
 	keyFile := filepath.Join(s.certPath, "tls.key")
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("server: load key pair from cert %q and key %q: %w", certFile, keyFile, err)
+		return nil, fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 	}
 
 	reloader, err := common.NewCertReloader(ctx, s.certPath, &cert)
 	if err != nil {
-		return nil, fmt.Errorf("server: start certificate reloader: %w", err)
+		return nil, fmt.Errorf("start certificate reloader: %w", err)
 	}
 	cfg.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return reloader.Get(), nil

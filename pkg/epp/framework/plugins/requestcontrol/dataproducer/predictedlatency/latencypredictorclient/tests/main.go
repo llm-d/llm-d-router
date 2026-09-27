@@ -18,9 +18,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"slices"
 	"strconv"
@@ -33,6 +34,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"golang.org/x/time/rate"
 )
+
+// testRunningMarker is the liveness file created at startup and removed on every exit path.
+const testRunningMarker = "/tmp/test_running"
 
 type TestMetrics struct {
 	TotalRequests         int64
@@ -88,7 +92,7 @@ func main() {
 	coalesceWindowMs := parseEnvInt("COALESCE_WINDOW_MS", 5)
 	maxCoalescedCallers := parseEnvInt("MAX_COALESCED_CALLERS", 50)
 
-	if err := os.WriteFile("/tmp/test_running", []byte("running"), 0644); err != nil {
+	if err := writeTestRunningMarker(testRunningMarker); err != nil {
 		log.Printf("Warning: could not create test_running marker: %v", err)
 	}
 	// Removed defer — cleaned up explicitly before all exit points to satisfy gocritic.
@@ -127,7 +131,7 @@ func main() {
 
 	if err := predictor.Start(testCtx); err != nil {
 		cancel()
-		os.Remove("/tmp/test_running")
+		os.Remove(testRunningMarker)
 		logger.Error(err, "Failed to start predictor")
 		return
 	}
@@ -158,7 +162,6 @@ func main() {
 	// ---------------------------------------------------------------
 	generatorWg.Go(func() {
 
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 		trainingTicker := time.NewTicker(time.Duration(trainingIntervalMs) * time.Millisecond)
 		defer trainingTicker.Stop()
 
@@ -175,7 +178,7 @@ func main() {
 					return
 				}
 
-				entries := generateTrainingBatch(rng, trainingBatchSize)
+				entries := generateTrainingBatch(trainingBatchSize)
 				atomic.AddInt64(&trainMetrics.TotalBatches, 1)
 				atomic.AddInt64(&trainMetrics.TotalEntries, int64(len(entries)))
 
@@ -419,40 +422,42 @@ func main() {
 
 	if failedReq > 0 {
 		logger.Info("WARNING: Test had failed prediction requests", "failed_count", failedReq)
-		os.Remove("/tmp/test_running")
+		os.Remove(testRunningMarker)
 		os.Exit(1)
 	}
 
-	os.Remove("/tmp/test_running")
+	os.Remove(testRunningMarker)
 	logger.Info("Test completed successfully!")
 }
 
 // generateTrainingBatch creates a batch of realistic training entries.
-func generateTrainingBatch(rng *rand.Rand, batchSize int) []latencypredictorclient.TrainingEntry {
+//
+//nolint:gosec // G404: math/rand/v2 is non-cryptographic PRNG used only for test fixture values
+func generateTrainingBatch(batchSize int) []latencypredictorclient.TrainingEntry {
 	entries := make([]latencypredictorclient.TrainingEntry, batchSize)
 
 	for i := range batchSize {
-		inputTokens := 128 + rng.Intn(2048)
+		inputTokens := 128 + rand.IntN(2048)
 		// Pick queue bucket uniformly across all 5 buckets: [0], [1-2], [3-5], [6-10], [11+]
 		var numWaiting int
-		switch rng.Intn(5) {
+		switch rand.IntN(5) {
 		case 0:
 			numWaiting = 0
 		case 1:
-			numWaiting = rng.Intn(2) + 1 // 1-2
+			numWaiting = rand.IntN(2) + 1 // 1-2
 		case 2:
-			numWaiting = rng.Intn(3) + 3 // 3-5
+			numWaiting = rand.IntN(3) + 3 // 3-5
 		case 3:
-			numWaiting = rng.Intn(5) + 6 // 6-10
+			numWaiting = rand.IntN(5) + 6 // 6-10
 		default:
-			numWaiting = rng.Intn(5) + 11 // 11-15
+			numWaiting = rand.IntN(5) + 11 // 11-15
 		}
-		numRunning := rng.Intn(8) + 1
-		kvCache := rng.Float64()
-		prefixCache := rng.Float64()
-		numTokensGenerated := 64 + rng.Intn(512)
-		prefillTIF := int64(rng.Intn(15000))
-		decodeTIF := int64(rng.Intn(5000))
+		numRunning := rand.IntN(8) + 1
+		kvCache := rand.Float64()
+		prefixCache := rand.Float64()
+		numTokensGenerated := 64 + rand.IntN(512)
+		prefillTIF := int64(rand.IntN(15000))
+		decodeTIF := int64(rand.IntN(5000))
 
 		// Simulate realistic TTFT
 		baseTTFT := float64(inputTokens)*0.05 +
@@ -470,13 +475,13 @@ func generateTrainingBatch(rng *rand.Rand, batchSize int) []latencypredictorclie
 			baseTTFT *= 0.8
 		}
 
-		ttftMs := math.Max(1.0, baseTTFT+(rng.Float64()-0.5)*baseTTFT*0.2)
+		ttftMs := math.Max(1.0, baseTTFT+(rand.Float64()-0.5)*baseTTFT*0.2)
 
 		// Simulate realistic TPOT
 		baseTPOT := 8.0 +
 			float64(decodeTIF)*0.02 +
 			float64(numRunning-1)*2.0 +
-			(rng.Float64()-0.5)*2.0
+			(rand.Float64()-0.5)*2.0
 
 		tpotMs := math.Max(1.0, baseTPOT*float64(numTokensGenerated))
 
@@ -511,6 +516,30 @@ func generateTrainingBatch(rng *rand.Rand, batchSize int) []latencypredictorclie
 	return entries
 }
 
+// writeTestRunningMarker creates path with O_EXCL, which fails when path is an existing symlink.
+// A stale entry is removed and the exclusive create is retried once.
+func writeTestRunningMarker(path string) error {
+	f, err := openExclusive(path)
+	if errors.Is(err, os.ErrExist) {
+		if rmErr := os.Remove(path); rmErr != nil {
+			return rmErr
+		}
+		f, err = openExclusive(path)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.Write([]byte("running"))
+	if err1 := f.Close(); err1 != nil && err == nil {
+		err = err1
+	}
+	return err
+}
+
+func openExclusive(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644) //nolint:gosec // G304: path is the fixed marker or a unit-test temp path
+}
+
 // parseEnvInt reads an integer environment variable, logging a warning on parse
 // failure, and returns the default value when the variable is unset or invalid.
 func parseEnvInt(key string, defaultVal int) int {
@@ -520,7 +549,7 @@ func parseEnvInt(key string, defaultVal int) int {
 	}
 	val, err := strconv.Atoi(raw)
 	if err != nil {
-		log.Printf("Warning: invalid value %q for %s, using default %d", raw, key, defaultVal)
+		log.Printf("Warning: invalid value %q for %s, using default %d", raw, key, defaultVal) //nolint:gosec // %q escapes control chars in env-var value; operator-supplied
 		return defaultVal
 	}
 	if val == 0 {

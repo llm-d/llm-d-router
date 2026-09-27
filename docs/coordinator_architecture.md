@@ -221,7 +221,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_coordinator` is false. Accepts `/v1/chat/completions`, `/v1/completions` and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions` and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
@@ -286,9 +286,10 @@ so client-provided values are not sent upstream.
 
 Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
 `decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
-[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
-original OpenAI path or the internal `/inference/v1/generate` path, depending on
-`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
+[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). For encode and prefill, the request
+path is either the client's original OpenAI path or the internal `/inference/v1/generate` path, depending on
+`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)); decode and conditional-decode
+always forward on the client's original path regardless of that setting. Other
 paths can be added later as new protocols are supported.
 
 ## EPP integration
@@ -672,7 +673,7 @@ commented with their defaults. The loader is [pkg/coordinator/config/config.go](
 ```yaml
 log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v overrides
 
-server:               # inbound listener; TLS unless secure_coordinator is false
+server:               # inbound listener; TLS unless secure_serving is false
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
@@ -729,8 +730,8 @@ always forward on the client's original OpenAI path and are unaffected by this s
   token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
   directly in the body.
 
-A step can override the global with `use_openai_format:` in its own `params`. The
-exact bodies per format are in [communication.md](communication.md).
+`encode` and `prefill` can each override the global with `use_openai_format:` in
+their own `params`. The exact bodies per format are in [communication.md](communication.md).
 
 `false` requires a `render` step in the pipeline: render produces the token IDs the
 tokens-in format sends, so the coordinator fails to start when `false` is set without a

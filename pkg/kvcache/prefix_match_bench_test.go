@@ -171,7 +171,7 @@ func BenchmarkMatchBlockKeysWithWriters(b *testing.B) {
 					return
 				default:
 				}
-				base := (uint64(w+1)<<32 | i*64) + 1
+				base := (uint64(w+1)<<32 | i*64) + 1 // #nosec G115 -- test data, w is a small worker index
 				for j := range engineKeys {
 					engineKeys[j] = kvblock.BlockHash(base + uint64(j))
 					requestKeys[j] = kvblock.BlockHash(base + uint64(j))

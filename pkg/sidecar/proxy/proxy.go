@@ -333,6 +333,24 @@ type Server struct {
 	hostResolver *hostResolver
 
 	config Config
+
+	// HTTPListener is an optional pre-bound listener for the data-plane HTTP
+	// server. When set, startHTTP serves on it and does not call net.Listen.
+	// Reserving the port in advance of Start closes the window in which another
+	// process can take a port that was selected but not yet bound. config.Port
+	// is still used for data-parallel rank math.
+	HTTPListener net.Listener
+
+	// MetricsListener is an optional pre-bound listener for the /metrics
+	// server. When set, serveMetrics serves on it and does not call net.Listen.
+	MetricsListener net.Listener
+
+	// DataParallelListeners holds pre-bound listeners for data-parallel rank
+	// clones 1..N-1 (index 0 is rank 1). When non-empty, startDataParallel
+	// assigns each to the corresponding clone's HTTPListener instead of
+	// calling net.Listen. Production leaves this nil and clones bind from
+	// config.Port + rank.
+	DataParallelListeners []net.Listener
 }
 
 // resolver lazily initializes and returns the request-path host resolver.
@@ -472,6 +490,7 @@ func (s *Server) Start(ctx context.Context) error {
 // Clone returns a clone of the current Server struct.
 // Note: decoderURL and decoderProxy are intentionally not copied — callers (e.g. startDataParallel)
 // always set them explicitly after cloning.
+// HTTPListener is not copied; each instance owns its listener.
 func (s *Server) Clone() *Server {
 	return &Server{
 		addr:                s.addr,
@@ -503,8 +522,8 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 	if maxIdle <= 0 {
 		maxIdle = defaultMaxIdleConnsPerHost
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
-	t.MaxIdleConns = 0                                   // unlimited
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 0 // unlimited
 	t.MaxIdleConnsPerHost = maxIdle
 	t.MaxConnsPerHost = 0 // unlimited
 	t.IdleConnTimeout = 90 * time.Second

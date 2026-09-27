@@ -124,13 +124,21 @@ jobs:
         if: ${{ matrix.image.source == 'build' }}
         uses: actions/checkout@v7
 
+      # $(BUILDER_IMAGE) in the Makefile resolves to the content hash tag. The
+      # e2e artifact has to match or test-e2e-coordinator-run pulls a tag with
+      # nothing built.
+      - name: Compute builder tag
+        if: ${{ matrix.image.name == 'builder' }}
+        id: builder-tag
+        run: echo "tag=$(make -f Makefile.coord.mk print-builder-tag)" >> "$GITHUB_OUTPUT"
+
       - name: Build ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'build' }}
         uses: ./.github/actions/docker-build-and-push
         with:
           docker-file: ${{ matrix.image.docker-file }}
           image-name: ${{ matrix.image.image-name }}
-          tag: dev
+          tag: ${{ matrix.image.name == 'builder' && steps.builder-tag.outputs.tag || 'dev' }}
           registry: ghcr.io/llm-d
           push: 'false'
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar

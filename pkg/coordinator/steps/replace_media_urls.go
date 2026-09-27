@@ -260,6 +260,8 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("scheme %q not allowed: %w", parsed.Scheme, pipeline.ErrBadRequest)
 	}
 	if !s.guard.hostAllowed(parsed.Hostname()) {
+		log.FromContext(ctx).WithName(ReplaceMediaURLsStepName).V(logutil.DEBUG).Info(
+			"rejecting media URL: host not in allowed_domains", "host", parsed.Hostname())
 		return nil, "", fmt.Errorf("host %q not allowed: %w", parsed.Hostname(), pipeline.ErrBadRequest)
 	}
 
@@ -268,7 +270,11 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", err
 	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamReplaceMediaURLs)
-	resp, err := s.client.Do(req)
+	// rawURL's host is checked against allowed_domains above, and s.client's
+	// dialer (addressGuard.dialControl) blocks the resolved IP if it is
+	// loopback, link-local, CGNAT, or private, closing the DNS-rebinding gap
+	// a hostname check alone would miss.
+	resp, err := s.client.Do(req) // codeql[go/request-forgery]
 	call.Done()
 	if err != nil {
 		return nil, "", err

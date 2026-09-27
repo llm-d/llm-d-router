@@ -32,7 +32,7 @@ An explicit `requestHandler.parsers` list is used as given. It gains no fallback
 Here is an example configuration using the `vllmgrpc-parser`:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -51,7 +51,7 @@ requestHandler:
 Configuration using both `vllmhttp-parser` and `openai-parser` (enables `/inference/v1/generate` while keeping OpenAI-compatible paths working):
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore
@@ -73,7 +73,7 @@ requestHandler:
 Configuration with multiple parsers (e.g. OpenAI and Anthropic API support on the same route):
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: maxScore

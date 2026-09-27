@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -126,6 +127,7 @@ func BenchmarkSchedule(b *testing.B) {
 // range, KV-cache utilization is distributed, and ~1/3 of pods have the
 // benchmark's target model loaded so lora-affinity has something to find.
 func makeBenchmarkEndpoints(n int) []fwksched.Endpoint {
+	scrapedAt := time.Now()
 	endpoints := make([]fwksched.Endpoint, n)
 	for i := 0; i < n; i++ {
 		active := map[string]int{"baseline": 1}
@@ -142,6 +144,7 @@ func makeBenchmarkEndpoints(n int) []fwksched.Endpoint {
 				KVCacheUsagePercent: float64(i%10) / 10, // 0.0..0.9
 				MaxActiveModels:     2,
 				ActiveModels:        active,
+				UpdateTime:          scrapedAt,
 			},
 			fwkdl.NewAttributes(),
 		)

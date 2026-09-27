@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -55,11 +56,11 @@ var errMetricsTLS = errors.New("metrics TLS")
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
 	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port (default 9090).")
-	metricsCertDir := pflag.String("metrics-cert-dir", "", "directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over HTTP. Overrides server.metrics_cert_dir.")
-	secureCoordinator := pflag.Bool("secure-coordinator", true, "serve the inference listener over TLS. Overrides server.secure_coordinator (default true).")
-	certPath := pflag.String("cert-path", "", "directory with tls.crt and tls.key for the inference listener. Empty generates a self-signed certificate, which is only suitable for testing. Overrides server.cert_path.")
-	tlsMinVersion := pflag.String("tls-min-version", "", "minimum TLS version for the inference listener (e.g. VersionTLS12, VersionTLS13). Empty uses VersionTLS12. Overrides server.tls_min_version.")
-	tlsCipherSuites := pflag.StringSlice("tls-cipher-suites", nil, "TLS cipher suites for the inference listener (Go crypto/tls names). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below. Overrides server.tls_cipher_suites.")
+	metricsCertDir := pflag.String("metrics-cert-dir", "", "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener. Overrides server.metrics_cert_dir.")
+	secureServing := pflag.Bool("secure-serving", true, "Serve the listener over TLS. Overrides server.secure_serving.")
+	certPath := pflag.String("cert-path", "", "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing. Overrides server.cert_path.")
+	tlsMinVersion := pflag.String("tls-min-version", "", "Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12. Overrides server.tls_min_version.")
+	tlsCipherSuites := pflag.StringSlice("tls-cipher-suites", nil, "Comma-separated list of TLS cipher suites for secure serving (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. Overrides server.tls_cipher_suites.")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -89,8 +90,8 @@ func main() {
 	if f := pflag.CommandLine.Lookup("metrics-cert-dir"); f != nil && f.Changed {
 		cfg.Server.MetricsCertDir = *metricsCertDir
 	}
-	if f := pflag.CommandLine.Lookup("secure-coordinator"); f != nil && f.Changed {
-		cfg.Server.SecureCoordinator = *secureCoordinator
+	if f := pflag.CommandLine.Lookup("secure-serving"); f != nil && f.Changed {
+		cfg.Server.SecureServing = *secureServing
 	}
 	if f := pflag.CommandLine.Lookup("cert-path"); f != nil && f.Changed {
 		cfg.Server.CertPath = *certPath
@@ -144,16 +145,15 @@ func main() {
 	log.Info("starting coordinator",
 		"addr", cfg.Server.ListenAddr,
 		"metrics_port", cfg.Server.MetricsPort,
-		"metrics_tls", cfg.Server.MetricsCertDir != "",
-		"tls", cfg.Server.SecureCoordinator,
-		"cert_path", cfg.Server.CertPath)
+		"metrics_tls", cfg.Server.MetricsCertDir != "")
+	log.Info("server TLS", "tls", cfg.Server.SecureServing, "cert_path", cfg.Server.CertPath)
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = run(ctx, srv, cfg.Server)
+	err = run(ctx, srv, cfg.Server, nil)
 	stop()
 	if err != nil {
 		log.Error(err, "server error")
@@ -166,13 +166,21 @@ func main() {
 // or either server exits. On any exit condition both servers are drained
 // before run returns: the coordinator server bounded by cfg.ShutdownTimeout,
 // the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
-// disables the metrics endpoint entirely.
-func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error {
+// disables the metrics endpoint entirely. lis, when non-nil, is an already
+// bound listener the coordinator server serves on instead of binding
+// cfg.ListenAddr itself; production passes nil.
+func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig, lis net.Listener) error {
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		errCh := make(chan error, 1)
-		go func() { errCh <- srv.ListenAndServe(gctx) }()
+		go func() {
+			if lis != nil {
+				errCh <- srv.Serve(gctx, lis)
+			} else {
+				errCh <- srv.ListenAndServe(gctx)
+			}
+		}()
 		select {
 		case err := <-errCh:
 			// ListenAndServe returned before shutdown was requested; always a failure.
@@ -192,21 +200,23 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig) error
 
 	if cfg.MetricsPort > 0 {
 		g.Go(func() error {
-			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertDir)
+			return serveMetrics(gctx, cfg.MetricsPort, cfg.MetricsCertDir, nil)
 		})
 	}
 
 	return g.Wait()
 }
 
-// serveMetrics stands up a Prometheus /metrics server on port and blocks
-// until ctx is cancelled or the underlying ListenAndServe returns
-// unexpectedly. On ctx cancellation the server is drained via Shutdown
-// bounded by metricsShutdownTimeout. Uses the shared controller-runtime
-// registry so every package that registers against it (this coordinator's
-// metrics, controller-runtime's process collectors) is exposed on the same
-// endpoint. A non-empty certDir enables TLS with tls.crt and tls.key.
-func serveMetrics(ctx context.Context, port int, certDir string) error {
+// serveMetrics stands up a Prometheus /metrics server and blocks until ctx is
+// cancelled or the underlying listen/serve returns unexpectedly. On ctx
+// cancellation the server is drained via Shutdown bounded by
+// metricsShutdownTimeout. Uses the shared controller-runtime registry so
+// every package that registers against it (this coordinator's metrics,
+// controller-runtime's process collectors) is exposed on the same endpoint. A
+// non-empty certDir enables TLS with tls.crt and tls.key. lis, when non-nil,
+// is an already bound listener the server serves on instead of binding port
+// itself; production passes nil.
+func serveMetrics(ctx context.Context, port int, certDir string, lis net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	srv := &http.Server{
@@ -218,13 +228,16 @@ func serveMetrics(ctx context.Context, port int, certDir string) error {
 	if serveTLS {
 		tlsConfig, err := metricsTLSConfig(ctx, certDir)
 		if err != nil {
+			if lis != nil {
+				_ = lis.Close()
+			}
 			return err
 		}
 		srv.TLSConfig = tlsConfig
 	}
 
 	// Shutdown fires when ctx cancels (normal path) or when the local
-	// cancel below is invoked after ListenAndServe returns (bind failure).
+	// cancel below is invoked after listen/serve returns (bind failure).
 	shutdownCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -238,9 +251,14 @@ func serveMetrics(ctx context.Context, port int, certDir string) error {
 	}()
 
 	var err error
-	if serveTLS {
+	switch {
+	case lis != nil && serveTLS:
+		err = srv.ServeTLS(lis, "", "")
+	case lis != nil:
+		err = srv.Serve(lis)
+	case serveTLS:
 		err = srv.ListenAndServeTLS("", "")
-	} else {
+	default:
 		err = srv.ListenAndServe()
 	}
 	cancel()

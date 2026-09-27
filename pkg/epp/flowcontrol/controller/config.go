@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 )
 
 const (
@@ -124,7 +124,7 @@ func (c *Config) String() string {
 type ConfigOption func(*Config)
 
 // NewConfigFromAPI creates a new Config from the API configuration.
-func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
+func NewConfigFromAPI(apiConfig *configapiv1.FlowControlConfig) (*Config, error) {
 	opts := make([]ConfigOption, 0, 4)
 	if apiConfig != nil {
 		if apiConfig.DefaultRequestTTL != nil {

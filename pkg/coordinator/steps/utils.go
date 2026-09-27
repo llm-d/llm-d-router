@@ -59,9 +59,27 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
+// rejectUseOpenAIFormatOverride returns an error if params sets use_openai_format.
+// decode and conditional-decode derive their body format directly from the
+// request's original path, so a step-level override has no effect; rejecting
+// the key surfaces stale config instead of silently ignoring it.
+func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
+	if _, ok := params["use_openai_format"]; ok {
+		return fmt.Errorf("%s: use_openai_format is not a valid parameter for this step", step)
+	}
+	return nil
+}
+
+// unreachableFormatError builds an error for a request format with no
+// registered coordinator route (see server.go), signaling a routing bug
+// rather than a client error.
+func unreachableFormatError(format reqcommon.APIType) error {
+	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
+}
+
 // resolveFormat maps a request path to the wire format a step emits. The steps
 // build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeGenerate; Chat Completions additionally requires
+// API collapses to APITypeVLLMGenerate; Chat Completions additionally requires
 // useOpenAIFormat. Generate is the fallback because its body carries the prompt
 // as reqCtx.TokenIDs and does not depend on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
@@ -118,24 +136,6 @@ func mmKwargsField(kwargs []string) map[string][]any {
 		}
 	}
 	return map[string][]any{ModalityImage: items}
-}
-
-// setGenerateTransferParams nests the kv/ec transfer params under
-// sampling_params.extra_args, the only place the /inference/v1/generate engine
-// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
-// input). It get-or-creates extra_args on the given sampling map so a client's
-// existing generation fields survive. ecParams may be empty, in which case
-// ec_transfer_params is left unset.
-func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
-	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
-	if !ok {
-		extraArgs = map[string]any{}
-		sampling[reqcommon.FieldExtraArgs] = extraArgs
-	}
-	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
-	if len(ecParams) > 0 {
-		extraArgs[reqcommon.FieldECTransferParams] = ecParams
-	}
 }
 
 // coerceParamsMap coerces a transfer-params value from an upstream response to a
@@ -346,34 +346,6 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		}
 	}
 	return entries, nil
-}
-
-// validateSamplingParams checks that sampling_params and its nested extra_args,
-// when present, are JSON objects. Both are optional. The decode step merges
-// kv_transfer_params into sampling_params.extra_args; a non-object at either
-// level would fall into its fallback branch and be silently replaced with an
-// empty map, discarding client-requested generation parameters with no error.
-// Validating once at ingestion keeps that path fail-loud, consistent with
-// token_ids and features.
-func validateSamplingParams(body map[string]any) error {
-	raw, ok := body[reqcommon.FieldSamplingParams]
-	if !ok || raw == nil {
-		return nil
-	}
-	sampling, ok := raw.(map[string]any)
-	if !ok {
-		return fmt.Errorf("%s must be an object, got %T: %w",
-			reqcommon.FieldSamplingParams, raw, pipeline.ErrBadRequest)
-	}
-	ea, ok := sampling[reqcommon.FieldExtraArgs]
-	if !ok || ea == nil {
-		return nil
-	}
-	if _, ok := ea.(map[string]any); !ok {
-		return fmt.Errorf("%s.%s must be an object, got %T: %w",
-			reqcommon.FieldSamplingParams, reqcommon.FieldExtraArgs, ea, pipeline.ErrBadRequest)
-	}
-	return nil
 }
 
 // validatePlaceholderBounds checks that every placeholder span [offset,

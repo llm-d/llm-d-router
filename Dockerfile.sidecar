@@ -19,6 +19,7 @@ RUN go mod download
 
 # Copy the go source
 COPY cmd/pd-sidecar/main.go cmd/cmd.go
+COPY internal internal
 COPY pkg/sidecar pkg/sidecar
 COPY pkg/common pkg/common
 COPY version version
