@@ -17,7 +17,7 @@ See the following related documents:
 Add three new types to support per-attribution-dimension token sums:
 
 ```go
-// InferenceDimensionKey identifies a (tenant_id, workload_id, target_model_name, namespace)
+// InferenceDimensionKey identifies a (tenant_id, workload_id, model_name, namespace)
 // combination, and optionally a user_id dimension. UserID is the value of the x-llm-d-user-id
 // header when present; it is empty when the coordinator's prometheus_user_id_label gate is false
 // (the default), because in that configuration the metric Vec is registered without the user_id
@@ -25,11 +25,11 @@ Add three new types to support per-attribution-dimension token sums:
 // it — the decoded key's UserID field is left as the zero value "". When the gate is true and
 // the header was absent, the coordinator emits "unknown" and UserID is that value.
 type InferenceDimensionKey struct {
-    UserID          string
-    TenantID        string
-    WorkloadID      string
-    TargetModelName string
-    Namespace       string
+    UserID     string
+    TenantID   string
+    WorkloadID string
+    ModelName  string
+    Namespace  string
 }
 
 // InferenceDimensionTokens holds the prompt and completion token counts for one
@@ -56,7 +56,7 @@ QueryInferenceDimensionTokens = "QueryInferenceDimensionTokens"
 // QueryInferenceDimensionTokens returns prompt and completion token sums from
 // llm_d_coordinator_request_input_tokens_attributed_total and
 // llm_d_coordinator_request_output_tokens_attributed_total,
-// broken down by user_id, tenant_id, workload_id, target_model_name, and namespace.
+// broken down by user_id, tenant_id, workload_id, model_name, and namespace.
 QueryInferenceDimensionTokens(start, end time.Time) *Future[InferenceDimensionResult]
 ```
 
@@ -89,24 +89,24 @@ the `sum by` includes `user_id`; when false it is omitted:
 
 - **End-of-window query** (input tokens, gate **on**):
   ```promql
-  sum by (user_id, tenant_id, workload_id, target_model_name, namespace) (
+  sum by (user_id, tenant_id, workload_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[<window>m] @ <end_unix>)
   )
   ```
 - **End-of-window query** (input tokens, gate **off**):
   ```promql
-  sum by (tenant_id, workload_id, target_model_name, namespace) (
+  sum by (tenant_id, workload_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[<window>m] @ <end_unix>)
   )
   ```
 - **Start-of-window query** (narrow lookback to anchor the delta, same conditional grouping):
   ```promql
   -- gate on:
-  sum by (user_id, tenant_id, workload_id, target_model_name, namespace) (
+  sum by (user_id, tenant_id, workload_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[2m] @ <start_unix>)
   )
   -- gate off:
-  sum by (tenant_id, workload_id, target_model_name, namespace) (
+  sum by (tenant_id, workload_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[2m] @ <start_unix>)
   )
   ```
@@ -170,8 +170,8 @@ existing separation.
 **`buildDimensionCosts()` join formula**:
 
 ```go
-// For each (user_id, tenant_id, workload_id, target_model_name, namespace) in dimensionTokens:
-//   look up model cost by target_model_name:namespace
+// For each (user_id, tenant_id, workload_id, model_name, namespace) in dimensionTokens:
+//   look up model cost by model_name:namespace
 //   apply join formula independently per cost basis:
 
 AllocationTotalCost = promptTokens × (InputCostPerMillionTokens[allocation] / 1_000_000)
@@ -199,8 +199,8 @@ token sums against the coordinator's un-attributed prompt token totals per
 count against which attribution coverage is measured:
 
 ```go
-// sum(llm_d_coordinator_request_input_tokens_attributed_total[model:ns])
-//   / llm_d_coordinator_request_input_tokens_sum[model:ns] < 0.9
+// sum(llm_d_coordinator_request_input_tokens_attributed_total by(model_name,namespace))
+//   / llm_d_coordinator_request_input_tokens_sum by(model_name,namespace) < 0.9
 // → log.Warnf("InferenceCost: attribution coverage low for model=%s ns=%s (%.0f%% of coordinator tokens attributed)")
 ```
 
@@ -560,8 +560,7 @@ carry all three.
 | **Calculator call order** | Calculator runs on model entries first; `buildDimensionCosts` uses the resulting rates | No need to re-run cost split logic per dimension entry. |
 | **`user_id` label semantics** | Conditional on `prometheus_user_id_label` gate (default: off). Gate on: label present, value is `"unknown"` when the header was absent. Gate off: metric registered without the label; `InferenceDimensionKey.UserID` is `""` and per-user breakdown via Prometheus is not meaningful. | The coordinator's Vec label set is fixed at registration time; the gate is the only clean way to omit the label in cardinality-sensitive deployments. Per-user attribution remains available via the structured log regardless of this setting. |
 | **`CollectMetrics` signature** | Unchanged `([]*InferenceCost, error)`; `InferenceDimensionResult` stored as `Collector` field; `BuildDimensionCosts` is a separate public method | Calculator must run between collect and dimension-cost build; keeping `CollectMetrics` signature stable avoids breaking `runner.go`, `queryservice.go`, and test code that mocks the interface. |
-| **`target_model_name` join key** | Label on attributed counters, populated by the coordinator from the vLLM decode response body; joined on `target_model_name:namespace` in OpenCost; matches the EPP label name exactly | The coordinator intercepts the decode response and extracts the `model` field — the same authoritative value vLLM returns. Falls back to `model_name` (requested model) on error paths. Using `target_model_name` (not `serving_model`) keeps coordinator and EPP metric label sets aligned so the two can be joined. |
-| **`requested_model` excluded from group-by** | Omitted from `InferenceDimensionKey` and PromQL `sum by (…)` | Cost rate is driven by `target_model_name`; including `requested_model` inflates cardinality without adding cost signal. Attribution by what was *served*, not what was *requested*, is the correct billing model. |
+| **`model_name` join key** | Label on attributed counters, carrying the requested model from the request body; joined on `model_name:namespace` in OpenCost | `model_name` is accurate for the majority of traffic (no model-name rewrite in effect). For rewritten traffic the per-request cost uses the requested model's rate; the gap is limited to deployments that use `InferenceModelRewrite` — see the [Known Limitations](coordinator-request-attribution-metrics.md#known-limitations) note in the main proposal. |
 | **Coverage warning denominator** | `llm_d_coordinator_request_input_tokens_sum` (coordinator's un-attributed histogram) | The coordinator owns prompt token counts. In the coordinator model, `vllm:prompt_tokens_total` is not the right denominator because it counts tokens at the vLLM level, not the coordinator entry point. The coordinator's un-attributed histogram is the ground truth for the number of requests that passed through the attribution path. |
 | **Backward compatibility** | New fields are empty-string by default; feature is opt-in via `COORDINATOR_REQUEST_ATTRIBUTION_ENABLED=true` | Deployments without attribution configured are completely unaffected. |
 
@@ -573,7 +572,7 @@ A cluster may contain multiple independent llm-d coordinator deployments, each i
 own namespace with its own coordinator, vLLM pods, and InferencePool. OpenCost is
 deployed once per cluster. Multi-deployment concerns are handled naturally: the attributed
 counters carry a `namespace` label (populated from `COORDINATOR_NAMESPACE` on the
-coordinator pod), and the `target_model_name:namespace` composite key partitions dimension
+coordinator pod), and the `model_name:namespace` composite key partitions dimension
 token data per deployment automatically — no manual per-namespace configuration is
 required.
 
@@ -598,6 +597,6 @@ in a single cluster-wide pass — a more invasive change deferred to a future it
 #### What works correctly without changes
 
 - **Model-level cost collection** — vLLM and allocation queries key by `(model_name, namespace)`, naturally partitioning deployments.
-- **`buildDimensionCosts()` join** — keys on `target_model_name:namespace`, costs attributed to the correct deployment.
+- **`buildDimensionCosts()` join** — keys on `model_name:namespace`, costs attributed to the correct deployment.
 - **Coverage warning** — compares attributed token sums vs coordinator un-attributed totals per `model_name:namespace`, each deployment checked independently.
 - **API filtering** — `?filter=namespace:"llm-d-prod"` isolates one deployment's costs from another.

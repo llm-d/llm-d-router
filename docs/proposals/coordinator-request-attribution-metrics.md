@@ -37,7 +37,7 @@ Inference Gateway.
 Supporting goals:
 
 - **Aggregate attribution** — Prometheus counters carry `tenant_id`, `workload_id`, and
-  `target_model_name` labels (and optionally `user_id`) so dashboards, alerts, and OpenCost
+  `model_name` labels (and optionally `user_id`) so dashboards, alerts, and OpenCost
   billing queries work without a log aggregation backend.
 - **Per-request audit** — a structured JSON log record is emitted for every request,
   always including all three identity fields and token counts, as an audit aid for
@@ -70,9 +70,9 @@ Supporting goals:
 - **Cost governance and anomaly detection** — a platform team configures alerts on
   per-tenant token consumption; when a tenant exceeds its expected monthly budget
   mid-cycle, an alert fires before the bill arrives.
-- **A/B model rollout cost comparison** — during a canary rollout, querying OpenCost by
-  `target_model_name` and `workload_id` shows whether the quality improvement justifies the
-  higher cost per million tokens.
+- **A/B model rollout cost comparison** _(blocked — see [Known Limitations](#known-limitations))_ — comparing costs
+  across a model-rewrite canary is not reliable with the current implementation because
+  `model_name` reports the requested model, not the served one, for rewritten traffic.
 
 ## Why the Coordinator
 
@@ -137,21 +137,17 @@ Two new **counter** metric families are added under `llm_d_coordinator`:
 
 | Metric | Type | Labels (always) | Labels (conditional) | Description |
 |---|---|---|---|---|
-| `llm_d_coordinator_request_input_tokens_attributed_total` | Counter | `model_name`, `tenant_id`, `workload_id`, `target_model_name`, `namespace` | `user_id` | Prompt tokens accumulated per attribution dimensions |
-| `llm_d_coordinator_request_output_tokens_attributed_total` | Counter | `model_name`, `tenant_id`, `workload_id`, `target_model_name`, `namespace` | `user_id` | Completion tokens accumulated per attribution dimensions |
+| `llm_d_coordinator_request_input_tokens_attributed_total` | Counter | `model_name`, `tenant_id`, `workload_id`, `namespace` | `user_id` | Prompt tokens accumulated per attribution dimensions |
+| `llm_d_coordinator_request_output_tokens_attributed_total` | Counter | `model_name`, `tenant_id`, `workload_id`, `namespace` | `user_id` | Completion tokens accumulated per attribution dimensions |
 
 `model_name` is the requested model from the request body (same as the existing
-`requestInputTokens` histogram). `target_model_name` is the model name returned by vLLM
-in the decode response body — the authoritative OpenCost join key, matching the EPP label
-set exactly so coordinator and EPP metrics can be joined on the served model. It may
-differ from `model_name` when a model-selector rewrite is in effect. When
-`target_model_name` is unavailable (error path, non-streaming response body not yet
-parsed), it defaults to `model_name`.
+`requestInputTokens` histogram). It is the OpenCost join key: `model_name:namespace`
+identifies the per-model cost rates used to price the attributed token counts.
 
 `namespace` is the Kubernetes namespace of the coordinator pod. Emitting `namespace` from
 the coordinator itself ensures the label is always present with the correct value
 regardless of how Prometheus is configured to scrape the endpoint. It also enables the
-`target_model_name:namespace` composite join key used by OpenCost to partition
+`model_name:namespace` composite join key used by OpenCost to partition
 dimension-token data per deployment when multiple coordinators run in different
 namespaces on a shared cluster.
 
@@ -173,11 +169,11 @@ request arrives:
 
 `BoundedLabel` caps the number of distinct values admitted **per label
 dimension** at 1 000. It does **not** cap the total number of time series, which
-is the cross-product of distinct values across all dimensions. With four
-independently bounded dimensions (`model_name`, `tenant_id`, `workload_id`,
-`target_model_name`) the worst-case series count on
+is the cross-product of distinct values across all dimensions. With three
+independently bounded dimensions (`model_name`, `tenant_id`, `workload_id`)
+the worst-case series count on
 `llm_d_coordinator_request_input_tokens_attributed_total` is on the order of
-1 000⁴. All four dimensions are influenced by client-supplied input (three
+1 000³. All three dimensions are influenced by client-supplied input (two
 headers plus the request body), so a single client can drive the product upward
 without any individual per-dimension cap ever being reached.
 
@@ -198,22 +194,22 @@ request_attribution:
 ```
 
 > [!WARNING]
-> **Cardinality**: `tenant_id`, `workload_id`, and `target_model_name` are header- or
-> body-sourced with no closed set. All three are bounded per dimension by `BoundedLabel`
-> (cap 1 000 each), which limits the number of distinct values admitted for each label
-> individually. It does **not** limit the total number of time series: Prometheus series
-> count is the product across co-occurring label values. With four client-influenced
-> dimensions the worst-case series count is on the order of 1 000⁴ — a single client
-> with arbitrary header values can exhaust memory without any individual cap being
-> exceeded. Deployments that do not enforce attribution headers from a trusted upstream
-> (e.g. a gateway or service mesh that injects them) should either lower the per-dimension
-> caps or disable the attributed metric families entirely and rely on the structured log
-> for per-request attribution. `user_id` is **not** passed through `BoundedLabel`: when
-> `prometheus_user_id_label: false` (the default) the label is absent entirely, and when
-> `true` the operator has asserted a bounded, known requestor population. Do **not**
-> enable `prometheus_user_id_label` for public-facing deployments with unbounded end-user
-> populations. Per-user attribution remains fully available via the structured log
-> regardless of this setting.
+> **Cardinality**: `tenant_id` and `workload_id` are header-sourced with no closed set.
+> Both are bounded per dimension by `BoundedLabel` (cap 1 000 each), which limits the
+> number of distinct values admitted for each label individually. It does **not** limit
+> the total number of time series: Prometheus series count is the product across
+> co-occurring label values. With three client-influenced dimensions (`model_name`,
+> `tenant_id`, `workload_id`) the worst-case series count is on the order of 1 000³ — a
+> single client with arbitrary header values can exhaust memory without any individual cap
+> being exceeded. Deployments that do not enforce attribution headers from a trusted
+> upstream (e.g. a gateway or service mesh that injects them) should either lower the
+> per-dimension caps or disable the attributed metric families entirely and rely on the
+> structured log for per-request attribution. `user_id` is **not** passed through
+> `BoundedLabel`: when `prometheus_user_id_label: false` (the default) the label is
+> absent entirely, and when `true` the operator has asserted a bounded, known requestor
+> population. Do **not** enable `prometheus_user_id_label` for public-facing deployments
+> with unbounded end-user populations. Per-user attribution remains fully available via
+> the structured log regardless of this setting.
 
 The existing `llm_d_coordinator_request_input_tokens` (model-only label,
 measured after render) is **not changed**. The new attributed counters are additive.
@@ -238,8 +234,7 @@ request trace span instead of (or in addition to) the log record.
   "tenant_id": "acme-corp",
   "user_id": "user-7f3a",
   "workload_id": "coding-agent-v2",
-  "requested_model": "Qwen3-32B",
-  "target_model_name": "Qwen3-32B",
+  "model_name": "Qwen3-32B",
   "namespace": "llm-d",
   "prompt_tokens": 128,
   "completion_tokens": 512,
@@ -248,10 +243,7 @@ request trace span instead of (or in addition to) the log record.
 ```
 
 - **Always includes `user_id`** in the log record, even when `prometheus_user_id_label: false` suppresses the label from the Prometheus metric.
-- **`requested_model`** is the value from the request body; **`target_model_name`** is
-  the value from the decode response body (defaults to `requested_model` on error paths),
-  stored as `RequestContext.TargetModelName` and emitted under the same key in both the
-  Prometheus label and the log record.
+- **`model_name`** is the value from the request body (`RequestContext.Model`).
 - **`namespace`** is the Kubernetes namespace of the coordinator pod, populated from the
   `COORDINATOR_NAMESPACE` environment variable (defaults to `default` when absent).
 - Is emitted at `INFO` level on the `coordinator.attribution` logger.
@@ -334,20 +326,9 @@ UserID     string
 WorkloadID string
 ```
 
-One additional field is set in `handleInference` from the request headers; two more are
-populated by the attribution hook after the response is received:
+Two more fields are populated by the attribution hook after the response is received:
 
 ```go
-// TargetModelName is the model name reported in the decode response body.
-// Populated by the attribution hook from the "model" field of the decode
-// response body, falling back to RequestContext.Model when the body is
-// unavailable or unparseable.
-//
-// Known limitation: in EPP deployments the EPP rewrites the response body
-// "model" field back to the client-facing name before forwarding, so
-// TargetModelName reports the requested model rather than the served one.
-TargetModelName string
-
 // CompletionTokens is the completion token count from the decode response body.
 // Populated by the attribution hook from the vLLM "usage.completion_tokens" field.
 // Zero when the decode response body was unavailable or unparseable.
@@ -364,10 +345,8 @@ PromptTokensFromBody int
 #### Header extraction
 
 In [`pkg/coordinator/server/handlers.go`](../../pkg/coordinator/server/handlers.go),
-after the `RequestContext` is constructed, all four attribution fields are extracted
-inside the `Enabled` gate. `TargetModelName` is only consumed by the attribution hook's
-`Emit` and has no other use in the pipeline, so gating it alongside the identity fields
-is correct:
+after the `RequestContext` is constructed, the three attribution identity fields are
+extracted inside the `Enabled` gate:
 
 ```go
 if s.attributionCfg.Enabled {
@@ -376,15 +355,6 @@ if s.attributionCfg.Enabled {
     reqCtx.WorkloadID = attributionHeader(r.Header, "x-llm-d-workload-id")
 }
 ```
-
-`TargetModelName` is not set here. It is populated by the attribution hook from the
-`"model"` field of the decode response body, falling back to `RequestContext.Model`
-when the body is unavailable or unparseable.
-
-Known limitation: in EPP deployments the EPP rewrites the response body `"model"` field
-back to the client-facing name before the response is forwarded, so the body reports the
-requested model rather than the served one. Resolving this requires the EPP to publish
-the rewrite target on the response, which is out of scope for this proposal.
 
 Where `attributionHeader` is a small helper that returns the header value or `"unknown"`:
 
@@ -453,15 +423,14 @@ an `io.TeeReader` that copies bytes to a side buffer as the proxy reads them:
 
 - For **non-streaming** responses: vLLM always includes a `usage` object in non-streaming
   responses. The `TeeReader` accumulates a full copy in a `bytes.Buffer`. After
-  `ServeHTTP` returns, parse `usage.prompt_tokens`, `usage.completion_tokens`, and `model`
-  from the buffer. Store on `RequestContext` as `CompletionTokens`, `TargetModelName`,
-  and `PromptTokensFromBody`.
+  `ServeHTTP` returns, parse `usage.prompt_tokens` and `usage.completion_tokens`
+  from the buffer. Store on `RequestContext` as `CompletionTokens` and `PromptTokensFromBody`.
 - For **streaming** responses (SSE): the `TeeReader` copies bytes to a
   `lastChunkTracker` — a writer that keeps only the last non-empty `data:` line it has
   seen. The final `data:` chunk before `data: [DONE]` carries a `usage` object when
   `stream_options.include_usage: true` is set. After `ServeHTTP` returns, the tracker's
-  captured line is parsed for `usage.completion_tokens` and `model`. The full stream is
-  **never** buffered.
+  captured line is parsed for `usage.completion_tokens`. The full stream is **never**
+  buffered.
 
 The hook fires for both cache-hit and cache-miss paths:
 
@@ -476,14 +445,14 @@ The hook fires for both cache-hit and cache-miss paths:
 
 #### Metric and log emission
 
-After `CompletionTokens` and `TargetModelName` are populated by the hook, the decode step
-calls `hook.Emit(reqCtx)` immediately after `proxy.ServeHTTP` returns:
+After `CompletionTokens` is populated by the hook, the decode step calls
+`hook.Emit(reqCtx)` immediately after `proxy.ServeHTTP` returns:
 
 **Prometheus** (in [`pkg/coordinator/metrics/record.go`](../../pkg/coordinator/metrics/record.go)):
 
 ```go
-RecordAttributedInputTokens(modelName, tenantID, workloadID, servingModel, namespace, userID, promptTokens)
-RecordAttributedOutputTokens(modelName, tenantID, workloadID, servingModel, namespace, userID, completionTokens)
+RecordAttributedInputTokens(modelName, tenantID, workloadID, namespace, userID, promptTokens)
+RecordAttributedOutputTokens(modelName, tenantID, workloadID, namespace, userID, completionTokens)
 ```
 
 Where `userID` is passed only when `prometheus_user_id_label: true`; otherwise the
@@ -497,8 +466,7 @@ logger.Info("request.complete",
     "tenant_id",       reqCtx.TenantID,
     "user_id",         reqCtx.UserID,
     "workload_id",     reqCtx.WorkloadID,
-    "requested_model", reqCtx.Model,
-    "target_model_name", reqCtx.TargetModelName,
+    "model_name",      reqCtx.Model,
     "namespace",       cfg.Namespace,
     "prompt_tokens",   promptTokens, // len(reqCtx.TokenIDs) if render ran, else PromptTokensFromBody
     "completion_tokens", reqCtx.CompletionTokens,
@@ -512,7 +480,6 @@ logger.Info("request.complete",
 |---|---|---|
 | Prompt tokens | `len(reqCtx.TokenIDs)` after the render step, or `reqCtx.PromptTokensFromBody` parsed by the attribution hook | When `render` is not in the pipeline, the hook reads `usage.prompt_tokens` from the decode response body and stores it in `PromptTokensFromBody`. |
 | Completion tokens | `usage.completion_tokens` from the decode response body | Parsed by the attribution hook; not available before decode. |
-| `target_model_name` | `"model"` field from decode response body; falls back to `reqCtx.Model` when body is unavailable or unparseable. | Known limitation: in EPP deployments the EPP rewrites the response body `"model"` field back to the client-facing name before forwarding, so the body reports the requested model rather than the served one. |
 
 For streaming responses, vLLM emits a final SSE chunk containing only `usage` when
 `stream_options.include_usage: true` is set:
@@ -592,10 +559,10 @@ for the full OpenCost implementation plan.
 
 ```promql
 -- input tokens consumed by tenant in a billing window
-  sum by (tenant_id, target_model_name, namespace) (
+  sum by (tenant_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[<window>m] @ <end_unix>)
   )
-- sum by (tenant_id, target_model_name, namespace) (
+- sum by (tenant_id, model_name, namespace) (
     increase(llm_d_coordinator_request_input_tokens_attributed_total[2m] @ <start_unix>)
   )
 ```
@@ -609,10 +576,8 @@ that has not yet configured header injection):
 - Structured log fields default to `unknown`.
 - No request is rejected; attribution is best-effort and degrades gracefully.
 
-If the `x-llm-d-model-name-rewrite` header is absent and the decode response body is
-unparseable or the decode step returns an error:
+If the decode response body is unparseable or the decode step returns an error:
 
-- `TargetModelName` defaults to `reqCtx.Model` (the requested model).
 - `CompletionTokens` defaults to `0`.
 - The structured log record and metrics are still emitted (with the fallback values) so
   the request is not silently dropped from attribution.
@@ -625,11 +590,30 @@ does not validate or re-derive them. Operators are responsible for ensuring that
 trusted upstream components can set these headers before requests reach the coordinator.
 The trust boundary requirement and recommended mitigations are documented in Appendix A.
 
+### Known Limitations
+
+**EPP model-name rewrites**: when the EPP rewrites a request's model to a different
+deployed model (an `InferenceModelRewrite`), the `model_name` label in the attributed
+counters reflects the *requested* model name, not the served one. This means:
+
+- For unambiguous requests (no rewrite in effect) — the majority of traffic — the
+  `model_name` label is accurate and OpenCost cost rates apply correctly.
+- For rewritten traffic, the per-request cost may be priced at the requested model's
+  rate rather than the served model's rate, if those rates differ. The gap is limited to
+  deployments that use `InferenceModelRewrite`.
+- A/B canary cost comparisons that rely on distinguishing costs by the *served* model
+  during a rewrite rollout are not reliable with this implementation. That use case
+  requires the EPP to publish the rewrite target on the response so the coordinator can
+  read it — out of scope for this proposal.
+
+Resolving this gap for rewritten traffic requires EPP changes (publishing the resolved
+model name on the response) and is deferred to a future iteration.
+
 ### Changes by Repository
 
 | Repository | Change |
 |---|---|
-| `llm-d/llm-d-router` | `RequestContext`: add `TenantID`, `UserID`, `WorkloadID`, `TargetModelName`, `CompletionTokens`, `PromptTokensFromBody` fields. `handleInference`: extract three attribution headers; inject `stream_options.include_usage` on streaming requests when attribution enabled. `config.go`: add `RequestAttributionConfig`. New file `pkg/coordinator/steps/attribution.go`: `AttributionHook` type, `ModifyResponse` closure, `Emit` function. Modify `pkg/coordinator/steps/decode.go` and `conditional_decode.go`: accept and invoke the hook. `pkg/coordinator/metrics/`: two new attributed counter families (`_total`) + recording functions, `tenant_id`/`workload_id` routed through `BoundedLabel`. `pkg/coordinator/pipeline/builder/builder.go`: inject hook into decode steps when enabled. |
+| `llm-d/llm-d-router` | `RequestContext`: add `TenantID`, `UserID`, `WorkloadID`, `CompletionTokens`, `PromptTokensFromBody` fields. `handleInference`: extract three attribution headers; inject `stream_options.include_usage` on streaming requests when attribution enabled. `config.go`: add `RequestAttributionConfig`. New file `pkg/coordinator/steps/attribution.go`: `AttributionHook` type, `ModifyResponse` closure, `Emit` function. Modify `pkg/coordinator/steps/decode.go` and `conditional_decode.go`: accept and invoke the hook. `pkg/coordinator/metrics/`: two new attributed counter families (`_total`) + recording functions, `tenant_id`/`workload_id` routed through `BoundedLabel`. `pkg/coordinator/pipeline/builder/builder.go`: inject hook into decode steps when enabled. |
 | `llm-d/llm-d` | New doc `docs/operations/observability/attribution.md`; update `docs/api-reference/coordinator-http-headers.md` to list the three attribution headers; update metrics docs; add example PromQL queries. |
 | `opencost/opencost` | Update metric names from `llm_d_epp_*` to `llm_d_coordinator_*` in `QueryInferenceDimensionTokens` — see [`open-cost-new-dimensions-plan-coordinator.md`](open-cost-new-dimensions-plan-coordinator.md) |
 
@@ -692,11 +676,11 @@ The EPP participates only in the ext-proc side-channel to pod selection — one 
 call per disaggregation phase — and returns before the inference response is produced.
 It does not hold the complete request/response cycle. This means:
 
-- `completion_tokens` and `target_model_name` — both required for accurate per-request
-  billing — come from the vLLM response body. The EPP never sees the response body on
-  the critical path; it would need to be wired into a separate response interception hook
-  (`ResponseBodyProcessor`) that is architecturally awkward compared to the coordinator's
-  natural ownership of the decode response.
+- `completion_tokens` — required for accurate per-request billing — comes from the vLLM
+  response body. The EPP never sees the response body on the critical path; it would need
+  to be wired into a separate response interception hook (`ResponseBodyProcessor`) that is
+  architecturally awkward compared to the coordinator's natural ownership of the decode
+  response.
 - The EPP emits metrics under a different binary and Prometheus subsystem (`llm_d_epp_*`).
   OpenCost would need to reconcile two metric origins — unnecessary complexity when the
   coordinator already owns the full lifecycle.
@@ -714,11 +698,11 @@ only the coordinator deployment model.
 Attribution could be captured at the Inference Gateway level via an Envoy filter or
 Lua plugin, before the request reaches the coordinator.
 
-**Rejected**: The coordinator is the only component that accumulates `TargetModelName` and
-`CompletionTokens` from the decode response body. A gateway filter would need to parse
-the vLLM response and correlate it with the inbound request identity — a stateful
-cross-request correlation problem that the coordinator solves naturally by holding
-`RequestContext` for the full request lifetime.
+**Rejected**: The coordinator is the only component that accumulates `CompletionTokens`
+from the decode response body. A gateway filter would need to parse the vLLM response
+and correlate it with the inbound request identity — a stateful cross-request correlation
+problem that the coordinator solves naturally by holding `RequestContext` for the full
+request lifetime.
 
 ### Use a separate telemetry sidecar
 
@@ -738,10 +722,10 @@ labels on the existing `llm_d_coordinator_request_input_tokens` histogram, and a
 
 1. **Different lifecycle, different values.** [`request_input_tokens`](../../pkg/coordinator/metrics/llm_d_coordinator_metrics.go:68)
    is recorded in the pipeline `defer` in [`pipeline.go`](../../pkg/coordinator/pipeline/pipeline.go:122)
-   after the render step and before decode runs. `target_model_name` and
-   `completion_tokens` — two of the required attribution dimensions — come from the
-   decode response body and do not exist at that point in the pipeline. They cannot be
-   added to a metric that is recorded before decode has completed.
+   after the render step and before decode runs. `completion_tokens` — a required
+   attribution dimension — comes from the decode response body and does not exist at that
+   point in the pipeline. It cannot be added to a metric that is recorded before decode
+   has completed.
 
 2. **`Vec` label sets are fixed at registration time.** The `prometheus_user_id_label`
    configuration gate requires the `user_id` label dimension to be present in some
@@ -905,8 +889,7 @@ as its inner step. This approach was rejected after review.
    to the original while capturing data for attribution parsing.
 2. Delegate to `innerStep.Execute` (the decode or conditional-decode step), which ran
    the proxy and streamed the response through the intercepting writer.
-3. Read `TargetModelName` and `CompletionTokens` from the captured data after the inner
-   step returned.
+3. Read `CompletionTokens` from the captured data after the inner step returned.
 4. Emit metrics and the log record.
 
 ### Why it was rejected
