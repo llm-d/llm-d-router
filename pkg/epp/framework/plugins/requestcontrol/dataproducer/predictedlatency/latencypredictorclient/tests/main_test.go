@@ -109,5 +109,5 @@ func assertRunningMarker(t *testing.T, path string) {
 func processUmask() os.FileMode {
 	mask := syscall.Umask(0)
 	syscall.Umask(mask)
-	return os.FileMode(mask)
+	return os.FileMode(mask) //nolint:gosec // G115: test fixture, syscall.Umask returns a small unix permission mask
 }

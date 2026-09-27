@@ -72,7 +72,7 @@ func buildDistinctBlockStoredPayload(t *testing.T, blockHash uint64) []byte {
 
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(blockHash) + uint32(i) + 1 // #nosec G115 -- test data is small
+		tokens[i] = uint32(blockHash) + uint32(i) + 1 //nolint:gosec // G115: test data is small
 	}
 	return buildEventPayload(t, []any{
 		string(kvevents.EventTypeBlockStored),
@@ -97,10 +97,10 @@ func buildBlockStoredEventBatchPayload(t *testing.T, blockHashBase uint64, dataP
 	tokens := make([]uint32, 64)
 	blockHashes := make([]any, 4)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data
 	}
 	for i := range blockHashes {
-		blockHashes[i] = blockHashBase + uint64(i) // #nosec G115 -- test data
+		blockHashes[i] = blockHashBase + uint64(i) //nolint:gosec // G115: test data
 	}
 
 	blockStored := []any{
@@ -385,7 +385,7 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 	}
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data
 	}
 	keys, err := tokenProcessor.TokensToKVBlockKeys(
 		kvblock.EmptyBlockHash, tokens, "TestModel", nil)

@@ -573,7 +573,7 @@ func TestEstimateBackend_ChatAudioFeature(t *testing.T) {
 	tokens := tp.Prompts[0].TokenIDs
 	assert.LessOrEqual(t, f.Offset+f.Length, len(tokens), "feature span [%d,%d) outside token stream of len %d", f.Offset, f.Offset+f.Length, len(tokens))
 	for i := f.Offset; i < f.Offset+f.Length; i++ {
-		assert.Equal(t, uint32(xxhash.Sum64String(url)), tokens[i], "token %d: got %d, want audio placeholder token", i, tokens[i])
+		assert.Equal(t, uint32(xxhash.Sum64String(url)), tokens[i], //nolint:gosec // G115: test fixture, xxhash truncated to placeholder token width "token %d: got %d, want audio placeholder token", i, tokens[i])
 	}
 }
 

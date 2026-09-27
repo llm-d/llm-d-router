@@ -80,7 +80,7 @@ func (i *recordingIndex) Evict(
 func makeTokens(n int) []uint32 {
 	tokens := make([]uint32, n)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 	return tokens
 }
@@ -89,7 +89,7 @@ func makeTokens(n int) []uint32 {
 func makeEngineKeys(n int, base uint64) []uint64 {
 	keys := make([]uint64, n)
 	for i := range keys {
-		keys[i] = base + uint64(i) // #nosec G115 -- test data, i is small
+		keys[i] = base + uint64(i) //nolint:gosec // G115: test data, i is small
 	}
 	return keys
 }

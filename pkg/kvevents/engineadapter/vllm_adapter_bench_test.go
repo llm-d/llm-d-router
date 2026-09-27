@@ -31,12 +31,12 @@ func buildBlockStoredPayload(b *testing.B, numBlocks int, includeOptional, inclu
 
 	hashes := make([]any, numBlocks)
 	for i := range hashes {
-		hashes[i] = uint64(1000 + i) //#nosec G115 -- bench test data, no overflow risk
+		hashes[i] = uint64(1000 + i) //nolint:gosec // G115: bench test data, no overflow risk
 	}
 
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) //#nosec G115 -- bench test data, no overflow risk
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: bench test data, no overflow risk
 	}
 
 	event := []any{

@@ -443,8 +443,8 @@ func testStressConcurrentAddOverlappingKeys(t *testing.T, ctx context.Context, i
 	requestKeys := make([]BlockHash, numKeys)
 	engineKeys := make([]BlockHash, numKeys)
 	for i := range numKeys {
-		requestKeys[i] = BlockHash(uint64(8000000) + uint64(i)) // #nosec G115 -- test data, i is small
-		engineKeys[i] = BlockHash(uint64(9000000) + uint64(i))  // #nosec G115 -- test data, i is small
+		requestKeys[i] = BlockHash(uint64(8000000) + uint64(i)) //nolint:gosec // G115: test data, i is small
+		engineKeys[i] = BlockHash(uint64(9000000) + uint64(i))  //nolint:gosec // G115: test data, i is small
 	}
 
 	var wg sync.WaitGroup
@@ -541,8 +541,8 @@ func testStressConcurrentAddLookup(t *testing.T, ctx context.Context, index Inde
 	requestKeys := make([]BlockHash, 5)
 	engineKeys := make([]BlockHash, 5)
 	for i := range 5 {
-		requestKeys[i] = BlockHash(uint64(6100000) + uint64(i)) // #nosec G115 -- test data, i is small
-		engineKeys[i] = BlockHash(uint64(6200000) + uint64(i))  // #nosec G115 -- test data, i is small
+		requestKeys[i] = BlockHash(uint64(6100000) + uint64(i)) //nolint:gosec // G115: test data, i is small
+		engineKeys[i] = BlockHash(uint64(6200000) + uint64(i))  //nolint:gosec // G115: test data, i is small
 	}
 
 	var wg sync.WaitGroup
@@ -594,8 +594,8 @@ func testStressConcurrentEvictDuringLookup(t *testing.T, ctx context.Context, in
 	requestKeys := make([]BlockHash, numKeys)
 	engineKeys := make([]BlockHash, numKeys)
 	for i := range numKeys {
-		requestKeys[i] = BlockHash(uint64(5100000) + uint64(i)) // #nosec G115 -- test data, i is small
-		engineKeys[i] = BlockHash(uint64(5200000) + uint64(i))  // #nosec G115 -- test data, i is small
+		requestKeys[i] = BlockHash(uint64(5100000) + uint64(i)) //nolint:gosec // G115: test data, i is small
+		engineKeys[i] = BlockHash(uint64(5200000) + uint64(i))  //nolint:gosec // G115: test data, i is small
 		entries := []PodEntry{
 			{PodIdentifier: fmt.Sprintf("pod-a-%d", i), DeviceTier: "gpu"},
 			{PodIdentifier: fmt.Sprintf("pod-b-%d", i), DeviceTier: "gpu"},
@@ -655,8 +655,8 @@ func testStressHighCardinality(t *testing.T, ctx context.Context, index Index) {
 	requestKeys := make([]BlockHash, numKeys)
 	engineKeys := make([]BlockHash, numKeys)
 	for i := range numKeys {
-		requestKeys[i] = BlockHash(uint64(1000000) + uint64(i)) // #nosec G115 -- test data, i is small
-		engineKeys[i] = BlockHash(uint64(2000000) + uint64(i))  // #nosec G115 -- test data, i is small
+		requestKeys[i] = BlockHash(uint64(1000000) + uint64(i)) //nolint:gosec // G115: test data, i is small
+		engineKeys[i] = BlockHash(uint64(2000000) + uint64(i))  //nolint:gosec // G115: test data, i is small
 	}
 
 	var wg sync.WaitGroup

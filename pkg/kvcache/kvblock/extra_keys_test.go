@@ -248,7 +248,7 @@ func TestMMFeatures_DifferentImagesProduceDifferentHashes(t *testing.T) {
 
 	tokens := make([]uint32, 16) // one block
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i < 64
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i < 64
 	}
 
 	// Same tokens, different image hashes → different block hashes.
@@ -275,7 +275,7 @@ func TestMMFeatures_NilFeaturesSameAsTextOnly(t *testing.T) {
 
 	tokens := make([]uint32, 16)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i < 64
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i < 64
 	}
 
 	// nil extraFeatures = text-only
@@ -299,7 +299,7 @@ func TestMMFeatures_OnlyAffectOverlappingBlocks(t *testing.T) {
 	// 4 blocks of tokens
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i < 64
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i < 64
 	}
 
 	// Text-only baseline

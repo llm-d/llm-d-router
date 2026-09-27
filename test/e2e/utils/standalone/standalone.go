@@ -333,7 +333,7 @@ func startPortForward(cfg Config, selector map[string]string) func() {
 	ctx, cancel := context.WithCancel(cfg.TestConfig.Context)
 	done := make(chan struct{})
 	forward := &routerPortForward{start: func(ctx context.Context, pod *corev1.Pod) (*forwardProcess, error) {
-		// #nosec G204 -- Fixed kubectl executable; API Pod names, integer ports and test settings are separate argv, without a shell.
+		//nolint:gosec // G204: Fixed kubectl executable; API Pod names, integer ports and test settings are separate argv, without a shell.
 		command := exec.CommandContext(ctx, "kubectl", "port-forward", "pod/"+pod.Name,
 			fmt.Sprintf("%d:8081", cfg.HTTPPort), fmt.Sprintf("%d:9090", cfg.MetricsPort),
 			"--context="+cfg.K8sContext, "--namespace="+cfg.Namespace, "--address=127.0.0.1")

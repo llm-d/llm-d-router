@@ -173,7 +173,7 @@ func TestTokenProcessorConfig_JSONUnmarshal_EndToEnd(t *testing.T) {
 
 			tokens := make([]uint32, tc.tokens)
 			for i := range tokens {
-				tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+				tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 			}
 			keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
 			require.NoError(t, err)
@@ -261,7 +261,7 @@ func TestBlockSizeTokensPrecedence(t *testing.T) {
 	// With BlockSizeTokens=16: 32 tokens = 2 blocks
 	tokens := make([]uint32, 32)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
@@ -297,7 +297,7 @@ func TestBackwardCompatibility_BlockSize(t *testing.T) {
 	// 32 tokens / blockSize=8 → 4 blocks
 	tokens := make([]uint32, 32)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
@@ -772,7 +772,7 @@ func TestHeterogeneousBlockSizeSupport(t *testing.T) {
 	// 512 tokens = 32 blocks (blockSize=16) = 2 blocks (blockSize=256)
 	tokens := make([]uint32, 512)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	modelName := "test-model"
@@ -817,7 +817,7 @@ func TestHeterogeneousBlockSizeSupport(t *testing.T) {
 
 		partialTokens := make([]uint32, 300)
 		for i := range partialTokens {
-			partialTokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+			partialTokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 		}
 		keys, err := proc256.TokensToKVBlockKeys(parentKey, partialTokens, modelName, nil)
 		require.NoError(t, err)
@@ -906,7 +906,7 @@ func newXXH64Processor(t *testing.T, seed string) kvblock.TokenProcessor {
 func TestXXH64_Deterministic(t *testing.T) {
 	tokens := make([]uint32, 32)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	// Across calls on one instance and across instances with the same config.
@@ -931,7 +931,7 @@ func TestXXH64_DifferentModelsProduceDifferentChains(t *testing.T) {
 
 	tokens := make([]uint32, 16)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	models := []string{"gpt-4", "llama-2-7b", "", "a"}
@@ -951,7 +951,7 @@ func TestXXH64_DifferentModelsProduceDifferentChains(t *testing.T) {
 func TestXXH64_DifferentSeedsProduceDifferentChains(t *testing.T) {
 	tokens := make([]uint32, 16)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	seeds := []string{"", "seed1", "seed2"}
@@ -974,7 +974,7 @@ func TestXXH64_ExtraFeaturesTaintBlockHash(t *testing.T) {
 
 	tokens := make([]uint32, 32) // 2 blocks
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	plainKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
@@ -1011,7 +1011,7 @@ func TestXXH64_ParentKeyContinuation(t *testing.T) {
 
 	tokens := make([]uint32, 64) // 4 blocks
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	fullKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
@@ -1035,7 +1035,7 @@ func TestXXH64_PartialTrailingBlockExcluded(t *testing.T) {
 
 	tokens := make([]uint32, 40) // 2 full blocks of 16, 8 leftover tokens
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i + 1) //nolint:gosec // G115: test data, i is small
 	}
 
 	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
@@ -1060,7 +1060,7 @@ func benchmarkTokensToKVBlockKeys(b *testing.B, algorithm string) {
 
 	tokens := make([]uint32, 10000)
 	for i := range tokens {
-		tokens[i] = uint32(i) // #nosec G115 -- test data, i is small
+		tokens[i] = uint32(i) //nolint:gosec // G115: test data, i is small
 	}
 
 	b.ResetTimer()
