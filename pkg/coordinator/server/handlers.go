@@ -94,9 +94,21 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	parseStart := time.Now()
+	// parseDuration measures the parse phase only: body read + JSON
+	// unmarshal. The deferred capture covers every early-return branch
+	// inside the phase, so a future branch cannot forget to record it.
+	// parseDone is set once the phase completes so the defer stops
+	// re-measuring — otherwise parseDuration would absorb the pipeline
+	// execution time and drive orchestration_overhead to zero.
+	parseDone := false
+	defer func() {
+		if !parseDone {
+			parseDuration = time.Since(parseStart)
+		}
+	}()
+
 	var err error
 	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
-	parseDuration = time.Since(parseStart)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(cw, "failed to read request body", http.StatusBadRequest)
@@ -110,18 +122,17 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		parseDuration = time.Since(parseStart)
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	if parsed == nil {
-		parseDuration = time.Since(parseStart)
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
 		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 	parseDuration = time.Since(parseStart)
+	parseDone = true
 
 	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
@@ -148,6 +159,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		Body:             parsed,
 		Model:            model,
 		Stream:           stream,
+		Route:            route,
 		KVTransferParams: make(map[string]any),
 		ResponseWriter:   cw,
 		ParseDuration:    parseDuration,

@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -319,11 +320,7 @@ func TestRoutesRegistered(t *testing.T) {
 // level vectors the handler mutates. Reset clears the vectors' state so
 // concurrent tests do not see each other's increments.
 func newMetricsRegistry(t *testing.T) *prometheus.Registry {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	require.NoError(t, coordmetrics.Register(reg))
-	coordmetrics.Reset()
-	return reg
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 }
 
 func TestHandleInference_SuccessRecordsRequestFamily(t *testing.T) {
@@ -664,39 +661,11 @@ func mustCounter(t *testing.T, reg *prometheus.Registry, name string, labels map
 }
 
 func histogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			if labelsMatch(m.GetLabel(), labels) {
-				return m.GetHistogram().GetSampleCount()
-			}
-		}
-	}
-	t.Fatalf("histogram %s%v not present", name, labels)
-	return 0
+	return metricstest.HistogramCount(t, reg, name, labels)
 }
 
 func histogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			if labelsMatch(m.GetLabel(), labels) {
-				return m.GetHistogram().GetSampleSum()
-			}
-		}
-	}
-	t.Fatalf("histogram %s%v not present", name, labels)
-	return 0
+	return metricstest.HistogramSum(t, reg, name, labels)
 }
 
 // seriesCount returns the number of series (label-set combinations) that the
@@ -757,6 +726,40 @@ func TestHandleInference_RecordsOrchestrationOverheadAndResponseBytes(t *testing
 	if hs := histogramSum(t, reg, "llm_d_coordinator_response_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs != 0 {
 		t.Fatalf("expected 0 response bytes on a silent success path, got %v", hs)
 	}
+}
+
+// TestHandleInference_ParseDurationIsNotInflatedByPipelineTime guards the
+// parse-phase measurement: ParseDuration must be recorded before the
+// pipeline runs and must cover only body read + JSON unmarshal. A regression
+// that defers the capture to handler exit (after the pipeline) would leave
+// RequestContext.ParseDuration at 0 during pipeline execution and drive
+// orchestration_overhead_seconds to zero by absorbing step time into the
+// parse term.
+func TestHandleInference_ParseDurationIsNotInflatedByPipelineTime(t *testing.T) {
+	var capturedParseDuration time.Duration
+	const stepSleep = 50 * time.Millisecond
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		capturedParseDuration = rc.ParseDuration
+		time.Sleep(stepSleep)
+		return nil
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	// A padded body (~64 KiB of JSON string) makes parse time comfortably
+	// measurable so the > 0 assertion cannot flake on coarse clocks.
+	bigPad := strings.Repeat("x", 64*1024)
+	body := `{"model":"m","pad":"` + bigPad + `"}`
+	req := httptest.NewRequest(http.MethodPost, gateway.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Greater(t, capturedParseDuration, time.Duration(0),
+		"ParseDuration must be set before the pipeline runs, got 0")
+	require.Less(t, capturedParseDuration, stepSleep,
+		"ParseDuration must not absorb pipeline execution time")
 }
 
 func TestHandleInference_ResponseBytesCountsStreamedAndErrorBodies(t *testing.T) {

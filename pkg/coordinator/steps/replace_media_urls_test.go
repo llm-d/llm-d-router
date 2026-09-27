@@ -33,6 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -1143,67 +1144,15 @@ func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
 }
 
 func newStepMetricsRegistry(t *testing.T) *prometheus.Registry {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	require.NoError(t, coordmetrics.Register(reg))
-	coordmetrics.Reset()
-	return reg
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 }
 
 func stepHistogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			got := map[string]string{}
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			match := true
-			for k, v := range labels {
-				if got[k] != v {
-					match = false
-					break
-				}
-			}
-			if match {
-				return m.GetHistogram().GetSampleCount()
-			}
-		}
-	}
-	return 0
+	return metricstest.HistogramCount(t, reg, name, labels)
 }
 
 func stepHistogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			got := map[string]string{}
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			match := true
-			for k, v := range labels {
-				if got[k] != v {
-					match = false
-					break
-				}
-			}
-			if match {
-				return m.GetHistogram().GetSampleSum()
-			}
-		}
-	}
-	return 0
+	return metricstest.HistogramSum(t, reg, name, labels)
 }
 
 func TestReplaceMediaURLsStep_RecordsMediaItemsAndDownloadSuccess(t *testing.T) {

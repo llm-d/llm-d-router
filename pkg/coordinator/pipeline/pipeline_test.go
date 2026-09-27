@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 )
 
 type mockStep struct {
@@ -141,11 +142,7 @@ func TestPipeline_RespectsContextCancellation(t *testing.T) {
 // isolation, and clears their state so concurrent tests do not see each
 // other's increments.
 func newMetricsRegistry(t *testing.T) *prometheus.Registry {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	require.NoError(t, coordmetrics.Register(reg))
-	coordmetrics.Reset()
-	return reg
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 }
 
 // stepErrorCount reads the error counter for the given step and error_code
@@ -467,59 +464,11 @@ func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[s
 }
 
 func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			got := map[string]string{}
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			match := true
-			for k, v := range labels {
-				if got[k] != v {
-					match = false
-					break
-				}
-			}
-			if match {
-				return m.GetHistogram().GetSampleCount()
-			}
-		}
-	}
-	return 0
+	return metricstest.HistogramCount(t, reg, name, labels)
 }
 
 func histogramSampleSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			got := map[string]string{}
-			for _, l := range m.GetLabel() {
-				got[l.GetName()] = l.GetValue()
-			}
-			match := true
-			for k, v := range labels {
-				if got[k] != v {
-					match = false
-					break
-				}
-			}
-			if match {
-				return m.GetHistogram().GetSampleSum()
-			}
-		}
-	}
-	return 0
+	return metricstest.HistogramSum(t, reg, name, labels)
 }
 
 func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
@@ -527,11 +476,11 @@ func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
 	steps := []Step{
 		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
 	}
-	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+	if err := New(steps).Execute(context.Background(), &RequestContext{Route: coordmetrics.RouteChatCompletions}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
-	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", map[string]string{"route": coordmetrics.RouteChatCompletions}))
+	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", map[string]string{"route": coordmetrics.RouteChatCompletions}), 1e-9)
 
 	reg = newMetricsRegistry(t)
 	steps = []Step{
@@ -541,11 +490,12 @@ func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
 		}},
 		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
 	}
+	// Empty Route is normalized to RouteUnknown by boundRoute at record time.
 	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", nil))
-	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", nil), 1e-9)
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_fanout_size", map[string]string{"route": coordmetrics.RouteUnknown}))
+	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_fanout_size", map[string]string{"route": coordmetrics.RouteUnknown}), 1e-9)
 }
 
 func TestExecute_AccumulatesStepDuration(t *testing.T) {
