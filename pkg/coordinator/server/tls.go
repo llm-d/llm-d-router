@@ -36,14 +36,17 @@ type tlsProfile struct {
 }
 
 // parseTLSProfile resolves TLS version and cipher suite names to their crypto/tls values.
-// An empty version uses TLS 1.2.
+// An empty version uses TLS 1.2. A version below TLS 1.2 is rejected.
 // An empty suite list uses the crypto/tls default.
 func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, error) {
 	profile := tlsProfile{minVersion: tls.VersionTLS12}
 	if minVersion != "" {
 		version, err := flag.TLSVersion(minVersion)
 		if err != nil {
-			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", minVersion, minVersion)
+			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", minVersion, minVersion)
+		}
+		if version < tls.VersionTLS12 {
+			return tlsProfile{}, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", minVersion)
 		}
 		profile.minVersion = version
 	}
@@ -61,8 +64,13 @@ func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, erro
 // certificate is generated, which is often used for testing.
 func (s *Server) listenerTLSConfig(ctx context.Context) (*tls.Config, error) {
 	cfg := &tls.Config{
-		MinVersion:   s.tls.minVersion,
+		MinVersion:   tls.VersionTLS12,
 		CipherSuites: s.tls.cipherSuites,
+	}
+	// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+	// parseTLSProfile already rejects a configured version below TLS 1.2.
+	if s.tls.minVersion > tls.VersionTLS12 {
+		cfg.MinVersion = s.tls.minVersion
 	}
 
 	if s.certPath == "" {

@@ -18,7 +18,7 @@ them. Which sources supply its value differs: see
 |---|---|---|---|---|---|---|
 | `--secure-serving` | `true` / `false` | `true` | yes | yes | yes | Serve the listener over TLS. |
 | `--cert-path` | directory path | empty | yes | yes | yes | Directory with `tls.crt` and `tls.key`. |
-| `--tls-min-version` | `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | yes | yes | yes | Minimum TLS version for secure serving. |
+| `--tls-min-version` | `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | yes | yes | yes | Minimum TLS version for secure serving. A value below `VersionTLS12` is rejected at startup. |
 | `--tls-cipher-suites` | Go `crypto/tls` cipher suite names (comma-separated or repeated) | `crypto/tls` default | yes | yes | yes | Cipher suites for secure serving. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-cert-reload` | `true` / `false` | `false` | yes | — | — | Reload the `--cert-path` key pair when it changes. |
 | `--secure-proxy` | `true` / `false` | `true` | — | deprecated | — | Deprecated alias for `--secure-serving`. |

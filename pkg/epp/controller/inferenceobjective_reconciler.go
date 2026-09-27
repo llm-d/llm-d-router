@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -75,6 +76,10 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Add or update if the InferenceObjective instance has a creation timestamp older than the existing entry of the model.
 	logger = logger.WithValues("poolRef", infObjective.Spec.PoolRef)
+	if infObjective.Spec.Priority == nil {
+		// The API defines an unset priority as 0.
+		infObjective.Spec.Priority = ptr.To(int32(0))
+	}
 	c.Datastore.ObjectiveSet(infObjective)
 	c.syncPriorityBands()
 	logger.Info("Added/Updated InferenceObjective")

@@ -62,7 +62,7 @@ func ScaleDeployment(cfg *testutils.TestConfig, nsName string, objects []string,
 			scale, err := cfg.KubeCli.AppsV1().Deployments(nsName).GetScale(cfg.Context, split[1], metav1.GetOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			scale.Spec.Replicas += int32(increment)
+			scale.Spec.Replicas += int32(increment) //nolint:gosec // G115: increment is a small test-controlled replica delta
 			_, err = cfg.KubeCli.AppsV1().Deployments(nsName).UpdateScale(cfg.Context, split[1], scale, metav1.UpdateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
@@ -273,7 +273,7 @@ func GetMetrics(metricsURL string) []string {
 }
 
 func scrapeMetrics(metricsURL string) ([]byte, error) {
-	resp, err := http.Get(metricsURL)
+	resp, err := http.Get(metricsURL) //nolint:gosec // G107: metricsURL is built from test-controlled config, not request-derived
 	if err != nil {
 		return nil, err
 	}

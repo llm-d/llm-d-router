@@ -290,7 +290,7 @@ dataLayer:
 	// wildcard address, the same one runnable.GRPCServer binds, so the
 	// collision is guaranteed on macOS as well as Linux: fwknet.ReserveListener
 	// binds only 127.0.0.1, which does not shadow [::]:<port> on macOS.
-	decoyListener, err := net.Listen("tcp", ":0")
+	decoyListener, err := net.Listen("tcp", ":0") //nolint:gosec // 0.0.0.0 needed for multi-NIC test
 	require.NoError(t, err)
 	defer decoyListener.Close()
 	decoyPort := uint16(decoyListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535

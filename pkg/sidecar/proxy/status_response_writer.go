@@ -177,7 +177,7 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	w.headerFlushed = true
 	w.dst.WriteHeader(status)
 	if w.buffer.Len() > 0 {
-		_, _ = w.dst.Write(w.buffer.Bytes())
+		WriteAll(w.dst, w.buffer.Bytes())
 		w.buffer.Reset()
 	}
 	if f, ok := w.dst.(http.Flusher); ok {

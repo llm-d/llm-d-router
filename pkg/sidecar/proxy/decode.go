@@ -128,7 +128,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	for {
 		if ctx.Err() != nil {
 			if streamingEnabled && chunkIndex > 0 {
-				fmt.Fprintf(w, "%s\n\n", sseDone) //nolint:errcheck
+				fmt.Fprintf(w, "%s\n\n", sseDone)
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
@@ -181,7 +181,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			span.SetStatus(codes.Error, "chunk decode failed")
 			maps.Copy(w.Header(), bw.headers)
 			w.WriteHeader(bw.statusCode)
-			w.Write(bw.bodyBytes()) //nolint:errcheck
+			WriteAll(w, bw.bodyBytes())
 			return
 		}
 
@@ -261,10 +261,10 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 				responseFieldChoices: []any{},
 			}
 			if data, err := json.Marshal(usageEvent); err == nil {
-				fmt.Fprintf(w, "%s%s\n\n", sseDataPrefix, data) //nolint:errcheck
+				fmt.Fprintf(w, "%s%s\n\n", sseDataPrefix, data)
 			}
 		}
-		fmt.Fprintf(w, "%s\n\n", sseDone) //nolint:errcheck
+		fmt.Fprintf(w, "%s\n\n", sseDone)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -303,7 +303,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(respBody) //nolint:errcheck
+	WriteAll(w, respBody)
 }
 
 // resolveMaxTokens returns the effective max-tokens limit from the request map.

@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -198,6 +199,8 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if err != nil {
 		return nil, err
 	}
+
+	prefixmetrics.Register()
 
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},

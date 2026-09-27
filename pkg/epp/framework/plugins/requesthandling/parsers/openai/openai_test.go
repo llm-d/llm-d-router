@@ -1587,7 +1587,7 @@ func TestOpenAIParser_RewriteModelNamePreservesTokenInput(t *testing.T) {
 	tests := []struct {
 		name, path, tokenField, body, wantTokens string
 	}{
-		{
+		{ //nolint:gosec // G101: tokenField names a JSON field, not a credential
 			name:       "nested completions",
 			path:       "/v1/completions",
 			tokenField: "prompt",

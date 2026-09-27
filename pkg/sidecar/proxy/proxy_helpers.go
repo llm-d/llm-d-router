@@ -113,12 +113,14 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 		}
 
-		minVersion := s.config.TLSMinVersion
-		if minVersion == 0 {
-			minVersion = tls.VersionTLS12
-		}
+		// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+		// Options.Complete already rejects a configured version below TLS 1.2.
 		// An empty suite list leaves CipherSuites nil, which selects the
 		// crypto/tls default, matching the coordinator and EPP.
+		minVersion := uint16(tls.VersionTLS12)
+		if s.config.TLSMinVersion > tls.VersionTLS12 {
+			minVersion = s.config.TLSMinVersion
+		}
 		server.TLSConfig = &tls.Config{
 			MinVersion:     minVersion,
 			CipherSuites:   s.config.TLSCipherSuites,
@@ -186,7 +188,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 }
 
 func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
-	defer func() { _ = r.Body.Close() }()
+	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
@@ -320,4 +322,10 @@ func isRetryableStatus(statusCode int) bool {
 	return statusCode == http.StatusBadGateway ||
 		statusCode == http.StatusServiceUnavailable ||
 		statusCode == http.StatusGatewayTimeout
+}
+
+// WriteAll writes b to w, discarding the error. The caller has already sent
+// headers and status, so there is no recovery action for a write failure.
+func WriteAll(w io.Writer, b []byte) {
+	_, _ = w.Write(b)
 }

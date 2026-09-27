@@ -78,6 +78,8 @@ type Datastore interface {
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *v1alpha2.InferenceObjective)
+	// ObjectiveGet and ObjectiveGetAll return the stored objectives, which are
+	// shared with concurrent readers and must not be modified.
 	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
 	ObjectiveDelete(namespacedName types.NamespacedName)
 	ObjectiveGetAll() []*v1alpha2.InferenceObjective

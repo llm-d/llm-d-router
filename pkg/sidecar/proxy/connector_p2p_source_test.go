@@ -71,7 +71,7 @@ var _ = Describe("P2P KV cache source header", func() {
 	}
 
 	sendRequest := func(proxyBaseAddr string, headers map[string]string) *http.Response {
-		return sendBody(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionTokens, headers)
+		return sendBody(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionCap, headers)
 	}
 
 	It("should inject remote_kv_source params on the local request without disaggregation", func() {

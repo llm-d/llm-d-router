@@ -17,7 +17,6 @@ limitations under the License.
 package env
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -34,19 +33,15 @@ func TestGetEnvFloat(t *testing.T) {
 		key        string
 		defaultVal float64
 		expected   float64
-		setup      func()
-		teardown   func()
+		setup      func(t *testing.T)
 	}{
 		{
 			name:       "env variable exists and is valid",
 			key:        "TEST_FLOAT",
 			defaultVal: 0.0,
 			expected:   123.456,
-			setup: func() {
-				os.Setenv("TEST_FLOAT", "123.456")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_FLOAT")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_FLOAT", "123.456")
 			},
 		},
 		{
@@ -54,11 +49,8 @@ func TestGetEnvFloat(t *testing.T) {
 			key:        "TEST_FLOAT",
 			defaultVal: 99.9,
 			expected:   99.9,
-			setup: func() {
-				os.Setenv("TEST_FLOAT", "invalid")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_FLOAT")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_FLOAT", "invalid")
 			},
 		},
 		{
@@ -66,15 +58,13 @@ func TestGetEnvFloat(t *testing.T) {
 			key:        "TEST_FLOAT_MISSING",
 			defaultVal: 42.42,
 			expected:   42.42,
-			setup:      func() {},
-			teardown:   func() {},
+			setup:      func(t *testing.T) {},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
+			tc.setup(t)
 
 			result := GetEnvFloat(tc.key, tc.defaultVal, logger.V(logutil.VERBOSE))
 			if result != tc.expected {
@@ -92,19 +82,15 @@ func TestGetEnvDuration(t *testing.T) {
 		key        string
 		defaultVal time.Duration
 		expected   time.Duration
-		setup      func()
-		teardown   func()
+		setup      func(t *testing.T)
 	}{
 		{
 			name:       "env variable exists and is valid",
 			key:        "TEST_DURATION",
 			defaultVal: 0,
 			expected:   1*time.Hour + 30*time.Minute,
-			setup: func() {
-				os.Setenv("TEST_DURATION", "1h30m")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_DURATION")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_DURATION", "1h30m")
 			},
 		},
 		{
@@ -112,11 +98,8 @@ func TestGetEnvDuration(t *testing.T) {
 			key:        "TEST_DURATION",
 			defaultVal: 5 * time.Minute,
 			expected:   5 * time.Minute,
-			setup: func() {
-				os.Setenv("TEST_DURATION", "invalid-duration")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_DURATION")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_DURATION", "invalid-duration")
 			},
 		},
 		{
@@ -124,27 +107,22 @@ func TestGetEnvDuration(t *testing.T) {
 			key:        "TEST_DURATION_MISSING",
 			defaultVal: 10 * time.Second,
 			expected:   10 * time.Second,
-			setup:      func() {},
-			teardown:   func() {},
+			setup:      func(t *testing.T) {},
 		},
 		{
 			name:       "env variable is empty string",
 			key:        "TEST_DURATION_EMPTY",
 			defaultVal: 1 * time.Millisecond,
 			expected:   1 * time.Millisecond,
-			setup: func() {
-				os.Setenv("TEST_DURATION_EMPTY", "")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_DURATION_EMPTY")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_DURATION_EMPTY", "")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
+			tc.setup(t)
 
 			result := GetEnvDuration(tc.key, tc.defaultVal, logger.V(logutil.VERBOSE))
 			if result != tc.expected {
@@ -162,19 +140,15 @@ func TestGetEnvInt(t *testing.T) {
 		key        string
 		defaultVal int
 		expected   int
-		setup      func()
-		teardown   func()
+		setup      func(t *testing.T)
 	}{
 		{
 			name:       "env variable exists and is valid",
 			key:        "TEST_INT",
 			defaultVal: 0,
 			expected:   123,
-			setup: func() {
-				os.Setenv("TEST_INT", "123")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_INT")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_INT", "123")
 			},
 		},
 		{
@@ -182,11 +156,8 @@ func TestGetEnvInt(t *testing.T) {
 			key:        "TEST_INT",
 			defaultVal: 99,
 			expected:   99,
-			setup: func() {
-				os.Setenv("TEST_INT", "invalid")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_INT")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_INT", "invalid")
 			},
 		},
 		{
@@ -194,27 +165,22 @@ func TestGetEnvInt(t *testing.T) {
 			key:        "TEST_INT_MISSING",
 			defaultVal: 42,
 			expected:   42,
-			setup:      func() {},
-			teardown:   func() {},
+			setup:      func(t *testing.T) {},
 		},
 		{
 			name:       "env variable is empty string",
 			key:        "TEST_INT_EMPTY",
 			defaultVal: 77,
 			expected:   77,
-			setup: func() {
-				os.Setenv("TEST_INT_EMPTY", "")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_INT_EMPTY")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_INT_EMPTY", "")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
+			tc.setup(t)
 
 			result := GetEnvInt(tc.key, tc.defaultVal, logger.V(logutil.VERBOSE))
 			if result != tc.expected {
@@ -232,19 +198,15 @@ func TestGetEnvBool(t *testing.T) {
 		key        string
 		defaultVal bool
 		expected   bool
-		setup      func()
-		teardown   func()
+		setup      func(t *testing.T)
 	}{
 		{
 			name:       "env variable exists and is valid",
 			key:        "TEST_BOOL",
 			defaultVal: false,
 			expected:   true,
-			setup: func() {
-				os.Setenv("TEST_BOOL", "true")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_BOOL")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_BOOL", "true")
 			},
 		},
 		{
@@ -252,11 +214,8 @@ func TestGetEnvBool(t *testing.T) {
 			key:        "TEST_BOOL",
 			defaultVal: false,
 			expected:   false,
-			setup: func() {
-				os.Setenv("TEST_BOOL", "invalid")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_BOOL")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_BOOL", "invalid")
 			},
 		},
 		{
@@ -264,27 +223,22 @@ func TestGetEnvBool(t *testing.T) {
 			key:        "TEST_BOOL_MISSING",
 			defaultVal: false,
 			expected:   false,
-			setup:      func() {},
-			teardown:   func() {},
+			setup:      func(t *testing.T) {},
 		},
 		{
 			name:       "env variable is empty string",
 			key:        "TEST_BOOL_EMPTY",
 			defaultVal: false,
 			expected:   false,
-			setup: func() {
-				os.Setenv("TEST_BOOL_EMPTY", "")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_BOOL_EMPTY")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_BOOL_EMPTY", "")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
+			tc.setup(t)
 
 			result := GetEnvBool(tc.key, tc.defaultVal, logger.V(logutil.VERBOSE))
 			if result != tc.expected {
@@ -302,19 +256,15 @@ func TestGetEnvString(t *testing.T) {
 		key        string
 		defaultVal string
 		expected   string
-		setup      func()
-		teardown   func()
+		setup      func(t *testing.T)
 	}{
 		{
 			name:       "env variable exists and is valid",
 			key:        "TEST_STR",
 			defaultVal: "default",
 			expected:   "123",
-			setup: func() {
-				os.Setenv("TEST_STR", "123")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_STR")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_STR", "123")
 			},
 		},
 		{
@@ -322,27 +272,22 @@ func TestGetEnvString(t *testing.T) {
 			key:        "TEST_STR_MISSING",
 			defaultVal: "default",
 			expected:   "default",
-			setup:      func() {},
-			teardown:   func() {},
+			setup:      func(t *testing.T) {},
 		},
 		{
 			name:       "env variable is empty string",
 			key:        "TEST_STR_EMPTY",
 			defaultVal: "default",
 			expected:   "",
-			setup: func() {
-				os.Setenv("TEST_STR_EMPTY", "")
-			},
-			teardown: func() {
-				os.Unsetenv("TEST_STR_EMPTY")
+			setup: func(t *testing.T) {
+				t.Setenv("TEST_STR_EMPTY", "")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.setup()
-			defer tc.teardown()
+			tc.setup(t)
 
 			result := GetEnvString(tc.key, tc.defaultVal, logger.V(logutil.VERBOSE))
 			if result != tc.expected {

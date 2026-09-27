@@ -522,8 +522,8 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 	if maxIdle <= 0 {
 		maxIdle = defaultMaxIdleConnsPerHost
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck
-	t.MaxIdleConns = 0                                   // unlimited
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 0 // unlimited
 	t.MaxIdleConnsPerHost = maxIdle
 	t.MaxConnsPerHost = 0 // unlimited
 	t.IdleConnTimeout = 90 * time.Second

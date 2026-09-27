@@ -1393,6 +1393,16 @@ func TestCompleteTLSServingProfile(t *testing.T) {
 			expectedError: `invalid tls-min-version "VersionTLS14"`,
 		},
 		{
+			name:          "TLS 1.0 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS10"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
+			name:          "TLS 1.1 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS11"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
 			name:          "invalid cipher suite",
 			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
 			expectedError: `invalid tls-cipher-suites: unknown cipher suite "FAKE_CIPHER_SUITE"`,

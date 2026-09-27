@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -69,8 +70,8 @@ type priorityBand struct {
 // capacityDimension returns this band's current occupancy against its configured limits.
 func (b *priorityBand) capacityDimension() contracts.CapacityDimension {
 	return contracts.CapacityDimension{
-		Len:              uint64(b.stats.len.Load()),
-		ByteSize:         uint64(b.stats.byteSize.Load()),
+		Len:              clamp.Uint64(b.stats.len.Load()),
+		ByteSize:         clamp.Uint64(b.stats.byteSize.Load()),
 		CapacityRequests: b.config.MaxRequests,
 		CapacityBytes:    b.config.MaxBytes,
 	}

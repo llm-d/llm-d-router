@@ -48,6 +48,10 @@ type EndpointEntry struct {
 	Address   string            `json:"address"             yaml:"address"`
 	Port      string            `json:"port"                yaml:"port"`
 	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	// RankIndex is the endpoint's pod-local rank, used to offset well-known
+	// ports (for example the KV-events socket) when multiple engines are
+	// co-located on the same address. Defaults to 0.
+	RankIndex int `json:"rankIndex,omitempty" yaml:"rankIndex,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -265,6 +269,10 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
 			continue
 		}
+		if e.RankIndex < 0 {
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid rankIndex %d", e.Name, e.RankIndex))
+			continue
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
@@ -276,6 +284,7 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			Port:        e.Port,
 			MetricsHost: net.JoinHostPort(e.Address, e.Port),
 			Labels:      e.Labels,
+			RankIndex:   e.RankIndex,
 		}
 		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)

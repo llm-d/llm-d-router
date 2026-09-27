@@ -180,6 +180,14 @@ func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS99"},
 		},
 		{
+			name: "TLS 1.0 below the floor",
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS10"},
+		},
+		{
+			name: "TLS 1.1 below the floor",
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS11"},
+		},
+		{
 			name: "unknown cipher suite",
 			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
 		},
@@ -197,6 +205,24 @@ func TestParseTLSProfile_EmptyUsesTLS12(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint16(tls.VersionTLS12), profile.minVersion, "empty tls_min_version must use TLS 1.2")
 	require.Empty(t, profile.cipherSuites, "empty tls_cipher_suites must leave the crypto/tls default")
+}
+
+func TestParseTLSProfile_RejectsBelowFloor(t *testing.T) {
+	tests := []struct {
+		name            string
+		minVersion      string
+		wantErrContains string
+	}{
+		{name: "VersionTLS10", minVersion: "VersionTLS10", wantErrContains: "below the TLS 1.2 minimum"},
+		{name: "VersionTLS11", minVersion: "VersionTLS11", wantErrContains: "below the TLS 1.2 minimum"},
+		{name: "unknown version", minVersion: "TLS1.2", wantErrContains: "unknown TLS version"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseTLSProfile(tt.minVersion, nil)
+			require.ErrorContains(t, err, tt.wantErrContains)
+		})
+	}
 }
 
 func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {

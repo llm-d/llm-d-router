@@ -187,7 +187,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
-		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. Only `inference.networking.k8s.io/v1` is currently supported.")
+		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. "+
+			"Only `inference.networking.k8s.io` is currently supported (`inference.networking.x-k8s.io` is deprecated but still accepted).")
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
@@ -332,6 +333,9 @@ func (opts *Options) Complete() error {
 		if err != nil {
 			return fmt.Errorf("invalid tls-min-version %q: %w", opts.TLSMinVersion, err)
 		}
+		if v < tls.VersionTLS12 {
+			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
+		}
 		opts.tlsMinVersionValue = v
 	}
 	if len(opts.TLSCipherSuites) > 0 {
@@ -431,6 +435,9 @@ func (opts *Options) Validate() error {
 	if opts.PluginStateStalenessThreshold <= 0 {
 		return fmt.Errorf("plugin-state-staleness-threshold must be positive, got %v", opts.PluginStateStalenessThreshold)
 	}
+	if opts.PoolGroup != routing.InferencePoolAPIGroup && opts.PoolGroup != "inference.networking.x-k8s.io" {
+		return fmt.Errorf("pool-group must be %q or the deprecated %q, got %q", routing.InferencePoolAPIGroup, "inference.networking.x-k8s.io", opts.PoolGroup)
+	}
 	if opts.MetricsStalenessThreshold <= 0 {
 		return fmt.Errorf("metrics-staleness-threshold must be positive, got %v", opts.MetricsStalenessThreshold)
 	}
@@ -488,7 +495,7 @@ func parseTLSVersion(s string) (uint16, error) {
 	if v, ok := tlsVersions[s]; ok {
 		return v, nil
 	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", s)
+	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s)
 }
 
 func parseCipherSuites(names []string) ([]uint16, error) {

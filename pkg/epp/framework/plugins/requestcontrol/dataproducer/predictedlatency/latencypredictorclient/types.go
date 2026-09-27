@@ -145,7 +145,7 @@ func ConfigFromEnv() *Config {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			cfg.MaxConcurrentDispatches = n
 		} else {
-			log.Printf("WARNING: LATENCY_MAX_CONCURRENT_DISPATCHES=%q is invalid (must be > 0), using default %d", s, cfg.MaxConcurrentDispatches)
+			log.Printf("WARNING: LATENCY_MAX_CONCURRENT_DISPATCHES=%q is invalid (must be > 0), using default %d", s, cfg.MaxConcurrentDispatches) //nolint:gosec // %q escapes control chars; env-var is operator-supplied
 		}
 	}
 	return cfg

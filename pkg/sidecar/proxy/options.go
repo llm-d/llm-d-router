@@ -378,10 +378,14 @@ var tlsVersions = map[string]uint16{
 }
 
 func parseTLSVersion(version string) (uint16, error) {
-	if value, ok := tlsVersions[version]; ok {
-		return value, nil
+	value, ok := tlsVersions[version]
+	if !ok {
+		return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", version)
 	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", version)
+	if value < tls.VersionTLS12 {
+		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", version)
+	}
+	return value, nil
 }
 
 func parseCipherSuites(names []string) ([]uint16, error) {

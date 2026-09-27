@@ -472,6 +472,7 @@ func fetchDeploymentLogs(nsName, deployment, container string) string {
 		args = append(args, "--context="+k8sContext)
 	}
 
+	// #nosec G204 -- Fixed kubectl executable; deployment, container and context names are test-controlled argv, without a shell.
 	out, err := exec.Command("kubectl", args...).CombinedOutput()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(),
 		"failed to fetch %s logs: %s", deployment, string(out))

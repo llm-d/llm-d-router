@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,6 +43,14 @@ func TestMain(m *testing.M) {
 	// Register all metrics once for the entire test suite.
 	Register()
 	os.Exit(m.Run())
+}
+
+const testdataDir = "testdata"
+
+// openGoldenFile opens a fixture under testdataDir, discarding any directory
+// component of name so the resolved path cannot escape testdataDir.
+func openGoldenFile(name string) (*os.File, error) {
+	return os.Open(filepath.Join(testdataDir, filepath.Base(name)))
 }
 
 func TestCoreLegacyMetricFamiliesAreNotRegistered(t *testing.T) {
@@ -930,7 +939,7 @@ func TestFlowControlEnqueueDurationMetric(t *testing.T) {
 func TestSchedulerAttemptsTotal(t *testing.T) {
 	compareMetrics := func(t *testing.T, family, goldenFile string) {
 		t.Helper()
-		wantMetrics, err := os.Open(goldenFile)
+		wantMetrics, err := openGoldenFile(goldenFile)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1384,7 +1393,7 @@ func TestFlowControlEvictionMetrics(t *testing.T) {
 		"llm_d_epp_flow_control_reclaim_target":           "testdata/llm_d_flow_control_reclaim_target_metric",
 		"llm_d_epp_flow_control_pending_reclaim":          "testdata/llm_d_flow_control_pending_reclaim_metric",
 	} {
-		want, err := os.Open(testdata)
+		want, err := openGoldenFile(testdata)
 		if err != nil {
 			t.Fatal(err)
 		}

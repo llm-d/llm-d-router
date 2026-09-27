@@ -182,9 +182,6 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 				Priority: &d.defaultPriority,
 			},
 		}
-	} else if infObjective.Spec.Priority == nil {
-		// Default to 0 if not specified.
-		infObjective.Spec.Priority = &d.defaultPriority
 	}
 	return infObjective
 }

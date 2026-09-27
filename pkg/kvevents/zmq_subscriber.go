@@ -81,6 +81,8 @@ func newZMQSubscriber(
 }
 
 // parseEventFrame validates and extracts a live or replayed event frame.
+// The returned sequence number is vLLM's per-pod event counter, which never
+// approaches int64 overflow.
 //
 //nolint:gocritic // unnamedResult conflicts with nonamedreturns
 func parseEventFrame(frames [][]byte) (string, uint64, []byte, bool) {
@@ -259,9 +261,11 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
 	defer span.End()
 	if span.IsRecording() {
+		//nolint:gosec // seq is vLLM's per-pod event counter; see parseEventFrame doc
+		seqAttr := int64(seq)
 		attrs := []attribute.KeyValue{
 			semconv.LLMDKVCacheEventsTopic(topic),
-			semconv.LLMDKVCacheEventsSequence(int64(seq)), //nolint:gosec // vLLM sequence counter never approaches int64 overflow
+			semconv.LLMDKVCacheEventsSequence(seqAttr),
 			semconv.LLMDKVCacheEventsPayloadSizeBytes(len(payload)),
 		}
 		// Empty unless the subscriber was created by pod discovery.

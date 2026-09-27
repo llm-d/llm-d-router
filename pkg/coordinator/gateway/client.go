@@ -104,7 +104,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		}
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // baseURL is operator-configured (cfg.Address); path is a fixed APIType constant, never request-derived
 	if err != nil {
 		return nil, fmt.Errorf("sending request to gateway: %w", err)
 	}

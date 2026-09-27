@@ -86,9 +86,11 @@ var _ = Describe("Reverse Proxy", func() {
 
 				<-proxy.readyCh
 
+				// The proxy generates its own self-signed certificate when
+				// CertPath is unset, so the client has no CA to verify against.
 				tr := &http.Transport{
 					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, // Skip certificate verification
+						InsecureSkipVerify: true, //nolint:gosec // proxy's self-signed cert is not exposed to the test for trust
 					},
 				}
 				client := &http.Client{

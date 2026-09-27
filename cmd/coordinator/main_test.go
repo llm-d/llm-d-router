@@ -268,7 +268,7 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	// Bind the wildcard the same way serveMetrics does so the collision is
 	// guaranteed on macOS as well as Linux. fwknet.ReserveListener binds only
 	// 127.0.0.1, which does not shadow [::]:<port> on macOS.
-	blocker, err := net.Listen("tcp", ":0")
+	blocker, err := net.Listen("tcp", ":0") //nolint:gosec // 0.0.0.0 needed for multi-NIC test
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blocker.Close() })
 	blockedPort := blocker.Addr().(*net.TCPAddr).Port

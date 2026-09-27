@@ -118,7 +118,7 @@ func TestServeMetrics_BindsMetricsPort(t *testing.T) {
 }
 
 func TestServeMetrics_ListenError(t *testing.T) {
-	held, err := net.Listen("tcp", ":0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = held.Close() })
 

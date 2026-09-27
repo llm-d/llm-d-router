@@ -9,6 +9,7 @@
   - [PeerMetadata](#peermetadata)
   - [Ordering contract](#ordering-contract)
   - [PeerStore](#peerstore)
+- [In-tree plugin: k8s-peer-discovery](#in-tree-plugin-k8s-peer-discovery)
 - [Selecting a peer discovery plugin in the EPP config](#selecting-a-peer-discovery-plugin-in-the-epp-config)
 - [Writing a peer discovery plugin](#writing-a-peer-discovery-plugin)
 
@@ -57,8 +58,9 @@ type PeerDiscovery interface {
     // error occurs. The caller invokes Start in a dedicated goroutine.
     Start(ctx context.Context, notifier PeerNotifier) error
 
-    // Ready returns a channel that is closed once after the plugin has
-    // completed its initial reconciliation with the underlying source.
+    // Ready returns a channel that is closed once discovery is delivering
+    // peers. The peer set may be incomplete when Ready closes and changes
+    // over time.
     Ready() <-chan struct{}
 }
 ```
@@ -105,6 +107,51 @@ returning a deterministically ordered snapshot of the current peer set.
 
 ---
 
+## In-tree plugin: k8s-peer-discovery
+
+The `k8s-peer-discovery` plugin
+(`pkg/epp/framework/plugins/datalayer/discovery/k8speer`) registers a Pod
+notification extractor with the datalayer runtime. The runtime owns the
+controller-runtime watch and runs it on every EPP replica. The plugin filters
+Pods by namespace, label selector, readiness, and self IP. Each ready,
+non-self Pod is upserted through the `PeerNotifier` passed to `Start`; Pods
+that become unready or are deleted are removed. `Start` applies all events
+from its own goroutine, so the notifier's single-goroutine contract holds.
+
+The plugin closes `Ready()` when `Start` runs. Peers from the initial Pod
+list may arrive after that.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `selector` | `string` | yes | Kubernetes label selector matching this EPP Deployment's pods (e.g. `app=my-epp`). |
+| `port` | `string` | yes | Port peer replicas listen on for state sync. Pods do not self-report a service port, so it comes from config. Values must be in the range 1 through 65535. |
+| `namespace` | `string` | yes | Namespace of this EPP Deployment's pods. It must match the EPP deployment namespace because the Pod cache is scoped to that namespace. When the `NAMESPACE` environment variable is set, the plugin validates the value at startup. |
+
+The plugin uses `POD_IP` to exclude this replica from the peer set. When it is
+unset, the plugin uses the Pod hostname instead. If `NAMESPACE` is unset, the
+plugin logs that it cannot validate the configured namespace.
+
+### Example config
+
+```yaml
+plugins:
+  - name: peer-disc
+    type: k8s-peer-discovery
+    parameters:
+      selector: "app=my-epp"
+      port: "9002"
+      namespace: default
+
+dataLayer:
+  discovery:
+    peers:
+      pluginRef: peer-disc
+```
+
+---
+
 ## Selecting a peer discovery plugin in the EPP config
 
 Add a `peers` entry inside `dataLayer.discovery` in the
@@ -114,9 +161,11 @@ in the top-level `plugins` list.
 ```yaml
 plugins:
   - name: my-peer-disc
-    type: <peer-discovery-plugin-type>
+    type: k8s-peer-discovery
     parameters:
-      # plugin-specific parameters
+      selector: "app=my-epp"
+      port: "9002"
+      namespace: default
 
 dataLayer:
   discovery:
@@ -137,7 +186,7 @@ registry. A runnable example of this pattern is in the test suite:
 - [`pkg/epp/framework/interface/datalayer/peer_test.go`](../pkg/epp/framework/interface/datalayer/peer_test.go)
   tests the interface contract with a fake store.
 - [`pkg/epp/statesync/peerstore_test.go`](../pkg/epp/statesync/peerstore_test.go)
-  (`TestPeerDiscoveryFullStack`) exercises the full plugin-to-store pipeline
+  (`TestPeerDiscoveryFullWiring`) exercises the full plugin-to-store pipeline
   with `MemoryPeerStore`.
 
 ```go

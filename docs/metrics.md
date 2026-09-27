@@ -164,6 +164,41 @@ when the producer is created; observations require prefix lookups.
 | `llm_d_epp_prefix_indexer_hit_ratio` | Histogram | `plugin_name`, `plugin_type` | Prefix-match hit ratio. |
 | `llm_d_epp_prefix_indexer_hit_bytes` | Histogram | `plugin_name`, `plugin_type` | Bytes matched per lookup. |
 
+### Prefix cache prediction
+
+The `approx-prefix-cache-producer` and the `precise-prefix-cache-producer` emit these metrics,
+labelled by the producer that observed them. `burst-prefix-cache-producer` also publishes prefix
+match data but is not instrumented here. Requests that reach no endpoint are not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens the prediction was measured against. |
+
+The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
+by `llm_d_epp_prefix_prompt_tokens_sum`. Both are observed in one call, so the ratio divides counts
+taken over the same requests. The rate the model server delivered is a separate ratio,
+`llm_d_epp_request_cached_tokens_sum` divided by `llm_d_epp_request_input_tokens_sum`.
+
+Comparing the two ratios is what the prediction metrics are for, subject to three limits.
+
+The request cohorts differ. A prediction is recorded before the request is forwarded, while the
+request token metrics come from the model server's response, so a request that fails or returns no
+usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
+two pairs.
+
+Under disaggregated prefill/decode the ratios describe different pods. The prediction follows the
+primary profile's endpoint, while `llm_d_epp_request_cached_tokens` carries the count the sidecar
+takes from the prefiller. The gap between the ratios is not index accuracy in that topology.
+
+Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
+server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
+zero-config default, packs bytes into four-byte pseudo-tokens: the predicted rate stays
+self-consistent, but CJK, code, and chat-template-heavy inputs shift it against the server's figure.
+
+`llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
+candidate rather than the chosen one, which bounds the reuse available to any routing decision.
+
 ### Multimodal encoder cache
 
 These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an

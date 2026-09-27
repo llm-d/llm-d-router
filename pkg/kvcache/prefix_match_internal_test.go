@@ -19,6 +19,7 @@ package kvcache
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"testing"
@@ -106,4 +107,28 @@ func TestMatchBlockKeysColdStateDoesNotTrackTierHistory(t *testing.T) {
 	withChurn := measure(3000)
 	assert.Less(t, withChurn, withoutChurn+16*1024,
 		"request state must scale with the tiers a request sees, not with tier ordinal history")
+}
+
+// clampOrdinal must never return speculativeTierOrdinal (math.MaxUint32),
+// even for a table size at or past the int-to-uint32 overflow boundary.
+func TestClampOrdinal(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want uint32
+	}{
+		{name: "below boundary", n: 5, want: 5},
+		{name: "at reserved sentinel minus one", n: math.MaxUint32 - 2, want: math.MaxUint32 - 2},
+		{name: "at reserved sentinel", n: math.MaxUint32 - 1, want: math.MaxUint32 - 1},
+		{name: "past reserved sentinel", n: math.MaxUint32, want: math.MaxUint32 - 1},
+		{name: "far past uint32 range", n: math.MaxInt64, want: math.MaxUint32 - 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampOrdinal(tc.n)
+			assert.Equal(t, tc.want, got)
+			assert.NotEqual(t, uint32(speculativeTierOrdinal), got,
+				"clamped ordinal must never collide with the speculative tier sentinel")
+		})
+	}
 }

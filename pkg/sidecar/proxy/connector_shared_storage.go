@@ -96,7 +96,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 
 		w.WriteHeader(dw.statusCode)
 		if dw.buffer.Len() > 0 {
-			w.Write(dw.buffer.Bytes()) //nolint:errcheck
+			WriteAll(w, dw.buffer.Bytes())
 		}
 
 		err := errors.New("decode request failed")
@@ -123,7 +123,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 
 	// Decode succeeded, write response to client
 	maps.Copy(w.Header(), dw.headers)
-	w.Write(dw.buffer.Bytes()) //nolint:errcheck
+	WriteAll(w, dw.buffer.Bytes())
 
 	return false, nil
 }
@@ -246,7 +246,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		s.logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		w.WriteHeader(pw.statusCode)
 		if pw.buffer.Len() > 0 {
-			w.Write(pw.buffer.Bytes()) //nolint:errcheck
+			WriteAll(w, pw.buffer.Bytes())
 		}
 		return fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
 	}
