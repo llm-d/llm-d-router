@@ -46,6 +46,7 @@ const ThunderAgentPluginType = "thunder-agent"
 var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
+	_ fwksched.Scorer             = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
