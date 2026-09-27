@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package prefillpin screens a request down to the prefill endpoint named in
-// its x-prefill-pin header.
+// its x-prefill-pin-host-port header.
 package prefillpin
 
 import (
@@ -38,7 +38,7 @@ const PluginType = "prefill-pin-screener"
 var _ fwkrc.Screener = (*Screener)(nil)
 
 // Screener keeps only the endpoint whose <ip:port> equals the request's
-// x-prefill-pin header.
+// x-prefill-pin-host-port header.
 type Screener struct {
 	typedName plugin.TypedName
 }

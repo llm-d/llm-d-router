@@ -3,7 +3,7 @@
 **Type:** `prefill-pin-screener`
 **Interfaces:** `requestcontrol.Screener`
 
-Keeps only the endpoint that the request's `x-prefill-pin` header names.
+Keeps only the endpoint that the request's `x-prefill-pin-host-port` header names.
 
 ## What it does
 
@@ -12,11 +12,11 @@ would pick (see [reserve-endpoint](../../reserveendpoint/README.md)), and writes
 that endpoint into the SGLang decode body. The real prefill request is then
 scheduled again, and can land on another pod. This screener makes the second
 pick equal to the first: the coordinator sends the reserved `<ip:port>` on
-`x-prefill-pin`, and the screener keeps only that endpoint.
+`x-prefill-pin-host-port`, and the screener keeps only that endpoint.
 
 ## How It Works
 
-- A request without `x-prefill-pin` keeps every endpoint, so all other traffic
+- A request without `x-prefill-pin-host-port` keeps every endpoint, so all other traffic
   is not changed.
 - A request with the header keeps the one endpoint whose `<ip:port>` equals the
   header value. IPv6 addresses are in brackets, as `net.JoinHostPort` writes
@@ -32,7 +32,7 @@ on a pinned request those work on one endpoint.
 
 ## Inputs consumed
 
-- The `x-prefill-pin` request header.
+- The `x-prefill-pin-host-port` request header.
 
 ## Output produced
 
@@ -44,7 +44,7 @@ The screener takes no parameters. See the configuration example in the
 [reserve-endpoint README](../../reserveendpoint/README.md#configuration), which
 shows both plugins in one EPP config.
 
-The coordinator drops a client's `x-prefill-pin` header, so only the
+The coordinator drops a client's `x-prefill-pin-host-port` header, so only the
 coordinator can pin a request. Other callers of the EPP must not forward the
 header from untrusted clients.
 
