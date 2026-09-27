@@ -187,6 +187,7 @@ func (s *PrefillDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Reques
 // reserve asks EPP which prefill endpoint it would pick for body, without
 // sending the request there, and returns that endpoint's <ip:port>.
 func (s *PrefillDecodeStep) reserve(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, path string, body []byte) (string, error) {
+	logger.V(logutil.DEBUG).Info("reserving prefill endpoint", "path", path)
 	resp, err := s.postPrefill(ctx, reqCtx, path, body, coordmetrics.UpstreamReserveEndpoint, reserveRequestIDSuffix,
 		routing.PreferHeader, routing.PreferReserveEndpoint)
 	if err != nil {

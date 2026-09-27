@@ -28,6 +28,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -441,6 +445,88 @@ func TestPrefillDecodeStep_ReserveFailures(t *testing.T) {
 			}
 			if rec.wroteHeader {
 				t.Error("the step wrote to the client; the server must answer with the error")
+			}
+		})
+	}
+}
+
+func TestPrefillDecodeStep_LogsTheAsk(t *testing.T) {
+	const (
+		reservingMsg = `"msg"="reserving prefill endpoint" "path"="` + reqcommon.PathChatCompletions + `"`
+		reservedMsg  = `"msg"="reserved prefill endpoint" "endpoint"="` + pdTestPrefill + `"`
+	)
+	refuse := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	tests := []struct {
+		name      string
+		verbosity int
+		reserve   http.HandlerFunc
+		wantErr   bool
+		// want is the ask's log lines, in order.
+		want []string
+	}{
+		{
+			name:      "debug logs the ask before its answer",
+			verbosity: logutil.DEBUG,
+			want:      []string{reservingMsg, reservedMsg},
+		},
+		{
+			name:      "debug logs the ask that EPP refuses, and no answer",
+			verbosity: logutil.DEBUG,
+			reserve:   refuse,
+			wantErr:   true,
+			want:      []string{reservingMsg},
+		},
+		{
+			name:      "trace logs the ask too",
+			verbosity: logutil.TRACE,
+			want:      []string{reservingMsg, reservedMsg},
+		},
+		{
+			name:      "verbose, one level below debug, does not log the ask",
+			verbosity: logutil.VERBOSE,
+		},
+		{
+			name:      "default does not log the ask",
+			verbosity: logutil.DEFAULT,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := newPDGateway(t)
+			if tt.reserve != nil {
+				g.reserve = tt.reserve
+			}
+			srv := httptest.NewServer(g)
+			defer srv.Close()
+
+			var mu sync.Mutex
+			var got []string
+			logger := funcr.New(func(_, args string) {
+				if !strings.Contains(args, "prefill endpoint") {
+					return
+				}
+				mu.Lock()
+				got = append(got, args)
+				mu.Unlock()
+			}, funcr.Options{Verbosity: tt.verbosity})
+
+			reqCtx, _ := newPDRequest(reqcommon.PathChatCompletions, chatBody())
+			err := newPDStep(t, srv.URL, nil).Execute(log.IntoContext(context.Background(), logger), reqCtx)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Execute error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(got) != len(tt.want) {
+				t.Fatalf("ask log lines = %q, want %q", got, tt.want)
+			}
+			for i, want := range tt.want {
+				if !strings.Contains(got[i], want) {
+					t.Errorf("ask log line %d = %q, want it to contain %q", i, got[i], want)
+				}
 			}
 		})
 	}
