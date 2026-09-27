@@ -102,6 +102,7 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	if k8sContext == "" {
 		return nil
 	}
+	//nolint:gosec // G204: fixed kubectl executable; ports, context and namespace are separate argv, without a shell
 	command := exec.Command("kubectl", "port-forward", "service/envoy",
 		strconv.Itoa(getGatewayPort())+":8081",
 		"--context="+k8sContext, "--namespace="+nsName)
