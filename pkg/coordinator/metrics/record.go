@@ -103,8 +103,8 @@ func IncConditionalDecodeProbes(result string) {
 
 // RecordEncodeSubrequests observes the number of Encode subrequests for one
 // client request, including zero when Encode does not run.
-func RecordEncodeSubrequests(n int) {
-	encodeSubrequests.WithLabelValues().Observe(float64(n))
+func RecordEncodeSubrequests(route string, n int) {
+	encodeSubrequests.WithLabelValues(boundRoute(route)).Observe(float64(n))
 }
 
 // RecordOrchestrationOverhead observes coordinator wall time outside parse

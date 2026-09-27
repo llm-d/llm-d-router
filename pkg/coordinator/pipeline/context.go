@@ -129,6 +129,12 @@ type RequestContext struct {
 	Model              string
 	Stream             bool
 
+	// Route is the bounded route label (coordmetrics.Route*) for the inbound
+	// URL path. Set by the server handler so the pipeline can slice metrics
+	// by route without duplicating the path-to-route mapping. Empty is
+	// normalized to RouteUnknown by boundRoute at record time.
+	Route string
+
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first
 	// entry in the step-timing summary.

@@ -184,7 +184,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		if executed["render"] {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
-		coordmetrics.RecordEncodeSubrequests(reqCtx.EncodeFanout)
+		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)
 	}()
 
 	for idx, step := range p.steps {

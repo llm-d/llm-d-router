@@ -70,7 +70,7 @@ func ClassifyDownloadResult(ctx context.Context, err error) string {
 	if err == nil {
 		return DownloadResultSuccess
 	}
-	if ctx != nil && ctx.Err() == context.Canceled {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return DownloadResultCancelled
 	}
 	if errors.Is(err, context.Canceled) {

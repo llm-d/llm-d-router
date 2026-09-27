@@ -23,6 +23,15 @@ import (
 
 // countingResponseWriter counts bytes written to the client so
 // response_size_bytes can include partial writes on cancellation or disconnect.
+//
+// It proxies Flush and Unwrap so http.ResponseController and middleware that
+// need them work transparently. It does NOT proxy http.Hijacker: the
+// coordinator serves inference HTTP only (no WebSocket/CONNECT upgrades), so
+// hijacking is never needed. Unwrap is implemented so if a future caller
+// uses http.ResponseController.Hijack(), the controller can reach the inner
+// writer's Hijack method — but a direct w.(http.Hijacker) type assertion on
+// the wrapper itself will fail. If hijack support becomes needed, add a
+// Hijack method that delegates to the inner writer.
 type countingResponseWriter struct {
 	http.ResponseWriter
 	n int

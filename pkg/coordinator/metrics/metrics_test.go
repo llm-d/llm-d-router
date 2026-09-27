@@ -188,8 +188,9 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 
 func TestPipelineAmplificationFamily_Records(t *testing.T) {
 	Reset()
-	RecordEncodeSubrequests(0)
-	RecordEncodeSubrequests(3)
+	RecordEncodeSubrequests(RouteChatCompletions, 0)
+	RecordEncodeSubrequests(RouteChatCompletions, 3)
+	RecordEncodeSubrequests("/raw/path", 2)
 	RecordOrchestrationOverhead(RouteChatCompletions, 40*time.Millisecond)
 	RecordOrchestrationOverhead("/raw/path", -time.Second)
 	RecordMediaItems(MediaTypeImage, 2)
@@ -201,8 +202,10 @@ func TestPipelineAmplificationFamily_Records(t *testing.T) {
 	RecordResponseSize(true, 512)
 	RecordResponseSize(false, 64)
 
-	require.InDelta(t, 2.0, histogramSampleCount(t, encodeSubrequests, nil), 1e-9)
-	require.InDelta(t, 3.0, histogramSampleSum(t, encodeSubrequests, nil), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleCount(t, encodeSubrequests, []string{RouteChatCompletions}), 1e-9)
+	require.InDelta(t, 3.0, histogramSampleSum(t, encodeSubrequests, []string{RouteChatCompletions}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, encodeSubrequests, []string{RouteUnknown}), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleSum(t, encodeSubrequests, []string{RouteUnknown}), 1e-9)
 
 	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteChatCompletions}), 1e-9)
 	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteUnknown}), 1e-9)

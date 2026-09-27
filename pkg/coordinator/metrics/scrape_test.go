@@ -44,7 +44,7 @@ func scrapeText(t *testing.T) string {
 	reg := prometheus.NewRegistry()
 	require.NoError(t, Register(reg))
 
-	RecordEncodeSubrequests(2)
+	RecordEncodeSubrequests(RouteChatCompletions, 2)
 	RecordOrchestrationOverhead(RouteChatCompletions, 15*time.Millisecond)
 	RecordMediaItems(MediaTypeImage, 1)
 	RecordMediaDownloadDuration(DownloadResultSuccess, 10*time.Millisecond)
@@ -87,7 +87,7 @@ func TestScrape_SeriesCarryBoundedLabelsAndSamples(t *testing.T) {
 	// Each observed label set must appear with real samples in the
 	// exposition: the bucket line with the bounded label proves both the
 	// label assembly and the observation reached the wire.
-	require.Contains(t, text, `llm_d_coordinator_encode_subrequests_bucket{le="2"} 1`)
+	require.Contains(t, text, `llm_d_coordinator_encode_subrequests_bucket{route="chat_completions",le="2"} 1`)
 	require.Contains(t, text, `llm_d_coordinator_orchestration_overhead_seconds_bucket{route="chat_completions",le="0.025"} 1`)
 	require.Contains(t, text, `llm_d_coordinator_media_items_bucket{media_type="image",le="1"} 1`)
 	require.Contains(t, text, `llm_d_coordinator_media_download_duration_seconds_bucket{result="success",le="0.025"} 1`)
