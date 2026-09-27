@@ -103,16 +103,22 @@ This document defines the process for releasing llm-d-router.
      ```
 
 1. Pushing the tag triggers CI action to build and publish the EPP image (`ghcr.io/llm-d/llm-d-router-endpoint-picker`) and sidecar image (`ghcr.io/llm-d/llm-d-router-disagg-sidecar`) to the [ghcr registry].
+   Official `v*` tags receive `:latest`.
+   Release-candidate tags (`-rc`, for example `v0.9.0-rc.1`) do not.
 1. Verify the [CI release workflow] completed successfully before proceeding.
 1. Test the steps in the tagged quickstart guide after the PR merges.
 
 ### Create the release!
 
+Publishing the GitHub release sets the title, notes, and GitHub's pre-release listing.
+It does not start the image pipeline or change image tags.
+The tag push already built and published the images and uploaded the artifacts.
+
 1. Create a [new release]:
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, e.g. `v0.1.0`.
     1. Click "Generate release notes" to auto-populate the list of PRs and contributors.
-    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` (or the unreleased fragments in `release-notes.d/unreleased/`) with the following prompt:
+    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` with the following prompt:
 
        ```text
        Please summarize these release notes into three clear sections:
@@ -122,7 +128,8 @@ This document defines the process for releasing llm-d-router.
        ```
 
        Review the generated content, edit it if necessary to ensure accuracy, and then copy and prepend this summary at the very top of the release description box on GitHub.
-    1. If this is a release candidate, select the "This is a pre-release" checkbox.
+    1. If this is a release candidate, select the "This is a pre-release" checkbox so GitHub lists the release as a pre-release.
+       This does not affect image tags.
 1. If you find any bugs in this process, create an [issue].
 
 ## Announce the Release

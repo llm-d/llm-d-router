@@ -16,24 +16,91 @@ limitations under the License.
 
 package request
 
-const (
-	FieldMaxTokens           = "max_tokens"
-	FieldMaxCompletionTokens = "max_completion_tokens"
-	FieldStream              = "stream"
-	FieldStreamOptions       = "stream_options"
+import (
+	"fmt"
+	"maps"
 )
 
-// PrimeSingleTokenRequest mutates target in place into a synthetic,
-// non-streaming, single-output-token chat-completions request derived from
-// original (which may be the same map as target). max_tokens is always
-// capped to 1; max_completion_tokens is only added when original already
-// carries it, and leaves it untached otherwise.
-func PrimeSingleTokenRequest(target, original map[string]any) {
-	target[FieldMaxTokens] = 1
-	if _, ok := original[FieldMaxCompletionTokens]; ok {
-		target[FieldMaxCompletionTokens] = 1
+// CapSingleToken rewrites body into a synthetic, non-streaming,
+// single-output-token prefill or encode request. It returns the map
+// the caps were written into: sampling_params for the vLLM generate API, body itself
+// otherwise. The vLLM generate API also expects transfer params in that map, so a
+// caller adding them needs no second lookup.
+//
+// The caps to rewrite come from APIType.tokenLimitFields, so each API's output
+// caps are named in one place. min_tokens is a floor rather than a cap, so it is
+// stripped instead of capped: it defaults to 0 in vLLM, so removing it keeps
+// min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
+// SamplingParams rejects min_tokens > max_tokens).
+//
+// body is rewritten in place, so the caller passes its own copy. A one-level
+// copy is enough: the generate sampling_params is always replaced with a map
+// body owns, so the rewrite never reaches a nested map the body was cloned from.
+func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
+	limits := body
+	if apiType == APITypeVLLMGenerate {
+		sp, _ := body[FieldSamplingParams].(map[string]any)
+		limits = make(map[string]any, len(sp)+1)
+		maps.Copy(limits, sp)
+		body[FieldSamplingParams] = limits
 	}
+	for _, field := range apiType.tokenLimitFields() {
+		limits[field] = 1
+	}
+	delete(limits, FieldMinTokens)
 
-	target[FieldStream] = false
-	delete(target, FieldStreamOptions)
+	body[FieldStream] = false
+	delete(body, FieldStreamOptions)
+	return limits
+}
+
+// RejectStatefulResponsesFields reports an error naming the first field it
+// finds that depends on state the router does not keep: previous_response_id
+// and conversation reference a prior turn, background asks for an async job
+// the router cannot poll, and file_id is part of the Responses file
+// hydration API, referring to a file the router never stored.
+//
+// store is left unchecked: it is handled upstream by the stateful proxy
+// (the agentic-api layer strips it before the request reaches the router),
+// and forwarding it is harmless regardless since it defaults to true.
+func RejectStatefulResponsesFields(body map[string]any) error {
+	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
+		if _, ok := body[field]; ok {
+			return fmt.Errorf("field %q is not supported by the router", field)
+		}
+	}
+	if background, ok := body[FieldBackground].(bool); ok && background {
+		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
+	}
+	if input, ok := body[FieldInput].([]any); ok && inputReferencesFile(input) {
+		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
+	}
+	return nil
+}
+
+// inputReferencesFile reports whether a Responses input array contains a
+// content part with a file_id field. file_id is not a top-level field:
+// OpenAI's Responses API nests it inside an input_image, input_file, or
+// input_audio content part, so finding it takes a walk of the input array
+// rather than a map lookup.
+func inputReferencesFile(input []any) bool {
+	for _, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := itemMap[FieldContent].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			partMap, ok := part.(map[string]any)
+			if ok {
+				if _, ok := partMap[FieldFileID]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

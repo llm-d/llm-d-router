@@ -27,8 +27,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -121,7 +124,7 @@ func chatResponse(content, finishReason string, promptTokens, completionTokens i
 
 // doPost sends a POST request to the proxy and returns the response.
 func doPost(addr, body string) *http.Response {
-	req, err := http.NewRequest(http.MethodPost, addr+ChatCompletionsPath, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, addr+reqcommon.PathChatCompletions, strings.NewReader(body))
 	Expect(err).ToNot(HaveOccurred())
 	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())
@@ -302,20 +305,33 @@ var _ = Describe("Chunked Decode", func() {
 
 		It("appendChunkToRequest appends assistant message to chat messages", func() {
 			req := map[string]any{
-				requestFieldMessages: []any{map[string]any{requestFieldRole: "user", requestFieldContent: "Hi"}},
+				requestFieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
 			}
-			appendChunkToRequest(req, "hello")
-			msgs := req[requestFieldMessages].([]any)
+			appendChunkToRequest(logr.Discard(), req, "hello")
+			msgs := req[requestFieldMessages].([]json.RawMessage)
 			Expect(msgs).To(HaveLen(2))
-			last := msgs[1].(map[string]any)
+			var last map[string]any
+			Expect(json.Unmarshal(msgs[1], &last)).To(Succeed())
 			Expect(last[requestFieldRole]).To(Equal("assistant"))
 			Expect(last[requestFieldContent]).To(Equal("hello"))
 		})
 
+		It("appendChunkToRequest keeps the client's messages byte-for-byte across chunks", func() {
+			userMessage := `{"role":"user","content":[{"type":"text","b":"1","a":"2"}]}`
+			req := map[string]any{requestFieldMessages: json.RawMessage(`[` + userMessage + `]`)}
+
+			appendChunkToRequest(logr.Discard(), req, "one")
+			appendChunkToRequest(logr.Discard(), req, "two")
+
+			body, err := json.Marshal(req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring(userMessage))
+		})
+
 		It("appendChunkToRequest is a no-op for empty text", func() {
-			req := map[string]any{requestFieldMessages: []any{}}
-			appendChunkToRequest(req, "")
-			Expect(req[requestFieldMessages].([]any)).To(BeEmpty())
+			req := map[string]any{requestFieldMessages: json.RawMessage(`[]`)}
+			appendChunkToRequest(logr.Discard(), req, "")
+			Expect(req[requestFieldMessages]).To(Equal(json.RawMessage(`[]`)))
 		})
 	})
 })

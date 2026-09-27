@@ -31,6 +31,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	grpcmetadata "google.golang.org/grpc/metadata"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -81,6 +82,10 @@ func newRequestHeaders(headers map[string]string) *extProcPb.ProcessingRequest {
 // runProcess drives Process over a single RequestHeaders message and returns the
 // lines it logged.
 func runProcess(t *testing.T, headers map[string]string) []string {
+	return runProcessWithContext(context.Background(), t, headers)
+}
+
+func runProcessWithContext(ctx context.Context, t *testing.T, headers map[string]string) []string {
 	t.Helper()
 
 	var logged []string
@@ -89,12 +94,24 @@ func runProcess(t *testing.T, headers map[string]string) []string {
 	}, funcr.Options{Verbosity: 2})
 
 	srv := &scriptedProcessServer{
-		ctx: log.IntoContext(context.Background(), capture),
+		ctx: log.IntoContext(ctx, capture),
 		req: newRequestHeaders(headers),
 	}
 	require.NoError(t, NewStreamingServer(nil, nil, nil, 0).Process(srv))
 
 	return logged
+}
+
+func TestProcessCorrelatesRequestLogsWithGRPCMetadata(t *testing.T) {
+	useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample())))
+
+	const metadataTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01"
+	ctx := grpcmetadata.NewIncomingContext(context.Background(), grpcmetadata.Pairs("traceparent", metadataTraceparent))
+	entry := entryLine(t, runProcessWithContext(ctx, t, map[string]string{
+		"x-request-id": "req-grpc-metadata",
+	}))
+
+	require.Contains(t, entry, upstreamTraceID, "EPP should join the trace from incoming gRPC metadata")
 }
 
 func entryLine(t *testing.T, logged []string) string {

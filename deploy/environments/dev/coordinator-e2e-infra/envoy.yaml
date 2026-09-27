@@ -1,11 +1,9 @@
 # Hand-rolled Envoy manifest for the coordinator e-p-d-pool e2e test.
 #
-# Mirrors deploy/environments/dev/e2e-infra/envoy.yaml in shape but routes any
-# request carrying an EPP-Profile header (encode | prefill | decode) to the
+# Routes requests carrying an EPP-Profile header (encode | prefill | decode) to the
 # single EPP's ext_proc cluster; the EPP itself picks the scheduling profile
 # named by that header value (see header-profile-handler). The chosen EPP picks
-# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster
-# (just like the single-pool e2e Envoy).
+# an endpoint and Envoy forwards the request to it via the ORIGINAL_DST cluster.
 #
 # A request without an EPP-Profile header is the external client request: it
 # matches the default route and is forwarded to the coordinator, the pipeline
@@ -211,7 +209,7 @@ data:
           original_dst_lb_config:
             use_http_header: true
             http_header_name: x-gateway-destination-endpoint
-        # Coordinator backend — plain HTTP, resolved by Service DNS name. Serves
+        # Coordinator backend — TLS, resolved by Service DNS name. Serves
         # the default (no EPP-Profile) route as the pipeline entry point.
         - name: coordinator
           type: STRICT_DNS
@@ -229,6 +227,13 @@ data:
                         socket_address:
                           address: llm-d-coordinator.${NAMESPACE}
                           port_value: 8080
+          # Accept untrusted certs from the coordinator (self-signed by default).
+          transport_socket:
+            name: "envoy.transport_sockets.tls"
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              common_tls_context:
+                validation_context:
         # Single ext_proc cluster — the one EPP serving all three phases.
         - name: ext_proc_epd
           type: STRICT_DNS

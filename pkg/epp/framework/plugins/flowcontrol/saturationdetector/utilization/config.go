@@ -38,6 +38,23 @@ const (
 	defaultHeadroom float64 = 0.0
 )
 
+// StalenessPolicy selects how endpoints with missing or stale metrics contribute to pool
+// saturation in Saturation().
+type StalenessPolicy string
+
+const (
+	// StalenessSaturated scores endpoints with missing or stale metrics as fully saturated
+	// (1.0). A fleet-wide metrics collection failure therefore halts dispatch entirely rather than
+	// admitting blind.
+	StalenessSaturated StalenessPolicy = "saturated"
+	// StalenessIgnore excludes endpoints with missing or stale metrics from the saturation
+	// average. When every candidate endpoint is stale, the pool scores 0.0 and dispatch continues,
+	// consistent with the Filter's fail-open fallback. Deployments choose this posture when the
+	// availability cost of a metrics collection outage outweighs the risk of driving stale,
+	// possibly overloaded endpoints.
+	StalenessIgnore StalenessPolicy = "ignore"
+)
+
 // apiConfig represents the external configuration schema for the utilization detector.
 // It dictates how the plugin calculates pool-level saturation (to trigger backpressure) and
 // endpoint-level limits (to filter out overloaded candidates during routing).
@@ -65,8 +82,8 @@ type apiConfig struct {
 	KVCacheUtilThreshold *float64 `json:"kvCacheUtilThreshold,omitempty"`
 
 	// MetricsStalenessThreshold defines how old an endpoint's metrics can be before they are
-	// considered stale. Stale endpoints are treated as 100% saturated to prevent routing traffic into
-	// unobservable black holes.
+	// considered stale. How stale endpoints affect pool saturation is controlled by
+	// StalenessPolicy.
 	//
 	// WARNING: In continuous batching architectures, the KV cache grows rapidly during the decode
 	// phase. A high staleness threshold combined with a high KV cache utilization limit can lead to
@@ -75,6 +92,13 @@ type apiConfig struct {
 	//
 	// Defaults to 200ms if unset.
 	MetricsStalenessThreshold *metav1.Duration `json:"metricsStalenessThreshold,omitempty"`
+
+	// StalenessPolicy selects how endpoints with missing or stale metrics contribute to pool
+	// saturation: "saturated" scores them as fully saturated, and "ignore" excludes them from
+	// the saturation average.
+	//
+	// Defaults to "saturated" if unset.
+	StalenessPolicy *StalenessPolicy `json:"stalenessPolicy,omitempty"`
 
 	// Headroom defines the allowed burst capacity above the ideal thresholds, expressed as a
 	// multiplier (e.g., 0.2 for 20%).
@@ -101,6 +125,7 @@ type Config struct {
 	KVCacheUtilThreshold      float64
 	MetricsStalenessThreshold time.Duration
 	Headroom                  float64
+	StalenessPolicy           StalenessPolicy
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -123,6 +148,7 @@ func buildConfig(apiCfg *apiConfig) (*Config, error) {
 		KVCacheUtilThreshold:      *safeCfg.KVCacheUtilThreshold,
 		MetricsStalenessThreshold: safeCfg.MetricsStalenessThreshold.Duration,
 		Headroom:                  *safeCfg.Headroom,
+		StalenessPolicy:           *safeCfg.StalenessPolicy,
 	}, nil
 }
 
@@ -139,6 +165,9 @@ func applyDefaults(cfg *apiConfig) {
 	}
 	if cfg.Headroom == nil {
 		cfg.Headroom = ptr.To(defaultHeadroom)
+	}
+	if cfg.StalenessPolicy == nil {
+		cfg.StalenessPolicy = ptr.To(StalenessSaturated)
 	}
 }
 
@@ -159,6 +188,11 @@ func validateConfig(cfg *apiConfig) error {
 	}
 	if cfg.Headroom != nil && *cfg.Headroom < 0.0 {
 		errs = append(errs, fmt.Errorf("headroom must be a non-negative value, got %f", *cfg.Headroom))
+	}
+	if cfg.StalenessPolicy != nil && *cfg.StalenessPolicy != StalenessSaturated &&
+		*cfg.StalenessPolicy != StalenessIgnore {
+		errs = append(errs, fmt.Errorf("stalenessPolicy must be %q or %q, got %q",
+			StalenessSaturated, StalenessIgnore, *cfg.StalenessPolicy))
 	}
 
 	return errors.Join(errs...)

@@ -33,7 +33,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
@@ -86,7 +85,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			stepDuration = reqCtx.StepDuration
 		}
 		coordmetrics.RecordOrchestrationOverhead(route, time.Since(receivedAt)-parseDuration-stepDuration)
-		coordmetrics.RecordResponseBytes(stream, cw.BytesWritten())
+		coordmetrics.RecordResponseSize(stream, cw.BytesWritten())
 		coordmetrics.DecRequestRunning(inflightModel)
 		if r != nil {
 			panic(r)
@@ -204,11 +203,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 // orchestration_overhead_seconds.
 func inferenceRoute(path string) string {
 	switch path {
-	case gateway.PathChatCompletions:
+	case reqcommon.PathChatCompletions:
 		return coordmetrics.RouteChatCompletions
-	case gateway.PathCompletions:
+	case reqcommon.PathCompletions:
 		return coordmetrics.RouteCompletions
-	case gateway.DefaultGeneratePath:
+	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
 		return coordmetrics.RouteGenerate
 	default:
 		return coordmetrics.RouteUnknown

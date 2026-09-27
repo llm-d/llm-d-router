@@ -186,9 +186,9 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 
 func TestPipelineAmplificationFamily_Records(t *testing.T) {
 	Reset()
-	RecordEncodeFanoutSize(RouteChatCompletions, 0)
-	RecordEncodeFanoutSize(RouteChatCompletions, 3)
-	RecordEncodeFanoutSize("/raw/path", 2)
+	RecordEncodeSubrequests(RouteChatCompletions, 0)
+	RecordEncodeSubrequests(RouteChatCompletions, 3)
+	RecordEncodeSubrequests("/raw/path", 2)
 	RecordOrchestrationOverhead(RouteChatCompletions, 40*time.Millisecond)
 	RecordOrchestrationOverhead("/raw/path", -time.Second)
 	RecordMediaItems(MediaTypeImage, 2)
@@ -197,13 +197,13 @@ func TestPipelineAmplificationFamily_Records(t *testing.T) {
 	RecordMediaDownloadDuration(DownloadResultError, 5*time.Millisecond)
 	RecordMediaDownloadDuration(DownloadResultCancelled, time.Millisecond)
 	RecordMediaDownloadDuration("timeout", time.Millisecond)
-	RecordResponseBytes(true, 512)
-	RecordResponseBytes(false, 64)
+	RecordResponseSize(true, 512)
+	RecordResponseSize(false, 64)
 
-	require.InDelta(t, 2.0, histogramSampleCount(t, encodeFanoutSize, []string{RouteChatCompletions}), 1e-9)
-	require.InDelta(t, 3.0, histogramSampleSum(t, encodeFanoutSize, []string{RouteChatCompletions}), 1e-9)
-	require.InDelta(t, 1.0, histogramSampleCount(t, encodeFanoutSize, []string{RouteUnknown}), 1e-9)
-	require.InDelta(t, 2.0, histogramSampleSum(t, encodeFanoutSize, []string{RouteUnknown}), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleCount(t, encodeSubrequests, []string{RouteChatCompletions}), 1e-9)
+	require.InDelta(t, 3.0, histogramSampleSum(t, encodeSubrequests, []string{RouteChatCompletions}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, encodeSubrequests, []string{RouteUnknown}), 1e-9)
+	require.InDelta(t, 2.0, histogramSampleSum(t, encodeSubrequests, []string{RouteUnknown}), 1e-9)
 
 	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteChatCompletions}), 1e-9)
 	require.InDelta(t, 1.0, histogramSampleCount(t, orchestrationOverhead, []string{RouteUnknown}), 1e-9)
@@ -217,10 +217,10 @@ func TestPipelineAmplificationFamily_Records(t *testing.T) {
 	require.InDelta(t, 2.0, histogramSampleCount(t, mediaDownloadDuration, []string{DownloadResultError}), 1e-9)
 	require.InDelta(t, 1.0, histogramSampleCount(t, mediaDownloadDuration, []string{DownloadResultCancelled}), 1e-9)
 
-	require.InDelta(t, 1.0, histogramSampleCount(t, responseBytes, []string{StreamTrue}), 1e-9)
-	require.InDelta(t, 512.0, histogramSampleSum(t, responseBytes, []string{StreamTrue}), 1e-9)
-	require.InDelta(t, 1.0, histogramSampleCount(t, responseBytes, []string{StreamFalse}), 1e-9)
-	require.InDelta(t, 64.0, histogramSampleSum(t, responseBytes, []string{StreamFalse}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, responseSize, []string{StreamTrue}), 1e-9)
+	require.InDelta(t, 512.0, histogramSampleSum(t, responseSize, []string{StreamTrue}), 1e-9)
+	require.InDelta(t, 1.0, histogramSampleCount(t, responseSize, []string{StreamFalse}), 1e-9)
+	require.InDelta(t, 64.0, histogramSampleSum(t, responseSize, []string{StreamFalse}), 1e-9)
 }
 
 func histogramSampleCount(t *testing.T, hv *prometheus.HistogramVec, labels []string) float64 {

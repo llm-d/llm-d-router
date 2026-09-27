@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -195,6 +196,52 @@ func TestFlowRegistry_WithConnection_AndHandle(t *testing.T) {
 			return nil
 		})
 		require.NoError(t, err)
+	})
+
+	t.Run("Handle_DefaultRequestTTL_ShouldReturnBandConfiguration", func(t *testing.T) {
+		t.Parallel()
+		testCases := []struct {
+			name    string
+			options []PriorityBandConfigOption
+			wantTTL time.Duration
+			wantSet bool
+		}{
+			{
+				name:    "Configured",
+				options: []PriorityBandConfigOption{WithBandDefaultRequestTTL(5 * time.Second)},
+				wantTTL: 5 * time.Second,
+				wantSet: true,
+			},
+			{
+				name: "Omitted",
+			},
+			{
+				name:    "ExplicitZero",
+				options: []PriorityBandConfigOption{WithBandDefaultRequestTTL(0)},
+				wantSet: true,
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				defaults := newTestPriorityBandPolicyDefaults()
+				configuredBand, err := NewPriorityBandConfig(highPriority, defaults, tc.options...)
+				require.NoError(t, err)
+				cfg, err := NewConfig(defaults, WithPriorityBand(configuredBand))
+				require.NoError(t, err)
+				h := newRegistryTestHarness(t, harnessOptions{config: cfg})
+				key := flowcontrol.FlowKey{ID: "ttl-flow", Priority: highPriority}
+
+				err = h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+					ttl, set := conn.DefaultRequestTTL()
+					assert.Equal(t, tc.wantSet, set)
+					assert.Equal(t, tc.wantTTL, ttl)
+					return nil
+				})
+				require.NoError(t, err)
+			})
+		}
 	})
 }
 
@@ -980,7 +1027,7 @@ func TestFlowRegistry_PriorityBandGarbageCollection(t *testing.T) {
 
 	t.Run("ShouldCollectBand_AfterFlowIdle", func(t *testing.T) {
 		t.Parallel()
-		h := newRegistryTestHarness(t, harnessOptions{})
+		h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
 		key := flowcontrol.FlowKey{ID: "test-flow", Priority: dynamicPrio}
 
 		// Create flow

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -251,8 +252,8 @@ func bulkPredictWithMetrics(
 	}
 
 	if predictedLatencyContext != nil {
-		recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
-		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.schedulingRequest.TargetModel, predictedLatencyContext.incomingModelName, duration.Seconds())
+		recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.schedulingRequest.TargetModel, duration.Seconds())
+		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.schedulingRequest.TargetModel, duration.Seconds())
 	}
 
 	results := make([]*latencypredictor.PredictionResponse, len(bulkResponse.Predictions))

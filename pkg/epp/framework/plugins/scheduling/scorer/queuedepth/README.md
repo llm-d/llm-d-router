@@ -19,7 +19,11 @@ So:
 - longest queue gets score `0.0`
 - others are linearly scaled between them
 
-If all endpoints have the same queue size (`maxQueue = minQueue`), all endpoints receive a neutral score of `1.0`.
+If all endpoints with written metrics have the same queue size (`maxQueue = minQueue`), those endpoints receive a neutral score of `1.0`.
+
+Endpoints with no written metrics (nil metrics, or a zero `UpdateTime`) are left unscored and do not participate in the min-max range.
+The scheduler treats an omitted score as a zero contribution from this plugin.
+An endpoint that has reported a waiting-queue size of 0 still scores as the shortest queue.
 
 ## Scheduling intent
 

@@ -100,11 +100,11 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	logger := log.FromContext(ctx).WithName("gateway")
 	if body != nil {
 		if v := logger.V(logutil.TRACE); v.Enabled() {
-			v.Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), "body", RedactBody(body))
+			v.Info("request body", "method", method, "path", path, "headers", httplog.RedactedHeaders(req.Header), logutil.HTTPBodyKey, RedactBody(body))
 		}
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req) //nolint:gosec // baseURL is operator-configured (cfg.Address); path is a fixed APIType constant, never request-derived
 	if err != nil {
 		return nil, fmt.Errorf("sending request to gateway: %w", err)
 	}
@@ -117,7 +117,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		if err != nil {
 			return nil, fmt.Errorf("reading response from gateway: %w", err)
 		}
-		v.Info("response body", "status", resp.StatusCode, "body", RedactBody(respBody))
+		v.Info("response body", "status", resp.StatusCode, logutil.HTTPBodyKey, RedactBody(respBody))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 

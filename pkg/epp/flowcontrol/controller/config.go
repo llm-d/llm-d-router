@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 )
 
 const (
@@ -54,9 +55,7 @@ const (
 
 // Config holds the configuration for the `FlowController`.
 type Config struct {
-	// DefaultRequestTTL is the default Time-To-Live applied to requests that do not specify their own
-	// TTL hint. Because the admission adapter does not currently plumb a per-request hint, this value
-	// governs every request entering flow control while the candidate pool has endpoints.
+	// DefaultRequestTTL is the fallback Time-To-Live for priority bands that do not configure one.
 	// Optional: Defaults to `defaultRequestTTL` (60s). An explicit zero disables eviction in that
 	// regime, and, unless `NoEndpointRequestTTL` overrides it, in the empty-pool regime as well; such
 	// requests are then bounded only by request context cancellation (client disconnect or gateway
@@ -125,7 +124,7 @@ func (c *Config) String() string {
 type ConfigOption func(*Config)
 
 // NewConfigFromAPI creates a new Config from the API configuration.
-func NewConfigFromAPI(apiConfig *configapi.FlowControlConfig) (*Config, error) {
+func NewConfigFromAPI(apiConfig *configapiv1.FlowControlConfig) (*Config, error) {
 	opts := make([]ConfigOption, 0, 4)
 	if apiConfig != nil {
 		if apiConfig.DefaultRequestTTL != nil {

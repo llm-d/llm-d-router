@@ -23,11 +23,16 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -38,12 +43,17 @@ type addCall struct {
 }
 
 func newProducerForPreRequest(ctx context.Context, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
+	return newNamedProducerForPreRequest(ctx, "test", speculativeEnabled, idx)
+}
+
+func newNamedProducerForPreRequest(ctx context.Context, name string, speculativeEnabled bool, idx *fakeKVBlockIndex) *Producer {
 	cache := ttlcache.New[string, *speculativeEntries](
 		ttlcache.WithTTL[string, *speculativeEntries](time.Minute),
 	)
 	return &Producer{
-		typedName:          plugin.TypedName{Type: PluginType, Name: "test"},
+		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
+		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		speculativeCache:   cache,
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
@@ -172,4 +182,91 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
+}
+
+// The predicted token count comes from the chosen endpoint's unweighted cached
+// block count, not the tier-weighted match score, and is reported with
+// speculative indexing off alongside the prompt tokens it is measured against.
+func TestPreRequest_RecordsPrediction(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-predicted-records"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoint := freshEndpoints()[0]
+	// Weighted score 2.5 against 4 cached blocks: the token count must follow
+	// the cached count.
+	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).
+		WithCachedBlockCount(4))
+
+	// A non-default profile name proves the lookup follows PrimaryProfileName.
+	beforePredicted := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum()
+	beforePrompt := sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum()
+	_ = p.PreRequest(ctx, tokenizedRequest("req-predicted", 8*testBlockSize),
+		primaryOnly("decode", endpoint))
+
+	assert.Equal(t, beforePredicted+float64(4*testBlockSize), sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleSum())
+	assert.Equal(t, beforePrompt+float64(8*testBlockSize), sharedPrefixHistogram(t, promptTokensMetric, name).GetSampleSum())
+}
+
+// An endpoint the producer never published match info for is not observed:
+// a zero would be indistinguishable from a real zero-hit prediction.
+func TestPreRequest_NoMatchInfo_RecordsNothing(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-predicted-absent"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	before := sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount()
+	_ = p.PreRequest(ctx, tokenizedRequest("req-no-info", testBlockSize),
+		primaryOnly("default", freshEndpoints()[0]))
+	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount())
+
+	// No endpoint at all is equally a no-op.
+	_ = p.PreRequest(ctx, tokenizedRequest("req-no-endpoint", testBlockSize),
+		&scheduling.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults:     map[string]*scheduling.ProfileRunResult{"default": {}},
+		})
+	assert.Equal(t, before, sharedPrefixHistogram(t, predictedCachedTokensMetric, name).GetSampleCount())
+}
+
+func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
+	return &scheduling.InferenceRequest{
+		RequestID: id,
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+			},
+		},
+	}
+}
+
+const (
+	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens"
+	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"
+)
+
+// sharedPrefixHistogram reads a shared prefix metric out of the registry it is
+// registered against, since those metrics live in another package. A metric
+// that has not been observed yet reads as nil, whose accessors return zero.
+func sharedPrefixHistogram(t *testing.T, metricName, pluginName string) *dto.Histogram {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "plugin_name" && label.GetValue() == pluginName {
+					return metric.GetHistogram()
+				}
+			}
+		}
+	}
+	return nil
 }

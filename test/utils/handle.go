@@ -1,5 +1,6 @@
 /*
 Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,7 +30,8 @@ import (
 type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
-	metricsRecorder plugin.MetricsRecorder
+	metricsRecorder    plugin.MetricsRecorder
+	crossReplicaSyncer plugin.Plugin
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -43,6 +45,14 @@ func (h *testHandle) PodList() []types.NamespacedName {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
+}
+
+func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
+	return h.crossReplicaSyncer
+}
+
+func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
+	h.crossReplicaSyncer = syncer
 }
 
 type testHandlePlugins struct {

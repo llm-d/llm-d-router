@@ -18,13 +18,25 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
+	// between phases of a disaggregated request.
+	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"
+	// RevisionDecisionIDHeaderKey identifies requests that belong to the same
+	// rollout decision. This is needed only for roles such as encode that create
+	// several parallel subrequests from one user request (for example, one per
+	// image). The coordinator must give every subrequest the same value so they
+	// use the same revision.
+	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldMaxTokens            = "max_tokens"
+	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldStream               = "stream"
+	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -34,4 +46,10 @@ const (
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
+	FieldPreviousResponseID   = "previous_response_id"
+	FieldConversation         = "conversation"
+	FieldBackground           = "background"
+	FieldInput                = "input"
+	FieldContent              = "content"
+	FieldFileID               = "file_id"
 )

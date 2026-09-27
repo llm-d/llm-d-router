@@ -120,9 +120,9 @@ var (
 
 // Upstream call family. Recorded once per outbound HTTP call by the step
 // that makes it: encode contributes one observation per multimodal entry
-// and replace-media-urls one per URL, so the counter multiplies past step_total
-// by the fan-out factor. Failures roll up into step_errors_total, so there
-// is no upstream_request_error_total.
+// and replace-media-urls one per URL, so this counter exceeds the number of
+// step executions by the fan-out factor. Failures roll up into
+// step_errors_total, so there is no upstream_request_error_total.
 var (
 	upstreamRequestTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -164,7 +164,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "conditional_decode_probes_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of conditional-decode probes by the worker's answer: served inline (2xx/3xx), deferred (HTTP 412) to the full pipeline, or error (any other 4xx/5xx).", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of conditional-decode probes by the worker's answer: served inline (2xx/3xx), deferred (HTTP 412) to the full pipeline, error (any other 4xx/5xx), or transport_error (no response received).", compbasemetrics.ALPHA),
 		},
 		[]string{"result"},
 	)
@@ -175,10 +175,10 @@ var (
 // media_download_duration_seconds, which is one observation per download
 // attempt.
 var (
-	encodeFanoutSize = prometheus.NewHistogramVec(
+	encodeSubrequests = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
-			Name:      "encode_fanout_size",
+			Name:      "encode_subrequests",
 			Help:      metricsutil.HelpMsgWithStability("Number of Encode subrequests produced by one client request. Observed once per pipeline execution after fan-out is known; 0 when Encode does not run or is skipped. Unit: subrequests.", compbasemetrics.ALPHA),
 			Buckets:   CountBuckets,
 		},
@@ -209,16 +209,16 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "media_download_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts; data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts. Requests rejected before the dial (invalid URL, disallowed scheme, or host not in allowed_domains) and data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 		resultLabel,
 	)
 
-	responseBytes = prometheus.NewHistogramVec(
+	responseSize = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
-			Name:      "response_bytes",
+			Name:      "response_size_bytes",
 			Help:      metricsutil.HelpMsgWithStability("Total bytes written to the client for one request, including partial writes on cancellation or disconnect. Observed once per client request. Unit: bytes.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.ResponseSizeBuckets,
 		},

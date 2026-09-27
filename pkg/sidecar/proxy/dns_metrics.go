@@ -18,9 +18,12 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +32,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/llm-d/llm-d-router/pkg/common"
 )
 
 // envMoRIIOMetricsAddr is a backward-compatible fallback for enabling the
@@ -100,33 +105,60 @@ func (s *Server) metricsAddr() string {
 }
 
 // maybeStartMetrics starts an opt-in Prometheus /metrics HTTP server when a
-// metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR),
-// registering the goroutine on grp so it shares the server lifecycle and shuts
-// down with ctx. When neither is set (the default) it is a no-op and the
-// counters simply go unscraped.
+// metrics address is configured (via --metrics-port or MORIIO_METRICS_ADDR) or
+// a MetricsListener is injected, registering the goroutine on grp so it shares
+// the server lifecycle and shuts down with ctx. When neither is set (the
+// default) it is a no-op and the counters simply go unscraped. A metrics
+// server failure propagates to grp and stops the sidecar: the failures
+// reachable here (an unusable --metrics-cert-dir, an address already in use)
+// are startup misconfigurations, so failing immediately surfaces them during
+// rollout instead of leaving the sidecar serving traffic with no /metrics
+// endpoint.
 func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
-	addr := s.metricsAddr()
-	if addr == "" {
+	if s.MetricsListener == nil && s.metricsAddr() == "" {
 		return
 	}
 	grp.Go(func() error {
-		return s.serveMetrics(ctx, addr)
+		return s.serveMetrics(ctx)
 	})
 }
 
 // serveMetrics serves the shared controller-runtime metrics registry at
-// /metrics on addr until ctx is cancelled, then shuts the server down
-// gracefully. Registration of the moriio_dns_* counters is ensured here so they
-// are present even if no resolver has been constructed yet.
-func (s *Server) serveMetrics(ctx context.Context, addr string) error {
+// /metrics until ctx is cancelled, then shuts the server down gracefully.
+// When MetricsListener is set, that listener is used; otherwise the address
+// from metricsAddr() is bound with net.Listen. Registration of the
+// moriio_dns_* counters is ensured here so they are present even if no
+// resolver has been constructed yet. The metrics server uses HTTP by default.
+// When --metrics-cert-dir is set, or metrics-cert-dir is set in the sidecar
+// YAML, it serves /metrics over HTTPS using tls.crt and tls.key from that
+// directory, with no fallback to HTTP. Startup and serving errors are
+// returned to maybeStartMetrics. The shutdown goroutine logs shutdown errors.
+func (s *Server) serveMetrics(ctx context.Context) error {
 	registerDNSMetrics()
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{}))
 	server := &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	serveTLS := s.config.MetricsCertDir != ""
+	if serveTLS {
+		tlsConfig, err := s.metricsTLSConfig(ctx)
+		if err != nil {
+			return err
+		}
+		server.TLSConfig = tlsConfig
+	}
+
+	ln := s.MetricsListener
+	if ln == nil {
+		var err error
+		ln, err = net.Listen("tcp", s.metricsAddr())
+		if err != nil {
+			return err
+		}
 	}
 
 	go func() {
@@ -138,10 +170,39 @@ func (s *Server) serveMetrics(ctx context.Context, addr string) error {
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		s.logger.Error(err, "metrics server failed")
+	s.logger.Info("starting MoRI-IO metrics server", "addr", ln.Addr().String(), "tls", serveTLS)
+	var err error
+	if serveTLS {
+		err = server.ServeTLS(ln, "", "")
+	} else {
+		err = server.Serve(ln)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// metricsTLSConfig loads tls.crt and tls.key from Config.MetricsCertDir for
+// the HTTPS metrics server. Changes to either file take effect without
+// restarting the sidecar.
+func (s *Server) metricsTLSConfig(ctx context.Context) (*tls.Config, error) {
+	certFile := filepath.Join(s.config.MetricsCertDir, "tls.crt")
+	keyFile := filepath.Join(s.config.MetricsCertDir, "tls.key")
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("metrics TLS: load key pair from cert %q and key %q: %w", certFile, keyFile, err)
+	}
+
+	reloader, err := common.NewCertReloader(ctx, s.config.MetricsCertDir, &cert)
+	if err != nil {
+		return nil, fmt.Errorf("metrics TLS: start certificate reloader: %w", err)
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return reloader.Get(), nil
+		},
+	}, nil
 }

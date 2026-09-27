@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package dataparallel
 
 import (
@@ -240,7 +256,14 @@ func Test_ProfileHandler_Pick(t *testing.T) {
 	}
 }
 
+type cloneableStr string
+
+func (s cloneableStr) Clone() fwkdl.Cloneable { return s }
+
 func Test_ProfileHandler_ProcessResults(t *testing.T) {
+	profileResult := newMockProfileRunResult(DefaultTestPodPort, "pod1")
+	key := plugin.NewDataKey("test-key", "test-producer")
+	profileResult.TargetEndpoints[0].Put(key, cloneableStr("test-value"))
 	tests := []struct {
 		name           string
 		primaryPort    int
@@ -307,6 +330,20 @@ func Test_ProfileHandler_ProcessResults(t *testing.T) {
 					assert.Equal(t, "8080", p.GetMetadata().Port)
 				}
 				assert.Equal(t, net.JoinHostPort("10.0.0.1", DefaultTestPodPort), headers[routing.DataParallelEndpointHeader])
+			},
+		},
+		{
+			name:        "success: target endpoint attributes are preserved",
+			primaryPort: 8080,
+			profileResults: map[string]*scheduling.ProfileRunResult{
+				"dp-profile": profileResult,
+			},
+			expectError: false,
+			checkResult: func(t *testing.T, res *scheduling.SchedulingResult, _ map[string]string) {
+				pod := res.ProfileResults["dp-profile"].TargetEndpoints[0]
+				value, ok := pod.Get(key)
+				assert.True(t, ok)
+				assert.Equal(t, cloneableStr("test-value"), value)
 			},
 		},
 	}

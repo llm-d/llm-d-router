@@ -59,7 +59,7 @@ pipeline:
 
 // coordinatorConfigNIXLGenerate is coordinatorConfigNIXL with OpenAI passthrough
 // disabled. With use_openai_format: false a chat/completions request collapses to
-// the native generate wire format on the encode and prefill legs, which build a
+// the native generate wire format on the encode and prefill steps, which build a
 // fresh sampling_params carrying only max_tokens: 1. This exercises a different
 // min_tokens-stripping path than the OpenAI clone-and-cap path.
 var coordinatorConfigNIXLGenerate = strings.Replace(
@@ -78,7 +78,7 @@ var coordinatorConfigNIXLGenerate = strings.Replace(
 // the InferencePool selects across all three roles, so an unlabeled or
 // mislabeled encode/prefill pod would otherwise be accepted as a decode
 // candidate; label-selector-filter's matchExpressions has no such exception.
-const eppConfig = `apiVersion: llm-d.ai/v1alpha1
+const eppConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
@@ -131,7 +131,7 @@ schedulingProfiles:
 // affinity to exploit, and decode is bound by concurrent in-flight requests,
 // not prefill throughput, so neither needs the prefill config's cache-affinity
 // filter or token-load scorer.
-const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1alpha1
+const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
@@ -154,7 +154,7 @@ schedulingProfiles:
 // eppConfigPrefill keeps prefix groups on cache-warm pods
 // (prefix-cache-affinity-filter), then picks by queued prefill token load
 // (token-load-scorer).
-const eppConfigPrefill = `apiVersion: llm-d.ai/v1alpha1
+const eppConfigPrefill = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser

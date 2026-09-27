@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,6 +45,10 @@ type HashBlock struct {
 // Hash computes a stable unique identifier for the HashBlock content.
 func (b HashBlock) Hash() uint64 {
 	if len(b.Tokens) > 0 {
+		// Reinterprets the uint32 slice as bytes to hash without copying. Safe
+		// because the length check above guarantees a valid backing array, and
+		// the byte length (len(Tokens) * 4) matches uint32's size exactly, so
+		// the resulting slice stays within the array's bounds.
 		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4)
 		return xxhash.Sum64(byteSlice)
 	}
@@ -58,31 +63,43 @@ func (b HashBlock) Hash() uint64 {
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
 // It requires request.Body.TokenizedRequest to be populated by a token-producer backend.
 func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]BlockHash {
+	hashes, _ := GetBlockHashesWithPromptTokens(ctx, request, blockSizeTokens, maxPrefixBlocks)
+	return hashes
+}
+
+// GetBlockHashesWithPromptTokens hashes as GetBlockHashes does and additionally
+// returns the token count of the prompt behind each entry, positionally aligned
+// with the hashes. A prompt's final block may be partial, so converting a
+// matched block count back to tokens overshoots unless it is bounded by the
+// length of the prompt that produced the blocks.
+func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) ([][]BlockHash, []int) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
 		loggerDebug.Info("Request or request data is nil, skipping hashing")
-		return nil
+		return nil, nil
 	}
 
 	tp := request.Body.TokenizedRequest
 	if tp == nil || tp.TokenCount() == 0 {
 		loggerDebug.Info("TokenizedRequest is empty, skipping hashing")
-		return nil
+		return nil, nil
 	}
 
 	var result [][]BlockHash
+	var promptTokens []int
 	for _, p := range tp.Prompts {
 		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
 		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
+			promptTokens = append(promptTokens, len(p.TokenIDs))
 		}
 	}
 	if len(result) == 0 {
 		loggerDebug.Info("No kv cache block found")
-		return nil
+		return nil, nil
 	}
-	return result
+	return result, promptTokens
 }
 
 // computeBlockHashes calculates the hash for content blocks.

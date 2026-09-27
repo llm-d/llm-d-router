@@ -16,13 +16,7 @@ limitations under the License.
 
 package gateway
 
-import "strings"
-
 const (
-	PathChatCompletions = "/v1/chat/completions"
-	PathCompletions     = "/v1/completions"
-	DefaultGeneratePath = "/inference/v1/generate"
-
 	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
 	ContentTypeJSON   = "application/json"
@@ -31,50 +25,3 @@ const (
 	PhasePrefill = "prefill"
 	PhaseDecode  = "decode"
 )
-
-type RequestFormat int
-
-const (
-	FormatGenerate RequestFormat = iota
-	FormatCompletions
-	FormatChatCompletions
-)
-
-func (f RequestFormat) String() string {
-	switch f {
-	case FormatGenerate:
-		return DefaultGeneratePath
-	case FormatCompletions:
-		return PathCompletions
-	case FormatChatCompletions:
-		return PathChatCompletions
-	default:
-		return "unknown"
-	}
-}
-
-// DetectFormat classifies an inbound request path. The chi router registers
-// only PathChatCompletions and PathCompletions, so in production path is always
-// one of those two; the FormatGenerate fallback covers only callers that pass an
-// arbitrary path. There is no error return because an unrecognized path is not a
-// failure: it maps to the generate format by design.
-func DetectFormat(path string) RequestFormat {
-	if strings.Contains(path, PathChatCompletions) {
-		return FormatChatCompletions
-	}
-	if strings.Contains(path, PathCompletions) {
-		return FormatCompletions
-	}
-	return FormatGenerate
-}
-
-func PathForFormat(format RequestFormat) string {
-	switch format {
-	case FormatChatCompletions:
-		return PathChatCompletions
-	case FormatCompletions:
-		return PathCompletions
-	default:
-		return DefaultGeneratePath
-	}
-}

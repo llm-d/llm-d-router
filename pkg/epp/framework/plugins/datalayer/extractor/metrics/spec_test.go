@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -343,7 +344,7 @@ func TestGetLoRAMetric(t *testing.T) {
 			// vLLM only emits vllm:lora_requests_info once at least one LoRA
 			// adapter has been loaded. A vanilla deployment with no LoRA must
 			// be treated as "no adapters" rather than a scrape error so the
-			// EPP doesn't spam DataLayerExtractErrorsTotal on every poll
+			// EPP doesn't spam LlmdDataLayerExtractErrorsTotal on every poll
 			// (#926).
 			name: "missing family treated as no adapters",
 			metricFamilies: sourcemetrics.PrometheusMetricMap{

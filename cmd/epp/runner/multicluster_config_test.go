@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -96,7 +96,7 @@ func multiClusterConfig(clustersPath string, withExtractor bool) string {
 		extractorPlugin = "  - type: multicluster-metrics-extractor\n    name: metrics-extractor\n"
 		extractorBinding = "      extractors:\n        - pluginRef: metrics-extractor\n"
 	}
-	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: multicluster-file-discovery
@@ -117,7 +117,8 @@ plugins:
   - type: single-profile-handler
 dataLayer:
   discovery:
-    pluginRef: discovery
+    endpoints:
+      pluginRef: discovery
   sources:
     - pluginRef: metrics-source
 %s`, clustersPath, extractorPlugin, extractorBinding)

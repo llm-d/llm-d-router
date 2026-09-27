@@ -59,8 +59,10 @@ func getHashAsUint64(raw any) (uint64, error) {
 	case uint64:
 		return val, nil
 	case int64:
-		// msgpack can decode small integers as int64
-		//nolint:gosec // int64 to uint64 conversion is safe here
+		// msgpack can decode small integers as int64.
+		if val < 0 {
+			return 0, fmt.Errorf("hash value is negative: %d", val)
+		}
 		return uint64(val), nil
 	case []byte:
 		if len(val) == 0 {

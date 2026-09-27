@@ -53,6 +53,7 @@ type ChatCompletionHandler struct {
 	MoRIIOWriteMode     bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
+	CompletionRawBodies [][]byte
 	CompletionHeaders   []http.Header
 	CompletionResponses []map[string]any
 	mu                  sync.Mutex
@@ -68,6 +69,15 @@ func (cc *ChatCompletionHandler) GetCompletionRequests() []map[string]any {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	return append([]map[string]any(nil), cc.CompletionRequests...)
+}
+
+// GetCompletionRawBodies returns a snapshot of the received request bodies as
+// sent on the wire, appended in lockstep with GetCompletionRequests, safe for
+// concurrent access.
+func (cc *ChatCompletionHandler) GetCompletionRawBodies() [][]byte {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return append([][]byte(nil), cc.CompletionRawBodies...)
 }
 
 // GetCompletionHeaders returns a snapshot of the received request headers,
@@ -90,23 +100,24 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	defer r.Body.Close() //nolint:all
+	defer r.Body.Close() //nolint:errcheck
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:all
+		w.Write([]byte(err.Error()))         //nolint:errcheck
 		return
 	}
 
 	var completionRequest map[string]any
 	if err := json.Unmarshal(b, &completionRequest); err != nil {
-		w.Write([]byte(err.Error())) //nolint:all
+		w.Write([]byte(err.Error())) //nolint:errcheck
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	cc.mu.Lock()
 	cc.CompletionRequests = append(cc.CompletionRequests, completionRequest)
+	cc.CompletionRawBodies = append(cc.CompletionRawBodies, b)
 	cc.CompletionHeaders = append(cc.CompletionHeaders, r.Header.Clone())
 	cc.mu.Unlock()
 
@@ -124,34 +135,34 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 			if !ok || kvTransferParams == nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 			kvTransferParamsMap, ok := kvTransferParams.(map[string]any)
 			if !ok {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 
 			if v, ok := kvTransferParamsMap["do_remote_decode"]; !ok || !v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_decode:true")) //nolint:all
+				w.Write([]byte("expected do_remote_decode:true")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["do_remote_prefill"]; !ok || v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_prefill:false")) //nolint:all
+				w.Write([]byte("expected do_remote_prefill:false")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["remote_engine_id"]; !ok || v != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_engine_id:null")) //nolint:all
+				w.Write([]byte("expected remote_engine_id:null")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["remote_block_ids"]; !ok || v != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_block_ids:null")) //nolint:all
+				w.Write([]byte("expected remote_block_ids:null")) //nolint:errcheck
 				return
 			}
 			if cc.MoRIIOWriteMode {
@@ -161,42 +172,42 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				v, ok := kvTransferParamsMap["remote_host"]
 				if !ok {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_host:<host>")) //nolint:all
+					w.Write([]byte("expected remote_host:<host>")) //nolint:errcheck
 					return
 				}
 				if s, isStr := v.(string); !isStr || s == "" {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:all
+					w.Write([]byte("expected remote_host to be a non-empty string in WRITE mode")) //nolint:errcheck
 					return
 				}
 				if v, ok := kvTransferParamsMap["remote_notify_port"]; !ok {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:all
+					w.Write([]byte("expected remote_notify_port:<int> in WRITE mode")) //nolint:errcheck
 					return
 				} else if _, isNum := v.(float64); !isNum {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_notify_port to be a number in WRITE mode")) //nolint:all
+					w.Write([]byte("expected remote_notify_port to be a number in WRITE mode")) //nolint:errcheck
 					return
 				}
 				if v, ok := kvTransferParamsMap["transfer_id"]; !ok {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected transfer_id:<uuid> in WRITE mode")) //nolint:all
+					w.Write([]byte("expected transfer_id:<uuid> in WRITE mode")) //nolint:errcheck
 					return
 				} else if s, isStr := v.(string); !isStr || s == "" {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:all
+					w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:errcheck
 					return
 				}
 			} else {
 				if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
 					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte("expected remote_host:null")) //nolint:all
+					w.Write([]byte("expected remote_host:null")) //nolint:errcheck
 					return
 				}
 			}
 			if v, ok := kvTransferParamsMap["remote_port"]; !ok || v != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_port:null")) //nolint:all
+				w.Write([]byte("expected remote_port:null")) //nolint:errcheck
 				return
 			}
 
@@ -212,38 +223,38 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			kvTransferParams, ok := completionRequest["kv_transfer_params"]
 			if !ok || kvTransferParams == nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 			kvTransferParamsMap, ok := kvTransferParams.(map[string]any)
 			if !ok {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["do_remote_prefill"]; !ok || !v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_prefill:true")) //nolint:all
+				w.Write([]byte("expected do_remote_prefill:true")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["do_remote_decode"]; !ok || v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_decode:false")) //nolint:all
+				w.Write([]byte("expected do_remote_decode:false")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["transfer_id"]; !ok || v == nil || v == "" {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected transfer_id to be non-empty")) //nolint:all
+				w.Write([]byte("expected transfer_id to be non-empty")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["remote_bootstrap_addr"]; !ok || v == nil || v == "" {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_bootstrap_addr to be non-empty")) //nolint:all
+				w.Write([]byte("expected remote_bootstrap_addr to be non-empty")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["remote_engine_id"]; !ok || v == nil || v == "" {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected remote_engine_id to be non-empty")) //nolint:all
+				w.Write([]byte("expected remote_engine_id to be non-empty")) //nolint:errcheck
 				return
 			}
 			rawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
@@ -251,28 +262,28 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			kvTransferParams, ok := completionRequest["kv_transfer_params"]
 			if !ok || kvTransferParams == nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 			kvTransferParamsMap, ok := kvTransferParams.(map[string]any)
 			if !ok {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:all
+				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["do_remote_decode"]; !ok || !v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_decode:true")) //nolint:all
+				w.Write([]byte("expected do_remote_decode:true")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["do_remote_prefill"]; !ok || v.(bool) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected do_remote_prefill:false")) //nolint:all
+				w.Write([]byte("expected do_remote_prefill:false")) //nolint:errcheck
 				return
 			}
 			if v, ok := kvTransferParamsMap["transfer_id"]; !ok || v == nil || v == "" {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected transfer_id to be non-empty")) //nolint:all
+				w.Write([]byte("expected transfer_id to be non-empty")) //nolint:errcheck
 				return
 			}
 			rawResponse = `{}`
@@ -298,7 +309,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	if cc.RawResponseType != contentTypeEventStream {
 		if err := json.Unmarshal([]byte(rawResponse), &completionResponse); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(err.Error())) //nolint:all
+			w.Write([]byte(err.Error())) //nolint:errcheck
 			return
 		}
 		cc.mu.Lock()
@@ -306,5 +317,5 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		cc.mu.Unlock()
 	}
 
-	w.Write([]byte(rawResponse)) //nolint:all
+	w.Write([]byte(rawResponse)) //nolint:errcheck
 }

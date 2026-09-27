@@ -41,6 +41,7 @@ func TestCostAwareKeyIndexBoundedUnderEviction(t *testing.T) {
 
 	cfg := DefaultCostAwareMemoryIndexConfig()
 	cfg.Size = fmt.Sprintf("%d", 2*oneKeyCost) // room for ~2 keys
+	cfg.NumCounters = 10_000
 
 	index, err := NewCostAwareMemoryIndex(cfg)
 	require.NoError(t, err)

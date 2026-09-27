@@ -30,6 +30,81 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
+func TestSGLangHTTPParser_RewritePriority(t *testing.T) {
+	t.Run("strips client priority and writes resolved priority", func(t *testing.T) {
+		parser := NewSGLangHTTPParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"input_ids": []any{1, 2, 3}, "priority": 100}, 2)
+		if err != nil {
+			t.Fatalf("RewritePriority() error = %v", err)
+		}
+		if !mutated {
+			t.Errorf("mutated = false, want true")
+		}
+		if got.(fwkrh.PayloadMap)["priority"] != 2 {
+			t.Errorf("priority = %v, want 2", got.(fwkrh.PayloadMap)["priority"])
+		}
+	})
+	t.Run("writes priority when none supplied", func(t *testing.T) {
+		parser := NewSGLangHTTPParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"input_ids": []any{1, 2, 3}}, 2)
+		if err != nil {
+			t.Fatalf("RewritePriority() error = %v", err)
+		}
+		if !mutated {
+			t.Errorf("mutated = false, want true")
+		}
+		if got.(fwkrh.PayloadMap)["priority"] != 2 {
+			t.Errorf("priority = %v, want 2", got.(fwkrh.PayloadMap)["priority"])
+		}
+	})
+}
+
+var benchmarkSGLangParseResult *fwkrh.ParseResult
+
+func makeSGLangTokenArrayBody(tokenCount int) []byte {
+	tokens := strings.Repeat("12345,", tokenCount-1) + "12345"
+	return []byte(`{"input_ids":[` + tokens + `],"sampling_params":{"max_new_tokens":1}}`)
+}
+
+func BenchmarkSGLangHTTPParser_ParseRequest(b *testing.B) {
+	parser := NewSGLangHTTPParser()
+	headers := map[string]string{":path": "/generate"}
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{"4K", 4 * 1024},
+		{"32K", 32 * 1024},
+		{"256K", 256 * 1024},
+		{"1M", 1_000_000},
+	} {
+		body := makeSGLangTokenArrayBody(tc.count)
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				result, err := parser.ParseRequest(context.Background(), body, headers)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkSGLangParseResult = result
+			}
+		})
+	}
+}
+
+func BenchmarkSGLangHTTPParser_ParseRequestFallback1M(b *testing.B) {
+	parser := NewSGLangHTTPParser()
+	headers := map[string]string{":path": "/generate"}
+	tokens := strings.Repeat("12345,", 1_000_000-1) + "12345.0"
+	body := []byte(`{"input_ids":[` + tokens + `],"sampling_params":{"max_new_tokens":1}}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		_, _ = parser.ParseRequest(context.Background(), body, headers)
+	}
+}
+
 func TestNewSGLangHTTPParser(t *testing.T) {
 	parser := NewSGLangHTTPParser()
 	want := fwkplugin.TypedName{Type: SGLangHTTPParserType, Name: SGLangHTTPParserType}
@@ -146,7 +221,11 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			tt.want.Payload = fwkrh.RawPayload(bodyBytes)
+			var wantMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &wantMap); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			tt.want.Payload = fwkrh.PayloadMap(wantMap)
 			if got.SkipResponseProcessing {
 				t.Errorf("SkipResponseProcessing = true, want false")
 			}
