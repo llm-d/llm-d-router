@@ -276,7 +276,7 @@ steps read and mutate. The load-bearing fields:
 it as the base header set, then stamp the request ID and `EPP-Profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
 request. Any client-provided value under that name is discarded. Client values of
-`EPP-Profile` and `x-prefill-pin` are also discarded, because EPP routes on them.
+`EPP-Profile` and `x-prefill-pin-host-port` are also discarded, because EPP routes on them.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -429,7 +429,7 @@ the decode body must name the prefill pod before either request is sent. The ste
    the pinned prefill request instead of running it, and SGLang runs a request on the
    rank that `x-data-parallel-rank` names, which can conflict with the rank the room
    implies.
-3. Sends the prefill request with `x-prefill-pin: <ip:port>` and the decode request at the
+3. Sends the prefill request with `x-prefill-pin-host-port: <ip:port>` and the decode request at the
    same time. Each of the three requests carries its own `x-request-id` (`<id>-reserve`,
    `<id>-prefill`, `<id>`), because EPP plugins key per-request state by it.
 4. Streams decode to the client. The prefill response is read for its status only. When one

@@ -16,7 +16,7 @@ picked endpoint, and EPP then answers the caller with `200`, the endpoint on the
 EPP forwards nothing to a model server.
 
 The coordinator writes that endpoint into the SGLang prefill and decode bodies,
-and pins the real prefill request to it with `x-prefill-pin` (see
+and pins the real prefill request to it with `x-prefill-pin-host-port` (see
 [prefill-pin-screener](../screener/prefillpin/README.md)).
 
 ## How It Works

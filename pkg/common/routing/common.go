@@ -72,7 +72,7 @@ const (
 	// PrefillPinHeader carries the prefill worker <ip:port> a request must be
 	// scheduled on. The coordinator copies it from the reserve-endpoint answer
 	// so that the prefill request lands on the pod its peer request names.
-	PrefillPinHeader = "x-prefill-pin"
+	PrefillPinHeader = "x-prefill-pin-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
