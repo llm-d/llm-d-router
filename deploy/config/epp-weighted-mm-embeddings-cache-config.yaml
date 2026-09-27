@@ -1,5 +1,8 @@
-# Sample EPP configuration with multimodal embeddings cache affinity.
-apiVersion: llm-d.ai/v1
+# Sample EPP configuration with length-weighted multimodal embeddings cache
+# affinity. With token-producer present, mm-embeddings-cache-producer uses
+# MultiModalFeature.Length as MatchItem.Size so larger media outweighs tiny
+# items in mm-embeddings-cache-scorer.
+apiVersion: llm-d.ai/v1alpha1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer
@@ -12,7 +15,8 @@ plugins:
   - type: core-metrics-extractor
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSizeInMBPerServer: 2048
+      # Match the model server's effective encoder_cache_size.
+      cacheSizeInEmbeddingsPerServer: 8192
   - type: mm-embeddings-cache-scorer
   - type: precise-prefix-cache-producer
     parameters:
