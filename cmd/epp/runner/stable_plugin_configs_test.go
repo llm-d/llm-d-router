@@ -65,7 +65,7 @@ func TestStablePluginConfigs(t *testing.T) {
 			require.NoError(t, err, "stable config %s no longer parses", file)
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
-			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 			require.NoError(t, err, "stable config %s no longer instantiates its plugins", file)
 
 			require.NoError(t, fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins),
