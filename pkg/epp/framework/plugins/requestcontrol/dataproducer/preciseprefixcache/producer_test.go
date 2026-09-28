@@ -854,7 +854,7 @@ type fakeSubscriberManager struct {
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _ string,
+	id, sourceEndpoint, endpoint, _, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)

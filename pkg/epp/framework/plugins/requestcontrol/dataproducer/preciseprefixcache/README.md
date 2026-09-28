@@ -46,6 +46,15 @@ so with a shared head sampler always-on event spans crowd request traces out of
 the exported volume. The EPP `--tracing` flag gates tracing as a whole, so this
 field has no effect while that is off.
 
+Set `kvEventsConfig.podDiscoveryConfig.snapshotSocketPort` to the port where
+vLLM serves KV-event snapshots (offset by data-parallel rank like `socketPort`)
+to warm a pod's index from its current cache state. A subscriber that joins
+mid-stream, or sees the engine restart, loads the snapshot instead of replaying
+buffered events, then follows live events after the snapshot's sequence
+number. Without `replaySocketPort`, a gap in the event sequence reloads the
+snapshot as well. A snapshot that fails or is unavailable is retried after the
+replay cooldown; the pod contributes no cache affinity until then.
+
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.
 
