@@ -98,7 +98,7 @@ export PD_ENABLED="\"${PD_ENABLED:-false}\""
 # Token length threshold to trigger P/D logic
 export PD_PROMPT_LEN_THRESHOLD="\"${PD_PROMPT_LEN_THRESHOLD:-10}\""
 
-export EPP_CONFIG="${EPP_CONFIG:-deploy/config/epp-precise-prefix-cache-config.yaml}"
+export EPP_CONFIG="${EPP_CONFIG:-test/e2e/artifacts/config/epp-precise-prefix-cache-config.yaml}"
 
 # Redis deployment name
 export REDIS_DEPLOYMENT_NAME="${REDIS_DEPLOYMENT_NAME:-lookup-server}"
