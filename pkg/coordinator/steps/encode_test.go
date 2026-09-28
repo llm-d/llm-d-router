@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -347,6 +351,98 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	err := step.Execute(context.Background(), reqCtx)
 	if err == nil {
 		t.Fatal("expected error when one encode fails")
+	}
+}
+
+func TestEncodeStep_FailureLogRecord(t *testing.T) {
+	const (
+		statusMsg  = `"msg"="encode fanout status"`
+		requestMsg = `"msg"="encode fanout request"`
+	)
+	tests := []struct {
+		name string
+		// status 0 is a transport failure: the server is closed before the request.
+		status  int
+		wantMsg string
+		wantKey string
+	}{
+		{name: "server error status", status: http.StatusServiceUnavailable, wantMsg: statusMsg, wantKey: `"status"=503`},
+		{name: "client error status", status: http.StatusBadRequest, wantMsg: statusMsg, wantKey: `"status"=400`},
+		{name: "success status other than 200", status: http.StatusAccepted, wantMsg: statusMsg, wantKey: `"status"=202`},
+		{name: "transport failure", wantMsg: requestMsg, wantKey: `"path"=`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+			if tt.status == 0 {
+				server.Close()
+			}
+
+			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger, records := captureLogger(logutil.DEFAULT)
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID: "req-1",
+				Model:     "test",
+				TokenIDs:  []int{1, 32000},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+				},
+			}
+			if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err == nil {
+				t.Fatal("expected an error from the failed sub-request")
+			}
+
+			notWantMsg := statusMsg
+			if tt.wantMsg == statusMsg {
+				notWantMsg = requestMsg
+			}
+			if got := countRecords(records(), tt.wantMsg, `"index"=0`, tt.wantKey); got != 1 {
+				t.Errorf("%d records contain %s with %s, want 1, records=%v", got, tt.wantMsg, tt.wantKey, records())
+			}
+			if got := countRecords(records(), notWantMsg); got != 0 {
+				t.Errorf("%d records contain %s, want 0, records=%v", got, notWantMsg, records())
+			}
+		})
+	}
+}
+
+func TestEncodeStep_DebugRequestRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger, records := captureLogger(logutil.DEBUG)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+		TokenIDs:  []int{1, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+	if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for index := range reqCtx.MultimodalEntries {
+		want := []string{`"msg"="sub-request body"`, fmt.Sprintf(`"index"=%d`, index), `"bodyLen"=`}
+		if got := countRecords(records(), want...); got != 1 {
+			t.Errorf("%d records contain %v, want 1, records=%v", got, want, records())
+		}
 	}
 }
 
