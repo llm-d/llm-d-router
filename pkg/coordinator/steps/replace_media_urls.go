@@ -135,7 +135,7 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	messages, ok := reqCtx.Body["messages"].([]any)
+	messages, ok := requestMessages(reqCtx.Body)
 	if !ok {
 		return nil
 	}
@@ -232,6 +232,7 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		return err
 	}
 
+	reqCtx.Body["messages"] = messages
 	for _, r := range results {
 		if !strings.HasPrefix(r.ref.url, "data:") {
 			r.ref.imageURL["url"] = fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)

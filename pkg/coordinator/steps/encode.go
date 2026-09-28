@@ -257,7 +257,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 // parts in order, so the fan-out loop can index by position instead of
 // re-walking all parts per image (O(N*M) -> O(N+M)).
 func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
+	messages, _ := requestMessages(body)
 	var parts []map[string]any
 	for _, msg := range messages {
 		msgMap, ok := msg.(map[string]any)

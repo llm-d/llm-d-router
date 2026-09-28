@@ -119,10 +119,14 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 }
 
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
+	if len(reqCtx.MultimodalEntries) == 0 {
+		return
+	}
+	messages, ok := requestMessages(reqCtx.Body)
 	if !ok {
 		return
 	}
+	reqCtx.Body["messages"] = messages
 
 	hashIdx := 0
 	for _, msg := range messages {
