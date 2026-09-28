@@ -39,6 +39,7 @@ const (
 	replayCooldown              = 30 * time.Second
 	maxConcurrentReplay         = 8
 	maxReplayNoProgressAttempts = 3
+	snapshotTimeout             = 30 * time.Second
 )
 
 var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
@@ -50,10 +51,13 @@ type zmqSubscriber struct {
 	sourceEndpoint string
 	endpoint       string
 	replayEndpoint string
-	remote         bool
-	topicFilter    string
-	queueMu        sync.Mutex
-	retired        bool
+	// snapshotEndpoint serves the publisher's current cache state, used in
+	// place of a full replay.
+	snapshotEndpoint string
+	remote           bool
+	topicFilter      string
+	queueMu          sync.Mutex
+	retired          bool
 
 	// Replay state persists across reconnections within subscriber lifetime.
 	lastSeq           uint64
@@ -66,17 +70,18 @@ type zmqSubscriber struct {
 // newZMQSubscriber creates a new ZMQ subscriber.
 func newZMQSubscriber(
 	pool *Pool,
-	podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter string,
+	podIdentifier, sourceEndpoint, endpoint, replayEndpoint, snapshotEndpoint, topicFilter string,
 	remote bool,
 ) *zmqSubscriber {
 	return &zmqSubscriber{
-		pool:           pool,
-		podIdentifier:  podIdentifier,
-		sourceEndpoint: sourceEndpoint,
-		endpoint:       endpoint,
-		replayEndpoint: replayEndpoint,
-		remote:         remote,
-		topicFilter:    topicFilter,
+		pool:             pool,
+		podIdentifier:    podIdentifier,
+		sourceEndpoint:   sourceEndpoint,
+		endpoint:         endpoint,
+		replayEndpoint:   replayEndpoint,
+		snapshotEndpoint: snapshotEndpoint,
+		remote:           remote,
+		topicFilter:      topicFilter,
 	}
 }
 
@@ -181,7 +186,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			continue
 		}
 
-		if z.replayEndpoint == "" {
+		if z.replayEndpoint == "" && z.snapshotEndpoint == "" {
 			// A per-endpoint subscriber reads a single publisher, so a backwards
 			// sequence means the engine restarted with an empty cache. The bound
 			// global socket interleaves many publishers, so its sequences move
@@ -208,7 +213,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			z.hasLastSeq = false
 			z.lastReplayFailure = time.Time{}
 			replayAttempted = true
-			z.requestReplay(ctx, 0)
+			z.rebuild(ctx, topic)
 		}
 
 		if z.hasLastLiveSeq && seq == z.lastLiveSeq {
@@ -233,7 +238,14 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 				"lastSeq", z.lastSeq, "currentSeq", seq, "missed", missed,
 				"endpoint", z.endpoint)
 			replayAttempted = true
-			if !z.requestReplay(ctx, z.lastSeq+1) {
+			if z.replayEndpoint == "" {
+				// Without a replay buffer the publisher is rebuilt from its snapshot.
+				z.resetForSource(topic)
+				z.hasLastSeq = false
+				if !z.rebuild(ctx, topic) {
+					continue
+				}
+			} else if !z.requestReplay(ctx, z.lastSeq+1) {
 				continue
 			}
 		}
@@ -244,7 +256,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			}
 			logger.Info("Joining mid-stream, requesting full replay",
 				"currentSeq", seq, "endpoint", z.endpoint)
-			if !z.requestReplay(ctx, 0) {
+			if !z.rebuild(ctx, topic) {
 				continue
 			}
 		}
@@ -343,6 +355,75 @@ func (z *zmqSubscriber) invalidateReplay(topic string) {
 	z.lastSeq = 0
 	z.hasLastSeq = false
 	z.lastReplayFailure = time.Now()
+}
+
+// rebuild loads the publisher's current state from its snapshot, and falls
+// back to replaying its buffered events from the start.
+func (z *zmqSubscriber) rebuild(ctx context.Context, topic string) bool {
+	if z.snapshotEndpoint != "" && z.requestSnapshot(ctx, topic) {
+		return true
+	}
+	return z.replayEndpoint != "" && z.requestReplay(ctx, 0)
+}
+
+// requestSnapshot queues the publisher's snapshot, event batches that rebuild
+// its cache state up to a sequence cut, and resumes the stream after the cut.
+// A failure starts the replay cooldown.
+func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool {
+	logger := log.FromContext(ctx).WithName("zmq-snapshot")
+	started := time.Now()
+	cut, batches, err := z.fetchSnapshot(ctx)
+	if err != nil {
+		z.lastReplayFailure = time.Now()
+		metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "snapshot").Inc()
+		logger.Error(err, "Failed to load snapshot", "snapshotEndpoint", z.snapshotEndpoint)
+		return false
+	}
+	for _, batch := range batches {
+		z.addTask(ctx, topic, 0, batch)
+	}
+	// A cut of -1 is a publisher that has not published yet.
+	z.lastSeq, z.hasLastSeq = 0, false
+	if cut >= 0 {
+		z.lastSeq, z.hasLastSeq = uint64(cut), true
+	}
+	z.lastReplayFailure = time.Time{}
+	logger.Info("Snapshot loaded", "cut", cut, "batches", len(batches),
+		"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
+	return true
+}
+
+// fetchSnapshot requests the snapshot. The reply frames are an 8-byte signed
+// sequence cut, a 16-byte stream id and the event batches; a cut below -1
+// means the publisher cannot serve one.
+func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, [][]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+	defer cancel()
+	if err := processReplayLimiter.Acquire(ctx, 1); err != nil {
+		return 0, nil, fmt.Errorf("waiting for capacity: %w", err)
+	}
+	defer processReplayLimiter.Release(1)
+
+	req := zmq4.NewReq(ctx, zmq4.WithTimeout(snapshotTimeout), zmq4.WithDialerMaxRetries(0))
+	defer req.Close()
+	if err := req.Dial(z.snapshotEndpoint); err != nil {
+		return 0, nil, err
+	}
+	if err := req.Send(zmq4.NewMsgString("snapshot")); err != nil {
+		return 0, nil, err
+	}
+	msg, err := req.Recv()
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(msg.Frames) < 2 || len(msg.Frames[0]) != 8 {
+		return 0, nil, fmt.Errorf("malformed snapshot reply with %d frames", len(msg.Frames))
+	}
+	cut := int64(binary.BigEndian.Uint64(msg.Frames[0])) //nolint:gosec // signed on the wire
+	if cut < -1 {
+		return 0, nil, fmt.Errorf("snapshot unavailable")
+	}
+	return cut, msg.Frames[2:], nil
 }
 
 // requestReplay requests buffered events starting from startSeq.

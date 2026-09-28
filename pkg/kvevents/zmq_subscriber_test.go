@@ -312,7 +312,7 @@ func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	// Start subscriber — remote=false means it binds (Listen).
 	endpoint := "tcp://127.0.0.1:15559"
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "kv@", false)
+	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false)
 	require.NoError(t, err)
 
 	// Give subscriber time to bind.
@@ -363,6 +363,7 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 			fmt.Sprintf("test-rank-%d", i),
 			sourceEndpoints[i],
 			zmqEndpoints[i],
+			"",
 			"",
 			"kv@",
 			false,
@@ -440,7 +441,7 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	endpoint := fmt.Sprintf("tcp://%s", ln.Addr().String())
 	ln.Close()
 	subManager := kvevents.NewSubscriberManager(pool)
-	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "kv@", false)
+	err = subManager.EnsureSubscriber(ctx, "test-pod", "", endpoint, "", "", "kv@", false)
 	require.NoError(t, err)
 	time.Sleep(100 * time.Millisecond)
 
@@ -515,7 +516,7 @@ func newReplayHarnessWithBehavior(
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "kv@", false))
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", false))
 	require.Eventually(t, func() bool { return buffer.requests.Load() == 1 },
 		5*time.Second, 50*time.Millisecond, "proactive replay expected")
 
@@ -731,7 +732,7 @@ func TestZMQSubscriber_SequenceResetWithoutReplayClearsPod(t *testing.T) {
 	pubEndpoint := availableEndpoint(t, ctx)
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, "", "kv@", false))
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, "", "", "kv@", false))
 	defer subManager.Shutdown(ctx)
 
 	pub := zmq4.NewPub(ctx)
@@ -775,4 +776,118 @@ func TestZMQSubscriber_ReplayedLiveEventsDoNotTriggerAnotherReplay(t *testing.T)
 	h.send(t, 2, payload)
 	time.Sleep(300 * time.Millisecond)
 	assert.Equal(t, int32(1), h.buffer.requests.Load())
+}
+
+// snapshotServer answers snapshot requests with its current cut and batches.
+type snapshotServer struct {
+	mu       sync.Mutex
+	cut      int64
+	batches  [][]byte
+	requests atomic.Int32
+}
+
+func (s *snapshotServer) set(cut int64, batches ...[]byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cut, s.batches = cut, batches
+}
+
+func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *snapshotServer {
+	t.Helper()
+	server := &snapshotServer{}
+	rep := zmq4.NewRep(ctx)
+	require.NoError(t, rep.Listen(endpoint))
+	t.Cleanup(func() { rep.Close() })
+	go func() {
+		for {
+			if _, err := rep.Recv(); err != nil {
+				return
+			}
+			server.requests.Add(1)
+			server.mu.Lock()
+			frames := [][]byte{seqFrame(uint64(server.cut)), make([]byte, 16)} //nolint:gosec // signed on the wire
+			frames = append(frames, server.batches...)
+			server.mu.Unlock()
+			if err := rep.Send(zmq4.NewMsgFrom(frames...)); err != nil {
+				return
+			}
+		}
+	}()
+	return server
+}
+
+func newSnapshotHarness(t *testing.T, cut int64, batches ...[]byte) (*replayHarness, *snapshotServer) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+
+	pubEndpoint := availableEndpoint(t, ctx)
+	snapshotEndpoint := availableEndpoint(t, ctx)
+	server := startSnapshotServer(t, ctx, snapshotEndpoint)
+	server.set(cut, batches...)
+
+	subManager := kvevents.NewSubscriberManager(pool)
+	require.NoError(t, subManager.EnsureSubscriber(
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, "", snapshotEndpoint, "kv@", false))
+	pub := zmq4.NewPub(ctx)
+	require.NoError(t, pub.Dial(pubEndpoint))
+	time.Sleep(100 * time.Millisecond)
+
+	t.Cleanup(func() {
+		pub.Close()
+		subManager.Shutdown(ctx)
+		pool.Shutdown(ctx)
+		cancel()
+	})
+	return &replayHarness{ctx: ctx, index: index, pub: pub, topic: []byte("kv@10.0.0.1:8000@TestModel")}, server
+}
+
+func (h *replayHarness) indexed(hash uint64) bool {
+	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(hash))
+	return err == nil
+}
+
+func TestZMQSubscriber_SnapshotLoadsStateAndResumesAfterCut(t *testing.T) {
+	h, server := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+
+	// The first frame is inside the snapshot: it triggers the load and is not applied.
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 999))
+	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+	h.send(t, 6, buildDistinctBlockStoredPayload(t, 200))
+	require.Eventually(t, func() bool { return h.indexed(200) }, 5*time.Second, 50*time.Millisecond)
+	assert.False(t, h.indexed(999), "a frame at or before the cut is already in the snapshot")
+	assert.Equal(t, int32(1), server.requests.Load())
+}
+
+func TestZMQSubscriber_SnapshotRebuildsPodOnGap(t *testing.T) {
+	h, server := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	h.send(t, 5, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+
+	server.set(8, buildDistinctBlockStoredPayload(t, 300))
+	h.send(t, 8, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool {
+		oldHits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{oldRequestKey}, nil)
+		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && h.indexed(300)
+	}, 5*time.Second, 50*time.Millisecond, "a gap must replace the pod's state with a new snapshot")
+	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func TestZMQSubscriber_UnavailableSnapshotWaitsForCooldown(t *testing.T) {
+	h, server := newSnapshotHarness(t, -2)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	h.send(t, 6, buildDistinctBlockStoredPayload(t, 200))
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, h.indexed(100) || h.indexed(200), "frames without a base must not reach the index")
+	assert.Equal(t, int32(1), server.requests.Load())
 }
