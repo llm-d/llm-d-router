@@ -148,6 +148,18 @@ func SaturationStageFromContext(ctx context.Context) string {
 	return stage
 }
 
+// DispatchReservationTracker closes the observation gap between flow-control dispatch and the
+// request lifecycle hooks that publish in-flight load. A reservation is created immediately
+// before a request is released from the flow-control queue and removed after PreRequest hooks
+// have published the request to the endpoint load signal.
+//
+// Implementations MUST be goroutine-safe. Request IDs are the reservation identity; duplicate
+// reserve and release calls must be idempotent.
+type DispatchReservationTracker interface {
+	ReserveDispatch(requestID string) bool
+	ReleaseDispatch(requestID string) bool
+}
+
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
 //
 // The goal of this policy is to enable adaptive capacity management by gating lower-priority traffic
