@@ -17,10 +17,12 @@ limitations under the License.
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -99,8 +102,25 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 	tests := []struct {
 		name   string
 		header http.Header
-		want   string
+		// allowed enables SSRF protection with only these hosts permitted; nil
+		// leaves it disabled.
+		allowed []string
+		// want is the disagg_type expected to increment; empty means none.
+		want string
 	}{
+		{
+			name:   "no headers records no disagg type",
+			header: http.Header{},
+		},
+		{
+			name: "encoders filtered out by SSRF protection fall back to prefill-decode",
+			header: http.Header{
+				encoderHeader: []string{"enc1:8000"},
+				prefillHeader: []string{"prefill1:8000"},
+			},
+			allowed: []string{"prefill1"},
+			want:    metrics.DisaggTypePD,
+		},
 		{
 			name:   "prefill only records prefill-decode",
 			header: http.Header{prefillHeader: []string{"prefill1:8000"}},
@@ -125,10 +145,19 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewProxy(Config{Port: "8000"})
 			s.allowlistValidator = &AllowlistValidator{}
+			if tt.allowed != nil {
+				s.allowlistValidator = &AllowlistValidator{
+					logger:         log.Log,
+					enabled:        true,
+					allowedTargets: set.New(tt.allowed...),
+				}
+			}
 			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {}
 			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {}
 			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-				t.Error("decoder passthrough must not be reached for a disaggregated request")
+				if tt.want != "" {
+					t.Error("decoder passthrough must not be reached for a disaggregated request")
+				}
 			})
 
 			before := map[string]float64{}
@@ -137,7 +166,7 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 			}
 
 			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(
-				httptest.NewRecorder(), &http.Request{Header: tt.header})
+				httptest.NewRecorder(), &http.Request{Header: tt.header, URL: &url.URL{Path: reqcommon.PathChatCompletions}})
 
 			for _, dt := range allTypes {
 				want := 0.0
@@ -162,25 +191,52 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 			return s.handleECSharedStorage
 		}},
 	}
+	imageBody := func() map[string]any {
+		return userMessageRequest(imageURLItem("https://example.com/img.jpg"))
+	}
 	outcomes := []struct {
 		name          string
+		body          func() map[string]any
 		encoderStatus int
+		decoderStatus int
 		wantCode      int
 		wantDecoder   bool
 		wantDelta     stageMetrics
 	}{
 		{
 			name:          "encoder 5xx records encode error without duration",
+			body:          imageBody,
 			encoderStatus: http.StatusInternalServerError,
+			decoderStatus: http.StatusOK,
 			wantCode:      http.StatusBadGateway,
 			wantDelta:     stageMetrics{encodeErrors: 1},
 		},
 		{
-			name:          "encoder success records encode duration",
+			name:          "encoder success records encode and decode duration",
+			body:          imageBody,
 			encoderStatus: http.StatusOK,
+			decoderStatus: http.StatusOK,
 			wantCode:      http.StatusOK,
 			wantDecoder:   true,
-			wantDelta:     stageMetrics{encodeCount: 1},
+			wantDelta:     stageMetrics{encodeCount: 1, decodeCount: 1},
+		},
+		{
+			name:          "text-only request samples no encode duration",
+			body:          textChatBody,
+			encoderStatus: http.StatusOK,
+			decoderStatus: http.StatusOK,
+			wantCode:      http.StatusOK,
+			wantDecoder:   true,
+			wantDelta:     stageMetrics{decodeCount: 1},
+		},
+		{
+			name:          "decoder 503 records decode error",
+			body:          imageBody,
+			encoderStatus: http.StatusOK,
+			decoderStatus: http.StatusServiceUnavailable,
+			wantCode:      http.StatusServiceUnavailable,
+			wantDecoder:   true,
+			wantDelta:     stageMetrics{encodeCount: 1, decodeCount: 1, decodeErrors: 1},
 		},
 	}
 
@@ -198,12 +254,12 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				decoderCalled := false
 				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					decoderCalled = true
-					w.WriteHeader(http.StatusOK)
+					w.WriteHeader(o.decoderStatus)
 				})
 
 				before := snapshotStageMetrics(t)
 				rw := httptest.NewRecorder()
-				req := chatRequest(t, userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+				req := chatRequest(t, o.body())
 				// Empty prefill endpoint routes straight to decoderProxy after encode.
 				c.handle(s)(rw, req, "", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
 
@@ -391,48 +447,73 @@ func (f *failingWriter) Header() http.Header        { return f.header }
 func (f *failingWriter) WriteHeader(statusCode int) { f.status = statusCode }
 func (f *failingWriter) Write([]byte) (int, error)  { return 0, errors.New("client gone") }
 
-func TestStatusCapturingResponseWriter(t *testing.T) {
+// readerFromHijacker is a response writer exposing io.ReaderFrom and
+// http.Hijacker, as net/http's response writer does.
+type readerFromHijacker struct {
+	*httptest.ResponseRecorder
+}
+
+func (readerFromHijacker) ReadFrom(io.Reader) (int64, error) { return 0, nil }
+func (readerFromHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, nil
+}
+
+func TestCaptureResponseStatus(t *testing.T) {
 	t.Run("write without header records implicit 200", func(t *testing.T) {
-		w := &statusCapturingResponseWriter{ResponseWriter: httptest.NewRecorder()}
+		w, status := captureResponseStatus(httptest.NewRecorder())
 		_, err := w.Write([]byte("ok"))
 		require.NoError(t, err)
-		assert.Equal(t, http.StatusOK, w.statusCode)
-		assert.False(t, w.failed())
+		assert.Equal(t, http.StatusOK, status.statusCode)
+		assert.False(t, status.failed())
 	})
 	t.Run("explicit error status is recorded and passed through", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		w := &statusCapturingResponseWriter{ResponseWriter: rec}
+		w, status := captureResponseStatus(rec)
 		w.WriteHeader(http.StatusServiceUnavailable)
-		assert.Equal(t, http.StatusServiceUnavailable, w.statusCode)
+		assert.Equal(t, http.StatusServiceUnavailable, status.statusCode)
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-		assert.True(t, w.failed())
+		assert.True(t, status.failed())
 	})
-	t.Run("first status wins", func(t *testing.T) {
-		w := &statusCapturingResponseWriter{ResponseWriter: httptest.NewRecorder()}
+	t.Run("first final status wins", func(t *testing.T) {
+		w, status := captureResponseStatus(httptest.NewRecorder())
 		w.WriteHeader(http.StatusBadGateway)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("x"))
-		assert.Equal(t, http.StatusBadGateway, w.statusCode)
-		assert.True(t, w.failed())
+		assert.Equal(t, http.StatusBadGateway, status.statusCode)
+		assert.True(t, status.failed())
+	})
+	t.Run("informational status does not latch", func(t *testing.T) {
+		w, status := captureResponseStatus(httptest.NewRecorder())
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusOK)
+		assert.Equal(t, http.StatusOK, status.statusCode)
+		assert.False(t, status.failed())
+	})
+	t.Run("no status written counts as failed", func(t *testing.T) {
+		_, status := captureResponseStatus(httptest.NewRecorder())
+		assert.True(t, status.failed())
 	})
 	t.Run("flush passes through to a flusher", func(t *testing.T) {
 		fr := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-		w := &statusCapturingResponseWriter{ResponseWriter: fr}
-		w.Flush()
+		w, _ := captureResponseStatus(fr)
+		http.NewResponseController(w).Flush()
 		assert.Equal(t, 1, fr.flushes)
 	})
-	t.Run("flush is a no-op on a non-flusher", func(t *testing.T) {
-		w := &statusCapturingResponseWriter{ResponseWriter: &failingWriter{header: http.Header{}}}
-		assert.NotPanics(t, w.Flush)
-	})
 	t.Run("underlying write error marks failed despite 200", func(t *testing.T) {
-		fw := &failingWriter{header: http.Header{}}
-		w := &statusCapturingResponseWriter{ResponseWriter: fw}
+		w, status := captureResponseStatus(&failingWriter{header: http.Header{}})
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("x"))
 		require.Error(t, err)
-		assert.Equal(t, http.StatusOK, w.statusCode)
-		assert.True(t, w.failed())
+		assert.Equal(t, http.StatusOK, status.statusCode)
+		assert.True(t, status.failed())
+	})
+	t.Run("optional interfaces survive the cached-tokens wrapper", func(t *testing.T) {
+		inner, _ := captureResponseStatus(readerFromHijacker{httptest.NewRecorder()})
+		w, _ := newCachedTokensResponseWriterWithFinalize(inner, 1, false)
+		_, isReaderFrom := w.(io.ReaderFrom)
+		assert.True(t, isReaderFrom)
+		_, _, err := http.NewResponseController(w).Hijack()
+		assert.NoError(t, err)
 	})
 }
 
@@ -512,6 +593,122 @@ func TestHandleNIXLV2ParallelWriteMetrics(t *testing.T) {
 			if tt.prefillStatus == http.StatusOK {
 				assert.True(t, sawSynthesizedKV.Load(), "request must take the parallel dispatch path")
 			}
+		})
+	}
+}
+
+// A decode response that cannot be delivered when the cached-tokens rewriter
+// flushes its buffered body is a decode error.
+func TestHandleNIXLV2SerialFinalizeFailureMetrics(t *testing.T) {
+	prefill := httptest.NewServer(statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`))
+	defer prefill.Close()
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+	s.logger = log.Log
+	// An incomplete JSON document stays buffered until finalize.
+	s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[`)
+
+	before := snapshotStageMetrics(t)
+	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
+}
+
+func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
+	tests := []struct {
+		name string
+		// stop is closed before the prefill server shuts down.
+		prefill   func(stop <-chan struct{}) http.Handler
+		decoder   http.Handler
+		wantCode  int
+		wantPanic bool
+		wantDelta stageMetrics
+	}{
+		{
+			name: "KV-wait timeout records a prefill error and the decode duration",
+			prefill: func(stop <-chan struct{}) http.Handler {
+				return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					select {
+					case <-r.Context().Done():
+					case <-stop:
+					}
+				})
+			},
+			decoder:   statusHandler(http.StatusOK, `{"choices":[]}`),
+			wantCode:  http.StatusGatewayTimeout,
+			wantDelta: stageMetrics{prefillCount: 1, prefillErrors: 1, decodeCount: 1},
+		},
+		{
+			name: "decode abort after prefill success records a decode error",
+			prefill: func(<-chan struct{}) http.Handler {
+				return statusHandler(http.StatusOK, `{}`)
+			},
+			decoder: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				panic(http.ErrAbortHandler)
+			}),
+			wantCode:  http.StatusBadGateway,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		},
+		{
+			name: "decode abort after its 200 reached the client records a decode error",
+			prefill: func(<-chan struct{}) http.Handler {
+				return statusHandler(http.StatusOK, `{}`)
+			},
+			decoder: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "data: {}\n\n")
+				// Let the commit point relay the 200 before the stream breaks.
+				time.Sleep(100 * time.Millisecond)
+				panic(http.ErrAbortHandler)
+			}),
+			wantCode:  http.StatusOK,
+			wantPanic: true,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stop := make(chan struct{})
+			prefill := httptest.NewServer(tt.prefill(stop))
+			defer prefill.Close()
+			defer close(stop)
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{
+				Port:                            "0",
+				DecoderURL:                      prefillURL,
+				KVConnector:                     KVConnectorNIXLV2,
+				MoRIIOWriteMode:                 true,
+				MoRIIOParallelDispatch:          true,
+				MoRIIOParallelDecodeWaitTimeout: 200 * time.Millisecond,
+				MoRIIODecodePodIP:               "127.0.0.1",
+				MoRIIODecodeNotifyPort:          61005,
+				MoRIIODecodeHandshakePort:       6301,
+				MoRIIOPrefillNotifyPort:         61006,
+				MoRIIOPrefillHandshakePort:      6302,
+				MoRIIOTPSize:                    1,
+				MoRIIODPSize:                    1,
+			})
+			s.logger = log.Log
+			s.decoderProxy = tt.decoder
+
+			before := snapshotStageMetrics(t)
+			rw := httptest.NewRecorder()
+			serve := func() {
+				s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			}
+			if tt.wantPanic {
+				assert.PanicsWithValue(t, http.ErrAbortHandler, serve)
+			} else {
+				serve()
+			}
+
+			assert.Equal(t, tt.wantCode, rw.Code)
+			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
 	}
 }

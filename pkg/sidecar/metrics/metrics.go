@@ -57,7 +57,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: subsystem,
 			Name:      "requests_total",
-			Help:      metricsutil.HelpMsgWithStability("Total requests handled by the sidecar, by OpenAI API type.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Requests on the intercepted inference API paths, by API type.", compbasemetrics.ALPHA),
 		},
 		[]string{"api_type"},
 	)
@@ -93,7 +93,7 @@ var (
 		prometheus.HistogramOpts{
 			Subsystem: subsystem,
 			Name:      "decode_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Decode stage latency in seconds.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Decode stage latency in seconds. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 	)
@@ -125,7 +125,8 @@ func Register() {
 	})
 }
 
-// RecordRequest counts a request handled by the sidecar for the given API type.
+// RecordRequest counts a request on an intercepted inference API path for the
+// given API type.
 func RecordRequest(apiType string) {
 	requestsTotal.WithLabelValues(apiType).Inc()
 }

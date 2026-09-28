@@ -21,7 +21,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
@@ -39,7 +39,7 @@ const (
 func gatherFamily(t *testing.T, name string) *dto.MetricFamily {
 	t.Helper()
 	metrics.Register()
-	families, err := ctrlmetrics.Registry.Gather()
+	families, err := crmetrics.Registry.Gather()
 	require.NoError(t, err)
 	for _, mf := range families {
 		if mf.GetName() == name {

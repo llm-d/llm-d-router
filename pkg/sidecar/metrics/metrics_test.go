@@ -101,6 +101,10 @@ func TestRegisterIdempotent(t *testing.T) {
 func TestMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal)
+	// Gather omits a CounterVec with no children, so create one in each.
+	requestsTotal.WithLabelValues("x")
+	disaggRequestsTotal.WithLabelValues("x")
+	errorsTotal.WithLabelValues("x")
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)

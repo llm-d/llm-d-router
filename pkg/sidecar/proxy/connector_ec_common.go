@@ -30,10 +30,12 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -310,7 +312,16 @@ func (s *Server) runPDPipeline(
 	}
 
 	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
-	if !s.forwardDataParallel || !s.dataParallelHandler(w, pdRequest) {
-		s.decoderProxy.ServeHTTP(w, pdRequest)
+	decodeStart := time.Now()
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest) {
+		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
+	}
+	decodeReturned = true
+	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
 	}
 }

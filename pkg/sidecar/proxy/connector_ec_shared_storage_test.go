@@ -278,6 +278,11 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 		expectedCalls int32
 	}{
 		{
+			name:          "no multimodal items — encoder not called",
+			request:       map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hello"}}},
+			expectedCalls: 0,
+		},
+		{
 			name:          "no duplicates — all items sent",
 			request:       userMessageRequest(imageURLItem("https://example.com/img1.jpg"), imageURLItem("https://example.com/img2.jpg")),
 			expectedCalls: 2,
@@ -302,8 +307,9 @@ func TestFanoutEncoderPrimerDeduplication(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requestCount.Store(0)
-			_, err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
+			total, err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id")
 			assert.NoError(t, err)
+			assert.Equal(t, int(tt.expectedCalls), total)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
 		})
 	}

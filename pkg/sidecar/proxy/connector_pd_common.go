@@ -113,7 +113,7 @@ func (s *Server) runConcurrentPD(
 	decodeStart := time.Now()
 
 	decodeReq = decodeReq.WithContext(ctx)
-	decodeWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
@@ -121,7 +121,7 @@ func (s *Server) runConcurrentPD(
 
 	decodeDuration := time.Since(decodeStart)
 	metrics.RecordDecodeDuration(decodeDuration)
-	if decodeWriter.failed() {
+	if decodeStatus.failed() {
 		metrics.RecordError(metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
