@@ -152,9 +152,9 @@ func arrayFromAny(v any) ([]any, bool) {
 }
 
 // fileHydrationPartTypes are the content part types whose FieldFileID names a
-// Files API upload. A file_id on any other object describes a file the serving
-// engine never fetches: a file_citation annotation on a replayed assistant turn
-// carries one, and vLLM reads only the text of such an item.
+// Files API upload. A file_id on any other object names no upload the router
+// would have to hydrate: an annotation on a replayed assistant turn carries one
+// under a type this map does not hold, so the walk passes over it.
 var fileHydrationPartTypes = map[string]bool{
 	PartTypeInputImage:         true,
 	PartTypeInputFile:          true,
@@ -164,10 +164,6 @@ var fileHydrationPartTypes = map[string]bool{
 // referencesFile reports whether v nests a content part naming a Files API
 // upload. The depth varies: a message content part, a computer_call_output's
 // output object, and a function_call_output's output array all carry one.
-//
-// An annotations array is skipped: every part type it holds reports a file the
-// completed turn cited, so descending would refuse a turn replayed verbatim
-// from a prior response.
 //
 // A file_id of null names no upload. The input schema declares the field
 // nullable on an input_image and an input_file, and a computer_screenshot
@@ -182,10 +178,7 @@ func referencesFile(v any) bool {
 				return true
 			}
 		}
-		for key, nested := range t {
-			if key == FieldAnnotations {
-				continue
-			}
+		for _, nested := range t {
 			if referencesFile(nested) {
 				return true
 			}

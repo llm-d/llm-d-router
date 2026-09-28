@@ -374,7 +374,7 @@ var _ = Describe("decodeRequestBody", func() {
 		messages := `[{"role":"user","content":"Hi"}]`
 		parsed, err := decodeRequestBody([]byte(`{"messages":` + messages + `}`))
 		Expect(err).ToNot(HaveOccurred())
-		Expect(parsed[requestFieldMessages]).To(Equal(json.RawMessage(messages)))
+		Expect(parsed[reqcommon.FieldMessages]).To(Equal(json.RawMessage(messages)))
 
 		decoded, err := requestMessages(parsed)
 		Expect(err).ToNot(HaveOccurred())
@@ -391,10 +391,10 @@ var _ = Describe("decodeRequestBody", func() {
 	})
 
 	It("reports a messages field that is not an array", func() {
-		_, err := requestMessages(map[string]any{requestFieldMessages: json.RawMessage(`{}`)})
+		_, err := requestMessages(map[string]any{reqcommon.FieldMessages: json.RawMessage(`{}`)})
 		Expect(err).To(HaveOccurred())
 
-		_, err = requestMessages(map[string]any{requestFieldMessages: 5})
+		_, err = requestMessages(map[string]any{reqcommon.FieldMessages: 5})
 		Expect(err).To(HaveOccurred())
 	})
 })

@@ -382,8 +382,9 @@ func TestRejectStatefulResponsesFields(t *testing.T) {
 		},
 		// Replaying a prior response's output items is the only multi-turn
 		// path left once previous_response_id and conversation are refused, so
-		// a citation the completed turn reported has to survive the replay.
-		// vLLM reads the text of such an item and nothing else.
+		// a citation the completed turn reported has to survive the replay. It
+		// survives because file_citation is not a fileHydrationPartTypes entry,
+		// which this case pins.
 		{
 			name: "a replayed file citation annotation is served",
 			body: map[string]any{"input": []any{

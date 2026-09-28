@@ -227,7 +227,7 @@ var inspectedRequestFields = map[string]struct{}{
 // preserves the key order inside every message. An absent field yields a nil
 // slice and no error.
 func requestMessages(req map[string]any) ([]json.RawMessage, error) {
-	switch v := req[requestFieldMessages].(type) {
+	switch v := req[reqcommon.FieldMessages].(type) {
 	case nil:
 		return nil, nil
 	case []json.RawMessage:
@@ -278,9 +278,12 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	}
 	// createRoutes registers one route per path in DetectAPIType's mapping and
 	// derives each route's apiType from the same call, so a path added to that
-	// list is guarded here without a second edit. Coverage stops at the
-	// registered routes: a request on any other path reaches the decoder proxy
-	// through the catch-all and its body is never read.
+	// list is guarded here without a second edit. Those paths are the API
+	// surface the router serves, and coverage stops there: a request on any
+	// other path, including PathResponses with a trailing slash or an extra
+	// segment, reaches the decoder proxy through the catch-all and its body is
+	// never read. Guarding those would put a body read on the catch-all, which
+	// serves every unrouted path for every API.
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)

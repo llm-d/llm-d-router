@@ -137,7 +137,8 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", ginkgo.Ordered, testWrapper(func() {
 	// Pending #3003: the EPP reports no multimodal features for a Responses
 	// body, so no encode profile is selected, the gateway sends no encoder
-	// endpoint header, and the sidecar never runs the fanout.
+	// endpoint header, and the sidecar never runs the fanout. Until that
+	// lands the spec is skipped, so the fanout path has no e2e coverage.
 	ginkgo.PIt("primes the encoder from Responses input_image content", func() {
 		nsName := getNamespace()
 

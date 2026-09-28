@@ -61,7 +61,6 @@ const (
 	FieldStore                = "store"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
-	FieldAnnotations          = "annotations"
 	FieldOutput               = "output"
 )
 
