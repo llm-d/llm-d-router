@@ -260,9 +260,6 @@ func TestUnscope_LeavesUnwrappedEndpointsAlone(t *testing.T) {
 	assert.Equal(t, endpoints, Unscope(endpoints))
 }
 
-// Declarations grant nothing on their own: the allowed sets come from the
-// registry, and a plugin nobody registered is confined like one that declares
-// nothing.
 // A plugin that startup registration missed is still confined to its own
 // declarations rather than to nothing: the spec is derived from the plugin on
 // first use. Missing the registration is a wiring bug, not grounds for cutting

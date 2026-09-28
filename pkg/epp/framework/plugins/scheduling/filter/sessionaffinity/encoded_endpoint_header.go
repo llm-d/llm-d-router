@@ -40,14 +40,14 @@ func newEncodedEndpointHeaderStrategy(params parameters) strategy {
 	}
 }
 
-// filter returns the session's pod alone when it is among the candidates,
-// otherwise all candidates so downstream filters and scorers can decide.
 // Consumes reports no request attributes: this strategy reads the session
 // header, not the attribute store.
 func (e *encodedEndpointHeaderStrategy) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{}
 }
 
+// filter returns the session's pod alone when it is among the candidates,
+// otherwise all candidates so downstream filters and scorers can decide.
 func (e *encodedEndpointHeaderStrategy) filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	podName := sessionutil.DecodePodName(ctx, request.Headers[e.sessionHeader])
 	if podName == "" {
