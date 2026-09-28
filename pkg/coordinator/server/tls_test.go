@@ -107,7 +107,7 @@ func TestServe_SelfSignedTLSWithoutCertPath(t *testing.T) {
 
 	client := &http.Client{
 		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // self-signed cert under test
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //#nosec -- self-signed cert under test
 	}
 	resp, err := client.Get("https://" + addr + "/healthz")
 	require.NoError(t, err)
@@ -151,7 +151,7 @@ func TestServe_TLSReloadsRotatedCert(t *testing.T) {
 func servedCert(t *testing.T, addr string) []byte {
 	t.Helper()
 
-	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // self-signed cert under test
+	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}) //#nosec -- self-signed cert under test
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -164,7 +164,7 @@ func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
 	addr := serve(t, config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS13"})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
+		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
 		MaxVersion:         tls.VersionTLS12,
 	})
 	require.Error(t, err, "TLS 1.2 client must be rejected when the minimum is TLS 1.3")
@@ -229,7 +229,7 @@ func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
 	addr := serve(t, config.ServerConfig{SecureServing: true})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
+		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
 		MaxVersion:         tls.VersionTLS11,
 		MinVersion:         tls.VersionTLS10,
 	})

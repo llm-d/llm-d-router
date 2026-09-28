@@ -47,7 +47,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	})
 	require.NoError(t, err)
 	framed := make([]byte, 5+len(msg))
-	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //nolint:gosec // G115: test fixture, small proto messages
+	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
 	features := []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
 	for _, tc := range []struct {
@@ -126,7 +126,7 @@ func TestGRPCTextProducesTokens(t *testing.T) {
 	msg, err := proto.Marshal(&pb.GenerateRequest{Input: &pb.GenerateRequest_Text{Text: "Hello world"}})
 	require.NoError(t, err)
 	framed := make([]byte, 5+len(msg))
-	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //nolint:gosec // G115: test fixture, small proto messages
+	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
 	parsed, err := vllmgrpc.NewVllmGRPCParser().ParseRequest(context.Background(), framed, map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
 	require.NoError(t, err)

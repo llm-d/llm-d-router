@@ -272,18 +272,18 @@ func sineWaveWAV(sampleRate, durationSec int) []byte {
 	var buf bytes.Buffer
 	dataSize := n * 2
 	buf.WriteString("RIFF")
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+dataSize)) //nolint:gosec // G115: test fixture, sampleRate * durationSec * 2 fits in uint32
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+dataSize)) //#nosec G115 -- test fixture, sampleRate * durationSec * 2 fits in uint32
 	buf.WriteString("WAVE")
 	buf.WriteString("fmt ")
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(16))
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))   //nolint:gosec // G115: test fixture, sample rate in standard WAV range
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate*2)) //nolint:gosec // G115: test fixture, byte rate for standard WAV
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))   //#nosec G115 -- test fixture, sample rate in standard WAV range
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate*2)) //#nosec G115 -- test fixture, byte rate for standard WAV
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(2))
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(16))
 	buf.WriteString("data")
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(dataSize)) //nolint:gosec // G115: test fixture, data size bounded by sampleRate * durationSec * 2
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(dataSize)) //#nosec G115 -- test fixture, data size bounded by sampleRate * durationSec * 2
 	for i := 0; i < n; i++ {
 		s := int16(16000 * math.Sin(2*math.Pi*440*float64(i)/float64(sampleRate)))
 		_ = binary.Write(&buf, binary.LittleEndian, s)

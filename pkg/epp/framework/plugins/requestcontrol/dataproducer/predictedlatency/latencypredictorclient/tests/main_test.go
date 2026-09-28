@@ -95,7 +95,7 @@ func assertRunningMarker(t *testing.T, path string) {
 	if got, want := info.Mode().Perm(), os.FileMode(0644)&^processUmask(); got != want {
 		t.Fatalf("%s perm = %o, want %o", path, got, want)
 	}
-	got, err := os.ReadFile(path) //nolint:gosec // G304: path is a temp file created in this test
+	got, err := os.ReadFile(path) //#nosec G304 -- path is a temp file created in this test
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,5 +109,5 @@ func assertRunningMarker(t *testing.T, path string) {
 func processUmask() os.FileMode {
 	mask := syscall.Umask(0)
 	syscall.Umask(mask)
-	return os.FileMode(mask) //nolint:gosec // G115: test fixture, syscall.Umask returns a small unix permission mask
+	return os.FileMode(mask) //#nosec G115 -- test fixture, syscall.Umask returns a small unix permission mask
 }

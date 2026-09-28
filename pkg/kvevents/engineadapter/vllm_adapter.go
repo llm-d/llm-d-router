@@ -403,7 +403,7 @@ func toInt(raw any) (int, error) {
 	case int64:
 		return int(v), nil
 	case uint64:
-		//nolint:gosec // token IDs and lora IDs fit in int; see func doc
+		//#nosec -- token IDs and lora IDs fit in int; see func doc
 		return int(v), nil
 	case int8:
 		return int(v), nil

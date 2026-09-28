@@ -432,7 +432,7 @@ func main() {
 
 // generateTrainingBatch creates a batch of realistic training entries.
 //
-//nolint:gosec // G404: math/rand/v2 is non-cryptographic PRNG used only for test fixture values
+// #nosec G404 -- math/rand/v2 is non-cryptographic PRNG used only for test fixture values
 func generateTrainingBatch(batchSize int) []latencypredictorclient.TrainingEntry {
 	entries := make([]latencypredictorclient.TrainingEntry, batchSize)
 
@@ -537,7 +537,7 @@ func writeTestRunningMarker(path string) error {
 }
 
 func openExclusive(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644) //nolint:gosec // G304: path is the fixed marker or a unit-test temp path
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644) //#nosec G302 G304 -- path is the fixed marker or a unit-test temp path; file mode is per-process, not a credential
 }
 
 // parseEnvInt reads an integer environment variable, logging a warning on parse
@@ -549,7 +549,7 @@ func parseEnvInt(key string, defaultVal int) int {
 	}
 	val, err := strconv.Atoi(raw)
 	if err != nil {
-		log.Printf("Warning: invalid value %q for %s, using default %d", raw, key, defaultVal) //nolint:gosec // %q escapes control chars in env-var value; operator-supplied
+		log.Printf("Warning: invalid value %q for %s, using default %d", raw, key, defaultVal) //#nosec -- %q escapes control chars in env-var value; operator-supplied
 		return defaultVal
 	}
 	if val == 0 {

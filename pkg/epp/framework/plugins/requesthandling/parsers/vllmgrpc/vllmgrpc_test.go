@@ -44,7 +44,7 @@ func createGrpcPayload(t *testing.T, msg proto.Message) []byte {
 
 	payload := make([]byte, 5+len(b))
 	payload[0] = 0                                           // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //nolint:gosec // G115: test fixture, small proto messages
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //#nosec G115 -- test fixture, small proto messages
 	copy(payload[5:], b)
 
 	return payload
