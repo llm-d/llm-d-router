@@ -14,7 +14,7 @@ We provide two charts depending on your deployment mode, both leveraging a share
 
 ## Prerequisites
 
-Before installing the charts, ensure that the **Gateway API Inference Extension CRDs** are installed in your cluster. Refer to the [getting started guide](https://github.com/llm-d/llm-d-router/tree/main/deploy) for installation instructions.
+Before installing the charts, ensure that the **Gateway API Inference Extension CRDs** are installed in your cluster. Refer to [Infrastructure Setup](https://github.com/llm-d/llm-d-router/blob/main/DEVELOPMENT.md#infrastructure-setup) for installation instructions.
 
 ---
 
