@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -472,6 +473,96 @@ func TestDetector_TokenFilter(t *testing.T) {
 	require.Len(t, kept, 1, "filter should fail open when all endpoints exceed burst limit")
 }
 
+// TestDetector_TokenFilterIncomingTokens verifies that the token limit applies to the endpoint's load
+// plus the uncached tokens the current request would add to it.
+func TestDetector_TokenFilterIncomingTokens(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	reg := newLocalRegistry()
+	// Burst limit = 100 * 1.2 = 120 tokens.
+	detector := newDetector("test-detector", config{mode: modeTokens, maxTokenConcurrency: 100, headroom: 0.2}, logr.Discard())
+	endpointName := "incoming-endpoint"
+	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) { load.Tokens = 110 })
+	endpoint := newStubSchedulingEndpoint(reg, endpointName)
+	candidates := []fwksched.Endpoint{endpoint, newStubSchedulingEndpoint(reg, cleanEndpoint)}
+
+	endpoint.incomingTokens = 9
+	require.Len(t, detector.Filter(ctx, nil, candidates), 2, "projected load below the limit passes")
+
+	endpoint.incomingTokens = 10
+	require.Len(t, detector.Filter(ctx, nil, candidates), 2, "projected load equal to the limit passes")
+
+	endpoint.incomingTokens = 11
+	kept := detector.Filter(ctx, nil, candidates)
+	require.Len(t, kept, 1, "projected load above the limit is filtered")
+	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+
+	untokenized := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+	require.Len(t, detector.Filter(ctx, untokenized, candidates), 2,
+		"a byte-based estimate for an untokenized prompt does not filter an endpoint below its limit")
+
+	tokenized := makeTokenRequest("tokenized", 4)
+	require.Len(t, detector.Filter(ctx, tokenized, candidates), 1, "a tokenized request's cost is counted")
+}
+
+// TestDetector_HybridFilterIncomingTokens verifies that hybrid mode projects tokens and keeps the
+// request limit on current load.
+func TestDetector_HybridFilterIncomingTokens(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	reg := newLocalRegistry()
+	detector := newDetector("test-detector", config{mode: modeHybrid, maxConcurrency: 10, maxTokenConcurrency: 100}, logr.Discard())
+	endpointName := "hybrid-incoming-endpoint"
+	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) {
+		load.Requests = 5
+		load.Tokens = 50
+	})
+	endpoint := newStubSchedulingEndpoint(reg, endpointName)
+	candidates := []fwksched.Endpoint{endpoint, newStubSchedulingEndpoint(reg, cleanEndpoint)}
+
+	endpoint.incomingTokens = 50
+	require.Len(t, detector.Filter(ctx, nil, candidates), 2, "tokens fill the limit exactly")
+
+	endpoint.incomingTokens = 51
+	require.Len(t, detector.Filter(ctx, nil, candidates), 1, "tokens exceed the limit")
+
+	endpoint.incomingTokens = 0
+	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) { load.Requests = 10 })
+	require.Len(t, detector.Filter(ctx, nil, candidates), 1, "request limit reached")
+}
+
+// TestDetector_FilterFailClosed verifies that with FailOpen false the filter returns no endpoints
+// when every candidate is over its limit.
+func TestDetector_FilterFailClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := buildConfig(&apiConfig{MaxConcurrency: ptr.To(int64(2)), FailOpen: ptr.To(false)})
+	require.NoError(t, err)
+	require.True(t, cfg.failClosed)
+
+	defaults, err := buildConfig(&apiConfig{})
+	require.NoError(t, err)
+	require.False(t, defaults.failClosed, "the filter fails open by default")
+
+	ctx := t.Context()
+	reg := newLocalRegistry()
+	detector := newDetector("test-detector", *cfg, logr.Discard())
+	endpointName := "busy-endpoint"
+	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) { load.Requests = 2 })
+
+	kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
+		newStubSchedulingEndpoint(reg, endpointName),
+		newStubSchedulingEndpoint(reg, cleanEndpoint),
+	})
+	require.Len(t, kept, 1, "a clean endpoint is still kept")
+	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+
+	kept = detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+	require.Empty(t, kept, "no endpoint is returned when every candidate is over its limit")
+}
+
 // TestDetector_TokenLifecycle verifies token accounting.
 func TestDetector_TokenLifecycle(t *testing.T) {
 	t.Parallel()
@@ -821,6 +912,8 @@ type liveSchedulingEndpoint struct {
 	metadata *datalayer.EndpointMetadata
 	reg      *localRegistry
 	id       string
+	// incomingTokens is the uncached-token cost the current request would add to this endpoint.
+	incomingTokens int64
 }
 
 func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingEndpoint {
@@ -833,14 +926,17 @@ func newStubSchedulingEndpoint(reg *localRegistry, name string) *liveSchedulingE
 
 func (f *liveSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata { return f.metadata }
 func (f *liveSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable, bool) {
-	if key == attrconcurrency.InFlightLoadDataKey {
+	switch key {
+	case attrconcurrency.InFlightLoadDataKey:
 		return f.reg.get(f.id), true
+	case attrconcurrency.UncachedRequestTokensDataKey:
+		return &attrconcurrency.UncachedRequestTokens{Tokens: f.incomingTokens}, true
 	}
 	return nil, false
 }
 func (f *liveSchedulingEndpoint) Put(fwkplugin.DataKey, datalayer.Cloneable) {}
 func (f *liveSchedulingEndpoint) Keys() []fwkplugin.DataKey {
-	return []fwkplugin.DataKey{attrconcurrency.InFlightLoadDataKey}
+	return []fwkplugin.DataKey{attrconcurrency.InFlightLoadDataKey, attrconcurrency.UncachedRequestTokensDataKey}
 }
 func (f *liveSchedulingEndpoint) String() string                { return f.id }
 func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
