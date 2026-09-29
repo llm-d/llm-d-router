@@ -47,10 +47,17 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	m.mu.Lock()
 	m.maintainLocked(now)
 	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
+	resumed := s.paused
+	s.paused = false
+	s.reservedUntil = time.Time{}
 	s.inflightTokens = estimateTokens(request.RequestSizeBytes)
 	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
+
+	if resumed {
+		a.metrics.resumes.Inc()
+	}
 	return nil
 }
 
