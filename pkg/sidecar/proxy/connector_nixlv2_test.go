@@ -437,7 +437,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 
@@ -502,7 +502,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 
@@ -553,7 +553,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 
@@ -604,7 +604,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 
@@ -755,7 +755,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 
@@ -972,7 +972,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:all
+			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
 			Fail(string(bp))
 		}
 

@@ -1,5 +1,5 @@
 # Sample EPP configuration with multimodal embeddings cache affinity.
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer

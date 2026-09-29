@@ -204,7 +204,7 @@ func (p *Predictor) doPredictBulkStrictHTTP(ctx context.Context, requests []Pred
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //nolint:gosec // URL is operator-configured in config.PredictionURLs
 	if err != nil {
 		return nil, fmt.Errorf("failed to call bulk prediction endpoint %s: %w", url, err)
 	}

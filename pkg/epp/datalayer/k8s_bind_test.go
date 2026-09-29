@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,6 +34,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	extractormocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 type testSyncingSource struct {
@@ -134,6 +136,70 @@ func TestNotificationDispatchReturnsExtractorErrors(t *testing.T) {
 
 	if err := reconciler.dispatch(context.Background(), logr.Discard(), event); !errors.Is(err, wantErr) {
 		t.Fatalf("dispatch() error = %v, want %v", err, wantErr)
+	}
+	if got := len(working.GetEvents()); got != 1 {
+		t.Fatalf("working extractor received %d events, want 1", got)
+	}
+}
+
+// TestNotificationDispatchRecordsExtractErrorMetric verifies that a failing
+// notification extractor increments datalayer_extract_errors_total with the
+// source and extractor type labels, mirroring the http polling path's recording contract.
+func TestNotificationDispatchRecordsExtractErrorMetric(t *testing.T) {
+	metrics.Reset()
+	wantErr := errors.New("extract failed")
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+	failing := extractormocks.NewNotificationExtractor("failing").WithExtractError(wantErr)
+	src := sourcenotifications.NewK8sNotificationSource(sourcenotifications.NotificationSourceType, "pods", gvk)
+	reconciler := &notificationReconciler{
+		src:        src,
+		extractors: []fwkdl.NotificationExtractor{failing},
+		log:        logr.Discard(),
+	}
+	event := &fwkdl.NotificationEvent{Object: &unstructured.Unstructured{}}
+
+	if err := reconciler.dispatch(context.Background(), logr.Discard(), event); !errors.Is(err, wantErr) {
+		t.Fatalf("dispatch() error = %v, want %v", err, wantErr)
+	}
+
+	if got := promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(src.TypedName().Type, failing.TypedName().Type)); got != 1.0 {
+		t.Fatalf("datalayer_extract_errors_total = %v, want 1", got)
+	}
+}
+
+// TestNotificationDispatchRecoversPanickingExtractor verifies that a panicking
+// notification extractor is recovered, recorded in datalayer_extract_errors_total,
+// and does not stop the dispatch loop.
+func TestNotificationDispatchRecoversPanickingExtractor(t *testing.T) {
+	metrics.Reset()
+	gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+	panicking := extractormocks.NewNotificationExtractor("panicking").WithExtractPanic("boom")
+	working := extractormocks.NewNotificationExtractor("working")
+	src := sourcenotifications.NewK8sNotificationSource(sourcenotifications.NotificationSourceType, "pods", gvk)
+	reconciler := &notificationReconciler{
+		src:        src,
+		extractors: []fwkdl.NotificationExtractor{panicking, working},
+		log:        logr.Discard(),
+	}
+	event := &fwkdl.NotificationEvent{Object: &unstructured.Unstructured{}}
+
+	var panicked any
+	var dispatchErr error
+	func() {
+		defer func() { panicked = recover() }()
+		dispatchErr = reconciler.dispatch(context.Background(), logr.Discard(), event)
+	}()
+	if panicked != nil {
+		t.Fatalf("dispatch panicked: %v", panicked)
+	}
+	if dispatchErr == nil {
+		t.Fatalf("dispatch() = nil, want an error so the reconcile is retried after a panicking extractor")
+	}
+
+	if got := promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(src.TypedName().Type, panicking.TypedName().Type)); got != 1.0 {
+		t.Fatalf("datalayer_extract_errors_total = %v, want 1", got)
 	}
 	if got := len(working.GetEvents()); got != 1 {
 		t.Fatalf("working extractor received %d events, want 1", got)

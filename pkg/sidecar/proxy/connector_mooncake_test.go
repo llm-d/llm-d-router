@@ -46,7 +46,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// start a mock bootstrap server that returns map
 		bootstrapServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(bootstrapResponse)) //nolint:all
+			_, _ = w.Write([]byte(bootstrapResponse))
 		}))
 		DeferCleanup(bootstrapServer.Close)
 
@@ -64,7 +64,7 @@ var _ = Describe("Mooncake Connector", func() {
 	It("should send concurrent requests with correct mooncake kv_transfer_params", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := chatCompletionsRequestBodyWithMaxCompletionTokens
+		body := chatCompletionsRequestBodyWithMaxCompletionCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -138,7 +138,7 @@ var _ = Describe("Mooncake Connector", func() {
 	It("should strip min_tokens from the prefill request and restore it in decode", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := chatCompletionsRequestBodyWithMinTokens
+		body := chatCompletionsRequestBodyWithMinCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 

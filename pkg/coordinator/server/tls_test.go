@@ -27,12 +27,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -57,8 +60,9 @@ func writeSelfSignedCert(t *testing.T, dir string) []byte {
 	return cert.Certificate[0]
 }
 
-// serve starts a server for cfg on a free port and returns its address.
-func serve(t *testing.T, cfg config.ServerConfig) string {
+// startServe starts a server for cfg on a free port and returns its address
+// and the channel ListenAndServe's result will arrive on.
+func startServe(t *testing.T, cfg config.ServerConfig) (string, chan error) {
 	t.Helper()
 
 	port, err := fwknet.GetFreePort()
@@ -80,16 +84,38 @@ func serve(t *testing.T, cfg config.ServerConfig) string {
 		require.ErrorIs(t, <-errCh, http.ErrServerClosed)
 	})
 
-	require.Eventually(t, func() bool {
-		conn, err := net.DialTimeout("tcp", cfg.ListenAddr, 100*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		_ = conn.Close()
-		return true
-	}, 5*time.Second, 20*time.Millisecond, "listener never came up on %s", cfg.ListenAddr)
+	return cfg.ListenAddr, errCh
+}
 
-	return cfg.ListenAddr
+// serve starts a server for cfg on a free port and waits for it to accept
+// connections before returning its address. Unlike require.Eventually, the
+// wait runs in the test's own goroutine so it can fail fast on a
+// ListenAndServe error (e.g. the free port getting stolen) instead of
+// burning the whole timeout dialing a listener that will never come up.
+func serve(t *testing.T, cfg config.ServerConfig) string {
+	t.Helper()
+
+	addr, errCh := startServe(t, cfg)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case err := <-errCh:
+			errCh <- err // leave it for startServe's cleanup to observe too
+			t.Fatalf("ListenAndServe returned early: %v", err)
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return addr
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("listener never came up on %s", addr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestServe_PlainHTTPWhenNotSecure(t *testing.T) {
@@ -102,8 +128,55 @@ func TestServe_PlainHTTPWhenNotSecure(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// TestServe_BindsAddrBeforeGeneratingSelfSignedCert holds the address open
+// for the server's lifetime rather than only from the point self-signed
+// certificate generation completes. tlsutil.CreateSelfSignedTLSCertificate
+// logs before it starts the RSA-4096 keygen, so replacing serverLog with a
+// sink that dials addr on that log line proves the listener was already
+// bound at that exact point, with no timing budget to miscalibrate.
+func TestServe_BindsAddrBeforeGeneratingSelfSignedCert(t *testing.T) {
+	port, err := fwknet.GetFreePort()
+	require.NoError(t, err)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	dialed := make(chan bool, 1)
+	original := serverLog
+	serverLog = funcr.New(func(_, args string) {
+		if !strings.Contains(args, "creating self-signed TLS certificate") {
+			return
+		}
+		conn, dialErr := net.Dial("tcp", addr)
+		dialed <- dialErr == nil
+		if dialErr == nil {
+			_ = conn.Close()
+		}
+	}, funcr.Options{Verbosity: logutil.DEFAULT})
+	t.Cleanup(func() { serverLog = original })
+
+	srv, err := New(config.ServerConfig{SecureServing: true, ListenAddr: addr}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+		require.ErrorIs(t, <-errCh, http.ErrServerClosed)
+	})
+
+	select {
+	case ok := <-dialed:
+		require.True(t, ok, "listener was not accepting connections when certificate generation started")
+	case <-time.After(5 * time.Second):
+		t.Fatal("certificate generation never started")
+	}
+}
+
 func TestServe_SelfSignedTLSWithoutCertPath(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true})
+	addr := serve(t, config.ServerConfig{SecureServing: true})
 
 	client := &http.Client{
 		Timeout:   5 * time.Second,
@@ -127,7 +200,7 @@ func TestServe_TLSServesCertFromCertPath(t *testing.T) {
 	certDir := t.TempDir()
 	want := writeSelfSignedCert(t, certDir)
 
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, CertPath: certDir})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 
 	require.Equal(t, want, servedCert(t, addr), "listener served a certificate other than the one in cert-path")
 }
@@ -136,7 +209,7 @@ func TestServe_TLSReloadsRotatedCert(t *testing.T) {
 	certDir := t.TempDir()
 	first := writeSelfSignedCert(t, certDir)
 
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, CertPath: certDir})
+	addr := serve(t, config.ServerConfig{SecureServing: true, CertPath: certDir})
 	require.Equal(t, first, servedCert(t, addr))
 
 	second := writeSelfSignedCert(t, certDir)
@@ -161,7 +234,7 @@ func servedCert(t *testing.T, addr string) []byte {
 }
 
 func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true, TLSMinVersion: "VersionTLS13"})
+	addr := serve(t, config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS13"})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test
@@ -177,11 +250,19 @@ func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 	}{
 		{
 			name: "unknown TLS version",
-			cfg:  config.ServerConfig{SecureCoordinator: true, TLSMinVersion: "VersionTLS99"},
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS99"},
+		},
+		{
+			name: "TLS 1.0 below the floor",
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS10"},
+		},
+		{
+			name: "TLS 1.1 below the floor",
+			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS11"},
 		},
 		{
 			name: "unknown cipher suite",
-			cfg:  config.ServerConfig{SecureCoordinator: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
+			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
 		},
 	}
 	for _, tt := range tests {
@@ -199,8 +280,26 @@ func TestParseTLSProfile_EmptyUsesTLS12(t *testing.T) {
 	require.Empty(t, profile.cipherSuites, "empty tls_cipher_suites must leave the crypto/tls default")
 }
 
+func TestParseTLSProfile_RejectsBelowFloor(t *testing.T) {
+	tests := []struct {
+		name            string
+		minVersion      string
+		wantErrContains string
+	}{
+		{name: "VersionTLS10", minVersion: "VersionTLS10", wantErrContains: "below the TLS 1.2 minimum"},
+		{name: "VersionTLS11", minVersion: "VersionTLS11", wantErrContains: "below the TLS 1.2 minimum"},
+		{name: "unknown version", minVersion: "TLS1.2", wantErrContains: "unknown TLS version"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseTLSProfile(tt.minVersion, nil)
+			require.ErrorContains(t, err, tt.wantErrContains)
+		})
+	}
+}
+
 func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
-	addr := serve(t, config.ServerConfig{SecureCoordinator: true})
+	addr := serve(t, config.ServerConfig{SecureServing: true})
 
 	_, err := tls.Dial("tcp", addr, &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // self-signed cert under test

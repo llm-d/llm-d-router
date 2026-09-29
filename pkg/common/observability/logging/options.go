@@ -18,6 +18,7 @@ package logging
 
 import (
 	"flag"
+	"math"
 
 	"github.com/spf13/pflag"
 	uberzap "go.uber.org/zap"
@@ -69,6 +70,14 @@ func (opts *LoggingOptions) Complete() error {
 	if zapLogLevelFlag != nil && !zapLogLevelFlag.Changed {
 		// See https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/log/zap#Options.Level
 		lvl := -1 * (opts.LogVerbosity)
+		// Clamp to int8 range: -v accepts any non-negative int, but zapcore.Level
+		// is an int8, and a verbosity beyond 128 would otherwise wrap.
+		switch {
+		case lvl < math.MinInt8:
+			lvl = math.MinInt8
+		case lvl > math.MaxInt8:
+			lvl = math.MaxInt8
+		}
 		opts.ZapOptions.Level = uberzap.NewAtomicLevelAt(zapcore.Level(int8(lvl)))
 		zapLogLevelFlag.Changed = true
 	}

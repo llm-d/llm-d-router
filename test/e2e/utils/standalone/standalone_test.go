@@ -33,7 +33,7 @@ const (
 	poolName = "food-review-inference-pool"
 	eppName  = poolName + "-epp"
 
-	simpleConfig = `apiVersion: llm-d.ai/v1alpha1
+	simpleConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer

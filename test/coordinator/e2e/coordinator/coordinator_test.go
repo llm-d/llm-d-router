@@ -18,6 +18,7 @@ package coordinate2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -199,6 +200,15 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 
 	logs := fetchCoordinatorLogs(nsName)
 	verifyCoordinatorSteps(logs, expectedSteps, expectedImages, true, true)
+	// The native generate leg, and a chat leg with OpenAI passthrough disabled,
+	// speak the generate wire format. On that leg the transfer params sit at the
+	// top level of the request body, not nested under sampling_params.extra_args.
+	// verifyCoordinatorSteps only substring-matches the prefill body and would
+	// still pass with the params nested, so this parses the structured http_body
+	// to pin the field's location.
+	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate {
+		verifyToplevelTransferParams(logs)
+	}
 	if threeEPP {
 		verifyPerRoleRouting(nsName, slices.Contains(expectedSteps, "encode"), reqID)
 	}
@@ -275,6 +285,94 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}
+}
+
+// verifyToplevelTransferParams pins the generate leg's transfer-param location
+// from the coordinator's own log output: the prefill request body carries
+// kv_transfer_params at the top level and its sampling_params has no
+// extra_args, so a regression that nests the params under
+// sampling_params.extra_args fails. verifyCoordinatorSteps only substring-
+// matches the prefill body, which still passes with the params nested, so this
+// parses the structured http_body the gateway logs at TRACE (log_level 5).
+func verifyToplevelTransferParams(logs string) {
+	ginkgo.By("Verifying the generate prefill body carries top-level kv_transfer_params")
+	body := parsePrefillGenerateBody(logs)
+
+	kv, ok := body["kv_transfer_params"].(map[string]any)
+	gomega.Expect(ok).To(gomega.BeTrue(),
+		"generate prefill body has no top-level kv_transfer_params object: %v", body)
+	gomega.Expect(kv).NotTo(gomega.BeEmpty(),
+		"generate prefill body top-level kv_transfer_params is empty: %v", body)
+
+	sampling, ok := body["sampling_params"].(map[string]any)
+	gomega.Expect(ok).To(gomega.BeTrue(),
+		"generate prefill body has no sampling_params object: %v", body)
+	gomega.Expect(sampling).NotTo(gomega.HaveKey("extra_args"),
+		"generate prefill body nests transfer params under sampling_params.extra_args: %v", body)
+}
+
+// parsePrefillGenerateBody returns the prefill leg's outgoing request body from
+// the coordinator log: the gateway's TRACE "request body" record whose
+// epp-profile is prefill, with its http_body field decoded. The body is the
+// redacted map the gateway logs (long strings collapsed), which keeps every
+// structural field this check reads.
+func parsePrefillGenerateBody(logs string) map[string]any {
+	prefillLine := ""
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, `"epp-profile":"prefill"`) && strings.Contains(line, `"http_body":{`) {
+			prefillLine = line
+			break
+		}
+	}
+	gomega.Expect(prefillLine).NotTo(gomega.BeEmpty(),
+		"coordinator logs have no prefill request body carrying an http_body field (is the coordinator at log_level 5?)")
+
+	bodyJSON := extractJSONObject(prefillLine, `"http_body":`)
+	var body map[string]any
+	gomega.Expect(json.Unmarshal([]byte(bodyJSON), &body)).To(gomega.Succeed(),
+		"prefill http_body is not valid JSON: %s", bodyJSON)
+	return body
+}
+
+// extractJSONObject returns the JSON object that follows key (e.g.
+// `"http_body":`) in s. It locates key anywhere in s and brace-scans forward
+// with awareness of string literals, so braces inside quoted values and any
+// fields logged after the object do not confuse the result.
+func extractJSONObject(s, key string) string {
+	i := strings.Index(s, key)
+	gomega.Expect(i).To(gomega.BeNumerically(">=", 0), "log line has no %s field: %s", key, s)
+	start := i + len(key)
+	for start < len(s) && s[start] != '{' {
+		start++
+	}
+	gomega.Expect(start).To(gomega.BeNumerically("<", len(s)), "no JSON object follows %s: %s", key, s)
+
+	depth := 0
+	inString, escaped := false, false
+	for j := start; j < len(s); j++ {
+		c := s[j]
+		switch {
+		case escaped:
+			escaped = false
+		case inString:
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+		}
+		if depth == 0 {
+			return s[start : j+1]
+		}
+	}
+	return s[start:]
 }
 
 // verifyPerRoleRouting asserts the Envoy EPP-Profile dispatch (envoy-3-epp.yaml)
@@ -374,6 +472,7 @@ func fetchDeploymentLogs(nsName, deployment, container string) string {
 		args = append(args, "--context="+k8sContext)
 	}
 
+	// #nosec G204 -- Fixed kubectl executable; deployment, container and context names are test-controlled argv, without a shell.
 	out, err := exec.Command("kubectl", args...).CombinedOutput()
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred(),
 		"failed to fetch %s logs: %s", deployment, string(out))

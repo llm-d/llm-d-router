@@ -113,60 +113,101 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	}
 }
 
-// Generate and Responses both resolve to the generate format, whose body is
-// forwarded without a tokens or prompt rewrite.
+// Generate forwards the body as-is because it already carries token_ids.
 func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
-	for _, path := range []string{reqcommon.PathVLLMGenerate, reqcommon.PathResponses} {
-		t.Run(path, func(t *testing.T) {
-			var receivedBody map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				_ = json.Unmarshal(body, &receivedBody)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{}`))
-			}))
-			defer srv.Close()
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
 
-			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   reqcommon.PathVLLMGenerate,
+		Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
+		TokenIDs:       []int{1, 2345},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
+	}
+	if _, ok := receivedBody["prompt"]; ok {
+		t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
+	}
+	if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
+	}
+}
+
+// Completions rewrites prompt to the rendered token IDs when render supplied
+// them, mirroring decode's TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV
+// coverage for the analogous branch in conditional_decode.go's prepareBody.
+func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   reqcommon.PathCompletions,
+		Body:           map[string]any{"model": testModelName, "prompt": "Hello"},
+		TokenIDs:       []int{1, 2345},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if tokenIDs, _ := receivedBody["prompt"].([]any); len(tokenIDs) != 2 {
+		t.Fatalf("expected prompt rewritten to rendered token_ids, got %v", receivedBody["prompt"])
+	}
+}
+
+// TestConditionalDecodeStep_UnreachableFormat_ReturnsError verifies that
+// request paths for formats prepareBody's switch does not handle explicitly
+// (APITypeMessages, APITypeResponses, APITypeSGLangGenerate) fail through
+// its default case, reporting an error instead of forwarding an unprepared
+// body.
+func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
+	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathSGLangGenerate} {
+		t.Run(path, func(t *testing.T) {
+			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			reqCtx := &pipeline.RequestContext{
-				RequestID:      "req-1",
-				OriginalPath:   path,
-				Body:           map[string]any{"model": testModelName, "token_ids": []int{1, 2345}},
-				TokenIDs:       []int{1, 2345},
-				ResponseWriter: httptest.NewRecorder(),
+				OriginalPath: path,
+				Body:         map[string]any{"model": testModelName},
 			}
-
-			err = step.Execute(context.Background(), reqCtx)
-			if !errors.Is(err, pipeline.ErrPipelineDone) {
-				t.Fatalf("expected ErrPipelineDone, got %v", err)
-			}
-			if _, ok := receivedBody["tokens"]; ok {
-				t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
-			}
-			if _, ok := receivedBody["prompt"]; ok {
-				t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
-			}
-			if tokenIDs, _ := receivedBody["token_ids"].([]any); len(tokenIDs) != 2 {
-				t.Fatalf("expected client token_ids to pass through, got %v", receivedBody["token_ids"])
+			if _, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx); err == nil {
+				t.Fatal("expected an error for an unreachable request format")
 			}
 		})
-	}
-}
-
-func TestConditionalDecodeStep_UnsupportedFormat(t *testing.T) {
-	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := map[string]any{"model": testModelName}
-	err = step.(*ConditionalDecodeStep).prepareBody(&pipeline.RequestContext{TokenIDs: []int{1}}, body, reqcommon.APIType(99))
-	if want := "conditional-decode: unsupported request format APIType(99)"; err == nil || err.Error() != want {
-		t.Fatalf("expected error %q, got %v", want, err)
 	}
 }
 

@@ -52,18 +52,20 @@ func newTestServer(t *testing.T, listenAddr string) *server.Server {
 	return srv
 }
 
-func waitForDial(t *testing.T, addr string, timeout time.Duration) {
+// waitForHealthz polls /healthz. A successful TCP dial precedes
+// http.Server.Serve dispatching, and srv.Shutdown on an unstarted
+// http.Server returns nil, so the socket alone is not a readiness signal.
+func waitForHealthz(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
+	client := &http.Client{Timeout: 200 * time.Millisecond}
+	require.Eventually(t, func() bool {
+		resp, err := client.Get("http://" + addr + "/healthz")
+		if err != nil {
+			return false
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("no listener came up on %s within %s", addr, timeout)
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, timeout, 20*time.Millisecond, "coordinator /healthz on %s never returned 200", addr)
 }
 
 func writeMetricsCertificate(t *testing.T, dir string) {
@@ -82,13 +84,40 @@ func writeMetricsCertificate(t *testing.T, dir string) {
 }
 
 func TestServeMetricsHTTP(t *testing.T) {
+	lis, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	port := lis.Addr().(*net.TCPAddr).Port
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- serveMetrics(ctx, port, "", lis) }()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	require.Eventually(t, func() bool {
+		resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/metrics")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 2*time.Second, 20*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
+// TestServeMetricsHTTP_NilListener covers the lis == nil branch that main()
+// always takes in production, where serveMetrics binds port itself instead
+// of serving on a caller-supplied listener.
+func TestServeMetricsHTTP_NilListener(t *testing.T) {
 	port, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, port, "") }()
+	go func() { errCh <- serveMetrics(ctx, port, "", nil) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	require.Eventually(t, func() bool {
@@ -107,13 +136,14 @@ func TestServeMetricsHTTP(t *testing.T) {
 func TestServeMetricsHTTPS(t *testing.T) {
 	certDir := t.TempDir()
 	writeMetricsCertificate(t, certDir)
-	port, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
+	port := lis.Addr().(*net.TCPAddr).Port
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveMetrics(ctx, port, certDir) }()
+	go func() { errCh <- serveMetrics(ctx, port, certDir, lis) }()
 
 	client := &http.Client{
 		Timeout:   2 * time.Second,
@@ -152,10 +182,12 @@ func TestServeMetricsInvalidTLSFiles(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.crt"), []byte("invalid"), 0o600))
 				require.NoError(t, os.WriteFile(filepath.Join(certDir, "tls.key"), []byte("invalid"), 0o600))
 			}
+			// TLS cert/key loading fails before any bind is attempted, so a bare
+			// port number carries no bind race here.
 			port, err := fwknet.GetFreePort()
 			require.NoError(t, err)
 
-			err = serveMetrics(context.Background(), port, certDir)
+			err = serveMetrics(context.Background(), port, certDir, nil)
 			require.ErrorIs(t, err, errMetricsTLS)
 		})
 	}
@@ -165,6 +197,40 @@ func TestServeMetricsInvalidTLSFiles(t *testing.T) {
 // exit path is context cancellation. run must return nil once the
 // coordinator server drains.
 func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
+	lis, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	listenAddr := lis.Addr().String()
+
+	cfg := config.ServerConfig{
+		ListenAddr:      listenAddr,
+		ShutdownTimeout: time.Second,
+		ReadTimeout:     time.Second,
+		WriteTimeout:    time.Second,
+		MetricsPort:     0,
+	}
+	srv := newTestServer(t, listenAddr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, srv, cfg, lis) }()
+
+	waitForHealthz(t, listenAddr, 2*time.Second)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after cancel")
+	}
+}
+
+// TestRun_NilListener_DrainsCleanlyOnCancel covers the lis == nil branch that
+// main() always takes in production, where run binds cfg.ListenAddr itself
+// instead of serving on a caller-supplied listener.
+func TestRun_NilListener_DrainsCleanlyOnCancel(t *testing.T) {
 	port, err := fwknet.GetFreePort()
 	require.NoError(t, err)
 	listenAddr := "127.0.0.1:" + strconv.Itoa(port)
@@ -182,9 +248,9 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, nil) }()
 
-	waitForDial(t, listenAddr, 2*time.Second)
+	waitForHealthz(t, listenAddr, 2*time.Second)
 	cancel()
 
 	select {
@@ -202,14 +268,14 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	// Bind the wildcard the same way serveMetrics does so the collision is
 	// guaranteed on macOS as well as Linux. fwknet.ReserveListener binds only
 	// 127.0.0.1, which does not shadow [::]:<port> on macOS.
-	blocker, err := net.Listen("tcp", ":0")
+	blocker, err := net.Listen("tcp", ":0") //nolint:gosec // 0.0.0.0 needed for multi-NIC test
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blocker.Close() })
 	blockedPort := blocker.Addr().(*net.TCPAddr).Port
 
-	inferencePort, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	listenAddr := "127.0.0.1:" + strconv.Itoa(inferencePort)
+	listenAddr := lis.Addr().String()
 
 	cfg := config.ServerConfig{
 		ListenAddr:      listenAddr,
@@ -224,7 +290,7 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, lis) }()
 
 	select {
 	case err := <-done:
@@ -242,11 +308,13 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 }
 
 func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
+	// The metrics server fails loading its TLS cert/key before ever binding
+	// metricsPort, so a bare port number carries no bind race for it.
 	metricsPort, err := fwknet.GetFreePort()
 	require.NoError(t, err)
-	inferencePort, err := fwknet.GetFreePort()
+	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
-	listenAddr := "127.0.0.1:" + strconv.Itoa(inferencePort)
+	listenAddr := lis.Addr().String()
 
 	cfg := config.ServerConfig{
 		ListenAddr:      listenAddr,
@@ -261,7 +329,7 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg) }()
+	go func() { done <- run(ctx, srv, cfg, lis) }()
 
 	select {
 	case err := <-done:

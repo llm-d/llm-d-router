@@ -202,9 +202,19 @@ func (t ordinalTable) of(name string) uint32 {
 	if id, ok := t[name]; ok {
 		return id
 	}
-	id := uint32(len(t))
+	id := clampOrdinal(len(t))
 	t[name] = id
 	return id
+}
+
+// clampOrdinal bounds a table size below the math.MaxUint32 sentinel that
+// speculativeTierOrdinal reserves, so a table that somehow grew that large
+// cannot collide with it.
+func clampOrdinal(n int) uint32 {
+	if n > math.MaxUint32-1 {
+		n = math.MaxUint32 - 1
+	}
+	return uint32(n)
 }
 
 // speculativeTierOrdinal keys the speculative per-tier chain. Feeders assign
@@ -214,7 +224,7 @@ const speculativeTierOrdinal = math.MaxUint32
 // slotRef maps one pod ordinal to a request-local slot.
 type slotRef struct {
 	ordinal uint32
-	slot    uint32 // slot index plus one; zero marks an empty bucket
+	slot    int32 // slot index plus one; zero marks an empty bucket
 }
 
 // slotTable is an open-addressed map from pod ordinal to request-local slot.
@@ -222,43 +232,48 @@ type slotRef struct {
 // the live candidates rather than with every ordinal an index ever assigned.
 type slotTable struct {
 	buckets []slotRef
+	mask    uint32
 }
 
 func (t *slotTable) reset(numEntries int) {
+	// Capping growth at 1<<31 keeps size-1 well within uint32 range, so the
+	// mask conversion below never truncates.
 	size := 2
-	for size < numEntries*2 {
+	for size < numEntries*2 && size < 1<<31 {
 		size <<= 1
 	}
 	if cap(t.buckets) < size {
 		t.buckets = make([]slotRef, size)
-		return
+	} else {
+		t.buckets = t.buckets[:size]
+		clear(t.buckets)
 	}
-	t.buckets = t.buckets[:size]
-	clear(t.buckets)
+	if size-1 > math.MaxUint32 {
+		size = math.MaxUint32 + 1
+	}
+	t.mask = uint32(size - 1)
 }
 
 func (t *slotTable) lookup(ordinal uint32) (int32, bool) {
-	mask := uint32(len(t.buckets) - 1)
-	i := ordinal * 2654435761 & mask
+	i := ordinal * 2654435761 & t.mask
 	for {
 		b := t.buckets[i]
 		if b.slot == 0 {
 			return 0, false
 		}
 		if b.ordinal == ordinal {
-			return int32(b.slot - 1), true
+			return b.slot - 1, true
 		}
-		i = (i + 1) & mask
+		i = (i + 1) & t.mask
 	}
 }
 
 func (t *slotTable) insert(ordinal uint32, slot int32) {
-	mask := uint32(len(t.buckets) - 1)
-	i := ordinal * 2654435761 & mask
+	i := ordinal * 2654435761 & t.mask
 	for t.buckets[i].slot != 0 {
-		i = (i + 1) & mask
+		i = (i + 1) & t.mask
 	}
-	t.buckets[i] = slotRef{ordinal: ordinal, slot: uint32(slot) + 1}
+	t.buckets[i] = slotRef{ordinal: ordinal, slot: slot + 1}
 }
 
 // tierChain tracks one tier's contiguous prefix for a candidate pod.
@@ -476,7 +491,13 @@ func (a *prefixAccumulator) newSlot(pod string) int32 {
 	} else {
 		a.slots = append(a.slots, matchSlot{pod: pod})
 	}
-	return int32(n)
+	// Candidate pods per request stay far below the int32 range; clamp
+	// defensively so a pathological request cannot wrap the index negative.
+	slot := n
+	if slot > math.MaxInt32 {
+		slot = math.MaxInt32
+	}
+	return int32(slot)
 }
 
 // weightOf resolves a tier's weight, caching by ordinal so the configured

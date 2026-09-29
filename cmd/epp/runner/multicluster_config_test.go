@@ -65,7 +65,7 @@ func TestMultiClusterConfigLoad(t *testing.T) {
 			require.NoError(t, err)
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
-			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+			_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr)
 				return
@@ -96,7 +96,7 @@ func multiClusterConfig(clustersPath string, withExtractor bool) string {
 		extractorPlugin = "  - type: multicluster-metrics-extractor\n    name: metrics-extractor\n"
 		extractorBinding = "      extractors:\n        - pluginRef: metrics-extractor\n"
 	}
-	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: multicluster-file-discovery
@@ -117,7 +117,8 @@ plugins:
   - type: single-profile-handler
 dataLayer:
   discovery:
-    pluginRef: discovery
+    endpoints:
+      pluginRef: discovery
   sources:
     - pluginRef: metrics-source
 %s`, clustersPath, extractorPlugin, extractorBinding)

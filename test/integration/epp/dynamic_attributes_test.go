@@ -31,7 +31,7 @@ import (
 
 func TestDynamicAttributes_Concurrency(t *testing.T) {
 	configText := `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl

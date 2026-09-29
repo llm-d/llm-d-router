@@ -46,7 +46,7 @@ var _ = Describe("P2P Connector", func() {
 	It("should send both requests with correct PD Multi Tier kv_transfer_params", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := chatCompletionsRequestBodyWithMaxCompletionTokens
+		body := chatCompletionsRequestBodyWithMaxCompletionCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -115,7 +115,7 @@ var _ = Describe("P2P Connector", func() {
 	It("should strip min_tokens from the prefill request and restore it in decode", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		body := chatCompletionsRequestBodyWithMinTokens
+		body := chatCompletionsRequestBodyWithMinCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -170,7 +170,7 @@ var _ = Describe("P2P Connector", func() {
 		}))
 		defer blockingPrefill.Close()
 
-		body := chatCompletionsRequestBodyWithMaxCompletionTokens
+		body := chatCompletionsRequestBodyWithMaxCompletionCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, blockingPrefill.URL[len("http://"):])
@@ -210,7 +210,7 @@ var _ = Describe("P2P Connector", func() {
 		defer failingPrefill.Close()
 
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
-			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionTokens)))
+			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionCap)))
 		Expect(err).ToNot(HaveOccurred())
 		req.Header.Add(routing.PrefillEndpointHeader, failingPrefill.URL[len("http://"):])
 

@@ -76,7 +76,7 @@ func (cl *client) Get(ctx context.Context, target *url.URL, ep Addressable,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	resp, err := cl.Do(req)
+	resp, err := cl.Do(req) //nolint:gosec // target URL is constructed from operator endpoint metadata
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch data from %s: %w", ep.GetID(), err)
 	}

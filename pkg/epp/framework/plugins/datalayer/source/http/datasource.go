@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime/debug"
 	"slices"
@@ -77,14 +78,21 @@ type HTTPDataSource[T any] struct {
 
 // TLSOptions configures the https transport. The zero value verifies the target
 // against the system CA pool with no client certificate.
+//
+// SkipVerify is an operator opt-in for environments where the target presents a
+// certificate the operator trusts by other means (a private CA, a known
+// self-signed peer in dev/test). Enabling it asserts that the operator has
+// independently verified the target identity; do not use SkipVerify to talk to
+// endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
 	// SkipVerify disables verification of the target's server certificate.
+	// See the TLSOptions doc for the threat model this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
-	// system pool. Ignored when SkipVerify is set.
+	// system pool. Ignored when SkipVerify is set. Must be an absolute path.
 	CACertPath string
 	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
-	// Both must be set together.
+	// Both must be set together. Paths must be absolute.
 	ClientCertPath string
 	ClientKeyPath  string
 }
@@ -141,6 +149,15 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
 	}
+	if tlsOpts.CACertPath != "" && !filepath.IsAbs(tlsOpts.CACertPath) {
+		return nil, fmt.Errorf("CACertPath must be an absolute filesystem path: %q", tlsOpts.CACertPath)
+	}
+	if tlsOpts.ClientCertPath != "" && !filepath.IsAbs(tlsOpts.ClientCertPath) {
+		return nil, fmt.Errorf("ClientCertPath must be an absolute filesystem path: %q", tlsOpts.ClientCertPath)
+	}
+	if tlsOpts.ClientKeyPath != "" && !filepath.IsAbs(tlsOpts.ClientKeyPath) {
+		return nil, fmt.Errorf("ClientKeyPath must be an absolute filesystem path: %q", tlsOpts.ClientKeyPath)
+	}
 
 	var cfg options
 	for _, o := range opts {
@@ -187,8 +204,10 @@ var (
 )
 
 // caCertPool loads a PEM CA bundle for TLS verification.
+// Callers must validate that path is an absolute filesystem path (NewHTTPDataSource
+// enforces this on TLSOptions.CACertPath).
 func caCertPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
+	pem, err := os.ReadFile(path) //nolint:gosec // path is operator-configured and validated as absolute in NewHTTPDataSource
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, path, err)
 	}
@@ -202,7 +221,7 @@ func caCertPool(path string) (*x509.CertPool, error) {
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
 // system pool), plus an mTLS client certificate when ClientCertPath is set.
 func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify}
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //nolint:gosec // see TLSOptions doc; operator-supplied flag with documented threat model
 	if !opts.SkipVerify && opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {

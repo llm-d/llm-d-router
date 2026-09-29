@@ -23,9 +23,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"testing"
@@ -171,6 +173,166 @@ func runEstimateBackendProduceLive(t *testing.T, c videoModelCase) {
 			})
 		}
 	}
+}
+
+// audioEstimateEndpointEnv names the env var holding the vLLM endpoint
+// (host:port) for the live audio comparison. Tests are skipped unless it is set.
+const audioEstimateEndpointEnv = "AUDIO_ESTIMATE_ENDPOINT"
+
+// liveAudioSampleRate is the sample rate of the synthesized WAV clips.
+const liveAudioSampleRate = 16000
+
+// audioModelCase describes a model-specific live audio estimation setup: the
+// served model name and the estimator configuration to compare against the
+// server at audioEstimateEndpointEnv.
+type audioModelCase struct {
+	name  string
+	model string
+	cfg   *estimateConfig
+}
+
+// qwen3OmniAudioCase configures estimation for a Qwen3-Omni server with the
+// zero-value (default) audio estimator: 25 placeholder tokens per second of
+// audio, file-size duration inference at 8000 compressed bytes/sec.
+var qwen3OmniAudioCase = audioModelCase{
+	name:  "qwen3omni",
+	model: "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+	cfg:   nil,
+}
+
+// TestEstimateBackend_QWEN3OMNI_ProduceTokenCount_Live compares the
+// whole-prompt token count from estimateBackend.produce against the
+// server-reported prompt_tokens for a "transcribe the audio" + input_audio
+// chat request on a live Qwen3-Omni server, across a matrix of clip durations.
+//
+// It is skipped unless AUDIO_ESTIMATE_ENDPOINT (host:port) is set. Clips are
+// synthesized locally as 16kHz mono 16-bit WAV sine waves, then base64-encoded
+// for both estimation and the API call, so the server and the estimator see
+// identical bytes.
+//
+//	AUDIO_ESTIMATE_ENDPOINT=10.0.0.1:8000 \
+//	  go test ./pkg/.../tokenizer/ -run TestEstimateBackend_QWEN3OMNI_ProduceTokenCount_Live -v
+func TestEstimateBackend_QWEN3OMNI_ProduceTokenCount_Live(t *testing.T) {
+	runEstimateBackendProduceAudioLive(t, qwen3OmniAudioCase)
+}
+
+// runEstimateBackendProduceAudioLive runs the duration matrix for one model:
+// for each clip it estimates the whole-prompt token count via
+// estimateBackend.produce and logs it against the server-reported
+// prompt_tokens with the exact duration supplied as request metadata.
+func runEstimateBackendProduceAudioLive(t *testing.T, c audioModelCase) {
+	endpoint := os.Getenv(audioEstimateEndpointEnv)
+	if endpoint == "" {
+		t.Skipf("set %s (host:port of a vLLM server) to run the live comparison", audioEstimateEndpointEnv)
+	}
+
+	b := estimateBackend{aud: newAudioEstimator(c.cfg)}
+	durations := []int{1, 5, 10, 30}
+	client := &http.Client{Timeout: 120 * time.Second}
+
+	t.Logf("%-6s %10s %10s %8s", "dur", "estimate", "actual", "err%")
+	for _, dur := range durations {
+		raw := sineWaveWAV(liveAudioSampleRate, dur)
+		payload := base64.StdEncoding.EncodeToString(raw)
+		t.Run(fmt.Sprintf("%ds", dur), func(t *testing.T) {
+			body := &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{
+					Role: "user",
+					Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+						{Type: "text", Text: "transcribe the audio"},
+						{Type: "input_audio", InputAudio: fwkrh.AudioBlock{Data: payload, Format: "wav"}},
+					}},
+				}},
+			}}
+			ctx := withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: float64(dur)}})
+			tp, err := b.produce(ctx, body)
+			if err != nil {
+				t.Fatalf("produce: %v", err)
+			}
+			estimate := tp.TokenCount()
+
+			actual, err := liveAudioPromptTokens(context.Background(), client, endpoint, c.model, payload)
+			if err != nil {
+				t.Skipf("query server: %v", err)
+			}
+
+			var errPct float64
+			if actual != 0 {
+				errPct = float64(estimate-actual) / float64(actual) * 100
+			}
+			t.Logf("%-5ds %10d %10d %7.1f%%", dur, estimate, actual, errPct)
+		})
+	}
+}
+
+// sineWaveWAV synthesizes a mono 16-bit PCM WAV of a 440Hz tone at the given
+// sample rate and duration.
+func sineWaveWAV(sampleRate, durationSec int) []byte {
+	n := sampleRate * durationSec
+	var buf bytes.Buffer
+	dataSize := n * 2
+	buf.WriteString("RIFF")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+dataSize))
+	buf.WriteString("WAVE")
+	buf.WriteString("fmt ")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate*2))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(2))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(16))
+	buf.WriteString("data")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(dataSize))
+	for i := 0; i < n; i++ {
+		s := int16(16000 * math.Sin(2*math.Pi*440*float64(i)/float64(sampleRate)))
+		_ = binary.Write(&buf, binary.LittleEndian, s)
+	}
+	return buf.Bytes()
+}
+
+// liveAudioPromptTokens posts a "transcribe the audio" + single-input_audio
+// chat completion and returns the server-reported usage.prompt_tokens.
+func liveAudioPromptTokens(ctx context.Context, client *http.Client, endpoint, model, base64WAV string) (int, error) {
+	modelJSON, err := json.Marshal(model)
+	if err != nil {
+		return 0, err
+	}
+	dataJSON, err := json.Marshal(base64WAV)
+	if err != nil {
+		return 0, err
+	}
+	body := fmt.Appendf(nil, `{"model":%s,"messages":[{"role":"user","content":[{"type":"text","text":"transcribe the audio"},{"type":"input_audio","input_audio":{"data":%s,"format":"wav"}}]}],"max_tokens":1,"temperature":0}`, modelJSON, dataJSON)
+
+	url := fmt.Sprintf("http://%s/v1/chat/completions", endpoint)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var parsed struct {
+		Usage struct {
+			PromptTokens int `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+	return parsed.Usage.PromptTokens, nil
 }
 
 // download fetches url and returns its body.

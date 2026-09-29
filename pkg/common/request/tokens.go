@@ -16,7 +16,10 @@ limitations under the License.
 
 package request
 
-import "maps"
+import (
+	"fmt"
+	"maps"
+)
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
 // single-output-token prefill or encode request. It returns the map
@@ -49,4 +52,55 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	body[FieldStream] = false
 	delete(body, FieldStreamOptions)
 	return limits
+}
+
+// RejectStatefulResponsesFields reports an error naming the first field it
+// finds that depends on state the router does not keep: previous_response_id
+// and conversation reference a prior turn, background asks for an async job
+// the router cannot poll, and file_id is part of the Responses file
+// hydration API, referring to a file the router never stored.
+//
+// store is left unchecked: it is handled upstream by the stateful proxy
+// (the agentic-api layer strips it before the request reaches the router),
+// and forwarding it is harmless regardless since it defaults to true.
+func RejectStatefulResponsesFields(body map[string]any) error {
+	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
+		if _, ok := body[field]; ok {
+			return fmt.Errorf("field %q is not supported by the router", field)
+		}
+	}
+	if background, ok := body[FieldBackground].(bool); ok && background {
+		return fmt.Errorf("field %q is not supported by the router", FieldBackground)
+	}
+	if input, ok := body[FieldInput].([]any); ok && inputReferencesFile(input) {
+		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
+	}
+	return nil
+}
+
+// inputReferencesFile reports whether a Responses input array contains a
+// content part with a file_id field. file_id is not a top-level field:
+// OpenAI's Responses API nests it inside an input_image, input_file, or
+// input_audio content part, so finding it takes a walk of the input array
+// rather than a map lookup.
+func inputReferencesFile(input []any) bool {
+	for _, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := itemMap[FieldContent].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			partMap, ok := part.(map[string]any)
+			if ok {
+				if _, ok := partMap[FieldFileID]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

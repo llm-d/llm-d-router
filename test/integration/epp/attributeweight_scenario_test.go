@@ -32,7 +32,7 @@ import (
 
 // Keep metrics neutral so attribute weight is the only scoring signal.
 const gpuWeightScorerConfig = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: label-producer

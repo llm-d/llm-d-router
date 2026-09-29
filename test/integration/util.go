@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -239,9 +240,13 @@ func CreateGrpcPayload(msg proto.Message) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(b) > math.MaxUint32 {
+		return nil, fmt.Errorf("marshaled message too large for gRPC length-prefixed framing: %d bytes", len(b))
+	}
+
 	payload := make([]byte, 5+len(b))
-	payload[0] = 0 // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b)))
+	payload[0] = 0                                           // 0 = uncompressed
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) // #nosec G115 -- bounds-checked above
 	copy(payload[5:], b)
 	return payload, nil
 }

@@ -28,9 +28,7 @@ import (
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
-// routerSubsystem is the router's standard EPP metrics subsystem. New metrics
-// are emitted under it; the legacy kvcache_* names are retained as deprecated
-// aliases so existing scrapers keep working during the migration.
+// routerSubsystem is the router's standard EPP metrics subsystem.
 const routerSubsystem = metricsutil.LLMDRouterEndpointPickerSubsystem
 
 // podIdentifierLabel is the label key carried by the per-pod kvevents metrics.
@@ -42,105 +40,70 @@ const (
 	reasonLabel    = "reason"
 )
 
-// dualCounter emits a value to both the deprecated kvcache_* counter and the
-// current llm_d_epp_* counter. It satisfies prometheus.Collector so both
-// register, and exposes the recording/read methods the call sites use.
-type dualCounter struct {
-	deprecated, current prometheus.Counter
-}
-
-func (d *dualCounter) Inc()                      { d.deprecated.Inc(); d.current.Inc() }
-func (d *dualCounter) Add(v float64)             { d.deprecated.Add(v); d.current.Add(v) }
-func (d *dualCounter) Desc() *prometheus.Desc    { return d.current.Desc() }
-func (d *dualCounter) Write(m *dto.Metric) error { return d.current.Write(m) }
-func (d *dualCounter) Describe(c chan<- *prometheus.Desc) {
-	d.deprecated.Describe(c)
-	d.current.Describe(c)
-}
-func (d *dualCounter) Collect(c chan<- prometheus.Metric) {
-	d.deprecated.Collect(c)
-	d.current.Collect(c)
-}
-
-// dualHistogram is the histogram analogue of dualCounter.
-type dualHistogram struct {
-	deprecated, current prometheus.Histogram
-}
-
-func (d *dualHistogram) Observe(v float64)         { d.deprecated.Observe(v); d.current.Observe(v) }
-func (d *dualHistogram) Desc() *prometheus.Desc    { return d.current.Desc() }
-func (d *dualHistogram) Write(m *dto.Metric) error { return d.current.Write(m) }
-func (d *dualHistogram) Describe(c chan<- *prometheus.Desc) {
-	d.deprecated.Describe(c)
-	d.current.Describe(c)
-}
-func (d *dualHistogram) Collect(c chan<- prometheus.Metric) {
-	d.deprecated.Collect(c)
-	d.current.Collect(c)
-}
-
-func newDualCounter(oldSubsystem, oldName, newName, help string) *dualCounter {
-	return &dualCounter{
-		deprecated: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "kvcache", Subsystem: oldSubsystem, Name: oldName,
-			Help: "Deprecated: use " + routerSubsystem + "_" + newName + ". " + help,
-		}),
-		current: prometheus.NewCounter(prometheus.CounterOpts{
-			Subsystem: routerSubsystem, Name: newName,
-			Help: metricsutil.HelpMsgWithStability(help, compbasemetrics.ALPHA),
-		}),
-	}
-}
-
-func newDualHistogram(oldSubsystem, oldName, newName, help string, buckets []float64) *dualHistogram {
-	return &dualHistogram{
-		deprecated: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "kvcache", Subsystem: oldSubsystem, Name: oldName,
-			Help:    "Deprecated: use " + routerSubsystem + "_" + newName + ". " + help,
-			Buckets: buckets,
-		}),
-		current: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Subsystem: routerSubsystem, Name: newName,
-			Help:    metricsutil.HelpMsgWithStability(help, compbasemetrics.ALPHA),
-			Buckets: buckets,
-		}),
-	}
-}
-
 var (
-	Admissions = newDualCounter("index", "admissions_total",
-		"kv_cache_index_admissions_total", "Total number of KV-block admissions")
-	Evictions = newDualCounter("index", "evictions_total",
-		"kv_cache_index_evictions_total", "Total number of KV-block evictions")
+	Admissions = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_admissions_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-block admissions",
+			compbasemetrics.ALPHA),
+	})
+	Evictions = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_evictions_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-block evictions",
+			compbasemetrics.ALPHA),
+	})
 
 	// LookupRequests counts how many Lookup() calls have been made.
-	LookupRequests = newDualCounter("index", "lookup_requests_total",
-		"kv_cache_index_lookup_requests_total", "Total number of lookup calls")
+	LookupRequests = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_lookup_requests_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of lookup calls",
+			compbasemetrics.ALPHA),
+	})
 	// MaxPodHitCount counts, per prefix match, the longest contiguous prefix
 	// chain any single pod holds counting from the first requested block.
-	MaxPodHitCount = newDualCounter("index", "max_pod_hit_count_total",
-		"kv_cache_index_max_pod_hit_count_total", "Longest contiguous per-pod prefix chain observed per lookup")
+	MaxPodHitCount = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_max_pod_hit_count_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Longest contiguous per-pod prefix chain observed per lookup",
+			compbasemetrics.ALPHA),
+	})
 	// LookupHits accumulates the same per-match contiguous chain length as
 	// MaxPodHitCount.
-	LookupHits = newDualCounter("index", "lookup_hits_total",
-		"kv_cache_index_lookup_hits_total", "Contiguous prefix blocks matched by the best pod per lookup")
-	LookupLatency = newDualHistogram("index", "lookup_latency_seconds",
-		"kv_cache_index_lookup_latency_seconds",
-		"Duration of Lookup and WalkKeys calls in seconds, including WalkKeys callbacks", prometheus.DefBuckets)
+	LookupHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_lookup_hits_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Contiguous prefix blocks matched by the best pod per lookup",
+			compbasemetrics.ALPHA),
+	})
+	LookupLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_lookup_latency_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of Lookup and WalkKeys calls in seconds, including WalkKeys callbacks",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
 
 	// DedupRemovedHashesSuppressed counts individual block hashes whose removal
 	// was suppressed by the kvevents reference-count dedup filter because another
 	// announcement still references the block. This counts block hashes, not
 	// BlockRemoved events.
-	DedupRemovedHashesSuppressed = newDualCounter("kvevents", "dedup_removed_hashes_suppressed_total",
-		"kv_cache_events_dedup_removed_hashes_suppressed_total",
-		"Block hashes whose removal was suppressed by the KV-event dedup filter (block hashes, not BlockRemoved events)")
+	DedupRemovedHashesSuppressed = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_dedup_removed_hashes_suppressed_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Block hashes whose removal was suppressed by the KV-event dedup filter (block hashes, not BlockRemoved events)",
+			compbasemetrics.ALPHA),
+	})
 	// DedupRemovedHashesForwarded counts individual block hashes forwarded to the
 	// index for eviction after passing the kvevents dedup filter. This counts
 	// block hashes, not BlockRemoved events.
-	DedupRemovedHashesForwarded = newDualCounter("kvevents", "dedup_removed_hashes_forwarded_total",
-		"kv_cache_events_dedup_removed_hashes_forwarded_total",
-		"Block hashes forwarded for eviction after the KV-event dedup filter (block hashes, not BlockRemoved events)")
+	DedupRemovedHashesForwarded = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_dedup_removed_hashes_forwarded_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Block hashes forwarded for eviction after the KV-event dedup filter (block hashes, not BlockRemoved events)",
+			compbasemetrics.ALPHA),
+	})
 	// KVEventStoresSkipped counts group-aware stores that cannot safely
 	// contribute to prefix indexing.
 	KVEventStoresSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{

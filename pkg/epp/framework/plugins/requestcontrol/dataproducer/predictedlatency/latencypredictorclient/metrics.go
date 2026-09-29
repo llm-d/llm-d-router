@@ -36,7 +36,7 @@ func (p *Predictor) GetMetrics(ctx context.Context) (*MetricsResponse, error) {
 		return nil, fmt.Errorf("failed to create metrics request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //nolint:gosec // URL is operator-configured in config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to call training server /metrics endpoint: %w", err)
 	}

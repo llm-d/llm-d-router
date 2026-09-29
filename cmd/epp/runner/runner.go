@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -40,11 +41,12 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/internal/runnable"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -71,6 +73,7 @@ import (
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	labelproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/label"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -105,6 +108,7 @@ import (
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
@@ -157,6 +161,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	"github.com/llm-d/llm-d-router/pkg/epp/statesync"
 	"github.com/llm-d/llm-d-router/version"
 )
 
@@ -184,13 +189,19 @@ type Runner struct {
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
-	rawConfig *configapi.EndpointPickerConfig
+	rawConfig *configapiv1.EndpointPickerConfig
 
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
 	healthGRPCServer *grpc.Server
-	healthGRPCPort   int
+	healthGRPCPort   uint16
 	draining         *atomic.Bool
+
+	// grpcListener and healthListener are optional pre-bound listeners for the
+	// runWithFileDiscovery path; when set, the ext_proc and health servers serve
+	// on them instead of binding opts.GRPCPort / opts.GRPCHealthPort.
+	grpcListener   net.Listener
+	healthListener net.Listener
 }
 
 // WithExecutableName sets the name of the executable containing the runner.
@@ -384,7 +395,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
@@ -490,6 +501,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	if err := serverRunner.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to setup EPP controllers")
+		return nil, nil, err
+	}
+	if err := r.setupPeerDiscovery(mgr, rawConfig); err != nil {
+		setupLog.Error(err, "Failed to setup peer discovery")
 		return nil, nil, err
 	}
 
@@ -660,6 +675,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, fwkplugin.StabilityBeta, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, fwkplugin.StabilityBeta, sessionid.Factory, attrsession.SessionIDDataKey)
+	// Alpha
+	fwkplugin.RegisterAsDefaultProducer(sessionstate.SessionStateProducerType, fwkplugin.StabilityAlpha, sessionstate.Factory, sessionstate.SessionStateDataKey)
 	fwkplugin.RegisterAsDefaultProducer(latencyobserver.LatencyObserverProducerType, fwkplugin.StabilityAlpha, latencyobserver.LatencyObserverFactory, attrlatency.TTFTPercentilesDataKey)
 
 	// Latency predictor plugins
@@ -716,6 +733,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.PluginType, fwkplugin.StabilityBeta, discoveryfile.Factory)
 	// multicluster variant
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
+	// Alpha
+	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
 
 	// register request header processor plugins
 	// Alpha
@@ -723,7 +742,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
 }
 
-func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
+func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapiv1.EndpointPickerConfig, error) {
 	// parseConfigurationPhaseOne is idempotent: Run() calls it to decide
 	// between the K8s and file-discovery paths, and the K8s path's setup()
 	// then calls it a second time. Cache the parsed config so we don't
@@ -777,10 +796,12 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
-func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
+func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapiv1.EndpointPickerConfig, ds datastore.Datastore, refreshMetricsInterval time.Duration) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds),
+		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
+		fwkplugin.WithRefreshMetricsInterval(refreshMetricsInterval))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
@@ -931,7 +952,7 @@ func resolvePoolNamespace(poolNamespace string) string {
 // parseConfigurationPhaseTwo; this function only looks it up and verifies its
 // type, so the loader-created instance (with its real Handle wired in) is the
 // one the runner drives.
-func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
+func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (fwkdl.EndpointDiscovery, error) {
 	ref := rawConfig.DataLayer.Discovery.Endpoints.PluginRef
 	p := r.PluginHandle.Plugin(ref)
 	if p == nil {
@@ -942,6 +963,35 @@ func (r *Runner) resolveDiscovery(rawConfig *configapi.EndpointPickerConfig) (fw
 		return nil, fmt.Errorf("discovery: plugin %q does not implement EndpointDiscovery", ref)
 	}
 	return disc, nil
+}
+
+// setupPeerDiscovery runs the PeerDiscovery plugin referenced by
+// rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
+// every replica. Discovered peers land in store. The plugin is expected to
+// have been instantiated and registered in r.PluginHandle by
+// parseConfigurationPhaseTwo.
+func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig) error {
+	dl := rawConfig.DataLayer
+	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		return nil
+	}
+
+	ref := dl.Discovery.Peers.PluginRef
+	p := r.PluginHandle.Plugin(ref)
+	if p == nil {
+		return fmt.Errorf("peerDiscovery: no plugin found with name %q", ref)
+	}
+	disc, ok := p.(fwkdl.PeerDiscovery)
+	if !ok {
+		return fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
+	}
+
+	// TODO(#1892): Connect peerStore to CrossReplicaSyncer. See TestPeerDiscoveryFullWiring.
+	peerStore := statesync.NewMemoryPeerStore()
+	notifier := fwkdl.NewPeerNotifier(peerStore)
+	return mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
+		return disc.Start(ctx, notifier)
+	})))
 }
 
 // initAdmissionControl builds the request admission controller, gated by the
@@ -1042,7 +1092,7 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
-func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapi.EndpointPickerConfig) error {
+func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
 	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
@@ -1082,7 +1132,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
@@ -1132,6 +1182,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		ds, director, r.parserRegistry, eppConfig.SaturationDetector, nil)
 	if requestEvictor != nil {
 		serverRunner.EvictChannelLookup = requestEvictor.EvictionRegistry()
+	}
+	if r.grpcListener != nil {
+		serverRunner.GrpcListener = r.grpcListener
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
@@ -1188,6 +1241,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+		if r.healthListener != nil {
+			return runnable.NoLeaderElection(runnable.GRPCServerOnListener("health", healthSrv, r.healthListener)).Start(ctx)
+		}
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
@@ -1206,7 +1262,7 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1214,7 +1270,7 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 			mux.Handle(path, h)
 		}
 	}
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
@@ -1227,7 +1283,7 @@ func serveMetrics(ctx context.Context, port int, enablePprof bool) error {
 	return nil
 }
 
-func toRawMap(cfg *configapi.EndpointPickerConfig) map[string]any {
+func toRawMap(cfg *configapiv1.EndpointPickerConfig) map[string]any {
 	if cfg == nil {
 		return nil
 	}

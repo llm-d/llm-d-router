@@ -89,5 +89,5 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 }
 
 func (s *Server) generateSGLangRoomID() int64 {
-	return time.Now().UnixNano() + int64(rand.IntN(1000))
+	return time.Now().UnixNano() + int64(rand.IntN(1000)) //nolint:gosec // G404: non-crypto use, a room ID disambiguator
 }

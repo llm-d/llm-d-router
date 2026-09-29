@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -57,7 +57,7 @@ func TestEnsureDataLayer(t *testing.T) {
 	// Not parallel: shares helpers with configloader_test.go that depend on global state.
 
 	t.Run("nil DataLayer injects metrics defaults", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{}
+		cfg := &configapiv1.EndpointPickerConfig{}
 		handle := testutils.NewTestHandle(context.Background())
 
 		err := ensureDataLayer(cfg, handle, metricsPlugins(handle))
@@ -71,8 +71,8 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("empty DataLayer {} injects metrics defaults (regression: was no-op)", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{},
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{},
 		}
 		handle := testutils.NewTestHandle(context.Background())
 
@@ -84,9 +84,9 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("non-metrics source gets metrics injected too (additive)", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{
-				Sources: []configapi.DataLayerSource{
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{
+				Sources: []configapiv1.DataLayerSource{
 					{PluginRef: "k8s-notification-source"},
 				},
 			},
@@ -103,9 +103,9 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("source of another type does not suppress injection", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{
-				Sources: []configapi.DataLayerSource{
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{
+				Sources: []configapiv1.DataLayerSource{
 					{PluginRef: "dcgmSource"},
 				},
 			},
@@ -121,9 +121,9 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("existing metrics-data-source is not double-injected", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{
-				Sources: []configapi.DataLayerSource{
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{
+				Sources: []configapiv1.DataLayerSource{
 					{PluginRef: sourcemetrics.MetricsDataSourceType},
 				},
 			},
@@ -137,12 +137,12 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("metrics source under a custom instance name is not double-injected", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{
-				Sources: []configapi.DataLayerSource{
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{
+				Sources: []configapiv1.DataLayerSource{
 					{
 						PluginRef:  "metricsSource",
-						Extractors: []configapi.DataLayerExtractor{{PluginRef: "customMetricsExtractor"}},
+						Extractors: []configapiv1.DataLayerExtractor{{PluginRef: "customMetricsExtractor"}},
 					},
 				},
 			},
@@ -161,8 +161,8 @@ func TestEnsureDataLayer(t *testing.T) {
 	})
 
 	t.Run("injectDefaults: false suppresses injection", func(t *testing.T) {
-		cfg := &configapi.EndpointPickerConfig{
-			DataLayer: &configapi.DataLayerConfig{
+		cfg := &configapiv1.EndpointPickerConfig{
+			DataLayer: &configapiv1.DataLayerConfig{
 				InjectDefaults: ptr.To(false),
 			},
 		}
@@ -179,9 +179,9 @@ func TestEnsureDataLayer(t *testing.T) {
 func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 	t.Run("detector implementing Filter is injected into profiles", func(t *testing.T) {
 		w := 2.0
-		cfg := &configapi.EndpointPickerConfig{
-			SchedulingProfiles: []configapi.SchedulingProfile{
-				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+		cfg := &configapiv1.EndpointPickerConfig{
+			SchedulingProfiles: []configapiv1.SchedulingProfile{
+				{Name: "default", Plugins: []configapiv1.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
 			},
 		}
 		handle := testutils.NewTestHandle(context.Background())
@@ -191,8 +191,8 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 		handle.AddPlugin(detectorName, detector)
 
 		allPlugins := handle.GetAllPluginsWithNames()
-		cfg.FlowControl = &configapi.FlowControlConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		cfg.FlowControl = &configapiv1.FlowControlConfig{
+			SaturationDetector: &configapiv1.SaturationDetectorConfig{PluginRef: detectorName},
 		}
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
@@ -204,9 +204,9 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 
 	t.Run("detector not implementing Filter is not injected", func(t *testing.T) {
 		w := 2.0
-		cfg := &configapi.EndpointPickerConfig{
-			SchedulingProfiles: []configapi.SchedulingProfile{
-				{Name: "default", Plugins: []configapi.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
+		cfg := &configapiv1.EndpointPickerConfig{
+			SchedulingProfiles: []configapiv1.SchedulingProfile{
+				{Name: "default", Plugins: []configapiv1.SchedulingPlugin{{PluginRef: "scorer", Weight: &w}}},
 			},
 		}
 		handle := testutils.NewTestHandle(context.Background())
@@ -216,8 +216,8 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 		handle.AddPlugin(detectorName, detector)
 
 		allPlugins := handle.GetAllPluginsWithNames()
-		cfg.FlowControl = &configapi.FlowControlConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		cfg.FlowControl = &configapiv1.FlowControlConfig{
+			SaturationDetector: &configapiv1.SaturationDetectorConfig{PluginRef: detectorName},
 		}
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
@@ -228,9 +228,9 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 
 	t.Run("detector already in profile is not duplicated", func(t *testing.T) {
 		detectorName := "my-detector"
-		cfg := &configapi.EndpointPickerConfig{
-			SchedulingProfiles: []configapi.SchedulingProfile{
-				{Name: "default", Plugins: []configapi.SchedulingPlugin{
+		cfg := &configapiv1.EndpointPickerConfig{
+			SchedulingProfiles: []configapiv1.SchedulingProfile{
+				{Name: "default", Plugins: []configapiv1.SchedulingPlugin{
 					{PluginRef: detectorName},
 					{PluginRef: "picker"},
 				}},
@@ -242,8 +242,8 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 		handle.AddPlugin(detectorName, detector)
 
 		allPlugins := handle.GetAllPluginsWithNames()
-		cfg.FlowControl = &configapi.FlowControlConfig{
-			SaturationDetector: &configapi.SaturationDetectorConfig{PluginRef: detectorName},
+		cfg.FlowControl = &configapiv1.FlowControlConfig{
+			SaturationDetector: &configapiv1.SaturationDetectorConfig{PluginRef: detectorName},
 		}
 
 		err := ensureSaturationDetector(cfg, handle, allPlugins)
