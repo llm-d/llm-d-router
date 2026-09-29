@@ -50,10 +50,6 @@ const (
 	responseFieldIndex            = "index"
 	responseFieldDelta            = "delta"
 
-	requestFieldMessages = "messages"
-	requestFieldRole     = "role"
-	requestFieldContent  = "content"
-
 	roleAssistant = "assistant"
 )
 
@@ -287,7 +283,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		fullText := textAccum.String()
 		if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
 			msg = maps.Clone(msg)
-			msg[requestFieldContent] = fullText
+			msg[reqcommon.FieldContent] = fullText
 			choice[responseFieldMessage] = msg
 		}
 		lastResponse[responseFieldChoices] = []any{choice}
@@ -383,7 +379,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 				responseFieldIndex:        choice[responseFieldIndex],
 				responseFieldFinishReason: choice[responseFieldFinishReason],
 			}
-			streamChoice[responseFieldDelta] = map[string]any{requestFieldContent: text, requestFieldRole: roleAssistant}
+			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
 			streamChoices = append(streamChoices, streamChoice)
 		}
 		streamChunk[responseFieldChoices] = streamChoices
@@ -412,7 +408,7 @@ func firstChoice(response map[string]any) map[string]any {
 // extractChoiceText returns the generated text from a choice's message.content.
 func extractChoiceText(choice map[string]any) string {
 	if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
-		if content, ok := msg[requestFieldContent].(string); ok {
+		if content, ok := msg[reqcommon.FieldContent].(string); ok {
 			return content
 		}
 	}
@@ -432,14 +428,14 @@ func appendChunkToRequest(logger logr.Logger, req map[string]any, text string) {
 		logger.V(logging.DEBUG).Info("chunked decode: cannot read request messages", "error", err)
 	}
 	chunk, err := json.Marshal(map[string]any{
-		requestFieldRole:    roleAssistant,
-		requestFieldContent: text,
+		reqcommon.FieldRole:    roleAssistant,
+		reqcommon.FieldContent: text,
 	})
 	if err != nil {
 		logger.V(logging.DEBUG).Info("chunked decode: cannot encode chunk text", "error", err)
 		return
 	}
-	req[requestFieldMessages] = append(messages, chunk)
+	req[reqcommon.FieldMessages] = append(messages, chunk)
 }
 
 // toInt converts a JSON number value (float64, int, or json.Number) to int.

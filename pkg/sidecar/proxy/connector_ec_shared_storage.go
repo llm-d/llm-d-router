@@ -34,13 +34,13 @@ import (
 // original request to the P/D connector. The returned item count is 0 when
 // there was no multimodal input to encode, so callers can tell a genuine
 // no-op apart from an encoder invocation.
-func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[string]any, encoderHostPorts []string, requestID string) (int, error) {
-	items := s.mmItemsForFanout(originalRequest, requestID)
+func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[string]any, encoderHostPorts []string, requestID string, apiType reqcommon.APIType) (int, error) {
+	items := s.mmItemsForFanout(originalRequest, requestID, apiType)
 	if len(items) == 0 {
 		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return 0, nil
 	}
-	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, nil)
+	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil)
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
@@ -65,7 +65,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 	// Step 1: Process through Encoder cluster (if has MM input)
 	if len(encodeEndPoints) > 0 {
 		encodeStart := time.Now()
-		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID)
+		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)

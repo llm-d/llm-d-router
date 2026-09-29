@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -453,6 +455,82 @@ var _ = Describe("Unreadable request body", func() {
 		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.runChunkedDecode(w, r)
+			}),
+	)
+})
+
+// Each entry point refuses a stateful Responses request and reaches neither
+// the prefill nor the decode upstream. The dispatch assertion comes first: a
+// handler that forwards the request and only then answers 400 satisfies the
+// status assertions on their own.
+var _ = Describe("Stateful Responses fields", func() {
+	DescribeTable("are refused before any upstream is dispatched",
+		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request, string)) {
+			var dispatched atomic.Bool
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				dispatched.Store(true)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			DeferCleanup(upstream.Close)
+
+			upstreamURL, err := url.Parse(upstream.URL)
+			Expect(err).ToNot(HaveOccurred())
+
+			// A guard that stops running must surface as a recorded dispatch,
+			// not a nil deref or a dial failure: the decode spans read
+			// DecoderURL, and handleMooncake queries a bootstrap endpoint on
+			// MooncakeBootstrapPort before it dispatches.
+			config.DecoderURL = upstreamURL
+			config.MooncakeBootstrapPort, err = strconv.Atoi(upstreamURL.Port())
+			Expect(err).ToNot(HaveOccurred())
+
+			proxy := NewProxy(config)
+			proxy.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				dispatched.Store(true)
+				w.WriteHeader(http.StatusOK)
+			})
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+
+			handle(proxy, w, r, upstreamURL.Host)
+
+			Expect(dispatched.Load()).To(BeFalse(), "request reached an upstream despite an unsupported field")
+			Expect(w.Code).To(Equal(http.StatusBadRequest))
+			Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
+		},
+		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleNIXLV2(w, r, upstream, "", reqcommon.APITypeResponses)
+			}),
+		Entry("shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleSharedStorage(w, r, upstream, reqcommon.APITypeResponses)
+			}),
+		Entry("mooncake", Config{Port: "0", KVConnector: KVConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleMooncake(w, r, upstream, reqcommon.APITypeResponses)
+			}),
+		Entry("p2p", Config{Port: "0", KVConnector: KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleP2P(w, r, upstream, "", reqcommon.APITypeResponses)
+			}),
+		Entry("sglang", Config{Port: "0", KVConnector: KVConnectorSGLang},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleSGLang(w, r, upstream)
+			}),
+		Entry("ec-nixl", Config{Port: "0", KVConnector: KVConnectorNIXLV2, ECConnector: ECConnectorNIXL},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleECNIXL(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+			}),
+		Entry("ec-shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage, ECConnector: ECExampleConnector},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleECSharedStorage(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+			}),
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.decodeWithP2PSource(w, r, upstream)
 			}),
 	)
 })

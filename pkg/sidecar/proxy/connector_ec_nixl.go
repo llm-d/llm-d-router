@@ -42,8 +42,9 @@ func (s *Server) fanoutEncoderCollect(
 	originalRequest map[string]any,
 	encoderHostPorts []string,
 	requestID string,
+	apiType reqcommon.APIType,
 ) (map[string]any, int, int, error) {
-	items := s.mmItemsForFanout(originalRequest, requestID)
+	items := s.mmItemsForFanout(originalRequest, requestID, apiType)
 	if len(items) == 0 {
 		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, 0, 0, nil
@@ -54,7 +55,7 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
@@ -123,7 +124,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 	// Step 1: fan out to encoders, collect per-image ec_transfer_params.
 	if len(encodeEndPoints) > 0 {
 		encodeStart := time.Now()
-		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID)
+		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
