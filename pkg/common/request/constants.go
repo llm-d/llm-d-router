@@ -71,6 +71,30 @@ const (
 	FieldBootstrapRoom = "bootstrap_room"
 )
 
+// Usage fields in a response body. Chat Completions and Completions report
+// prompt_tokens and completion_tokens with details under prompt_tokens_details;
+// Responses and Conversations report input_tokens and output_tokens with details
+// under input_tokens_details. total_tokens is named the same in every API.
+const (
+	FieldUsage               = "usage"
+	FieldPromptTokens        = "prompt_tokens"
+	FieldCompletionTokens    = "completion_tokens"
+	FieldInputTokens         = "input_tokens"
+	FieldOutputTokens        = "output_tokens"
+	FieldTotalTokens         = "total_tokens"
+	FieldPromptTokensDetails = "prompt_tokens_details"
+	FieldInputTokensDetails  = "input_tokens_details"
+	FieldCachedTokens        = "cached_tokens"
+)
+
+// Server-sent event framing for streamed responses. SGLang sends the bare
+// marker as an event payload, the OpenAI APIs send the framed line.
+const (
+	SSEDataPrefix = "data: "
+	SSEDoneMarker = "[DONE]"
+	SSEDone       = SSEDataPrefix + SSEDoneMarker
+)
+
 // Content part types, the values a content part's FieldType takes. A
 // chat-completions *_url part nests its URL and options under one object keyed
 // by the part type, so PartTypeImageURL and FieldImageURL hold the same string

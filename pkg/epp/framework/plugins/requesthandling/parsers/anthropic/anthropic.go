@@ -26,6 +26,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -38,8 +39,6 @@ const (
 
 	messagesAPI    = "messages"
 	countTokensAPI = "messages/count_tokens"
-
-	streamingRespPrefix = "data: "
 
 	contentType     = "content-type"
 	eventStreamType = "text/event-stream"
@@ -222,7 +221,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
 		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
 		if !ok || !bytes.Contains(content, []byte("usage")) {
 			continue

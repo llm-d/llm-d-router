@@ -265,16 +265,16 @@ var _ = Describe("Chunked Decode", func() {
 
 			// Two chunk data events + usage event + [DONE]
 			Expect(events).To(HaveLen(4))
-			Expect(events[3]).To(Equal(sseDone))
+			Expect(events[3]).To(Equal(reqcommon.SSEDone))
 
 			var first map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], sseDataPrefix)), &first)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
 			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
 			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
 
 			// Verify cumulative usage in the final usage event.
 			var usageEvent map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], sseDataPrefix)), &usageEvent)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], reqcommon.SSEDataPrefix)), &usageEvent)).To(Succeed())
 			usage := usageEvent["usage"].(map[string]any)
 			promptTokens, _ := toInt(usage["prompt_tokens"])
 			completionTokens, _ := toInt(usage["completion_tokens"])

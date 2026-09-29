@@ -28,6 +28,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -41,10 +42,8 @@ const (
 	// generatePathSuffix is the SGLang native generate API path.
 	generatePathSuffix = "generate"
 
-	streamingRespPrefix = "data: "
-	streamingDoneMarker = "[DONE]"
-	contentTypeHeader   = "content-type"
-	eventStreamType     = "text/event-stream"
+	contentTypeHeader = "content-type"
+	eventStreamType   = "text/event-stream"
 )
 
 // compile-time type validation
@@ -244,12 +243,12 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, streamingRespPrefix)
+		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
 		if !ok {
 			continue
 		}
 		data = strings.TrimSpace(data)
-		if data == streamingDoneMarker {
+		if data == reqcommon.SSEDoneMarker {
 			continue
 		}
 		var resp sgLangResponse
