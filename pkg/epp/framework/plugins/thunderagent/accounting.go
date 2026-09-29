@@ -25,8 +25,11 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-// PreRequest sets the request's estimated prompt tokens as its session's
-// in-flight tokens, binds the session to the picked endpoint.
+// PreRequest adds the request's estimated prompt tokens to its session's
+// in-flight tokens, binds the session to the picked endpoint, and stashes the
+// estimate on the request for ResponseBody to remove. A session can have
+// several turns in flight at once (parallel sub-agents), so each turn charges
+// and later removes only its own estimate.
 func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	id := sessionID(request)
 	if id == "" {
@@ -50,10 +53,15 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	resumed := s.paused
 	s.paused = false
 	s.reservedUntil = time.Time{}
-	s.inflightTokens = estimateTokens(request.RequestSizeBytes)
+	// At least one token, so inflightTokens is nonzero exactly while a turn
+	// is in flight.
+	estimate := max(estimateTokens(request.RequestSizeBytes), 1)
+	s.inflightTokens += estimate
 	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
+
+	request.PutAttribute(inflightEstimateKey, estimate)
 
 	if resumed {
 		a.metrics.resumes.Inc()
@@ -61,13 +69,19 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	return nil
 }
 
-// ResponseBody updates the session in thunder agent session manager.
+// ResponseBody settles a completed turn: it removes the turn's own in-flight
+// estimate and replaces the session's committed tokens with the usage total.
+// Requests PreRequest did not charge are ignored.
 func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
 	id := sessionID(request)
 	if id == "" {
+		return
+	}
+	estimate, ok := fwksched.ReadRequestAttribute[int64](request, inflightEstimateKey)
+	if !ok {
 		return
 	}
 
@@ -80,14 +94,13 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 		m.mu.Unlock()
 		return
 	}
+	s.inflightTokens = max(s.inflightTokens-estimate, 0)
 	switch {
 	case response.Usage.TotalTokens > 0:
 		s.committedTokens = int64(response.Usage.TotalTokens)
-	case s.inflightTokens > s.committedTokens:
-		s.committedTokens = s.inflightTokens
+	case estimate > s.committedTokens:
+		s.committedTokens = estimate
 	}
-	// Clear the session inflight token since it's completed.
-	s.inflightTokens = 0
 	s.lastResponseAt = now
 	s.lastActivity = now
 	m.mu.Unlock()

@@ -84,10 +84,6 @@ never appear in metrics or logs.
   accounting.
 - Anonymous traffic (no session id) passes the gate untracked; pair the
   plugin with a general load scorer to place it.
-- A session is assumed to have at most one request in flight. If one sends
-  overlapping requests, the first to finish clears the in-flight estimate
-  while the others still run, so the session can be counted as idle and
-  paused.
 - There is no explicit end-of-session signal: a finished session stays in
   the working set as an idle session until another session's turn reclaims
   its room or the idle TTL drops it, so the working set gauge overestimates

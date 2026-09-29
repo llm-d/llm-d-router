@@ -45,6 +45,11 @@ import (
 // ThunderAgentPluginType is the plugin type registered with the framework.
 const ThunderAgentPluginType = "thunder-agent"
 
+// inflightEstimateKey is the request attribute under which PreRequest stashes
+// the token estimate it charged to the session, so ResponseBody removes
+// exactly what was added.
+var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
+
 var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}

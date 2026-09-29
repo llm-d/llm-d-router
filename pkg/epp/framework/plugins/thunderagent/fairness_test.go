@@ -248,3 +248,17 @@ func TestFailsOpenWithoutFitView(t *testing.T) {
 	q := makeQueue("s1", time.Now(), 4000000)
 	require.Equal(t, q, pick(t, a, q))
 }
+
+// An admitted session with a turn already in flight is sized as that turn
+// plus the new one, since PreRequest adds the new estimate to what is in
+// flight; its room is reserved at that size.
+func TestAdmittedSizeAddsTurnsInFlight(t *testing.T) {
+	a := newTestAgent(testConfig())
+	seed(t, a, "s1", "pod-a", 300)
+	_ = startTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 1600) // 400 in flight
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	q := makeQueue("s1", time.Now(), 1200) // estimate 300: 400 + 300 = 700
+	require.Equal(t, q, pick(t, a, q))
+	require.Equal(t, float64(700), endpointTokens(a, "default/pod-a"))
+}
