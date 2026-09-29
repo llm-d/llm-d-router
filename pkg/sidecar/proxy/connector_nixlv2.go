@@ -38,6 +38,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
@@ -218,12 +219,14 @@ retryLoop:
 	}
 
 	prefillDuration := time.Since(prefillStart)
+	metrics.RecordPrefillDuration(prefillDuration)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			logging.HTTPBodyKey, pw.buffer.String())
@@ -380,7 +383,10 @@ retryLoop:
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
 		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
 	}
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
+	statusWriter, decodeStatus := captureResponseStatus(w)
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
@@ -389,13 +395,21 @@ retryLoop:
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, body)
 	}
+	decodeReturned = true
 	if err := finalizeDecodeWriter(); err != nil {
+		metrics.RecordDecodeDuration(time.Since(decodeStart))
+		metrics.RecordError(metrics.StageDecode)
 		s.logger.Error(err, "failed to flush cached token response writer")
 		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
 		return
 	}
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
 
 	// Calculate end-to-end P/D timing metrics.
@@ -637,9 +651,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
+		prefillDuration := time.Since(prefillStartedAt)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
-			semconv.LLMDPDProxyPrefillDurationMs(float64(time.Since(prefillStartedAt).Milliseconds())),
+			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
@@ -657,8 +673,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Swallowing the abort here keeps the process alive but hides the failure
 	// from the client, so record it and replay it on the request goroutine.
 	var decodeAborted atomic.Bool
+	// Written by the decode goroutine, read after decodeDone is closed.
+	var decodeDuration time.Duration
 	go func() {
 		defer close(decodeDone)
+		defer func() { decodeDuration = time.Since(decodeStartedAt) }()
 		// Same recover: abort this request, do not kill the process.
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -693,6 +712,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Set once this goroutine has written a terminal response of its own, so an
 	// aborted decode cannot write a second status over it.
 	clientResponded := false
+	// Set when the KV-wait timer fired; decode then ran for the full timeout.
+	decodeTimedOut := false
 
 	select {
 	case <-prefillDone:
@@ -707,6 +728,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		// Prefill failed: abort decode and return the prefill error verbatim.
 		cancel()
 		dcw.abort()
+		metrics.RecordError(metrics.StagePrefill)
 		status := http.StatusBadGateway
 		if prefillResp != nil {
 			status = prefillResp.statusCode
@@ -734,6 +756,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		// and fail rather than hang waiting for KV that may never arrive.
 		cancel()
 		dcw.abort()
+		// Counted here rather than from prefill's own outcome: the cancelled
+		// prefill may still come back 2xx if it completed as the timer fired.
+		metrics.RecordError(metrics.StagePrefill)
+		decodeTimedOut = true
 		s.logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 			"request_id", uuidStr, "timeout", waitTimeout.String())
 		clientResponded = true
@@ -747,6 +773,20 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+
+	// Decode errors are attributed only when the commit point let decode's
+	// response reach the client. When the commit point wrote the response
+	// itself (prefill error or KV-wait timeout), decode's output was discarded
+	// and the failure is counted as a prefill error. Decode duration is also
+	// sampled on the KV-wait timeout, where decode waited the full timeout.
+	if !clientResponded {
+		metrics.RecordDecodeDuration(decodeDuration)
+		if decodeAborted.Load() || dcw.failed() {
+			metrics.RecordError(metrics.StageDecode)
+		}
+	} else if decodeTimedOut {
+		metrics.RecordDecodeDuration(decodeDuration)
+	}
 
 	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration

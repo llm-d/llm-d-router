@@ -764,7 +764,7 @@ func TestFanoutEncoderPath(t *testing.T) {
 			srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
 			srv.logger = log.Log
 
-			err = srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderURL.Host}, "test-req-id", tt.apiType)
+			_, err = srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderURL.Host}, "test-req-id", tt.apiType)
 			require.NoError(t, err)
 
 			mu.Lock()
@@ -801,6 +801,12 @@ func TestFanoutEncoderPrimerOnePerPart(t *testing.T) {
 		apiType       reqcommon.APIType
 		expectedCalls int32
 	}{
+		{
+			name:          "no multimodal items — encoder not called",
+			request:       map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hello"}}},
+			apiType:       reqcommon.APITypeChatCompletions,
+			expectedCalls: 0,
+		},
 		{
 			name:          "distinct image URLs",
 			request:       userMessageRequest(imageURLItem("https://example.com/img1.jpg"), imageURLItem("https://example.com/img2.jpg")),
@@ -871,8 +877,9 @@ func TestFanoutEncoderPrimerOnePerPart(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requestCount.Store(0)
-			err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id", tt.apiType)
+			total, err := srv.fanoutEncoderPrimer(context.Background(), tt.request, []string{encoderHostPort}, "test-req-id", tt.apiType)
 			assert.NoError(t, err)
+			assert.Equal(t, int(tt.expectedCalls), total)
 			assert.Equal(t, tt.expectedCalls, requestCount.Load())
 		})
 	}
@@ -925,8 +932,9 @@ func TestFanoutEncoderForwardsMMProcessorKwargs(t *testing.T) {
 			parsed, err := decodeRequestBody([]byte(tt.body))
 			require.NoError(t, err)
 
-			require.NoError(t, srv.fanoutEncoderPrimer(context.Background(), parsed,
-				[]string{encoderURL.Host}, "test-req-id", tt.apiType))
+			_, err = srv.fanoutEncoderPrimer(context.Background(), parsed,
+				[]string{encoderURL.Host}, "test-req-id", tt.apiType)
+			require.NoError(t, err)
 
 			mu.Lock()
 			defer mu.Unlock()
