@@ -78,6 +78,7 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 		// handler consumes it: in disaggregated mode the warmup must hit the
 		// same prefill worker whose cache the real next turn's prefill reuses.
 		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
+		dataParallelHostPort := r.Header.Get(routing.DataParallelEndpointHeader)
 
 		raw, body, ok := s.readJSONBody(r, w)
 		if !ok {
@@ -90,6 +91,11 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 		tee := newSpecPrefillWriter(w)
 		next(tee, r)
 
+		if tee.truncated {
+			s.logger.WithName("speculative-prefill").WithValues(benchmarkValues...).V(logging.DEBUG).Info("skip speculative prefill: captured response truncated", "maxCaptureBytes", specPrefillMaxCapture)
+			release()
+			return
+		}
 		answer := accumulateAssistantText(tee.contentType(), tee.captured())
 		if answer == "" {
 			release()
@@ -97,7 +103,7 @@ func (s *Server) speculativePrefillMiddleware(next http.HandlerFunc) http.Handle
 		}
 		// Detach from the request context so the warm-up survives the client
 		// connection closing after the turn completes.
-		go s.triggerSpeculativePrefill(context.WithoutCancel(r.Context()), body, answer, prefillHostPorts, release, benchmarkValues)
+		go s.triggerSpeculativePrefill(context.WithoutCancel(r.Context()), body, answer, prefillHostPorts, dataParallelHostPort, release, benchmarkValues)
 	}
 }
 
@@ -121,8 +127,10 @@ func specPrefillRequested(r *http.Request) bool {
 // request to warm the KV cache. User2 is intentionally not predicted: the prefix
 // ends at the assistant answer, matching the cached portion the real next turn
 // will reuse. In P/D mode (prefillHostPorts set) the warmup targets the prefill
-// worker whose cache the next turn's prefill reuses; otherwise the local decoder.
-func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map[string]any, answer string, prefillHostPorts []string, release func(), benchmarkValues []any) {
+// worker whose cache the next turn's prefill reuses; otherwise it targets the
+// selected data-parallel decoder rank when present, falling back to the local
+// decoder.
+func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map[string]any, answer string, prefillHostPorts []string, dataParallelHostPort string, release func(), benchmarkValues []any) {
 	logger := s.logger.WithName("speculative-prefill").WithValues(benchmarkValues...)
 	defer release()
 
@@ -158,15 +166,12 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 
 	prefillBody := maps.Clone(originalBody)
 	prefillBody[requestFieldMessages] = nextMessages
-	prefillBody[requestFieldMaxTokens] = 1
-	prefillBody[requestFieldMaxCompletionTokens] = 1
-	prefillBody[requestFieldStream] = false
+	reqcommon.CapSingleToken(prefillBody, reqcommon.APITypeChatCompletions)
 	// Send [prior messages + assistant answer] as a normal chat request so both
 	// vLLM and SGLang render the answer as a completed history turn, matching
 	// the [prior + answer] prefix the real next turn reuses. Engine-specific
 	// render controls (continue_final_message/add_generation_prompt) are avoided
 	// for portability; the trailing generation prompt is past the shared prefix.
-	delete(prefillBody, requestFieldStreamOptions)
 	delete(prefillBody, requestFieldKVTransferParams)
 
 	// P/D: warm the prefill worker that served this turn (and that the next
@@ -191,6 +196,10 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 			return
 		}
 		s.sendToPrefiller(ctx, logger, host, payload)
+		return
+	}
+	if dataParallelHostPort != "" {
+		s.sendToDataParallelDecoder(ctx, logger, dataParallelHostPort, payload)
 		return
 	}
 	// Fall back to the local decoder in aggregated mode or when the target fails
@@ -227,6 +236,7 @@ func firstAllowedHostPort(s *Server, hostPorts []string) string {
 // speculative payload through the cached prefiller reverse proxy. Best-effort:
 // failures are logged at debug and never surface to the client.
 func (s *Server) sendToPrefiller(ctx context.Context, logger logr.Logger, prefillHostPort string, payload []byte) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, specPrefillTimeout)
 	defer cancel()
 
@@ -243,7 +253,47 @@ func (s *Server) sendToPrefiller(ctx context.Context, logger logr.Logger, prefil
 	req.Header.Set("Content-Type", "application/json")
 	bw := &bufferedResponseWriter{}
 	handler.ServeHTTP(bw, req)
-	logger.V(logging.DEBUG).Info("speculative prefill warmed prefiller KV cache", "target", prefillHostPort, "status", bw.statusCode)
+	status := bw.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status >= http.StatusBadRequest {
+		logger.V(logging.DEBUG).Info("speculative prefill prefiller returned error", "target", prefillHostPort, "status", status, "duration", time.Since(started).String(), "payloadBytes", len(payload))
+		return
+	}
+	logger.V(logging.DEBUG).Info("speculative prefill warmed prefiller KV cache", "target", prefillHostPort, "status", status, "duration", time.Since(started).String(), "payloadBytes", len(payload))
+}
+
+// sendToDataParallelDecoder warms the selected data-parallel decoder rank in
+// aggregated mode. If the selected rank is unavailable, the warmup is skipped
+// rather than falling back to rank 0 and populating the wrong KV cache.
+func (s *Server) sendToDataParallelDecoder(ctx context.Context, logger logr.Logger, dataParallelHostPort string, payload []byte) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, specPrefillTimeout)
+	defer cancel()
+
+	handler, ok := s.dataParallelProxies[dataParallelHostPort]
+	if !ok || handler == nil {
+		logger.V(logging.DEBUG).Info("skip speculative prefill: data-parallel decoder handler not found", "target", dataParallelHostPort)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(payload))
+	if err != nil {
+		logger.V(logging.DEBUG).Info("speculative prefill: data-parallel decoder request build failed", "target", dataParallelHostPort, "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	bw := &bufferedResponseWriter{}
+	handler.ServeHTTP(bw, req)
+	status := bw.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if status >= http.StatusBadRequest {
+		logger.V(logging.DEBUG).Info("speculative prefill data-parallel decoder returned error", "target", dataParallelHostPort, "status", status, "duration", time.Since(started).String(), "payloadBytes", len(payload))
+		return
+	}
+	logger.V(logging.DEBUG).Info("speculative prefill warmed data-parallel decoder KV cache", "target", dataParallelHostPort, "status", status, "duration", time.Since(started).String(), "payloadBytes", len(payload))
 }
 
 // sendPairedPDWarmup warms a disaggregated deployment by issuing a matched

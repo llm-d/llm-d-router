@@ -112,33 +112,33 @@ const (
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
-	Port                    int      `json:"port,omitempty"`
-	ModelServerPort         int      `json:"model-server-port,omitempty"`
-	VLLMPort                int      `json:"vllm-port,omitempty"`
-	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
-	DataParallelSize        int      `json:"data-parallel-size,omitempty"`
-	KVConnector             string   `json:"kv-connector,omitempty"`
-	ECConnector             string   `json:"ec-connector,omitempty"`
-	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
-	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
-	EnableSpeculativePrefill *bool   `json:"enable-speculative-prefill,omitempty"`
-	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-proxy,omitempty"`
-	CertPath                string   `json:"cert-path,omitempty"`
-	EnableTLS               []string `json:"enable-tls,omitempty"`
-	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
-	TLSMinVersion           string   `json:"tls-min-version,omitempty"`
-	TLSCipherSuites         []string `json:"tls-cipher-suites,omitempty"`
-	InferencePool           string   `json:"inference-pool,omitempty"`
-	PoolGroup               string   `json:"pool-group,omitempty"`
-	MaxIdleConnsPerHost     int      `json:"max-idle-conns-per-host,omitempty"`
-	PrefillMaxRetries       *int     `json:"prefill-max-retries,omitempty"`
-	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
-	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
-	Tracing                 *bool    `json:"tracing,omitempty"`
-	MetricsPort             int      `json:"metrics-port,omitempty"`
-	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
+	Port                     int      `json:"port,omitempty"`
+	ModelServerPort          int      `json:"model-server-port,omitempty"`
+	VLLMPort                 int      `json:"vllm-port,omitempty"`
+	MooncakeBootstrapPort    int      `json:"mooncake-bootstrap-port,omitempty"`
+	P2PConnectorPort         int      `json:"p2p-connector-port,omitempty"`
+	DataParallelSize         int      `json:"data-parallel-size,omitempty"`
+	KVConnector              string   `json:"kv-connector,omitempty"`
+	ECConnector              string   `json:"ec-connector,omitempty"`
+	EnableSSRFProtection     *bool    `json:"enable-ssrf-protection,omitempty"`
+	EnablePrefillerSampling  *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableSpeculativePrefill *bool    `json:"enable-speculative-prefill,omitempty"`
+	EnableP2PPull            *bool    `json:"enable-p2p-pull,omitempty"`
+	SecureServing            *bool    `json:"secure-proxy,omitempty"`
+	CertPath                 string   `json:"cert-path,omitempty"`
+	EnableTLS                []string `json:"enable-tls,omitempty"`
+	TLSInsecureSkipVerify    []string `json:"tls-insecure-skip-verify,omitempty"`
+	TLSMinVersion            string   `json:"tls-min-version,omitempty"`
+	TLSCipherSuites          []string `json:"tls-cipher-suites,omitempty"`
+	InferencePool            string   `json:"inference-pool,omitempty"`
+	PoolGroup                string   `json:"pool-group,omitempty"`
+	MaxIdleConnsPerHost      int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries        *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff      string   `json:"prefill-retry-backoff,omitempty"`
+	DecodeChunkSize          int      `json:"decode-chunk-size,omitempty"`
+	Tracing                  *bool    `json:"tracing,omitempty"`
+	MetricsPort              int      `json:"metrics-port,omitempty"`
+	MetricsCertDir           string   `json:"metrics-cert-dir,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -221,20 +221,20 @@ func NewOptions() *Options {
 
 	return &Options{
 		Config: Config{
-			Port:                    defaultPort,
-			KVConnector:             KVConnectorNIXLV2,
-			DataParallelSize:        defaultDataParallelSize,
-			SecureServing:           true,
-			EnablePrefillerSampling: enablePrefillerSampling,
+			Port:                     defaultPort,
+			KVConnector:              KVConnectorNIXLV2,
+			DataParallelSize:         defaultDataParallelSize,
+			SecureServing:            true,
+			EnablePrefillerSampling:  enablePrefillerSampling,
 			EnableSpeculativePrefill: false,
-			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
-			PrefillMaxRetries:       0,
-			PrefillRetryBackoff:     200 * time.Millisecond,
-			MooncakeBootstrapPort:   mooncakeBootstrapPort,
-			P2PConnectorPort:        p2pConnectorPort,
-			PoolGroup:               routing.InferencePoolAPIGroup,
-			DecodeChunkSize:         0,
-			Tracing:                 false,
+			MaxIdleConnsPerHost:      defaultMaxIdleConnsPerHost,
+			PrefillMaxRetries:        0,
+			PrefillRetryBackoff:      200 * time.Millisecond,
+			MooncakeBootstrapPort:    mooncakeBootstrapPort,
+			P2PConnectorPort:         p2pConnectorPort,
+			PoolGroup:                routing.InferencePoolAPIGroup,
+			DecodeChunkSize:          0,
+			Tracing:                  false,
 			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
 			// Port defaults match vLLM's MoRI-IO connector defaults.
 			MoRIIOWriteMode:           false,
