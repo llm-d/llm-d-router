@@ -285,7 +285,7 @@ func TestSidecarConfiguration(t *testing.T) {
 			expectedError: nil,
 		},
 		{
-			name: "flags set constants.ECConnectorNIXL",
+			name: "flags set ECConnectorNIXL",
 			inputFlags: map[string]any{
 				ecConnector: constants.ECConnectorNIXL,
 			},
