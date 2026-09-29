@@ -33,6 +33,7 @@ import (
 const (
 	TokenLoadScorerType        = "token-load-scorer"
 	tokenQueueThresholdDefault = 4194304 // 128 requests @ 32K per request
+	nonTextTokenWeightDefault  = 1.0     // a multimodal token costs the same as a text token
 )
 
 // Config holds the configuration for the TokenLoadScorer.
@@ -41,6 +42,10 @@ type Config struct {
 	// Defaults to 4194304 if unset.
 	QueueThresholdTokens     int64  `json:"queueThresholdTokens"`
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+	// NonTextTokenWeight is how much one multimodal (image, audio, video) token
+	// counts toward the load, relative to a text token. Defaults to 1.0 if unset
+	// or non-positive, which scores every token alike.
+	NonTextTokenWeight float64 `json:"nonTextTokenWeight,omitempty"`
 }
 
 // compile-time type assertion
@@ -49,6 +54,7 @@ var _ fwksched.Scorer = &TokenLoadScorer{}
 type TokenLoadScorer struct {
 	typedName                    fwkplugin.TypedName
 	queueThresholdTokens         float64
+	nonTextTokenWeight           float64
 	inFlightLoadDataKey          fwkplugin.DataKey
 	uncachedRequestTokensDataKey fwkplugin.DataKey
 }
@@ -65,10 +71,14 @@ func TokenLoadScorerFactory(name string, params *json.Decoder, _ fwkplugin.Handl
 	if cfg.QueueThresholdTokens <= 0 {
 		cfg.QueueThresholdTokens = tokenQueueThresholdDefault
 	}
+	if cfg.NonTextTokenWeight <= 0 {
+		cfg.NonTextTokenWeight = nonTextTokenWeightDefault
+	}
 
 	return &TokenLoadScorer{
 		typedName:                    fwkplugin.TypedName{Type: TokenLoadScorerType, Name: name},
 		queueThresholdTokens:         float64(cfg.QueueThresholdTokens),
+		nonTextTokenWeight:           cfg.NonTextTokenWeight,
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
 	}, nil
@@ -103,18 +113,20 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 
 		// Read both accumulated in-flight load and the projected impact of the
 		// request being scored, which are now carried on separate attributes.
-		var tokens int64
+		var tokens, nonTextTokens int64
 		if val, ok := endpoint.Get(s.inFlightLoadDataKey); ok {
 			if load, ok := val.(*attrconcurrency.InFlightLoad); ok && load != nil {
 				tokens += load.Tokens
+				nonTextTokens += load.NonTextTokens
 			}
 		}
 		if val, ok := endpoint.Get(s.uncachedRequestTokensDataKey); ok {
 			if uncached, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
 				tokens += uncached.Tokens
+				nonTextTokens += uncached.NonTextTokens
 			}
 		}
-		tokenLoad = float64(tokens)
+		tokenLoad = s.weightedTokens(tokens, nonTextTokens)
 
 		score := 0.0
 		if tokenLoad <= 0 {
@@ -131,9 +143,20 @@ func (s *TokenLoadScorer) Score(ctx context.Context, _ *fwksched.InferenceReques
 			if md := endpoint.GetMetadata(); md != nil {
 				endpointID = md.ID.String()
 			}
-			debugLogger.Info("TokenLoadScorer scoring", "endpoint", endpointID, "tokenLoad", tokenLoad, "score", score)
+			debugLogger.Info("TokenLoadScorer scoring", "endpoint", endpointID, "tokenLoad", tokenLoad, "nonTextTokens", nonTextTokens, "score", score)
 		}
 	}
 
 	return scores
+}
+
+// weightedTokens is the load of tokens tokens, nonTextTokens of which are
+// multimodal: text counts once and each multimodal token counts
+// nonTextTokenWeight. A text-only load, or an unset weight, is exactly tokens.
+func (s *TokenLoadScorer) weightedTokens(tokens, nonTextTokens int64) float64 {
+	if nonTextTokens <= 0 || s.nonTextTokenWeight <= 0 {
+		return float64(tokens)
+	}
+	nonText := min(nonTextTokens, tokens)
+	return float64(tokens-nonText) + s.nonTextTokenWeight*float64(nonText)
 }

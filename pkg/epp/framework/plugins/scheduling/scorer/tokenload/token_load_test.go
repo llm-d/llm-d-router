@@ -19,10 +19,13 @@ package tokenload
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -149,4 +152,66 @@ func BenchmarkTokenLoadScorer_Score(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = scorer.Score(ctx, req, endpoints)
 	}
+}
+
+// TestTokenLoadScorer_NonTextTokenWeight covers the case the weight exists for:
+// 3000 image tokens plus 3000 text tokens is more work than 6000 text tokens.
+func TestTokenLoadScorer_NonTextTokenWeight(t *testing.T) {
+	newScorer := func(t *testing.T, params string) *TokenLoadScorer {
+		t.Helper()
+		plugin, err := TokenLoadScorerFactory(TokenLoadScorerType, json.NewDecoder(strings.NewReader(params)), nil)
+		require.NoError(t, err)
+		return plugin.(*TokenLoadScorer)
+	}
+	newEndpoint := func(name string) fwksched.Endpoint {
+		return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: name}}, &fwkdl.Metrics{}, nil)
+	}
+	score := func(s *TokenLoadScorer, mixed, text fwksched.Endpoint) (float64, float64) {
+		scores := s.Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{mixed, text})
+		return scores[mixed], scores[text]
+	}
+
+	t.Run("default weight scores every token alike", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000}`)
+		mixed, text := newEndpoint("mixed"), newEndpoint("text")
+		mixed.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 6000, NonTextTokens: 3000})
+		text.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 6000})
+
+		mixedScore, textScore := score(s, mixed, text)
+		assert.InDelta(t, 0.5, mixedScore, 1e-9)
+		assert.InDelta(t, 0.5, textScore, 1e-9)
+	})
+
+	t.Run("non-text weight makes the multimodal load heavier", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 2}`)
+		mixed, text := newEndpoint("mixed"), newEndpoint("text")
+		mixed.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 6000, NonTextTokens: 3000})
+		text.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 6000})
+
+		// mixed: 3000 text + 2*3000 image = 9000 -> 1 - 9000/12000; text: 1 - 6000/12000.
+		mixedScore, textScore := score(s, mixed, text)
+		assert.InDelta(t, 0.25, mixedScore, 1e-9)
+		assert.InDelta(t, 0.5, textScore, 1e-9)
+	})
+
+	t.Run("weight applies to the request being scheduled too", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 3}`)
+		ep := newEndpoint("ep")
+		ep.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 2000, NonTextTokens: 1000})
+		ep.Put(s.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: 2000, NonTextTokens: 1000})
+
+		// (1000 + 3*1000) in flight + (1000 + 3*1000) for this request = 8000.
+		scores := s.Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{ep})
+		assert.InDelta(t, 1-8000.0/12000, scores[ep], 1e-9)
+	})
+
+	t.Run("non-positive weight falls back to 1.0", func(t *testing.T) {
+		assert.InDelta(t, nonTextTokenWeightDefault, newScorer(t, `{"nonTextTokenWeight": 0}`).nonTextTokenWeight, 0)
+		assert.InDelta(t, nonTextTokenWeightDefault, newScorer(t, `{"nonTextTokenWeight": -2}`).nonTextTokenWeight, 0)
+	})
+
+	t.Run("non-text count is capped at the total", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 2}`)
+		assert.InDelta(t, 2000, s.weightedTokens(1000, 5000), 0, "only the 1000 tokens that exist can be multimodal")
+	})
 }

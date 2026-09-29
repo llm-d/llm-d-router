@@ -47,6 +47,11 @@ type InFlightLoad struct {
 	// Requests is the in-flight request count this endpoint has committed to,
 	// maintained with the same lifecycle as Tokens.
 	Requests int64
+
+	// NonTextTokens is the part of Tokens that is multimodal placeholder tokens
+	// (image, audio, video), maintained with the same lifecycle as Tokens. It is
+	// never larger than Tokens, so Tokens - NonTextTokens is the text share.
+	NonTextTokens int64
 }
 
 // Clone returns an independent copy of the InFlightLoad. The value-copy
@@ -73,6 +78,11 @@ type UncachedRequestTokens struct {
 	// never committed to endpoint state and not decremented on stream end.
 	// Zero when no request is in scope (e.g., background snapshots).
 	Tokens int64
+
+	// NonTextTokens is the part of Tokens that is multimodal placeholder tokens
+	// still to be computed on this endpoint, after the same prefix-cache
+	// discount. Never larger than Tokens.
+	NonTextTokens int64
 }
 
 // Clone returns an independent copy of the UncachedRequestTokens.
