@@ -45,26 +45,8 @@ const (
 
 	defaultMaxIdleConnsPerHost = 1024
 
-	requestHeaderRequestID = reqcommon.RequestIDHeaderKey
-
-	requestFieldKVTransferParams     = reqcommon.FieldKVTransferParams
-	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
-	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
-	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
-	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
-	requestFieldMinTokens            = reqcommon.FieldMinTokens
-	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
-	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
-	requestFieldDoRemoteDecode       = reqcommon.FieldDoRemoteDecode
-	requestFieldRemoteBlockIDs       = reqcommon.FieldRemoteBlockIDs
-	requestFieldRemoteEngineID       = reqcommon.FieldRemoteEngineID
-	requestFieldRemoteHost           = reqcommon.FieldRemoteHost
-	requestFieldRemotePort           = reqcommon.FieldRemotePort
-	requestFieldStream               = reqcommon.FieldStream
-	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
-	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
-	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
-	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
+	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
+	tracerScope = "llm-d-router/pkg/sidecar/proxy"
 
 	// requestHeaderDataParallelRank pins a request to a specific vLLM
 	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
@@ -85,10 +67,6 @@ const (
 
 	finishReasonCacheThreshold = "cache_threshold"
 
-	// SGLang bootstrap fields
-	requestFieldBootstrapHost = "bootstrap_host"
-	requestFieldBootstrapPort = "bootstrap_port"
-	requestFieldBootstrapRoom = "bootstrap_room"
 	// Mooncake transfer fields
 	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
@@ -100,14 +78,6 @@ const (
 	requestFieldRemotePrefiller = "remote_prefiller"
 	requestFieldRemoteKVSource  = "remote_kv_source"
 	requestFieldKVRequestID     = "kv_request_id"
-
-	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
-	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
-	KVConnectorSGLang        = constants.KVConnectorSGLang
-	KVConnectorMooncake      = constants.KVConnectorMooncake
-	KVConnectorOffloading    = constants.KVConnectorOffloading
-	ECExampleConnector       = constants.ECExampleConnector
-	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
 
 // Config represents the complete runtime configuration for the proxy server.
@@ -547,25 +517,25 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
-	case KVConnectorSharedStorage:
+	case constants.KVConnectorSharedStorage:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
 			s.handleSharedStorage(w, r, host, apiType)
 		}
-	case KVConnectorSGLang:
+	case constants.KVConnectorSGLang:
 		// SGLang sends the same body to the prefill and decode requests and caps no
 		// output tokens, so it does not use the API type.
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}
-	case KVConnectorMooncake:
+	case constants.KVConnectorMooncake:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
 			s.handleMooncake(w, r, host, apiType)
 		}
-	case KVConnectorOffloading:
+	case constants.KVConnectorOffloading:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
 			s.handleP2P(w, r, host, kvCacheSource, apiType)
 		}
-	case KVConnectorNIXLV2:
+	case constants.KVConnectorNIXLV2:
 		fallthrough
 	default:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
@@ -583,9 +553,9 @@ func (s *Server) setECConnector() {
 	}
 
 	switch ecConnector {
-	case ECExampleConnector:
+	case constants.ECExampleConnector:
 		s.handleECConnector = s.handleECSharedStorage
-	case ECConnectorNIXL:
+	case constants.ECConnectorNIXL:
 		s.handleECConnector = s.handleECNIXL
 	default:
 		// Unknown EC connector value, skip encoder stage. Validate() should

@@ -30,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
@@ -69,10 +70,10 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	// Build prefill request body
 	prefillData := maps.Clone(requestData)
-	prefillData[requestFieldKVTransferParams] = map[string]any{
-		requestFieldDoRemotePrefill: false,
-		requestFieldDoRemoteDecode:  true,
-		requestFieldTransferID:      transferID,
+	prefillData[reqcommon.FieldKVTransferParams] = map[string]any{
+		reqcommon.FieldDoRemotePrefill: false,
+		reqcommon.FieldDoRemoteDecode:  true,
+		requestFieldTransferID:         transferID,
 	}
 	// update fields from original body; return asap.
 	reqcommon.CapSingleToken(prefillData, apiType)
@@ -93,12 +94,12 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	// Build decode request body
 	decodeData := maps.Clone(requestData)
-	decodeData[requestFieldKVTransferParams] = map[string]any{
-		requestFieldDoRemotePrefill:     true,
-		requestFieldDoRemoteDecode:      false,
+	decodeData[reqcommon.FieldKVTransferParams] = map[string]any{
+		reqcommon.FieldDoRemotePrefill:  true,
+		reqcommon.FieldDoRemoteDecode:   false,
 		requestFieldTransferID:          transferID,
 		requestFieldRemoteBootstrapAddr: bootstrapAddr,
-		requestFieldRemoteEngineID:      engineID,
+		reqcommon.FieldRemoteEngineID:   engineID,
 	}
 
 	decodeBody, err := json.Marshal(decodeData)
@@ -113,7 +114,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		trace.Info("Decode request", logging.HTTPBodyKey, string(decodeBody))
 	}
 
-	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, KVConnectorMooncake, func(prefillReq, _ *http.Request) {
+	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(mooncakeDataParallelRankHeader, dpRank)

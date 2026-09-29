@@ -40,8 +40,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := body[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
+	if cacheHitThreshold, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
 		needsPrefill, err := s.tryDecode(w, decodeReq, body)
 		if err != nil {
@@ -51,7 +51,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 			s.logger.V(logging.DEBUG).Info("decode succeeded without prefill")
 			return
 		}
-		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 	}
 
 	// we clone the completion request to avoid modifying the original request
@@ -62,7 +62,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
@@ -77,7 +77,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 
 // tryDecode attempts to decode and returns whether prefill is needed.
 func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, body map[string]any) (bool, error) {
-	if isStreaming, _ := body[requestFieldStream].(bool); isStreaming {
+	if isStreaming, _ := body[reqcommon.FieldStream].(bool); isStreaming {
 		if flusher, ok := w.(flushableResponseWriter); ok {
 			bw := newResponseWriterWithBuffer(flusher)
 			return s.tryDecodeStreaming(bw, r)
@@ -218,7 +218,7 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType) error {
 	// Prepare prefill request
 	reqcommon.CapSingleToken(body, apiType)
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	pbody, err := json.Marshal(body)
 	if err != nil {

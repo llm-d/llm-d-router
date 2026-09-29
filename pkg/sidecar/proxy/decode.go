@@ -88,7 +88,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	)
 	defer span.End()
 
-	streamingEnabled, _ := body[requestFieldStream].(bool)
+	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
 
 	span.SetAttributes(
@@ -144,17 +144,17 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		}
 
 		chunkReq := maps.Clone(body)
-		chunkReq[requestFieldMaxTokens] = chunkBudget
-		chunkReq[requestFieldMaxCompletionTokens] = chunkBudget
-		chunkReq[requestFieldStream] = false
-		delete(chunkReq, requestFieldStreamOptions)
+		chunkReq[reqcommon.FieldMaxTokens] = chunkBudget
+		chunkReq[reqcommon.FieldMaxCompletionTokens] = chunkBudget
+		chunkReq[reqcommon.FieldStream] = false
+		delete(chunkReq, reqcommon.FieldStreamOptions)
 
 		// From the second chunk onward: remove KV transfer params and instruct
 		// to continue the last assistant message rather than start a new one.
 		if chunkIndex > 0 {
-			delete(chunkReq, requestFieldKVTransferParams)
-			chunkReq[requestFieldContinueFinalMessage] = true
-			chunkReq[requestFieldAddGenerationPrompt] = false
+			delete(chunkReq, reqcommon.FieldKVTransferParams)
+			chunkReq[reqcommon.FieldContinueFinalMessage] = true
+			chunkReq[reqcommon.FieldAddGenerationPrompt] = false
 		}
 
 		chunkBody, err := json.Marshal(chunkReq)
@@ -306,7 +306,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 // Prefers max_completion_tokens (OpenAI v1) over max_tokens (legacy).
 // Returns -1 when neither field is set (no explicit limit).
 func resolveMaxTokens(req map[string]any) int {
-	for _, field := range []string{requestFieldMaxCompletionTokens, requestFieldMaxTokens} {
+	for _, field := range []string{reqcommon.FieldMaxCompletionTokens, reqcommon.FieldMaxTokens} {
 		if v, ok := req[field]; ok {
 			if n, ok := toInt(v); ok && n > 0 {
 				return n

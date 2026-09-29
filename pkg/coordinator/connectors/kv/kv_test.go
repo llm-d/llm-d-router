@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -35,9 +36,9 @@ func TestSGLangKV_Params(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		KVTransferParams: map[string]any{
-			fieldBootstrapHost: "10.0.0.42",
-			fieldBootstrapPort: 8998,
-			fieldBootstrapRoom: int64(12345),
+			reqcommon.FieldBootstrapHost: "10.0.0.42",
+			reqcommon.FieldBootstrapPort: 8998,
+			reqcommon.FieldBootstrapRoom: int64(12345),
 		},
 	}
 
@@ -49,21 +50,21 @@ func TestSGLangKV_Params(t *testing.T) {
 	if prefill["do_remote_prefill"] != false {
 		t.Errorf("prefill: do_remote_prefill = %v, want false", prefill["do_remote_prefill"])
 	}
-	if prefill[fieldBootstrapPort] != sglangBootstrapPort {
-		t.Errorf("prefill: %s = %v, want %d", fieldBootstrapPort, prefill[fieldBootstrapPort], sglangBootstrapPort)
+	if prefill[reqcommon.FieldBootstrapPort] != sglangBootstrapPort {
+		t.Errorf("prefill: %s = %v, want %d", reqcommon.FieldBootstrapPort, prefill[reqcommon.FieldBootstrapPort], sglangBootstrapPort)
 	}
-	room, ok := prefill[fieldBootstrapRoom].(string)
+	room, ok := prefill[reqcommon.FieldBootstrapRoom].(string)
 	if !ok || room == "" {
-		t.Errorf("prefill: %s = %v (%T), want non-empty string", fieldBootstrapRoom, prefill[fieldBootstrapRoom], prefill[fieldBootstrapRoom])
+		t.Errorf("prefill: %s = %v (%T), want non-empty string", reqcommon.FieldBootstrapRoom, prefill[reqcommon.FieldBootstrapRoom], prefill[reqcommon.FieldBootstrapRoom])
 	}
 
 	// Decode: forwards prefill-response kv_transfer_params plus remote flags.
 	wantDecode := map[string]any{
-		fieldBootstrapHost:  "10.0.0.42",
-		fieldBootstrapPort:  8998,
-		fieldBootstrapRoom:  int64(12345),
-		"do_remote_decode":  false,
-		"do_remote_prefill": true,
+		reqcommon.FieldBootstrapHost: "10.0.0.42",
+		reqcommon.FieldBootstrapPort: 8998,
+		reqcommon.FieldBootstrapRoom: int64(12345),
+		"do_remote_decode":           false,
+		"do_remote_prefill":          true,
 	}
 	if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, wantDecode) {
 		t.Errorf("decode params:\n got=%v\nwant=%v", got, wantDecode)

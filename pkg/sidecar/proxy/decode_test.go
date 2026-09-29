@@ -32,6 +32,7 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -68,7 +69,7 @@ func newChunkedTestSetupWithHandler(chunkSize int, handler http.Handler) *chunke
 	cfg := Config{
 		Port:            "0",
 		DecoderURL:      decoderURL,
-		KVConnector:     KVConnectorNIXLV2,
+		KVConnector:     constants.KVConnectorNIXLV2,
 		DecodeChunkSize: chunkSize,
 	}
 	proxy := NewProxy(cfg)
@@ -287,7 +288,7 @@ var _ = Describe("Chunked Decode", func() {
 	Describe("helper functions", func() {
 
 		It("resolveMaxTokens prefers max_completion_tokens over max_tokens", func() {
-			req := map[string]any{requestFieldMaxTokens: float64(50), requestFieldMaxCompletionTokens: float64(100)}
+			req := map[string]any{reqcommon.FieldMaxTokens: float64(50), reqcommon.FieldMaxCompletionTokens: float64(100)}
 			Expect(resolveMaxTokens(req)).To(Equal(100))
 		})
 

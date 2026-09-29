@@ -158,7 +158,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			var parsed map[string]any
 			assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
 
-			ec, hasEC := parsed[requestFieldECTransferParams].(map[string]any)
+			ec, hasEC := parsed[reqcommon.FieldECTransferParams].(map[string]any)
 			if tt.wantECParams {
 				assert.True(t, hasEC, "prefill body should carry ec_transfer_params")
 				assert.Len(t, ec, tt.wantECLen, "one entry per distinct multimodal item")
@@ -168,7 +168,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 					assert.Containsf(t, entry, "peer_host", "ec[%q] should carry transfer metadata", k)
 				}
 			} else {
-				_, present := parsed[requestFieldECTransferParams]
+				_, present := parsed[reqcommon.FieldECTransferParams]
 				assert.False(t, present, "shared_storage primer must not add ec_transfer_params to the prefill body")
 			}
 		})

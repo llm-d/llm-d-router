@@ -34,6 +34,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
 
@@ -115,18 +116,18 @@ func expectGenerateRequestTokenLimitsOn(prefillHandler, decodeHandler *mock.Chat
 	prefillReq := prefillHandler.GetCompletionRequests()[0]
 	decodeReq := decodeHandler.GetCompletionRequests()[0]
 
-	prefillSP, ok := prefillReq[requestFieldSamplingParams].(map[string]any)
+	prefillSP, ok := prefillReq[reqcommon.FieldSamplingParams].(map[string]any)
 	Expect(ok).To(BeTrue())
-	Expect(prefillSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-	Expect(prefillSP).ToNot(HaveKey(requestFieldMinTokens))
-	Expect(prefillReq).ToNot(HaveKey(requestFieldMaxTokens))
-	Expect(prefillReq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
+	Expect(prefillSP).To(HaveKeyWithValue(reqcommon.FieldMaxTokens, BeNumerically("==", 1)))
+	Expect(prefillSP).ToNot(HaveKey(reqcommon.FieldMinTokens))
+	Expect(prefillReq).ToNot(HaveKey(reqcommon.FieldMaxTokens))
+	Expect(prefillReq).ToNot(HaveKey(reqcommon.FieldMaxCompletionTokens))
 
-	decodeSP, ok := decodeReq[requestFieldSamplingParams].(map[string]any)
+	decodeSP, ok := decodeReq[reqcommon.FieldSamplingParams].(map[string]any)
 	Expect(ok).To(BeTrue())
-	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 100)))
-	Expect(decodeSP).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
-	Expect(decodeReq).ToNot(HaveKey(requestFieldMaxCompletionTokens))
+	Expect(decodeSP).To(HaveKeyWithValue(reqcommon.FieldMaxTokens, BeNumerically("==", 100)))
+	Expect(decodeSP).To(HaveKeyWithValue(reqcommon.FieldMinTokens, BeNumerically("==", 5)))
+	Expect(decodeReq).ToNot(HaveKey(reqcommon.FieldMaxCompletionTokens))
 }
 
 type sidecarTestInfo struct {
@@ -160,7 +161,7 @@ func (testInfo *sidecarTestInfo) startProxy() string {
 }
 
 // SGLang and Mooncake excluded: async prefill requires Eventually and bootstrap server setup.
-var connectors = []string{KVConnectorSharedStorage, KVConnectorNIXLV2}
+var connectors = []string{constants.KVConnectorSharedStorage, constants.KVConnectorNIXLV2}
 
 var _ = Describe("Common Connector tests", func() {
 
@@ -319,7 +320,7 @@ var _ = Describe("Common Connector tests", func() {
 				prefillReq := testInfo.prefillHandler.CompletionRequests[0]
 
 				Expect(prefillReq).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 1)))
-				Expect(prefillReq).ToNot(HaveKey(requestFieldMinTokens))
+				Expect(prefillReq).ToNot(HaveKey(reqcommon.FieldMinTokens))
 
 				By("verifying decode request keeps the client's original min_tokens=5")
 				Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -396,11 +397,11 @@ var _ = Describe("Non-object request body", func() {
 			testInfo.cancelFn()
 			<-testInfo.stoppedCh
 		},
-		Entry("nixlv2 null", KVConnectorNIXLV2, `null`),
-		Entry("shared-storage null", KVConnectorSharedStorage, `null`),
-		Entry("mooncake null", KVConnectorMooncake, `null`),
-		Entry("p2p null", KVConnectorOffloading, `null`),
-		Entry("sglang null", KVConnectorSGLang, `null`),
+		Entry("nixlv2 null", constants.KVConnectorNIXLV2, `null`),
+		Entry("shared-storage null", constants.KVConnectorSharedStorage, `null`),
+		Entry("mooncake null", constants.KVConnectorMooncake, `null`),
+		Entry("p2p null", constants.KVConnectorOffloading, `null`),
+		Entry("sglang null", constants.KVConnectorSGLang, `null`),
 	)
 })
 
@@ -420,35 +421,35 @@ var _ = Describe("Unreadable request body", func() {
 			Expect(w.Code).To(Equal(http.StatusBadRequest))
 			Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring("failed to read request body"))
 		},
-		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
+		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleNIXLV2(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
 			}),
-		Entry("shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage},
+		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleSharedStorage(w, r, "10.0.0.1:8080", reqcommon.APITypeChatCompletions)
 			}),
-		Entry("mooncake", Config{Port: "0", KVConnector: KVConnectorMooncake},
+		Entry("mooncake", Config{Port: "0", KVConnector: constants.KVConnectorMooncake},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleMooncake(w, r, "10.0.0.1:8080", reqcommon.APITypeChatCompletions)
 			}),
-		Entry("p2p", Config{Port: "0", KVConnector: KVConnectorOffloading},
+		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleP2P(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
 			}),
-		Entry("sglang", Config{Port: "0", KVConnector: KVConnectorSGLang},
+		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleSGLang(w, r, "10.0.0.1:8080")
 			}),
-		Entry("ec-nixl", Config{Port: "0", KVConnector: KVConnectorNIXLV2, ECConnector: ECConnectorNIXL},
+		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
 			}),
-		Entry("ec-shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage, ECConnector: ECExampleConnector},
+		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
 			}),
-		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: KVConnectorOffloading},
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.decodeWithP2PSource(w, r, "10.0.0.2:8080")
 			}),
@@ -500,35 +501,35 @@ var _ = Describe("Stateful Responses fields", func() {
 			Expect(w.Code).To(Equal(http.StatusBadRequest))
 			Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
 		},
-		Entry("nixlv2", Config{Port: "0", KVConnector: KVConnectorNIXLV2},
+		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleNIXLV2(w, r, upstream, "", reqcommon.APITypeResponses)
 			}),
-		Entry("shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage},
+		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleSharedStorage(w, r, upstream, reqcommon.APITypeResponses)
 			}),
-		Entry("mooncake", Config{Port: "0", KVConnector: KVConnectorMooncake},
+		Entry("mooncake", Config{Port: "0", KVConnector: constants.KVConnectorMooncake},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleMooncake(w, r, upstream, reqcommon.APITypeResponses)
 			}),
-		Entry("p2p", Config{Port: "0", KVConnector: KVConnectorOffloading},
+		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleP2P(w, r, upstream, "", reqcommon.APITypeResponses)
 			}),
-		Entry("sglang", Config{Port: "0", KVConnector: KVConnectorSGLang},
+		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleSGLang(w, r, upstream)
 			}),
-		Entry("ec-nixl", Config{Port: "0", KVConnector: KVConnectorNIXLV2, ECConnector: ECConnectorNIXL},
+		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleECNIXL(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
 			}),
-		Entry("ec-shared-storage", Config{Port: "0", KVConnector: KVConnectorSharedStorage, ECConnector: ECExampleConnector},
+		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleECSharedStorage(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
 			}),
-		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: KVConnectorOffloading},
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.decodeWithP2PSource(w, r, upstream)
 			}),
