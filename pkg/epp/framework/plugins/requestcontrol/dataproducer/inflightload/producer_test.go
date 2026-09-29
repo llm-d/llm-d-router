@@ -352,6 +352,7 @@ func TestInFlightLoadProducer_DeleteEndpointPrunesOnlyMatchingMetricSeries(t *te
 	})
 	require.NoError(t, err)
 
+	//nolint:gosec // G101: metric name, not a credential
 	expectedTokens := `
 # HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
 # TYPE llm_d_epp_inflight_tokens gauge

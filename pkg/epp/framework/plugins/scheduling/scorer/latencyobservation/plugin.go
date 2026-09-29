@@ -251,7 +251,7 @@ func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		// Independent coin per under-observed endpoint. Overrides the final
 		// score only, so a probe never distorts the normalization above.
 		if s.explorationRate > 0 && !e.hasBaseline {
-			if rand.Float64() < s.explorationRate {
+			if rand.Float64() < s.explorationRate { //nolint:gosec // G404: exploration coin-flip for endpoint scoring, not security-sensitive
 				scores[endpoint] = 1.0
 			} else if anyTrusted {
 				scores[endpoint] = 0

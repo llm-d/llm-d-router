@@ -210,8 +210,8 @@ func runPredictionWithBody(t *testing.T, p *dataProducer, id string, body *fwkrh
 }
 
 const (
-	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens"
-	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"
+	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens" //nolint:gosec // G101: metric name, not a credential
+	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"           //nolint:gosec // G101: metric name, not a credential
 )
 
 // metricSum reads a shared prefix metric out of the registry it is registered

@@ -274,8 +274,7 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	// dialer (addressGuard.dialControl) blocks the resolved IP if it is
 	// loopback, link-local, CGNAT, or private, closing the DNS-rebinding gap
 	// a hostname check alone would miss.
-	// codeql[go/request-forgery]
-	resp, err := s.client.Do(req)
+	resp, err := s.client.Do(req) // codeql[go/request-forgery]
 	call.Done()
 	if err != nil {
 		return nil, "", err

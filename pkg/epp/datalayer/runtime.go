@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -524,6 +525,24 @@ func (r *Runtime) UpdateEndpoint(ctx context.Context, ep fwkdl.Endpoint) {
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
 }
 
+// runRecoveredExtractor invokes one extractor under panic recovery, mirroring
+// the http source's runExtractor: a panic is converted into an error carrying
+// the stack in the log, so the caller's existing failure handling (counting,
+// logging, and on the notification path retry via the reconciler) applies
+// uniformly. Notification events are one-shot, so unlike the polling path a
+// swallowed panic would permanently lose the event; returning the wrapped
+// error keeps panics retryable exactly like ordinary extract failures.
+func runRecoveredExtractor(logger logr.Logger, sourceType, extractorType string, extract func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(fmt.Errorf("%v", r), "extractor panicked",
+				"source", sourceType, "extractor", extractorType, "stack", string(debug.Stack()))
+			err = fmt.Errorf("extractor panicked: %v", r)
+		}
+	}()
+	return extract()
+}
+
 // dispatchEndpointEvent routes an endpoint lifecycle event to all registered
 // EndpointSources and their extractors.
 func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger, event fwkdl.EndpointEvent) {
@@ -546,7 +565,9 @@ func (r *Runtime) dispatchEndpointEvent(ctx context.Context, logger logr.Logger,
 		}
 		for _, ext := range exts {
 			if epExt, ok := ext.(fwkdl.EndpointExtractor); ok {
-				if err := epExt.Extract(ctx, *processed); err != nil {
+				if err := runRecoveredExtractor(logger, src.TypedName().Type, ext.TypedName().Type, func() error {
+					return epExt.Extract(ctx, *processed)
+				}); err != nil {
 					metrics.RecordDataLayerExtractError(src.TypedName().Type, ext.TypedName().Type)
 					logger.Error(err, "endpoint extractor failed", "extractor", ext.TypedName())
 				}

@@ -61,6 +61,7 @@ const chatCompletionsRequestBodyWithMinCap = `{
 				"min_tokens": 5
 			}`
 
+//nolint:gosec // G101: JSON test-fixture string, not a credential
 const generateRequestBodyWithTokenLimits = `{
 				"model": "Qwen/Qwen2-0.5B",
 				"token_ids": [1, 2, 3, 4],

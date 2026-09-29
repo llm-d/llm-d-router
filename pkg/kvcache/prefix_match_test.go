@@ -462,7 +462,7 @@ func TestMatchBlockKeysManyTiers(t *testing.T) {
 // entries.
 func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
-	rng := rand.New(rand.NewSource(1))
+	rng := rand.New(rand.NewSource(1)) //nolint:gosec // G404: fixed-seed deterministic test fixture
 	tiers := []string{"gpu", "cpu", "disk", kvcache.SpeculativeTier}
 	backends := []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
 	weights := map[string]float64{"gpu": 1.0, "cpu": 0.8}

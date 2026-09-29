@@ -104,13 +104,13 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
 	var completionRequest map[string]any
 	if err := json.Unmarshal(b, &completionRequest); err != nil {
-		w.Write([]byte(err.Error())) //nolint:errcheck
+		_, _ = w.Write([]byte(err.Error()))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -135,7 +135,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 			if !ok || kvTransferParams == nil {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("expected kv_transfer_params:{...}")) //nolint:errcheck
+				_, _ = w.Write([]byte("expected kv_transfer_params:{...}"))
 				return
 			}
 			kvTransferParamsMap, ok := kvTransferParams.(map[string]any)
