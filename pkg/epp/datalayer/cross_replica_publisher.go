@@ -142,14 +142,19 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 		return
 	}
 	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
+	supply := spec.Supply(endpointID)
 	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
 		Get: func() fwkdl.Cloneable {
-			if value, ok, _ := p.get(ctx, spec, endpointID); ok {
-				if cloneable, ok := value.(fwkdl.Cloneable); ok {
-					return cloneable
-				}
+			local := supply()
+			peerAggregate, ok, _ := p.get(ctx, spec, endpointID)
+			if !ok {
+				return local
 			}
-			return nil
+			combined := spec.Aggregate([]any{local, peerAggregate})
+			if cloneable, ok := combined.(fwkdl.Cloneable); ok {
+				return cloneable
+			}
+			return local
 		},
 	})
 }

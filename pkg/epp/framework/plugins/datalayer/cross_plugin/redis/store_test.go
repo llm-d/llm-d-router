@@ -17,7 +17,9 @@ limitations under the License.
 package redis
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,9 +32,11 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
 const (
@@ -42,6 +46,10 @@ const (
 )
 
 var testStateKey = fwkdl.StateKey("inflight")
+
+type customValue struct {
+	Count int
+}
 
 type commandRecorder struct {
 	commands []goredis.Cmder
@@ -124,6 +132,14 @@ func sumInts(values []any) any {
 	return total
 }
 
+func sumCustomValues(values []any) any {
+	total := &customValue{}
+	for _, value := range values {
+		total.Count += value.(*customValue).Count
+	}
+	return total
+}
+
 func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string) (int, bool) {
 	t.Helper()
 	value, ok, err := store.Get(context.Background(), key, endpointID)
@@ -134,7 +150,7 @@ func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID
 	return value.(int), true
 }
 
-func TestSetPreparesAggregateAndGetReadsMemory(t *testing.T) {
+func TestSetPreparesPeerAggregateAndGetReadsMemory(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
@@ -145,9 +161,51 @@ func TestSetPreparesAggregateAndGetReadsMemory(t *testing.T) {
 	for range 2 {
 		total, ok := getSum(t, store, testStateKey, testEndpointID)
 		require.True(t, ok)
-		require.Equal(t, 11, total)
+		require.Equal(t, 7, total)
 	}
 	require.Equal(t, int64(1), counter.count.Load(), "Get must not read Redis")
+}
+
+func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := newTestStore(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-b", &customValue{Count: 7}, time.Now())
+
+	require.NoError(t, store.Set(
+		context.Background(), testStateKey, testEndpointID, &customValue{Count: 4}, sumCustomValues,
+	))
+	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, &customValue{Count: 7}, value)
+}
+
+func TestEncodeStampedUsesConcreteValueStream(t *testing.T) {
+	writtenAt := time.Unix(123, 456).UTC()
+	data, err := encodeStamped(&customValue{Count: 7}, writtenAt)
+	require.NoError(t, err)
+
+	decoder := gob.NewDecoder(bytes.NewReader(data))
+	var decodedAt time.Time
+	require.NoError(t, decoder.Decode(&decodedAt))
+	require.Equal(t, writtenAt, decodedAt)
+
+	var value customValue
+	require.NoError(t, decoder.Decode(&value))
+	require.Equal(t, customValue{Count: 7}, value)
+}
+
+func TestEncodeStampedSupportsInFlightLoad(t *testing.T) {
+	writtenAt := time.Unix(123, 456).UTC()
+	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
+	data, err := encodeStamped(want, writtenAt)
+	require.NoError(t, err)
+
+	stamped, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
+	require.NoError(t, err)
+	require.Equal(t, want, stamped.Value)
+	require.Equal(t, writtenAt, stamped.WrittenAt)
 }
 
 func TestSetRefreshesPreparedAggregate(t *testing.T) {
@@ -159,12 +217,12 @@ func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	seedReplica(t, server, testStateKey, "epp-b", 9, time.Now())
 	total, ok := getSum(t, store, testStateKey, testEndpointID)
 	require.True(t, ok)
-	require.Equal(t, 11, total)
+	require.Equal(t, 7, total)
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	total, ok = getSum(t, store, testStateKey, testEndpointID)
 	require.True(t, ok)
-	require.Equal(t, 13, total)
+	require.Equal(t, 9, total)
 	require.Equal(t, int64(2), counter.count.Load())
 }
 
@@ -210,15 +268,19 @@ func TestSetSkipsStaleAndUndecodableFields(t *testing.T) {
 
 	total, ok := getSum(t, store, testStateKey, testEndpointID)
 	require.True(t, ok)
-	require.Equal(t, 11, total)
+	require.Equal(t, 7, total)
 }
 
 func TestPreparedAggregateExpires(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{value: 4, expiresAt: time.Now().Add(-time.Second)})
+	store.cache.Store(hashKey, &aggregateCacheEntry{
+		values: []cachedReplicaValue{
+			{value: 7, expiresAt: time.Now().Add(-time.Second)},
+		},
+		aggregate: sumInts,
+	})
 
 	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
 
@@ -229,9 +291,29 @@ func TestPreparedAggregateExpires(t *testing.T) {
 	require.False(t, cached)
 }
 
+func TestGetKeepsUnexpiredPeerValues(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := newTestStore(t, server, testReplicaID)
+	hashKey := store.hashKey(testStateKey, testEndpointID)
+	store.cache.Store(hashKey, &aggregateCacheEntry{
+		values: []cachedReplicaValue{
+			{value: 100, expiresAt: time.Now().Add(-time.Second)},
+			{value: 7, expiresAt: time.Now().Add(time.Second)},
+		},
+		aggregate: sumInts,
+	})
+
+	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 7, value)
+}
+
 func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	require.NoError(t, store.Delete(context.Background(), testStateKey, testEndpointID))
@@ -297,6 +379,23 @@ func TestGetOrSetReturnsFirstValueAcrossStores(t *testing.T) {
 	require.Equal(t, "a", actual)
 }
 
+func TestGetOrSetSupportsUnregisteredConcreteValue(t *testing.T) {
+	server := miniredis.RunT(t)
+	storeA, _ := newTestStore(t, server, "epp-a")
+	storeB, _ := newTestStore(t, server, "epp-b")
+	ctx := context.Background()
+
+	actual, existed, err := storeA.GetOrSet(ctx, "request", "request-id", &customValue{Count: 1})
+	require.NoError(t, err)
+	require.False(t, existed)
+	require.Equal(t, &customValue{Count: 1}, actual)
+
+	actual, existed, err = storeB.GetOrSet(ctx, "request", "request-id", &customValue{Count: 2})
+	require.NoError(t, err)
+	require.True(t, existed)
+	require.Equal(t, &customValue{Count: 1}, actual)
+}
+
 func TestGetOrSetIsLinearizable(t *testing.T) {
 	server := miniredis.RunT(t)
 	const callers = 16
@@ -342,6 +441,9 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	store, _ := newTestStore(t, server, testReplicaID)
 	ctx := context.Background()
 
+	peer, err := encodeStamped(7, time.Now())
+	require.NoError(t, err)
+	server.HSet(store.hashKey("request", "request-id"), "epp-b", string(peer))
 	require.NoError(t, store.Set(ctx, "request", "request-id", 4, sumInts))
 	actual, existed, err := store.GetOrSet(ctx, "request", "request-id", "decision")
 	require.NoError(t, err)
@@ -350,7 +452,7 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 
 	total, ok := getSum(t, store, "request", "request-id")
 	require.True(t, ok)
-	require.Equal(t, 4, total)
+	require.Equal(t, 7, total)
 }
 
 func TestGetOrSetExpires(t *testing.T) {
@@ -382,6 +484,37 @@ func TestGetOrSetPropagatesRedisErrors(t *testing.T) {
 	require.ErrorContains(t, err, "redis unavailable")
 	require.False(t, existed)
 	require.Nil(t, actual)
+}
+
+func TestSetRecoversAfterRedisBecomesAvailable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	client := goredis.NewClient(&goredis.Options{
+		Addr:         address,
+		DialTimeout:  100 * time.Millisecond,
+		ReadTimeout:  100 * time.Millisecond,
+		WriteTimeout: 100 * time.Millisecond,
+		MaxRetries:   0,
+	})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	store := &RedisStateStore{replicaID: testReplicaID, client: client, ttl: testTTL}
+
+	require.Error(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+
+	server := miniredis.NewMiniRedis()
+	require.NoError(t, server.StartAddr(address))
+	t.Cleanup(server.Close)
+	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
+
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.NoError(collect, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	}, time.Second, 10*time.Millisecond)
+	total, ok := getSum(t, store, testStateKey, testEndpointID)
+	require.True(t, ok)
+	require.Equal(t, 7, total)
 }
 
 func TestGetOrSetRejectsNilCandidate(t *testing.T) {
@@ -440,6 +573,16 @@ func TestFactoryConfiguration(t *testing.T) {
 			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"soon\"}", server.Addr()),
 			wantErr: "invalid ttl",
 		},
+		{
+			name:    "zero TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"0s\"}", server.Addr()),
+			wantErr: "ttl must be positive",
+		},
+		{
+			name:    "negative TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"-1s\"}", server.Addr()),
+			wantErr: "ttl must be positive",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -457,4 +600,19 @@ func TestFactoryConfiguration(t *testing.T) {
 			require.Equal(t, "redis", store.TypedName().Name)
 		})
 	}
+}
+
+func TestFactoryDoesNotRequireRedisAvailability(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+		fmt.Sprintf(`{"address": %q}`, address),
+	)), nil)
+
+	require.NoError(t, err)
+	store := plugin.(*RedisStateStore)
+	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
 }

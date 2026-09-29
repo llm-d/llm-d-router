@@ -19,6 +19,7 @@ package datalayer
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,10 @@ type fakeCloneable struct{ id string }
 
 func (f fakeCloneable) Clone() fwkdl.Cloneable { return f }
 
+type fakeLoad int64
+
+func (l fakeLoad) Clone() fwkdl.Cloneable { return l }
+
 type setCall struct {
 	key        fwkdl.StateKey
 	endpointID string
@@ -43,9 +48,12 @@ type setCall struct {
 }
 
 type fakeSyncer struct {
-	mu      sync.Mutex
-	sets    []setCall
-	deletes []setCall
+	mu       sync.Mutex
+	sets     []setCall
+	deletes  []setCall
+	getValue any
+	getOK    bool
+	getErr   error
 }
 
 func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
@@ -60,7 +68,9 @@ func (s *fakeSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID strin
 }
 
 func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
-	return nil, false, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getValue, s.getOK, s.getErr
 }
 
 func (s *fakeSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID string) error {
@@ -79,6 +89,31 @@ func (s *fakeSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, can
 type fakeContributor struct {
 	key          fwkdl.StateKey
 	syncDisabled bool
+}
+
+type liveLoadContributor struct {
+	local *atomic.Int64
+}
+
+func (c liveLoadContributor) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "live-load", Name: "live-load"}
+}
+
+func (c liveLoadContributor) CrossReplicaState() fwkdl.CrossReplicaSpec {
+	return fwkdl.CrossReplicaSpec{
+		StateKey:     "live-load",
+		AttributeKey: fwkplugin.NewDataKey("live-load", "live-load"),
+		Supply: func(string) func() fwkdl.Cloneable {
+			return func() fwkdl.Cloneable { return fakeLoad(c.local.Load()) }
+		},
+		Aggregate: func(values []any) any {
+			var total fakeLoad
+			for _, value := range values {
+				total += value.(fakeLoad)
+			}
+			return total
+		},
+	}
 }
 
 type fakeEndpointContributor struct {
@@ -230,6 +265,71 @@ func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 	assert.Equal(t, "ns/ep-a", syncer.sets[0].endpointID)
 	assert.Equal(t, fakeCloneable{id: "ns/ep-a"}, syncer.sets[0].value)
 	assert.Equal(t, 2, syncer.sets[0].aggregate([]any{"a", "b"}))
+}
+
+func TestCrossReplicaPublisher_CombinesLiveLocalWithCachedPeers(t *testing.T) {
+	var local atomic.Int64
+	local.Store(4)
+	contributor := liveLoadContributor{local: &local}
+	spec := contributor.CrossReplicaState()
+	syncer := &fakeSyncer{getValue: fakeLoad(7), getOK: true}
+	pub := &crossReplicaPublisher{syncer: syncer}
+	endpoint := testEndpoint("ep-a")
+
+	pub.handleEndpointEvent(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: endpoint,
+	}, contributor)
+
+	value, ok := endpoint.GetAttributes().Get(spec.AttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, fakeLoad(11), value)
+
+	local.Store(5)
+	value, ok = endpoint.GetAttributes().Get(spec.AttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, fakeLoad(12), value)
+
+	local.Store(0)
+	value, ok = endpoint.GetAttributes().Get(spec.AttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, fakeLoad(7), value)
+}
+
+func TestCrossReplicaPublisher_UsesLiveLocalOnPeerCacheMiss(t *testing.T) {
+	var local atomic.Int64
+	local.Store(4)
+	contributor := liveLoadContributor{local: &local}
+	spec := contributor.CrossReplicaState()
+	pub := &crossReplicaPublisher{syncer: &fakeSyncer{}}
+	endpoint := testEndpoint("ep-a")
+
+	pub.handleEndpointEvent(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: endpoint,
+	}, contributor)
+
+	value, ok := endpoint.GetAttributes().Get(spec.AttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, fakeLoad(4), value)
+}
+
+func TestCrossReplicaPublisher_UsesLiveLocalOnPeerCacheError(t *testing.T) {
+	var local atomic.Int64
+	local.Store(4)
+	contributor := liveLoadContributor{local: &local}
+	spec := contributor.CrossReplicaState()
+	pub := &crossReplicaPublisher{syncer: &fakeSyncer{getErr: assert.AnError}}
+	endpoint := testEndpoint("ep-a")
+
+	pub.handleEndpointEvent(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: endpoint,
+	}, contributor)
+
+	value, ok := endpoint.GetAttributes().Get(spec.AttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, fakeLoad(4), value)
 }
 
 func TestCrossReplicaPublisher_SkipsSyncDisabled(t *testing.T) {

@@ -4,8 +4,9 @@
 **Interface:** `CrossReplicaSyncer`
 
 Shares endpoint and request coordination state between EPP replicas through
-Redis. Each EPP publishes its local endpoint value. The plugin computes the
-cross-replica aggregate during `Set` and serves `Get` from an in-process cache.
+Redis. Each EPP publishes its local endpoint value. The plugin caches peer
+values during `Set`, and `Get` aggregates unexpired peers from that in-process
+cache. The data layer combines the peer aggregate with the current local value.
 
 ## Configuration
 
@@ -31,20 +32,47 @@ Parameters:
 The configured Redis server must support field expiration and `SET NX GET`.
 Redis 7.4 or newer is required.
 
+Values stored under the same state key must use a compatible `encoding/gob`
+schema. Each EPP decodes peer values into the type supplied by its local
+contributor without requiring global `gob.Register` calls.
+
 ## State Model
 
 Endpoint state is stored in one Redis hash per state key and endpoint. Each EPP
 owns one field in that hash. `Set` refreshes the field TTL, reads the hash in the
-same transaction, computes the aggregate, and caches it locally. `Get` only
-reads the local aggregate cache.
+same transaction, and caches the other replicas' values locally. `Get` filters
+expired peer values and computes their aggregate without reading Redis. The
+data layer combines that result with the contributor's live local value. If no
+peer value is available, the local value is used by itself.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.
 
+## Scheduling and Admission
+
+Periodic endpoint synchronization provides peer-aware scheduling state. It is
+eventually consistent: two EPP replicas can make scheduling or admission
+decisions before either observes the other's latest work.
+
+This synchronization does not implement an atomic cluster-wide admission
+quota. A deployment that requires a fixed admission limit can use separate
+local-only admission producers, with one admitting EPP per fixed share and the
+shares summing to the intended limit. Unused capacity is not borrowed between
+shares automatically.
+
+`GetOrSet` coordinates one value for one request identifier. It does not reserve
+capacity across different requests.
+
 ## Deployment
 
 The plugin is a Redis client and does not deploy a Redis server. The server must
-be provisioned separately and reachable at the configured address.
+be provisioned separately. Plugin construction does not connect to Redis, so an
+unavailable server does not prevent the EPP from starting. Failed publications
+leave the current peer cache in place until its entries expire. Scheduling then
+uses local state until a later publication succeeds and refreshes the cache.
+
+`GetOrSet` does not use a local fallback. It returns Redis errors because its
+callers require cross-replica atomicity.
 
 ## Related Documentation
 
