@@ -156,7 +156,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 // their room. Returns false when the candidate must hold.
 func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpointState]float64) bool {
 	s := a.mgr.sessions[c.id]
-	var committed float64
+	var committed, inflight float64
 	switch {
 	case c.id == "":
 		// Anonymous traffic is not tracked and passes through.
@@ -167,11 +167,13 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 	default:
 		c.class = s.class()
 		committed = float64(s.committedTokens)
+		inflight = float64(s.inflightTokens)
 	}
 
 	// The new turn resends the whole history, so its estimate is the
-	// session's size from now on; committed tokens are the floor.
-	c.tokens = max(committed, float64(estimateTokens(c.sizeBytes)))
+	// session's size from now on; committed tokens are the floor. PreRequest
+	// adds the estimate to the turns already in flight.
+	c.tokens = max(committed, inflight+float64(max(estimateTokens(c.sizeBytes), 1)))
 	if c.class == classAdmitted || len(rooms) == 0 {
 		return true
 	}
