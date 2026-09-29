@@ -34,7 +34,8 @@ type Registrant interface {
 
 // PendingRegistration describes a (source-type, extractor) dependency.
 // Extractor must be non-nil; registering a DataSource without an Extractor is not supported.
-// If DefaultSource is nil, IfMissing governs behavior when no matching source exists.
+// If DefaultSource is nil, IfMissing governs behavior when no matching source exists,
+// or when several polling sources match.
 // If DefaultSource is non-nil, it is registered as a new source when no match is found;
 // for NotificationSources its GVK() narrows the match.
 type PendingRegistration struct {
@@ -45,11 +46,11 @@ type PendingRegistration struct {
 	IfMissing     MissingPolicy    // applies only when DefaultSource is nil
 }
 
-// MissingPolicy controls behavior when a required source type is absent from the config.
+// MissingPolicy controls behavior when a required source cannot be resolved.
 type MissingPolicy int
 
 const (
-	// Fail returns an error if the required source type is not configured (default).
+	// Fail returns an error (default).
 	Fail MissingPolicy = iota
 	// Warn logs a warning and skips wiring; the plugin degrades gracefully.
 	Warn

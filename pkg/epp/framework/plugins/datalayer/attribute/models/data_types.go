@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	ModelsExtractorType = "models-data-extractor"
+	ModelsExtractorType  = "models-data-extractor"
+	ModelsDataSourceType = "models-data-source"
 )
 
 var ModelsAttributeKey = plugin.NewDataKey("/v1/models", ModelsExtractorType)
