@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -50,7 +51,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	}
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
-		reqCtx.Request.Headers[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
+		key := strings.ToLower(header.Key)
+		if request.RoutingHeaders.Has(key) {
+			continue
+		}
+		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
 	}
 
 	reqCtx.ObjectiveKey, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ObjectiveKey)
@@ -96,7 +101,8 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateHeaders(ctx, reqCtx),
+						SetHeaders:    s.generateHeaders(ctx, reqCtx),
+						RemoveHeaders: unsetRoutingHeaders(reqCtx),
 					},
 				},
 			},
@@ -152,6 +158,18 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 	return headers
+}
+
+// unsetRoutingHeaders lists the routing headers no plugin set, so Envoy removes
+// any client-supplied value before forwarding.
+func unsetRoutingHeaders(reqCtx *RequestContext) []string {
+	var remove []string
+	for _, key := range sets.List(request.RoutingHeaders) {
+		if _, ok := reqCtx.Request.Headers[key]; !ok {
+			remove = append(remove, key)
+		}
+	}
+	return remove
 }
 
 func (s *StreamingServer) generateMetadata(endpoint string, endpointScores map[string]float64) *structpb.Struct {
