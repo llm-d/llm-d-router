@@ -151,6 +151,27 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 	return proxy, out
 }
 
+// serveDecode proxies proxyReq over transport, streams the response to w, and
+// returns the outcome. upstream labels the call's metrics.
+func serveDecode(logger logr.Logger, transport http.RoundTripper, w http.ResponseWriter, proxyReq *http.Request,
+	upstream string, modifyResponse func(*http.Response) error) *decodeOutcome {
+	proxy, out := newDecodeProxy(logger, instrumentedTransport(transport, upstream), modifyResponse)
+	proxy.ServeHTTP(w, proxyReq)
+	return out
+}
+
+// streamedError converts a decode outcome to the error its step returns: a
+// transport failure or an upstream 4xx/5xx, both already answered to the client.
+func (o *decodeOutcome) streamedError(step string) error {
+	if o.TransportErr != nil {
+		return &pipeline.UpstreamStreamedError{Step: step, Cause: o.TransportErr}
+	}
+	if o.Status >= http.StatusBadRequest {
+		return &pipeline.UpstreamStreamedError{Step: step, StatusCode: o.Status}
+	}
+	return nil
+}
+
 // proxyErrorLogWriter adapts the reverse proxy's *log.Logger sink to the
 // request-scoped logr. The proxy logs here when a read fails mid-copy, after
 // the response has started, which is the only signal that the client received a
