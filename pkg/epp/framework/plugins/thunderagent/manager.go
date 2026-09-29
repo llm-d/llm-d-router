@@ -17,6 +17,7 @@ limitations under the License.
 package thunderagent
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -26,6 +27,40 @@ import (
 // endpointStaleAfter drops a pod entry that holds no sessions and has not been
 // seen for this long.
 const endpointStaleAfter = 5 * time.Second
+
+// reservationTTL bounds an admission reservation whose session never reached
+// PreRequest, such as a request cancelled between dispatch and binding.
+// Counting a cancelled request as occupancy would be phantom load.
+const reservationTTL = 5 * time.Second
+
+// sessionClass ranks a waiting session for admission. Lower dispatches
+// first.
+type sessionClass int
+
+const (
+	// classAdmitted is a session already admitted to a pod: bound to it,
+	// at least one turn dispatched, not paused. Its footprint is already
+	// counted and finishing its trajectory is what frees capacity, so its
+	// turns always dispatch.
+	classAdmitted sessionClass = iota
+	// classPaused gave its room to another session's turn: its next turn
+	// must fit its own pod again, but it outranks never-admitted sessions.
+	classPaused
+	// classNew is not admitted to any pod: it never dispatched, or its pod
+	// left the pool. Admitted only when a pod has room.
+	classNew
+)
+
+func (c sessionClass) String() string {
+	switch c {
+	case classAdmitted:
+		return "admitted"
+	case classPaused:
+		return "paused"
+	default:
+		return "new"
+	}
+}
 
 // session is one agent trajectory, identified by its agent-identity session id.
 // All fields are guarded by sessionManager.mu.
@@ -37,6 +72,17 @@ type session struct {
 	// flight.
 	inflightTokens int64
 	lastActivity   time.Time
+	lastResponseAt time.Time
+	turnCount      int64
+	// paused is set when Pick reclaims the session's room for another turn:
+	// the session stops counting against its endpoint, and its next turn
+	// must pass the fit check again before it dispatches.
+	paused bool
+	// Until reservedUntil, a session whose turn Pick has dispatched but
+	// PreRequest has not yet charged counts reservedTokens against its
+	// endpoint.
+	reservedTokens float64
+	reservedUntil  time.Time
 }
 
 // size is the session's KV footprint in tokens. Each turn resends the whole
@@ -49,6 +95,39 @@ func (s *session) size() float64 {
 	return float64(s.committedTokens)
 }
 
+// class ranks the session for admission. The order of the checks matters: a
+// session whose pod left the pool re-enters as new even if it was paused.
+func (s *session) class() sessionClass {
+	if s.endpoint == nil || s.turnCount == 0 {
+		return classNew
+	}
+	if s.paused {
+		return classPaused
+	}
+	return classAdmitted
+}
+
+// footprint is the accounting rule: an unexpired reservation counts its
+// reserved size, a paused session counts nothing, everything else counts
+// its full footprint.
+func (s *session) footprint(now time.Time) float64 {
+	switch {
+	case now.Before(s.reservedUntil):
+		return s.reservedTokens
+	case s.paused:
+		return 0
+	}
+	return s.size()
+}
+
+// reclaimable reports whether the session's room can be taken for another
+// turn: it is admitted and counted in full, has no turn in flight, and has
+// been idle for at least minIdle since its last response.
+func (s *session) reclaimable(now time.Time, minIdle time.Duration) bool {
+	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
+		now.Sub(s.lastResponseAt) >= minIdle
+}
+
 // endpointState is the plugin's own record of one endpoint.
 type endpointState struct {
 	id       string
@@ -59,12 +138,55 @@ type endpointState struct {
 	updatedAt time.Time
 }
 
-func (p *endpointState) workingSetTokens() float64 {
+// occupancy is the endpoint's working set under the accounting rule.
+func (p *endpointState) occupancy(now time.Time) float64 {
 	var total float64
 	for _, s := range p.sessions {
+		total += s.footprint(now)
+	}
+	return total
+}
+
+// idleSessions returns the endpoint's sessions whose room can be reclaimed.
+// Sessions with a turn queued are skipped: they are about to be active.
+func (p *endpointState) idleSessions(now time.Time, minIdle time.Duration, queued map[string]bool) []*session {
+	var idle []*session
+	for id, s := range p.sessions {
+		if s.reclaimable(now, minIdle) && !queued[id] {
+			idle = append(idle, s)
+		}
+	}
+	return idle
+}
+
+// reclaimableTokens sums the footprints reclaim could free with the same
+// arguments.
+func (p *endpointState) reclaimableTokens(now time.Time, minIdle time.Duration, queued map[string]bool) float64 {
+	var total float64
+	for _, s := range p.idleSessions(now, minIdle, queued) {
 		total += s.size()
 	}
 	return total
+}
+
+// reclaim pauses the endpoint's reclaimable sessions, longest idle first,
+// until room covers need, and returns how many it paused.
+func (p *endpointState) reclaim(now time.Time, minIdle time.Duration, queued map[string]bool, room, need float64) int {
+	if room >= need {
+		return 0
+	}
+	idle := p.idleSessions(now, minIdle, queued)
+	sort.Slice(idle, func(i, j int) bool { return idle[i].lastResponseAt.Before(idle[j].lastResponseAt) })
+	paused := 0
+	for _, s := range idle {
+		if room >= need {
+			break
+		}
+		s.paused = true
+		room += s.size()
+		paused++
+	}
+	return paused
 }
 
 // sessionManager is the ledger shared by all of the thunder agent plugin's hooks.
@@ -145,8 +267,8 @@ func estimateTokens(sizeBytes int) int64 {
 
 // gaugeSnapshot is the ledger state the metrics collector reports.
 type gaugeSnapshot struct {
-	endpoints     map[string]endpointGauge
-	running, idle int
+	endpoints             map[string]endpointGauge
+	running, idle, paused int
 }
 
 type endpointGauge struct {
@@ -160,6 +282,11 @@ func (m *sessionManager) sweep(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, s := range m.sessions {
+		// Keep live reservations: a session Pick admitted has no activity yet,
+		// so once its reservation expires unconfirmed the TTL below drops it.
+		if now.Before(s.reservedUntil) {
+			continue
+		}
 		if s.inflightTokens > 0 {
 			continue
 		}
@@ -192,20 +319,23 @@ func (m *sessionManager) removeEndpoint(id string) {
 }
 
 // snapshot returns the values to report.
-func (m *sessionManager) snapshot() gaugeSnapshot {
+func (m *sessionManager) snapshot(now time.Time) gaugeSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	snap := gaugeSnapshot{endpoints: make(map[string]endpointGauge, len(m.endpoints))}
 	for _, s := range m.sessions {
-		if s.inflightTokens > 0 {
+		switch {
+		case s.paused:
+			snap.paused++
+		case s.inflightTokens > 0:
 			snap.running++
-		} else {
+		default:
 			snap.idle++
 		}
 	}
 	for id, p := range m.endpoints {
-		snap.endpoints[id] = endpointGauge{workingSet: p.workingSetTokens(), capacity: p.capacity}
+		snap.endpoints[id] = endpointGauge{workingSet: p.occupancy(now), capacity: p.capacity}
 	}
 	return snap
 }

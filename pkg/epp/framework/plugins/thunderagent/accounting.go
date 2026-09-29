@@ -49,14 +49,22 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	m := a.mgr
 	m.mu.Lock()
 	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
+	resumed := s.paused
+	s.paused = false
+	s.reservedUntil = time.Time{}
 	// At least one token, so inflightTokens is nonzero exactly while a turn
 	// is in flight.
 	estimate := max(estimateTokens(request.RequestSizeBytes), 1)
 	s.inflightTokens += estimate
+	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
 
 	request.PutAttribute(inflightEstimateKey, estimate)
+
+	if resumed {
+		a.metrics.resumes.Inc()
+	}
 	return nil
 }
 
@@ -91,6 +99,7 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 	case estimate > s.committedTokens:
 		s.committedTokens = estimate
 	}
+	s.lastResponseAt = now
 	s.lastActivity = now
 	m.mu.Unlock()
 }
