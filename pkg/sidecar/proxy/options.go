@@ -123,7 +123,7 @@ type yamlConfiguration struct {
 	ECConnector              string   `json:"ec-connector,omitempty"`
 	EnableSSRFProtection     *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling  *bool    `json:"enable-prefiller-sampling,omitempty"`
-  EnableSpeculativePrefill *bool    `json:"enable-speculative-prefill,omitempty"`
+	EnableSpeculativePrefill *bool    `json:"enable-speculative-prefill,omitempty"`
 	EnableP2PPull            *bool    `json:"enable-p2p-pull,omitempty"`
 	SecureServing            *bool    `json:"secure-serving,omitempty"`
 	SecureProxy              *bool    `json:"secure-proxy,omitempty"`
