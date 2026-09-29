@@ -52,8 +52,8 @@ type redisConfig struct {
 }
 
 // RedisStateStore is a CrossReplicaSyncer backed by Redis for cross-replica
-// state sharing. Set caches each endpoint's peer values, and Get aggregates
-// unexpired peers from memory.
+// state sharing. Set prepares each endpoint's full and remote aggregates, and
+// Get and GetRemote serve them from memory.
 type RedisStateStore struct {
 	typedName fwkplugin.TypedName
 	replicaID string
@@ -63,13 +63,11 @@ type RedisStateStore struct {
 }
 
 type aggregateCacheEntry struct {
-	values    []cachedReplicaValue
-	aggregate func([]any) any
-}
-
-type cachedReplicaValue struct {
-	value     any
-	expiresAt time.Time
+	value           any
+	expiresAt       time.Time
+	remoteValue     any
+	remoteExpiresAt time.Time
+	hasRemote       bool
 }
 
 func RedisStateStoreFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -167,7 +165,8 @@ func gobDecode(data []byte, prototype any) (stampedValue, error) {
 	return stampedValue{Value: target.Elem().Interface(), WrittenAt: writtenAt}, nil
 }
 
-// Set publishes this replica's value and caches the peer values used by Get.
+// Set publishes this replica's value and prepares the aggregates returned by
+// Get and GetRemote.
 func (s *RedisStateStore) Set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
 	now := time.Now()
@@ -191,7 +190,8 @@ func (s *RedisStateStore) Set(ctx context.Context, key fwkdl.StateKey, endpointI
 	if err != nil {
 		return fmt.Errorf("redis-state-store: hgetall: %w", err)
 	}
-	values := make([]cachedReplicaValue, 0, len(raw))
+	remoteValues := make([]any, 0, len(raw))
+	var remoteExpiresAt time.Time
 	for field, encoded := range raw {
 		if field == s.replicaID {
 			continue
@@ -203,32 +203,42 @@ func (s *RedisStateStore) Set(ctx context.Context, key fwkdl.StateKey, endpointI
 			}
 			continue
 		}
-		expiresAt := stamped.WrittenAt.Add(s.ttl)
-		if !expiresAt.After(now) {
+		valueExpiresAt := stamped.WrittenAt.Add(s.ttl)
+		if !valueExpiresAt.After(now) {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("redis-state-store: skipping stale entry", "field", field, "age", now.Sub(stamped.WrittenAt), "ttl", s.ttl)
 			}
 			continue
 		}
-		values = append(values, cachedReplicaValue{value: stamped.Value, expiresAt: expiresAt})
+		remoteValues = append(remoteValues, stamped.Value)
+		if remoteExpiresAt.IsZero() || valueExpiresAt.Before(remoteExpiresAt) {
+			remoteExpiresAt = valueExpiresAt
+		}
 	}
 
-	if len(values) == 0 {
-		s.cache.Delete(hashKey)
-		return nil
+	entry := &aggregateCacheEntry{}
+	if len(remoteValues) == 0 {
+		entry.value = aggregate([]any{value})
+		entry.expiresAt = now.Add(s.ttl)
+	} else {
+		entry.remoteValue = aggregate(remoteValues)
+		entry.remoteExpiresAt = remoteExpiresAt
+		entry.hasRemote = true
+		entry.value = aggregate([]any{value, entry.remoteValue})
+		entry.expiresAt = now.Add(s.ttl)
+		if remoteExpiresAt.Before(entry.expiresAt) {
+			entry.expiresAt = remoteExpiresAt
+		}
 	}
-	s.cache.Store(hashKey, &aggregateCacheEntry{
-		values:    values,
-		aggregate: aggregate,
-	})
+	s.cache.Store(hashKey, entry)
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("redis-state-store: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numPeers", len(values))
+		v.Info("redis-state-store: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", len(remoteValues)+1)
 	}
 	return nil
 }
 
-// Get aggregates the unexpired peer values cached by the most recent Set.
+// Get returns the full aggregate prepared by the most recent Set.
 func (s *RedisStateStore) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
 	hashKey := s.hashKey(key, endpointID)
 	cached, ok := s.cache.Load(hashKey)
@@ -236,18 +246,24 @@ func (s *RedisStateStore) Get(_ context.Context, key fwkdl.StateKey, endpointID 
 		return nil, false, nil
 	}
 	entry := cached.(*aggregateCacheEntry)
-	now := time.Now()
-	values := make([]any, 0, len(entry.values))
-	for _, cachedValue := range entry.values {
-		if cachedValue.expiresAt.After(now) {
-			values = append(values, cachedValue.value)
-		}
-	}
-	if len(values) == 0 {
+	if !entry.expiresAt.After(time.Now()) {
 		s.cache.CompareAndDelete(hashKey, cached)
 		return nil, false, nil
 	}
-	return entry.aggregate(values), true, nil
+	return entry.value, true, nil
+}
+
+// GetRemote returns the peer aggregate prepared by the most recent Set.
+func (s *RedisStateStore) GetRemote(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
+	cached, ok := s.cache.Load(s.hashKey(key, endpointID))
+	if !ok {
+		return nil, false, nil
+	}
+	entry := cached.(*aggregateCacheEntry)
+	if !entry.hasRemote || !entry.remoteExpiresAt.After(time.Now()) {
+		return nil, false, nil
+	}
+	return entry.remoteValue, true, nil
 }
 
 func (s *RedisStateStore) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {

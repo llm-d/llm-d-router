@@ -32,15 +32,20 @@ type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
 	// Set writes this replica's value for the given key and endpoint and prepares
-	// the peer aggregate returned by Get. The runtime calls this periodically,
-	// once per live endpoint, with a fresh local snapshot.
+	// the aggregates returned by Get and GetRemote. The runtime calls this
+	// periodically, once per live endpoint, with a fresh local snapshot.
 	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
 
 	// Get returns the prepared aggregate for the given key and endpoint across
-	// peer replicas. The runtime combines it with the live local value. Returns
-	// (value, true, nil) on hit, (nil, false, nil) on miss, or
-	// (nil, false, err) on failure.
+	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on miss,
+	// or (nil, false, err) on failure.
 	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
+
+	// GetRemote returns the prepared aggregate for the given key and endpoint
+	// across peer replicas. The runtime combines it with the live local value.
+	// Returns (value, true, nil) on hit, (nil, false, nil) on miss, or
+	// (nil, false, err) on failure.
+	GetRemote(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error

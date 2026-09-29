@@ -91,6 +91,10 @@ func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string) (any,
 	return nil, false, nil
 }
 
+func (testCrossReplicaSyncer) GetRemote(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+	return nil, false, nil
+}
+
 func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
 	return nil
 }

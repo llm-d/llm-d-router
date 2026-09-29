@@ -48,12 +48,15 @@ type setCall struct {
 }
 
 type fakeSyncer struct {
-	mu       sync.Mutex
-	sets     []setCall
-	deletes  []setCall
-	getValue any
-	getOK    bool
-	getErr   error
+	mu             sync.Mutex
+	sets           []setCall
+	deletes        []setCall
+	getValue       any
+	getOK          bool
+	getErr         error
+	getRemoteValue any
+	getRemoteOK    bool
+	getRemoteErr   error
 }
 
 func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
@@ -71,6 +74,12 @@ func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.getValue, s.getOK, s.getErr
+}
+
+func (s *fakeSyncer) GetRemote(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getRemoteValue, s.getRemoteOK, s.getRemoteErr
 }
 
 func (s *fakeSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID string) error {
@@ -208,6 +217,13 @@ func (s *blockingSyncer) Get(_ context.Context, _ fwkdl.StateKey, endpointID str
 	return value, ok, nil
 }
 
+func (s *blockingSyncer) GetRemote(_ context.Context, _ fwkdl.StateKey, endpointID string) (any, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.state[endpointID]
+	return value, ok, nil
+}
+
 func (s *blockingSyncer) Delete(_ context.Context, _ fwkdl.StateKey, endpointID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,7 +288,12 @@ func TestCrossReplicaPublisher_CombinesLiveLocalWithCachedPeers(t *testing.T) {
 	local.Store(4)
 	contributor := liveLoadContributor{local: &local}
 	spec := contributor.CrossReplicaState()
-	syncer := &fakeSyncer{getValue: fakeLoad(7), getOK: true}
+	syncer := &fakeSyncer{
+		getValue:       fakeLoad(100),
+		getOK:          true,
+		getRemoteValue: fakeLoad(7),
+		getRemoteOK:    true,
+	}
 	pub := &crossReplicaPublisher{syncer: syncer}
 	endpoint := testEndpoint("ep-a")
 
@@ -319,7 +340,7 @@ func TestCrossReplicaPublisher_UsesLiveLocalOnPeerCacheError(t *testing.T) {
 	local.Store(4)
 	contributor := liveLoadContributor{local: &local}
 	spec := contributor.CrossReplicaState()
-	pub := &crossReplicaPublisher{syncer: &fakeSyncer{getErr: assert.AnError}}
+	pub := &crossReplicaPublisher{syncer: &fakeSyncer{getRemoteErr: assert.AnError}}
 	endpoint := testEndpoint("ep-a")
 
 	pub.handleEndpointEvent(context.Background(), fwkdl.EndpointEvent{
@@ -593,7 +614,7 @@ func TestReleaseEndpointDispatchesDeleteOutsidePublisherLock(t *testing.T) {
 	contributor := callbackEndpointContributor{
 		fakeContributor: fakeContributor{key: "inflight:test"},
 		onDelete: func() {
-			_, _, _ = r.crossReplicaPub.get(context.Background(), fakeContributor{key: "inflight:test"}.CrossReplicaState(), "ns/ep-gone")
+			_, _, _ = r.crossReplicaPub.getRemote(context.Background(), fakeContributor{key: "inflight:test"}.CrossReplicaState(), "ns/ep-gone")
 		},
 	}
 	r.crossReplicaPub = &crossReplicaPublisher{

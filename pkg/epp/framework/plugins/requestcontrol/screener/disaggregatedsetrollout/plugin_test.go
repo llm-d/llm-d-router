@@ -502,6 +502,10 @@ func (s *decisionSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool
 	return nil, false, nil
 }
 
+func (s *decisionSyncer) GetRemote(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+	return nil, false, nil
+}
+
 func (s *decisionSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }
 
 func (s *decisionSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, id string, _ any) (any, bool, error) {

@@ -26,7 +26,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
-func TestLocalSyncerHasNoPeerAggregate(t *testing.T) {
+func TestLocalSyncerReturnsFullAggregateAndNoRemoteAggregate(t *testing.T) {
 	syncer := NewLocalSyncer("test", "replica-a")
 	aggregate := func(values []any) any {
 		return values[0].(int) * 2
@@ -35,6 +35,11 @@ func TestLocalSyncerHasNoPeerAggregate(t *testing.T) {
 	require.NoError(t, syncer.Set(context.Background(), "load", "default/backend-0", 21, aggregate))
 	value, ok, err := syncer.Get(context.Background(), fwkdl.StateKey("load"), "default/backend-0")
 
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 42, value)
+
+	value, ok, err = syncer.GetRemote(context.Background(), fwkdl.StateKey("load"), "default/backend-0")
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, value)

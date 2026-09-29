@@ -4,9 +4,10 @@
 **Interface:** `CrossReplicaSyncer`
 
 Shares endpoint and request coordination state between EPP replicas through
-Redis. Each EPP publishes its local endpoint value. The plugin caches peer
-values during `Set`, and `Get` aggregates unexpired peers from that in-process
-cache. The data layer combines the peer aggregate with the current local value.
+Redis. Each EPP publishes its local endpoint value. During `Set`, the plugin
+prepares a full aggregate and a peer-only aggregate in its in-process cache.
+`Get` returns the full aggregate. The data layer combines `GetRemote` with the
+current local value.
 
 ## Configuration
 
@@ -40,10 +41,11 @@ contributor without requiring global `gob.Register` calls.
 
 Endpoint state is stored in one Redis hash per state key and endpoint. Each EPP
 owns one field in that hash. `Set` refreshes the field TTL, reads the hash in the
-same transaction, and caches the other replicas' values locally. `Get` filters
-expired peer values and computes their aggregate without reading Redis. The
-data layer combines that result with the contributor's live local value. If no
-peer value is available, the local value is used by itself.
+same transaction, and caches the prepared aggregates locally. Each aggregate
+expires with its oldest included value. `Get` and `GetRemote` read the cache
+without accessing Redis. The data layer combines the remote aggregate with the
+contributor's live local value. If no peer value is available, the local value
+is used by itself.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.
