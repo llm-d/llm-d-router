@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -35,6 +37,8 @@ import (
 func testConfig() Config {
 	cfg := defaultConfig()
 	cfg.CapacityTokens = 1000
+	cfg.IdleDecayHalfLifeSeconds = 0 // no decay: exact assertions
+	cfg.PauseSweepSeconds = 0        // sweep on every Saturation call
 	return cfg
 }
 
@@ -106,7 +110,8 @@ func endpointTokens(a *ThunderAgent, id string) float64 {
 	if !ok {
 		return -1
 	}
-	return p.undecayedTokens()
+	u, _ := p.occupancy(time.Now(), 0)
+	return u
 }
 
 // forceMaintenance backdates the rate limiter so the next hook call runs the
@@ -115,4 +120,47 @@ func forceMaintenance(a *ThunderAgent) {
 	a.mgr.mu.Lock()
 	a.mgr.lastMaintenance = time.Time{}
 	a.mgr.mu.Unlock()
+}
+
+// dlEndpoint builds a datalayer endpoint without scraped capacity, selecting
+// the fallback.
+func dlEndpoint(name string) fwkdl.Endpoint {
+	nn := types.NamespacedName{Namespace: "default", Name: name}
+	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{})
+}
+
+// primeFitView refreshes the pod ledger the way the flow controller does
+// each dispatch cycle.
+func primeFitView(a *ThunderAgent, endpoints ...fwkdl.Endpoint) {
+	a.Saturation(context.Background(), endpoints)
+}
+
+func isPaused(a *ThunderAgent, id string) bool {
+	a.mgr.mu.Lock()
+	defer a.mgr.mu.Unlock()
+	s, ok := a.mgr.sessions[id]
+	return ok && s.paused
+}
+
+func makeQueue(id string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
+	return &fwkfcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: fwkfc.FlowKey{ID: id},
+		PeekV: &fwkfcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     headEnqueue,
+			OriginalRequestV: fwkfcmocks.NewMockFlowControlRequest(headBytes, "req-"+id, fwkfc.FlowKey{ID: id}),
+		},
+	}
+}
+
+func bandOf(queues ...fwkfc.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAccessor {
+	return &fwkfcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(callback func(flow fwkfc.FlowQueueAccessor) bool) {
+			for _, q := range queues {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
 }

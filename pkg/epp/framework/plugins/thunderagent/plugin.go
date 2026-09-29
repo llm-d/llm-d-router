@@ -33,7 +33,9 @@ package thunderagent
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -47,6 +49,8 @@ var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwksched.Scorer             = &ThunderAgent{}
+	_ fwkfc.SaturationDetector    = &ThunderAgent{}
+	_ fwkfc.FairnessPolicy        = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -54,7 +58,10 @@ var (
 type ThunderAgent struct {
 	typedName fwkplugin.TypedName
 
-	capacityTokens float64
+	capacityTokens       float64
+	utilThreshold        float64
+	pauseSweep           time.Duration
+	headWaitStarvationMs float64
 
 	mgr     *sessionManager
 	metrics *thunderMetrics
@@ -87,10 +94,13 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
 	return &ThunderAgent{
-		typedName:      fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
-		capacityTokens: float64(cfg.CapacityTokens),
-		mgr:            mgr,
-		metrics:        newThunderMetrics(mgr),
+		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
+		capacityTokens:       float64(cfg.CapacityTokens),
+		utilThreshold:        cfg.UtilThreshold,
+		pauseSweep:           time.Duration(cfg.PauseSweepSeconds * float64(time.Second)),
+		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
+		mgr:                  mgr,
+		metrics:              newThunderMetrics(mgr),
 	}
 }
 

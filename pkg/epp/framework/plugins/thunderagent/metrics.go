@@ -30,16 +30,69 @@ import (
 // thunderMetrics holds the plugin's Prometheus collectors.
 type thunderMetrics struct {
 	ledger *ledgerCollector
+
+	holds                *prometheus.CounterVec
+	releases             *prometheus.CounterVec
+	pauses               prometheus.Counter
+	resumes              prometheus.Counter
+	starvationPromotions prometheus.Counter
 }
 
 func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
 	return &thunderMetrics{
 		ledger: newLedgerCollector(mgr),
+		holds: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_holds_total",
+			Help:      metricsutil.HelpMsgWithStability("Dispatches whose head waited past the hold floor in the flow-control queue, by session class.", compbasemetrics.ALPHA),
+		}, []string{"class"}),
+		releases: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_releases_total",
+			Help:      metricsutil.HelpMsgWithStability("Dispatches picked by the thunder fairness policy, by session class.", compbasemetrics.ALPHA),
+		}, []string{"class"}),
+		pauses: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_pauses_total",
+			Help:      metricsutil.HelpMsgWithStability("Sessions paused by the sweep; their next turn must fit their endpoint again.", compbasemetrics.ALPHA),
+		}),
+		resumes: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_resumes_total",
+			Help:      metricsutil.HelpMsgWithStability("Paused sessions whose next turn was admitted and dispatched.", compbasemetrics.ALPHA),
+		}),
+		starvationPromotions: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_starvation_promotions_total",
+			Help:      metricsutil.HelpMsgWithStability("Queue heads force-admitted ahead of class, size, and fit by the starvation backstop.", compbasemetrics.ALPHA),
+		}),
 	}
 }
 
 func (m *thunderMetrics) register(reg prometheus.Registerer) error {
-	return registerReplacing(reg, m.ledger)
+	return errors.Join(
+		registerReplacing(reg, m.ledger),
+		registerOrReuse(reg, &m.holds),
+		registerOrReuse(reg, &m.releases),
+		registerOrReuse(reg, &m.pauses),
+		registerOrReuse(reg, &m.resumes),
+		registerOrReuse(reg, &m.starvationPromotions),
+	)
+}
+
+func registerOrReuse[C prometheus.Collector](reg prometheus.Registerer, target *C) error {
+	err := reg.Register(*target)
+	if err == nil {
+		return nil
+	}
+	var already prometheus.AlreadyRegisteredError
+	if errors.As(err, &already) {
+		if existing, ok := already.ExistingCollector.(C); ok {
+			*target = existing
+			return nil
+		}
+	}
+	return err
 }
 
 // registerReplacing registers c, replacing a collector with the same
@@ -92,8 +145,10 @@ func (c *ledgerCollector) Collect(ch chan<- prometheus.Metric) {
 	snap := c.mgr.snapshot(time.Now())
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.running), "running")
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.idle), "idle")
+	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.paused), "paused")
 	for endpoint, g := range snap.endpoints {
 		ch <- prometheus.MustNewConstMetric(c.workingSet, prometheus.GaugeValue, g.undecayed, endpoint, "undecayed")
+		ch <- prometheus.MustNewConstMetric(c.workingSet, prometheus.GaugeValue, g.decayed, endpoint, "decayed")
 		ch <- prometheus.MustNewConstMetric(c.capacity, prometheus.GaugeValue, g.capacity, endpoint)
 	}
 }
