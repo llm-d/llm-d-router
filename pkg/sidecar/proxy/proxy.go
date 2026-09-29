@@ -48,36 +48,8 @@ const (
 	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
 	tracerScope = "llm-d-router/pkg/sidecar/proxy"
 
-	// requestHeaderDataParallelRank pins a request to a specific vLLM
-	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
-	requestHeaderDataParallelRank = "x-data-parallel-rank"
-
-	// MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
-	// so the prefill engine can push KV to decode via RDMA Write.
-	requestFieldRemoteNotifyPort = "remote_notify_port"
-	requestFieldRemoteDPRank     = "remote_dp_rank"
-	// requestFieldRemoteDPRankOverride tells the decode-side connector to use
-	// the sidecar's remote_dp_rank verbatim rather than recomputing its own hash.
-	requestFieldRemoteDPRankOverride = "remote_dp_rank_override"
-	requestFieldRemoteHandshakePort  = "remote_handshake_port"
-	requestFieldTransferID           = "transfer_id"
-
 	responseFieldChoices      = "choices"
 	responseFieldFinishReason = "finish_reason"
-
-	finishReasonCacheThreshold = "cache_threshold"
-
-	// Mooncake transfer fields
-	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
-
-	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
-	// nesting key, named for the remote party it describes: "remote_decoder" on
-	// the prefill request, "remote_prefiller" on the decode request, "remote_kv_source"
-	// for a symmetric cached-prefix pull.
-	requestFieldRemoteDecoder   = "remote_decoder"
-	requestFieldRemotePrefiller = "remote_prefiller"
-	requestFieldRemoteKVSource  = "remote_kv_source"
-	requestFieldKVRequestID     = "kv_request_id"
 )
 
 // Config represents the complete runtime configuration for the proxy server.

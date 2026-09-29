@@ -41,9 +41,6 @@ const (
 
 	// generatePathSuffix is the SGLang native generate API path.
 	generatePathSuffix = "generate"
-
-	contentTypeHeader = "content-type"
-	eventStreamType   = "text/event-stream"
 )
 
 // compile-time type validation
@@ -230,8 +227,8 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 
 func isEventStream(headers map[string]string) bool {
 	for key, value := range headers {
-		if strings.EqualFold(key, contentTypeHeader) &&
-			strings.Contains(strings.ToLower(value), eventStreamType) {
+		if strings.EqualFold(key, request.HeaderContentType) &&
+			strings.Contains(strings.ToLower(value), request.MediaTypeEventStream) {
 			return true
 		}
 	}

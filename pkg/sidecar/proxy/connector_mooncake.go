@@ -33,9 +33,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
-const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
+// Mooncake transfer fields
+const requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 
-const mooncakeDataParallelRankHeader = "X-data-parallel-rank" // to send rank id in header to prefill
+const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
@@ -117,7 +118,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
-		prefillReq.Header.Set(mooncakeDataParallelRankHeader, dpRank)
+		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
 	})
 }
 

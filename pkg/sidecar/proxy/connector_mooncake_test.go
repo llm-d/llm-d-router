@@ -126,7 +126,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// Prefill must be pinned to the dp rank whose engine_id is sent to decode
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		Expect(prefillHeaders[0].Get(mooncakeDataParallelRankHeader)).To(Equal("0"))
+		Expect(prefillHeaders[0].Get(requestHeaderDataParallelRank)).To(Equal("0"))
 
 		// Decode should preserve original max_tokens and max_completion_tokens from request
 		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
@@ -262,7 +262,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// header includes rank_id
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		pinnedRank := prefillHeaders[0].Get(mooncakeDataParallelRankHeader)
+		pinnedRank := prefillHeaders[0].Get(requestHeaderDataParallelRank)
 		Expect(engineByRank).To(HaveKey(pinnedRank))
 
 		// decode payload body has rank_id's engine_id

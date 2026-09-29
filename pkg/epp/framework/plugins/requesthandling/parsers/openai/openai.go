@@ -55,10 +55,6 @@ const (
 	imagesEditsAPI = "images/edits"
 	audioSpeechAPI = "audio/speech"
 
-	contentType = "content-type"
-	// The base media type for Server-Sent Events. responseMediaType strips
-	// optional parameters such as "; charset=utf-8".
-	eventStreamType = "text/event-stream"
 	octetStreamType = "application/octet-stream"
 
 	// Text to speech api response format:
@@ -233,7 +229,7 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		// may emit a trailing empty body with the EndOfStream flag set to true.
 		return nil, nil //nolint:nilnil
 	}
-	if mediaType == eventStreamType {
+	if mediaType == request.MediaTypeEventStream {
 		return p.parseStreamResponse(body)
 	}
 
@@ -273,7 +269,7 @@ func isStreamTerminator(content []byte) bool {
 }
 
 func responseMediaType(headers map[string]string) string {
-	value, ok := headerValue(headers, contentType)
+	value, ok := headerValue(headers, request.HeaderContentType)
 	if !ok {
 		return ""
 	}
@@ -444,7 +440,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	contentTypeValue, _ := headerValue(headers, contentType)
+	contentTypeValue, _ := headerValue(headers, request.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
 		return nil, errors.New("images edits request must have a multipart/form-data content-type")

@@ -39,9 +39,6 @@ const (
 
 	messagesAPI    = "messages"
 	countTokensAPI = "messages/count_tokens"
-
-	contentType     = "content-type"
-	eventStreamType = "text/event-stream"
 )
 
 // compile-time type validation
@@ -156,7 +153,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 
 	isStream := false
 	for k, v := range headers {
-		if strings.ToLower(k) == contentType && strings.Contains(strings.ToLower(v), eventStreamType) {
+		if strings.ToLower(k) == request.HeaderContentType && strings.Contains(strings.ToLower(v), request.MediaTypeEventStream) {
 			isStream = true
 			break
 		}

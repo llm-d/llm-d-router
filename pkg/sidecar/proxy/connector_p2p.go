@@ -37,6 +37,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
+// OffloadingConnector kv_transfer_params fields. The role is encoded by the
+// nesting key, named for the remote party it describes: "remote_decoder" on
+// the prefill request, "remote_prefiller" on the decode request, "remote_kv_source"
+// for a symmetric cached-prefix pull.
+const (
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
+)
+
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
 // prefiller stores KV under a kv_request_id with no peer address; the decoder
 // pulls it using the prefiller's OffloadingConnector P2P tier host/port. The

@@ -40,6 +40,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
+// MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
+// so the prefill engine can push KV to decode via RDMA Write.
+const (
+	requestFieldRemoteNotifyPort = "remote_notify_port"
+	requestFieldRemoteDPRank     = "remote_dp_rank"
+	// requestFieldRemoteDPRankOverride tells the decode-side connector to use
+	// the sidecar's remote_dp_rank verbatim rather than recomputing its own hash.
+	requestFieldRemoteDPRankOverride = "remote_dp_rank_override"
+	requestFieldRemoteHandshakePort  = "remote_handshake_port"
+)
+
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
 

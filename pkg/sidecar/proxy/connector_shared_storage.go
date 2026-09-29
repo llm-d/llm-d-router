@@ -28,6 +28,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+const finishReasonCacheThreshold = "cache_threshold"
+
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
