@@ -51,11 +51,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err := rejectUseOpenAIFormatOverride(DecodeStepName, params); err != nil {
 		return nil, err
 	}
-	kvName, err := paramString(params, ParamKVConnector)
-	if err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	kvConn, err := kv.Build(kvName)
+	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
