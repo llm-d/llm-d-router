@@ -132,7 +132,7 @@ func (p *Predictor) sampleFromSlice(entries []TrainingEntry, sampleSize int) []T
 	// Create a copy and shuffle
 	sample := make([]TrainingEntry, len(entries))
 	copy(sample, entries)
-	rand.Shuffle(len(sample), func(i, j int) { //nolint:gosec // non-crypto sampling for training-set order
+	rand.Shuffle(len(sample), func(i, j int) { //#nosec -- non-crypto sampling for training-set order
 		sample[i], sample[j] = sample[j], sample[i]
 	})
 
@@ -175,7 +175,7 @@ func (p *Predictor) flushTraining(ctx context.Context) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req) //nolint:gosec // operator-config URL via config.TrainingURL
+	resp, err := p.httpClient.Do(req) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		p.logger.Error(err, "Bulk POST failed", "url", url)
 		return
@@ -272,7 +272,7 @@ func (p *Predictor) refreshModelInfo(ctx context.Context) error {
 		return fmt.Errorf("failed to create model info request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req) //nolint:gosec // operator-config URL via config.TrainingURL
+	resp, err := p.httpClient.Do(req) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return fmt.Errorf("failed to call /model/download/info endpoint: %w", err)
 	}
@@ -376,7 +376,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("failed to create TTFT trees request: %w", err)
 	}
 
-	ttftResp, err := p.httpClient.Do(ttftReq) //nolint:gosec // operator-config URL via config.TrainingURL
+	ttftResp, err := p.httpClient.Do(ttftReq) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch TTFT trees: %w", err)
 	}
@@ -398,7 +398,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("failed to create TPOT trees request: %w", err)
 	}
 
-	tpotResp, err := p.httpClient.Do(tpotReq) //nolint:gosec // operator-config URL via config.TrainingURL
+	tpotResp, err := p.httpClient.Do(tpotReq) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch TPOT trees: %w", err)
 	}

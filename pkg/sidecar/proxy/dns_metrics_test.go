@@ -148,7 +148,7 @@ func TestServeMetrics_TLS(t *testing.T) {
 	addr := ln.Addr().String()
 	client := &http.Client{
 		Timeout:   2 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // self-signed test cert
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //#nosec -- self-signed test cert
 	}
 	require.Eventually(t, func() bool {
 		resp, err := client.Get("https://" + addr + "/metrics")

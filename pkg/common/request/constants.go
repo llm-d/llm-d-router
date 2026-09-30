@@ -82,9 +82,9 @@ const (
 	FieldInputTokens         = "input_tokens"
 	FieldOutputTokens        = "output_tokens"
 	FieldTotalTokens         = "total_tokens"
-	FieldPromptTokensDetails = "prompt_tokens_details"
-	FieldInputTokensDetails  = "input_tokens_details"
-	FieldCachedTokens        = "cached_tokens"
+	FieldPromptTokensDetails = "prompt_tokens_details" //#nosec G101 -- JSON field name, not a credential
+	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
+	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
 )
 
 // Server-sent event framing for streamed responses. SGLang sends the bare

@@ -473,7 +473,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 	t.IdleConnTimeout = 90 * time.Second
 	if scheme == schemeHTTPS {
 		t.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
+			InsecureSkipVerify: insecureSkipVerify, //#nosec
 			MinVersion:         tls.VersionTLS12,
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,

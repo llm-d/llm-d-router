@@ -91,7 +91,7 @@ var _ = Describe("Reverse Proxy", func() {
 				// CertPath is unset, so the client has no CA to verify against.
 				tr := &http.Transport{
 					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, //nolint:gosec // proxy's self-signed cert is not exposed to the test for trust
+						InsecureSkipVerify: true, //#nosec -- proxy's self-signed cert is not exposed to the test for trust
 					},
 				}
 				client := &http.Client{
