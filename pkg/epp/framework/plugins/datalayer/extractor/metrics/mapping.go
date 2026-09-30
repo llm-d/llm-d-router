@@ -62,6 +62,7 @@ type MappingConfig struct {
 type CustomMetric struct {
 	AttributeKey string
 	Spec         *Spec
+	Optional     bool
 }
 
 type namedSpec struct {
@@ -202,6 +203,7 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
+			Optional:     cfg.Optional,
 		})
 	}
 	return metrics, errs

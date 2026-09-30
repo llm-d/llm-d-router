@@ -200,7 +200,9 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	for _, custom := range mapping.CustomMetrics {
 		metric, err := custom.Spec.getLatestMetric(families)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			if !custom.Optional {
+				errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			}
 			continue
 		}
 		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
