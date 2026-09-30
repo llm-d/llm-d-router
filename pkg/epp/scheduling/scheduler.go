@@ -126,7 +126,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	before := time.Now()
 	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
-	if verboseEnabled {
+	if verboseEnabled && err == nil {
 		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)
 	}
 
