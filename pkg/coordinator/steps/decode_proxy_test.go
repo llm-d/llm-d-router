@@ -19,11 +19,13 @@ package steps
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -252,5 +254,35 @@ func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
 				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
 			}
 		})
+	}
+}
+
+func TestEOFReader(t *testing.T) {
+	var complete bool
+	r := &eofReader{ReadCloser: io.NopCloser(strings.NewReader("abc")), eof: &complete}
+
+	buf := make([]byte, 2)
+	if _, err := r.Read(buf); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if complete {
+		t.Fatal("complete before the body was read to its end")
+	}
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !complete {
+		t.Fatal("not complete after the body was read to its end")
+	}
+}
+
+func TestEOFReaderReadErrorIsNotComplete(t *testing.T) {
+	var complete bool
+	r := &eofReader{ReadCloser: io.NopCloser(iotest.ErrReader(context.Canceled)), eof: &complete}
+	if _, err := r.Read(make([]byte, 1)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if complete {
+		t.Fatal("a cut body must not count as complete")
 	}
 }

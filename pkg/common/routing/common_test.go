@@ -130,3 +130,27 @@ func TestIsConditionalDecode(t *testing.T) {
 		})
 	}
 }
+
+func TestHasPreference(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		token   string
+		want    bool
+	}{
+		{"nil headers", nil, PreferReserveEndpoint, false},
+		{"reserve-endpoint", map[string]string{PreferHeader: PreferReserveEndpoint}, PreferReserveEndpoint, true},
+		{"reserve-endpoint case insensitive", map[string]string{PreferHeader: "Reserve-Endpoint"}, PreferReserveEndpoint, true},
+		{"reserve-endpoint among tokens", map[string]string{PreferHeader: "if-available, reserve-endpoint;x=1"}, PreferReserveEndpoint, true},
+		{"only the other token", map[string]string{PreferHeader: PreferIfAvailable}, PreferReserveEndpoint, false},
+		{"reserve-endpoint does not match if-available", map[string]string{PreferHeader: PreferReserveEndpoint}, PreferIfAvailable, false},
+		{"prefix of a longer token", map[string]string{PreferHeader: "reserve-endpoints"}, PreferReserveEndpoint, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasPreference(tt.headers, tt.token); got != tt.want {
+				t.Errorf("HasPreference(%v, %q) = %v, want %v", tt.headers, tt.token, got, tt.want)
+			}
+		})
+	}
+}

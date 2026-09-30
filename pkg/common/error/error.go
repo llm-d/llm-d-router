@@ -111,19 +111,30 @@ func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
 		return nil, status.Errorf(status.Code(err), "failed to handle request: %v", err)
 	}
 
+	var headers map[string]string
+	if e, ok := err.(Error); ok {
+		headers = e.Headers
+	}
+	return BuildImmediateResponse(httpCode, headers, []byte(err.Error())), nil
+}
+
+// BuildImmediateResponse builds an Envoy ImmediateResponse: Envoy answers the
+// caller with httpCode, headers and body, and forwards nothing upstream. An
+// empty body or empty headers are left unset.
+func BuildImmediateResponse(httpCode envoyTypePb.StatusCode, headers map[string]string, body []byte) *extProcPb.ProcessingResponse {
 	ir := &extProcPb.ImmediateResponse{
 		Status: &envoyTypePb.HttpStatus{
 			Code: httpCode,
 		},
 	}
 
-	if err.Error() != "" {
-		ir.Body = []byte(err.Error())
+	if len(body) > 0 {
+		ir.Body = body
 	}
 
-	if e, ok := err.(Error); ok && len(e.Headers) > 0 {
-		setHeaders := make([]*configPb.HeaderValueOption, 0, len(e.Headers))
-		for k, v := range e.Headers {
+	if len(headers) > 0 {
+		setHeaders := make([]*configPb.HeaderValueOption, 0, len(headers))
+		for k, v := range headers {
 			setHeaders = append(setHeaders, &configPb.HeaderValueOption{
 				Header: &configPb.HeaderValue{
 					Key:      k,
@@ -140,5 +151,5 @@ func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: ir,
 		},
-	}, nil
+	}
 }
