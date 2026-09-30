@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -411,6 +412,13 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// The server logs this so it appears once: every data parallel rank starts the shared validator.
+	if !s.allowlistValidator.enabled {
+		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
+			"flag", "--"+enableSSRFProtection,
+			"headers", []string{routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader, routing.KVCacheSourceHeader})
 	}
 
 	// Configure handlers
