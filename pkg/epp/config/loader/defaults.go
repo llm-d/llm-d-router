@@ -310,6 +310,9 @@ func ensureSaturationDetector(
 
 func injectFilterIntoProfiles(profiles []configapiv1.SchedulingProfile, pluginRef string) {
 	for i := range profiles {
+		if profiles[i].InjectSaturationFilter != nil && !*profiles[i].InjectSaturationFilter {
+			continue
+		}
 		found := false
 		for _, p := range profiles[i].Plugins {
 			if p.PluginRef == pluginRef {
