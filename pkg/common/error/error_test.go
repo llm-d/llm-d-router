@@ -344,3 +344,57 @@ func TestBuildErrResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildImmediateResponse(t *testing.T) {
+	tests := []struct {
+		name        string
+		code        envoyTypePb.StatusCode
+		headers     map[string]string
+		body        []byte
+		wantHeaders map[string]string
+	}{
+		{
+			name:        "200 with headers and no body",
+			code:        envoyTypePb.StatusCode_OK,
+			headers:     map[string]string{"x-prefill-host-port": "10.0.0.1:8000"},
+			wantHeaders: map[string]string{"x-prefill-host-port": "10.0.0.1:8000"},
+		},
+		{
+			name: "no headers and no body",
+			code: envoyTypePb.StatusCode_OK,
+		},
+		{
+			name: "body without headers",
+			code: envoyTypePb.StatusCode_ServiceUnavailable,
+			body: []byte("gone"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := BuildImmediateResponse(tt.code, tt.headers, tt.body).GetImmediateResponse()
+			if ir == nil {
+				t.Fatal("expected an ImmediateResponse")
+			}
+			if ir.Status.Code != tt.code {
+				t.Errorf("status = %v, want %v", ir.Status.Code, tt.code)
+			}
+			if string(ir.Body) != string(tt.body) {
+				t.Errorf("body = %q, want %q", ir.Body, tt.body)
+			}
+			got := map[string]string{}
+			if ir.Headers != nil {
+				for _, h := range ir.Headers.SetHeaders {
+					got[h.Header.Key] = string(h.Header.RawValue)
+				}
+			}
+			if len(got) != len(tt.wantHeaders) {
+				t.Fatalf("headers = %v, want %v", got, tt.wantHeaders)
+			}
+			for k, v := range tt.wantHeaders {
+				if got[k] != v {
+					t.Errorf("header %q = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
