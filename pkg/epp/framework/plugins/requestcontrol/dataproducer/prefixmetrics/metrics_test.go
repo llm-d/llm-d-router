@@ -35,26 +35,43 @@ func TestRegisterIsIdempotent(t *testing.T) {
 
 // A zero prediction is a real observation: the router expected no cache hit,
 // and the request still contributes its prompt tokens to the denominator.
+// Every field lands on its own histogram, and all four carry a sample per
+// call so their sums stay divisible by one another.
 func TestRecordPrediction(t *testing.T) {
-	predictedCachedTokens.Reset()
-	promptTokens.Reset()
-	t.Cleanup(func() {
-		predictedCachedTokens.Reset()
-		promptTokens.Reset()
+	resetPredictionMetrics()
+	t.Cleanup(resetPredictionMetrics)
+
+	RecordPrediction("test-plugin", "test-type", Prediction{
+		Selected: 512, BestPredicted: 768, BestAvailable: 896, PromptTokens: 1024,
+	})
+	RecordPrediction("test-plugin", "test-type", Prediction{
+		Selected: 0, BestPredicted: 0, BestAvailable: 0, PromptTokens: 256,
 	})
 
-	RecordPrediction("test-plugin", "test-type", 512, 1024)
-	RecordPrediction("test-plugin", "test-type", 0, 256)
+	for _, tc := range []struct {
+		name string
+		vec  *prometheus.HistogramVec
+		sum  float64
+	}{
+		{"selected", predictedCachedTokens, 512},
+		{"best predicted", bestPredictedCachedTokens, 768},
+		{"best available", bestAvailableCachedTokens, 896},
+		{"prompt", promptTokens, 1280},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			histogram, err := histogramFor(tc.vec, "test-plugin", "test-type")
+			require.NoError(t, err)
+			assert.Equal(t, uint64(2), histogram.GetSampleCount())
+			assert.Equal(t, tc.sum, histogram.GetSampleSum())
+		})
+	}
+}
 
-	predicted, err := histogramFor(predictedCachedTokens, "test-plugin", "test-type")
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), predicted.GetSampleCount())
-	assert.Equal(t, float64(512), predicted.GetSampleSum())
-
-	prompt, err := histogramFor(promptTokens, "test-plugin", "test-type")
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), prompt.GetSampleCount())
-	assert.Equal(t, float64(1280), prompt.GetSampleSum())
+func resetPredictionMetrics() {
+	predictedCachedTokens.Reset()
+	bestPredictedCachedTokens.Reset()
+	bestAvailableCachedTokens.Reset()
+	promptTokens.Reset()
 }
 
 func histogramFor(vec *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {

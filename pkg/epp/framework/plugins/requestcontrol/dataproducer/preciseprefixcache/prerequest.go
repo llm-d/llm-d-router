@@ -37,6 +37,7 @@ const (
 	defaultSpeculativeTTL      = 2 * time.Second
 	experimentalPrefillProfile = "prefill"
 	blockKeysStateKey          = plugin.StateKey("precise-prefix-cache-producer.block-keys")
+	bestAvailableStateKey      = plugin.StateKey("precise-prefix-cache-producer.best-available")
 )
 
 var _ requestcontrol.PreRequest = &Producer{}
@@ -66,13 +67,44 @@ func (s *blockKeysState) Clone() plugin.StateData {
 	return &blockKeysState{perPromptKeys: cp}
 }
 
-// recordPrediction reports the prompt tokens the index expects the scheduler's
-// chosen endpoint to serve from its prefix cache. It reads the unweighted
+// bestAvailableState carries the highest prediction across the request's
+// candidate endpoints from Produce to PreRequest. Produce is the only stage
+// that sees those candidates before the scheduler's filters narrow them.
+type bestAvailableState struct {
+	cachedTokens int
+}
+
+// Clone implements plugin.StateData.
+func (s *bestAvailableState) Clone() plugin.StateData {
+	cp := *s
+	return &cp
+}
+
+// predictedCachedTokens converts a match into the prompt tokens the index
+// expects the endpoint to serve from its prefix cache. It reads the unweighted
 // cached-block count rather than the tier-weighted match score, so a RAM-tier
 // hit contributes its full token count, and it counts speculative entries
 // because those are part of what the router acted on. The token processor drops
-// a prompt's trailing partial block, so the block-to-token conversion cannot
-// exceed the prompt length.
+// a prompt's trailing partial block, so the conversion cannot exceed the prompt
+// length.
+func predictedCachedTokens(info *attrprefix.PrefixCacheMatchInfo) int {
+	return info.CachedBlockCount() * info.BlockSizeTokens()
+}
+
+// matchInfo reads the match the producer attached to an endpoint.
+func (p *Producer) matchInfo(endpoint scheduling.Endpoint) (*attrprefix.PrefixCacheMatchInfo, bool) {
+	raw, ok := endpoint.Get(p.dk)
+	if !ok {
+		return nil, false
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	return info, ok
+}
+
+// recordPrediction reports the prediction for the chosen endpoint against the
+// best the picker could have chosen and the best any candidate held before
+// filtering, so the reuse a routing decision left behind is separable from the
+// reuse filtering put out of reach.
 func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
 	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
 		return
@@ -81,19 +113,37 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 	if primary == nil || len(primary.TargetEndpoints) == 0 {
 		return
 	}
-	raw, ok := primary.TargetEndpoints[0].Get(p.dk)
-	if !ok {
-		return
-	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	info, ok := p.matchInfo(primary.TargetEndpoints[0])
 	if !ok {
 		return
 	}
 	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return
 	}
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
-		info.CachedBlockCount()*info.BlockSizeTokens(), request.Body.TokenizedRequest.TokenCount())
+
+	selected := predictedCachedTokens(info)
+	// A profile that reports no scored candidates leaves only the chosen
+	// endpoint to go on, so selected stands in. That keeps the histograms on
+	// the same requests, at the cost of reading as a perfect routing decision.
+	bestPredicted := selected
+	for _, candidate := range primary.ScoredCandidates {
+		if candidateInfo, ok := p.matchInfo(candidate.Endpoint); ok {
+			bestPredicted = max(bestPredicted, predictedCachedTokens(candidateInfo))
+		}
+	}
+
+	bestAvailable := bestPredicted
+	if state, err := plugin.ReadPluginStateKey[*bestAvailableState](
+		p.pluginState, request.RequestID, bestAvailableStateKey); err == nil {
+		bestAvailable = max(bestAvailable, state.cachedTokens)
+	}
+
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, prefixmetrics.Prediction{
+		Selected:      selected,
+		BestPredicted: bestPredicted,
+		BestAvailable: bestAvailable,
+		PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
+	})
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -152,6 +202,10 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
+	// Produce writes state on every request, so the cleanup cannot sit behind
+	// the speculative-indexing gate.
+	defer p.pluginState.Delete(request.RequestID)
+
 	p.recordPrediction(request, schedulingResult)
 
 	if !p.speculativeEnabled {
@@ -167,7 +221,6 @@ func (p *Producer) PreRequest(ctx context.Context,
 			"requestID", request.RequestID)
 		return nil
 	}
-	p.pluginState.Delete(request.RequestID)
 
 	hasKeys := false
 	for _, pk := range state.perPromptKeys {

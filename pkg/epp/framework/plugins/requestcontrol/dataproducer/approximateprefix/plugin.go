@@ -244,15 +244,18 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		totalBlocks += len(hashes)
 	}
 
+	bestAvailable := 0
 	for _, pod := range pods {
-		matchLen := prefixCacheServers[ServerID(pod.GetMetadata().ID)]
-		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, blockSize))
+		id := ServerID(pod.GetMetadata().ID)
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(prefixCacheServers[id], totalBlocks, blockSize))
+		bestAvailable = max(bestAvailable, predictedCachedTokens[id])
 	}
 
 	state := &SchedulingContextState{
-		PerPromptHashes:       perPromptHashes,
-		PrefixCacheServers:    prefixCacheServers,
-		PredictedCachedTokens: predictedCachedTokens,
+		PerPromptHashes:           perPromptHashes,
+		PrefixCacheServers:        prefixCacheServers,
+		PredictedCachedTokens:     predictedCachedTokens,
+		BestAvailableCachedTokens: bestAvailable,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -304,11 +307,33 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
 	if request.Body != nil {
-		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
-			state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)],
-			request.Body.TokenizedRequest.TokenCount())
+		selected := state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)]
+		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, prefixmetrics.Prediction{
+			Selected:      selected,
+			BestPredicted: bestAmongScored(primaryProfileResult.ScoredCandidates, state.PredictedCachedTokens, selected),
+			BestAvailable: state.BestAvailableCachedTokens,
+			PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
+		})
 	}
 	return nil
+}
+
+// bestAmongScored returns the highest prediction the picker could have chosen.
+// It walks the scored candidates rather than the prediction map: the map is
+// filled from the shared indexer, which reports every server holding a block,
+// including pods this request was never allowed to reach.
+//
+// A profile that reports no scored candidates leaves only the chosen endpoint
+// to go on, so selected stands in. That keeps the histograms on the same
+// requests, at the cost of reading as a perfect routing decision.
+func bestAmongScored(scored []fwksched.ScoredEndpoint, predicted map[ServerID]int, selected int) int {
+	best := selected
+	for _, candidate := range scored {
+		if md := candidate.GetMetadata(); md != nil {
+			best = max(best, predicted[ServerID(md.ID)])
+		}
+	}
+	return best
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

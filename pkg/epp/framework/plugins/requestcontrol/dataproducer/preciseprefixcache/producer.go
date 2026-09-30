@@ -396,6 +396,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		return err
 	}
 
+	bestAvailable := 0
+	for _, result := range results {
+		bestAvailable = max(bestAvailable, predictedCachedTokens(result.info))
+	}
+	p.pluginState.Write(request.RequestID, bestAvailableStateKey,
+		&bestAvailableState{cachedTokens: bestAvailable})
+
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
 			&blockKeysState{perPromptKeys: perPromptKeys})
