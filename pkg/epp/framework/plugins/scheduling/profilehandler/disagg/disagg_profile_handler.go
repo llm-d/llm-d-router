@@ -265,7 +265,7 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 //
 // The deciders run inside this handler's extension points, through the request
 // the handler was handed, so their keys are confined against this declaration
-// rather than their own. Consumes covers their reads for the same reason.
+// rather than their own.
 func (h *Handler) Produces() map[plugin.DataKey]any {
 	produced := map[plugin.DataKey]any{
 		// Endpoint is an interface; its zero value is the type witness the
@@ -285,7 +285,9 @@ func (h *Handler) Produces() map[plugin.DataKey]any {
 	return produced
 }
 
-// Consumes defines data types consumed by this plugin (through the PD decider).
+// Consumes declares the prefix match info and tokenized prompt the handler
+// requires for P/D, plus everything its deciders declare. The deciders' reads
+// are confined against this declaration for the reason given on Produces.
 func (h *Handler) Consumes() plugin.DataDependencies {
 	prefixMatchInfoDK := attrprefix.PrefixCacheMatchInfoDataKey
 	if h.pdDecider != nil {
@@ -293,12 +295,33 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 			prefixMatchInfoDK = consumer.prefixMatchInfoDataKey()
 		}
 	}
-	return plugin.DataDependencies{
+	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
 			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
+		Optional: map[plugin.DataKey]any{},
 	}
+	deciders := []deciderPlugin{h.pdDecider, h.encodeDecider}
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Required {
+				consumed.Required[key] = witness
+			}
+		}
+	}
+	// A key one decider requires stays required when the other lists it as
+	// optional.
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Optional {
+				if _, required := consumed.Required[key]; !required {
+					consumed.Optional[key] = witness
+				}
+			}
+		}
+	}
+	return consumed
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
