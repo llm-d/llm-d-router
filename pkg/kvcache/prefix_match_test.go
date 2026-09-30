@@ -146,7 +146,7 @@ func TestMatchBlockKeys(t *testing.T) {
 			},
 			requestKeys: []kvblock.BlockHash{10},
 			want: map[string]kvcache.PodMatch{
-				podA: {WeightedScore: 0.3, MatchedBlocks: 1, BlocksByTier: map[string]int{"storage": 1}},
+				podA: {WeightedScore: 0.3, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"storage": 1}},
 			},
 		},
 		{
