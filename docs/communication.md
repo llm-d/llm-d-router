@@ -755,8 +755,17 @@ No `features` or `ec_transfer_params` (no images); `prompt` contains the token a
 ### Optimization: avoid sending pixel data to prefill
 
 With a renderer that emits `features.mm_metadata` (see vLLM
-[#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator can
-omit `kwargs_data` on the prefill request when `ec_transfer_params` is present.
+[#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
+`kwargs_data` for an entry when `ec_transfer_params` covers that entry.
+
+This applies to prefill legs that carry a `features` map: the completions and
+generate wire formats. A chat-completions client reaches those legs when
+`use_openai_format` is `false`, which routes prefill through
+`/inference/v1/generate`; with the default `true`, prefill forwards the client
+body, which carries no `features`. A client calling `/inference/v1/generate`
+directly runs no encode stage (see
+[Generate Requests](#generate-requests-inferencev1generate)), so
+`ec_transfer_params` stays empty and every entry falls back to `kwargs_data`.
 
 `kwargs_data` mixes encoder tensors (`pixel_values`) with lightweight fields
 (`image_grid_thw` and other `keep_on_cpu` / placeholder-metadata fields). Encode
@@ -765,9 +774,9 @@ Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
 embeddings. For large images the pixel tensors dominate payload size, so dropping
 `kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
-The decision is **per entry**, not per request: an entry whose hash has a
-descriptor in `ec_transfer_params` and carries non-empty metadata ships only
-`mm_metadata[i]`; every other entry keeps `kwargs_data[i]`. Both fields are
+The choice is per entry: an entry whose hash has a matching descriptor in
+`ec_transfer_params` and carries non-empty metadata ships `mm_metadata[i]`;
+every other entry keeps `kwargs_data[i]`. Both fields are
 always present in the prefill body with complementary nulls so vLLM's
 per-item zip merge (`merge_mm_kwargs_items`) reconstructs each entry from
 whichever side is non-null.
