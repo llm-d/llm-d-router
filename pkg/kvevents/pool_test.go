@@ -161,6 +161,18 @@ func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
 		sourceEndpoint: sourceEndpoint,
 		done:           done,
 	}
+	// Learn group metadata keyed by the source endpoint, which is the pod
+	// identifier the retire reset clears.
+	groupIdx := 0
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				GroupIdx:        &groupIdx,
+				KVCacheSpecKind: KVCacheSpecKindFullAttention,
+				BlockSize:       16,
+			},
+		},
+	}, sourceEndpoint, "test-model")
 	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
 
 	removed := make(chan struct{})
@@ -198,6 +210,8 @@ func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
 	_, tracked := pool.dedup.refs[sourceEndpoint]
 	pool.dedup.mu.Unlock()
 	assert.False(t, tracked)
+	_, cataloged := pool.GroupCatalog().Get(sourceEndpoint, kvblock.GroupID(0))
+	assert.False(t, cataloged, "retire reset must drop learned group metadata")
 	result, err := idx.Lookup(ctx, keys, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result[keys[0]])
@@ -1171,6 +1185,39 @@ func TestAllBlocksCleared_Dispatch(t *testing.T) {
 		require.Len(t, result[ck], 1, "only the surviving pod should remain on key %s", ck)
 		assert.Equal(t, "pod-kept", result[ck][0].PodIdentifier)
 	}
+}
+
+// TestPool_RetireResetDropsGroupCatalog verifies the two reset flavors differ
+// in what per-pod state they keep:
+//   - an in-stream reset (engine cache rebuild or replay invalidation) keeps
+//     the learned group metadata
+//   - a retire reset (the source's last subscriber is gone) drops it
+func TestPool_RetireResetDropsGroupCatalog(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+
+	groupIdx := 0
+	learn := func(pod string) {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+			},
+		}, pod, "test-model")
+	}
+	learn("pod-live")
+	learn("pod-gone")
+
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@", SourceEndpoint: "pod-live", reset: true})
+	_, ok := pool.GroupCatalog().Get("pod-live", kvblock.GroupID(0))
+	require.True(t, ok, "in-stream reset must keep group metadata")
+
+	pool.processRawMessage(ctx, &RawMessage{Topic: "kv@", SourceEndpoint: "pod-gone", reset: true, retire: true})
+	_, ok = pool.GroupCatalog().Get("pod-gone", kvblock.GroupID(0))
+	assert.False(t, ok, "retire reset must drop group metadata")
 }
 
 // TestPool_AllBlocksClearedResetsDedup verifies the filter is reset on
