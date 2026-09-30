@@ -145,11 +145,15 @@ func TestHasPreference(t *testing.T) {
 		{"nil headers", nil, other, false},
 		{"empty headers", map[string]string{}, other, false},
 		{"empty Prefer value", map[string]string{PreferHeader: ""}, other, false},
+		// The empty and whitespace-only token cases return at the empty want
+		// guard before the Prefer value is split, so they test that guard only.
 		{"empty token does not match an empty Prefer value", map[string]string{PreferHeader: ""}, "", false},
 		{"empty token does not match a trailing comma", map[string]string{PreferHeader: "respond-async,"}, "", false},
 		{"empty token does not match a leading comma", map[string]string{PreferHeader: ", respond-async"}, "", false},
 		{"empty token does not match an entry with no token", map[string]string{PreferHeader: "=x"}, "", false},
+		{"whitespace-only token does not match a trailing comma", map[string]string{PreferHeader: "respond-async, "}, " ", false},
 		{"token", map[string]string{PreferHeader: other}, other, true},
+		{"token with surrounding whitespace in want", map[string]string{PreferHeader: other}, "  respond-async  ", true},
 		{"token case insensitive", map[string]string{PreferHeader: "Respond-Async"}, other, true},
 		{"token among tokens with a parameter", map[string]string{PreferHeader: "if-available, respond-async;x=1"}, other, true},
 		{"token with whitespace", map[string]string{PreferHeader: "  respond-async  "}, other, true},

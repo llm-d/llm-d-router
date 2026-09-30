@@ -70,13 +70,14 @@ func StripScheme(endpoint string) string {
 // Per RFC 7240 the Prefer header value is a comma-separated list of
 // preferences. Each preference is a token with an optional "=" value and
 // optional ";"-delimited parameters. This function matches the token
-// case-insensitively, ignoring surrounding whitespace, the value, parameters,
-// and any other tokens that may appear alongside it. For example,
-// "return=minimal" matches the token "return". HasPreference(headers, "")
-// always returns false. Quoted-string values that contain "," or ";" are not
-// supported.
+// case-insensitively, ignoring whitespace around both the parsed token and
+// want, the value, parameters, and any other tokens that may appear alongside
+// it. For example, "return=minimal" matches the token "return". A want that is
+// empty or only whitespace always returns false. Quoted-string values that
+// contain "," or ";" are not supported.
 func HasPreference(headers map[string]string, want string) bool {
 	prefer := headers[PreferHeader]
+	want = strings.TrimSpace(want)
 	if prefer == "" || want == "" {
 		return false
 	}
