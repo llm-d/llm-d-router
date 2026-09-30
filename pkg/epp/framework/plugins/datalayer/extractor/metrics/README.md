@@ -49,6 +49,7 @@ The plugin config supports:
 The plugin comes with built-in support for the following engines:
 -   `vllm`
 -   `sglang`
+-   `atom`
 -   `trtllm-serve`
 -   `triton-tensorrt-llm`
 
@@ -57,7 +58,7 @@ To correctly establish the mapping, model server Pods should be labeled using th
 ```yaml
 metadata:
   labels:
-    llm-d.ai/engine-type: vllm # other options: sglang, trtllm-serve, triton-tensorrt-llm, triton 
+    llm-d.ai/engine-type: vllm # other options: sglang, atom, trtllm-serve, triton-tensorrt-llm, triton 
 
 ```
 

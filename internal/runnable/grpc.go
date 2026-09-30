@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,7 +30,7 @@ import (
 
 // GRPCServer converts the given gRPC server into a runnable.
 // The server name is just being used for logging.
-func GRPCServer(name string, srv *grpc.Server, port int) manager.Runnable {
+func GRPCServer(name string, srv *grpc.Server, port uint16) manager.Runnable {
 	return manager.RunnableFunc(func(ctx context.Context) error {
 		// Use "name" key as that is what manager.Server does as well.
 		log := ctrl.Log.WithValues("name", name)

@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import "testing"
 //
 // When the fixtures in test/e2e/configs_test.go are updated, mirror them here.
 var e2eConfigsForSmoke = map[string]string{
-	"simpleConfig": `apiVersion: llm-d.ai/v1alpha1
+	"simpleConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -40,7 +40,7 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"pdConfig": `apiVersion: llm-d.ai/v1alpha1
+	"pdConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -73,7 +73,7 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"pdTopologyConfig": `apiVersion: llm-d.ai/v1alpha1
+	"pdTopologyConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -116,7 +116,7 @@ schedulingProfiles:
   - pluginRef: queue-scorer
     weight: 1
 `,
-	"epdConfig": `apiVersion: llm-d.ai/v1alpha1
+	"epdConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: encode-filter
@@ -155,7 +155,7 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1alpha1
+	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -176,7 +176,7 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
-	"gpuUtilConfig": `apiVersion: llm-d.ai/v1alpha1
+	"gpuUtilConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: dcgm-data-source

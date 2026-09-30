@@ -21,7 +21,7 @@ A **plugin** is a component that:
 
 ### Examples of plugins
 
-- **Scheduling filters**: `bylabel`, `bylabelselector`, `encoderole`, etc.
+- **Scheduling filters**: `label-selector-filter`, `encode-filter`, `prefill-filter`, `decode-filter`, etc.
 - **Scheduling scorers**: `prefix`, `sessionaffinity`, `loadaware`, `loraaffinity`, etc.
 - **Profile handlers**: `DataParallelProfileHandler`, `DisaggProfileHandler`, etc.
 - **Eviction policies**: `EvictionOrderingPolicy` (e.g. `eviction-priority-then-time-ordering`),

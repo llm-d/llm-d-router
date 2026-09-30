@@ -1,8 +1,25 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package endpointattribute
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,7 +56,7 @@ func endpointWith(queue int, kvUsage float64) fwksched.Endpoint {
 		attrmetrics.ScalarMetricValue(kvUsage))
 	return fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{},
-		&fwkdl.Metrics{WaitingQueueSize: queue, KVCacheUsagePercent: kvUsage},
+		&fwkdl.Metrics{WaitingQueueSize: queue, KVCacheUsagePercent: kvUsage, UpdateTime: time.Now()},
 		attrs,
 	)
 }
@@ -101,7 +118,7 @@ func TestParityQueueScorer(t *testing.T) {
 func TestDivergenceWhenAttributeAbsent(t *testing.T) {
 	noAttr := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{},
-		&fwkdl.Metrics{WaitingQueueSize: 0, KVCacheUsagePercent: 0.0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, KVCacheUsagePercent: 0.0, UpdateTime: time.Now()},
 		fwkdl.NewAttributes(),
 	)
 	endpoints := []fwksched.Endpoint{noAttr}

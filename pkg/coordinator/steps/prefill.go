@@ -74,7 +74,12 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	return &PrefillStep{useOpenAIFormat: useOpenAI, gwClient: gwClient, kv: kvConn, ec: ecConn}, nil
+	return &PrefillStep{
+		useOpenAIFormat: useOpenAI,
+		gwClient:        gwClient,
+		kv:              kvConn,
+		ec:              ecConn,
+	}, nil
 }
 
 func (s *PrefillStep) Name() string { return PrefillStepName }
@@ -93,7 +98,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		return fmt.Errorf("prefill: marshal: %w", err)
 	}
 
-	path := gateway.PathForFormat(format)
+	path := format.Path()
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
 	headers := reqCtx.ForwardedHeaders()
@@ -123,52 +128,41 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 
 	reqCtx.KVTransferParams = coerceParamsMap(logger, prefillResp.KVTransferParams, "kv_transfer_params")
+	if len(reqCtx.KVTransferParams) == 0 && s.kv.Name() == kv.NIXL {
+		// kv-nixl always requests a remote-decode handoff, so missing
+		// kv_transfer_params means decode will recompute the whole prompt.
+		// Older engines (< v0.29.0) silently drop top-level transfer params
+		// on this route, which is the most common cause.
+		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+			"kvConnector", s.kv.Name(), "path", path)
+	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
 
 	logger.V(logutil.DEFAULT).Info("complete")
 	return nil
 }
 
-func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format gateway.RequestFormat) (map[string]any, error) {
+func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
 	}
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
-	// Per-entry decision: an entry ships mm_metadata[i] when its hash has an
-	// EC descriptor and carries non-empty metadata, otherwise kwargs_data[i].
-	// Both fields are always emitted with complementary nulls so vLLM's
-	// per-item merge (merge_mm_kwargs_items) reconstructs each entry.
+	// Per-entry mm_metadata/kwargs_data choice; see buildPrefillMMFeatures.
 	features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams)
 
 	switch format {
-	case gateway.FormatChatCompletions:
+	case reqcommon.APITypeChatCompletions:
 		body := maps.Clone(reqCtx.Body)
-		capSingleTokenOutput(body, format)
-		tokens := map[string]any{
-			"token_ids": reqCtx.TokenIDs,
-		}
-		if features != nil {
-			tokensFeatures := map[string]any{
-				"mm_hashes":       features["mm_hashes"],
-				"mm_placeholders": features["mm_placeholders"],
-			}
-			// Chat tokens.features never carried kwargs_data. When the metadata
-			// path is active, forward mm_metadata so prefill can compute mRoPE
-			// without re-processing encoder tensors.
-			if md, ok := features["mm_metadata"]; ok {
-				tokensFeatures["mm_metadata"] = md
-			}
-			tokens["features"] = tokensFeatures
-		}
-		body["tokens"] = tokens
+		reqcommon.CapSingleToken(body, format)
 		body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
 		}
 		return body, nil
 
-	case gateway.FormatCompletions:
+	case reqcommon.APITypeCompletions:
 		prompt := reqCtx.Body["prompt"]
 		if len(reqCtx.TokenIDs) > 0 {
 			prompt = reqCtx.TokenIDs
@@ -179,7 +173,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			"prompt":                        prompt,
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		capSingleTokenOutput(body, format)
+		reqcommon.CapSingleToken(body, format)
 		if features != nil {
 			body["features"] = features
 		}
@@ -188,26 +182,28 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		}
 		return body, nil
 
-	case gateway.FormatGenerate:
-		// The /inference/v1/generate engine reads transfer params only from
-		// sampling_params.extra_args; top-level fields are ignored on input.
-		sampling := map[string]any{reqcommon.FieldMaxTokens: 1}
-		setGenerateTransferParams(sampling, kvParams, ecParams)
+	case reqcommon.APITypeVLLMGenerate:
 		body := map[string]any{
-			"request_id":                  reqCtx.RequestID,
-			"token_ids":                   reqCtx.TokenIDs,
-			"model":                       reqCtx.Model,
-			reqcommon.FieldSamplingParams: sampling,
+			"request_id":                    reqCtx.RequestID,
+			"token_ids":                     reqCtx.TokenIDs,
+			"model":                         reqCtx.Model,
+			reqcommon.FieldKVTransferParams: kvParams,
 		}
-		capSingleTokenOutput(body, format)
+		reqcommon.CapSingleToken(body, format)
 		if features != nil {
 			body["features"] = features
 		}
+		if len(ecParams) > 0 {
+			body[reqcommon.FieldECTransferParams] = ecParams
+		}
 		return body, nil
+
+	default:
+		// resolveFormat above never returns anything but the formats handled
+		// here, so this case is unreachable unless resolveFormat's contract
+		// changes.
+		return nil, unreachableFormatError(format)
 	}
-	// resolveFormat only ever yields the three formats above; a new value
-	// reaching here is a programming error, not a client fault.
-	return nil, fmt.Errorf("prefill: unsupported request format %v", format)
 }
 
 type prefillResponse struct {

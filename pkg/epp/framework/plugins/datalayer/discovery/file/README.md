@@ -44,13 +44,14 @@ endpoints:
     namespace: <string>         # optional -- defaults to "default"
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
+    rankIndex: <int>            # optional -- defaults to 0, must be >= 0
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
 
 ## Configuration
 
-**Location:** `dataLayer.discovery.pluginRef` referencing a plugin entry of
+**Location:** `dataLayer.discovery.endpoints.pluginRef` referencing a plugin entry of
 type `file-discovery` in `plugins`.
 **Enabled by default:** No.
 

@@ -1,11 +1,30 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
 	"context"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
@@ -27,12 +46,13 @@ var _ = Describe("Data Parallel support", func() {
 			ctx, cancel := context.WithCancel(ctx)
 			grp, ctx := errgroup.WithContext(ctx)
 
-			// proxy.startDataParallel starts listeners on the ports following
-			// the proxy's main port. To avoid problems, get a free port and
-			// tell the proxy that it is listening on that port minus one.
-			freePort, err := fwknet.GetFreePort()
+			// Rank-1 clone binds this listener. Rank 0 is config.Port for
+			// DP rank math and is not served in this test.
+			rank1Ln, err := fwknet.ReserveListener()
 			Expect(err).ToNot(HaveOccurred())
-			fakeProxyPort := freePort - 1
+			DeferCleanup(func() { _ = rank1Ln.Close() })
+			rank1Port := rank1Ln.Addr().(*net.TCPAddr).Port
+			fakeProxyPort := rank1Port - 1
 
 			// The data parallel support, assumes that the decoders are
 			// listening on a set of contiguous ports. Get a free port
@@ -58,6 +78,7 @@ var _ = Describe("Data Parallel support", func() {
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)
+			theProxy.DataParallelListeners = []net.Listener{rank1Ln}
 			theProxy.allowlistValidator, err = NewAllowlistValidator(false, routing.InferencePoolAPIGroup, "", "")
 			Expect(err).ToNot(HaveOccurred())
 
@@ -65,8 +86,19 @@ var _ = Describe("Data Parallel support", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(theProxy.dataParallelProxies).To(HaveLen(testDataParallelSize))
-			handler := theProxy.dataParallelProxies["127.0.0.1:"+strconv.Itoa(fakeProxyPort+1)]
+			handler := theProxy.dataParallelProxies["127.0.0.1:"+strconv.Itoa(rank1Port)]
 			Expect(handler).ToNot(BeNil())
+
+			rank1Addr := rank1Ln.Addr().String()
+			healthClient := &http.Client{Timeout: 200 * time.Millisecond}
+			Eventually(func() bool {
+				resp, err := healthClient.Get("http://" + rank1Addr + "/health")
+				if err != nil {
+					return false
+				}
+				defer resp.Body.Close()
+				return resp.StatusCode == http.StatusOK
+			}, "2s", "20ms").Should(BeTrue())
 
 			rank0Handler := sidecarmock.GenericHandler{}
 			rank0Server := httptest.NewServer(&rank0Handler)
@@ -81,7 +113,7 @@ var _ = Describe("Data Parallel support", func() {
 			Expect(int(rank0Handler.RequestCount.Load())).To(Equal(1))
 			Expect(int(rank1Handler.RequestCount.Load())).To(Equal(0))
 
-			req.Header.Add(routing.DataParallelEndpointHeader, "127.0.0.1:"+strconv.Itoa(fakeProxyPort+1))
+			req.Header.Add(routing.DataParallelEndpointHeader, "127.0.0.1:"+strconv.Itoa(rank1Port))
 			resp = httptest.NewRecorder()
 			proxyHandler.ServeHTTP(resp, req)
 			Expect(int(rank0Handler.RequestCount.Load())).To(Equal(1))

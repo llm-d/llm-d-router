@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -64,7 +65,7 @@ var _ = Describe("SGLang Connector", func() {
 				"max_tokens": 50
 			}`
 
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
@@ -79,8 +80,11 @@ var _ = Describe("SGLang Connector", func() {
 		}
 
 		// Because SGLang connector sends requests concurrently (prefill in goroutine),
-		// wait until the prefill handler has finished processing before reading its state.
-		Eventually(testInfo.prefillHandler.RequestCount.Load).Should(Equal(int32(1)))
+		// wait until the prefill handler has finished processing before reading its
+		// state. The wait polls the recorded requests rather than RequestCount: the
+		// mock counts a request on entry and records it after reading the body, so
+		// the counter reaches 1 while the slice is still empty.
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
 
 		// Validate prefill request
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
@@ -156,7 +160,7 @@ var _ = Describe("SGLang Connector", func() {
 		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
 
 		body := `{"model": "Qwen", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+ChatCompletionsPath, bytes.NewReader([]byte(body)))
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]

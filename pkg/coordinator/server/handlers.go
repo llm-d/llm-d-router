@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -140,6 +142,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
+	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
 
 	if requestIDReplaced && clientRequestID != "" {
 		// Log the rejected length, never the raw value, to avoid reflecting

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +20,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -36,6 +38,19 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// CrossReplicaSyncer returns the configured cross-replica syncer plugin. It
+	// returns nil when cross-replica synchronization is not configured.
+	CrossReplicaSyncer() Plugin
+
+	// SetCrossReplicaSyncer makes the configured cross-replica syncer available
+	// to plugins through the handle.
+	SetCrossReplicaSyncer(Plugin)
+
+	// RefreshMetricsInterval returns the base polling tick configured by
+	// --refresh-metrics-interval, after the minimum-interval clamp. Data sources
+	// that set their own interval may poll less often than this. Zero when unset.
+	RefreshMetricsInterval() time.Duration
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -60,8 +75,10 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList         PodListFunc
-	metricsRecorder MetricsRecorder
+	podList                PodListFunc
+	metricsRecorder        MetricsRecorder
+	crossReplicaSyncer     Plugin
+	refreshMetricsInterval time.Duration
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -111,6 +128,21 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
+// CrossReplicaSyncer returns the configured cross-replica syncer plugin.
+func (h *eppHandle) CrossReplicaSyncer() Plugin {
+	return h.crossReplicaSyncer
+}
+
+// SetCrossReplicaSyncer sets the configured cross-replica syncer plugin.
+func (h *eppHandle) SetCrossReplicaSyncer(syncer Plugin) {
+	h.crossReplicaSyncer = syncer
+}
+
+// RefreshMetricsInterval returns the data-layer polling cadence.
+func (h *eppHandle) RefreshMetricsInterval() time.Duration {
+	return h.refreshMetricsInterval
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -121,6 +153,14 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 		if recorder != nil {
 			h.metricsRecorder = recorder
 		}
+	}
+}
+
+// WithRefreshMetricsInterval sets the base polling tick advertised to plugins
+// via Handle.RefreshMetricsInterval.
+func WithRefreshMetricsInterval(interval time.Duration) HandleOption {
+	return func(h *eppHandle) {
+		h.refreshMetricsInterval = interval
 	}
 }
 

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +34,8 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
+
+const cleanEndpoint = "clean-endpoint"
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
 type localRegistry struct {
@@ -192,13 +195,20 @@ func TestDetector_Configuration(t *testing.T) {
 		driveLoad(ctx, reg, detector, endpointName, 1)
 
 		t.Run("fallback to clean endpoint", func(t *testing.T) {
-			cleanEndpoint := "clean-endpoint"
 			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
 				newStubSchedulingEndpoint(reg, endpointName),
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
 			require.Len(t, kept, 1, "Filter should drop the overloaded endpoint")
 			require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+		})
+
+		t.Run("fail open when all endpoints overloaded", func(t *testing.T) {
+			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
+				newStubSchedulingEndpoint(reg, endpointName),
+			})
+			require.Len(t, kept, 1, "Filter should fail open and return all endpoints when all are overloaded")
+			require.Equal(t, endpointName, kept[0].GetMetadata().ID.Name)
 		})
 	})
 }
@@ -433,9 +443,12 @@ func TestDetector_TokenFilter(t *testing.T) {
 	reg := newLocalRegistry()
 	detector := newDetector("test-detector", config, logr.Discard())
 	endpointName := "token-filter-endpoint"
-	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)}
+	endpoints := []fwksched.Endpoint{
+		newStubSchedulingEndpoint(reg, endpointName),
+		newStubSchedulingEndpoint(reg, cleanEndpoint),
+	}
 
-	// Drive 110 tokens (just below 120 burst limit) -> endpoint should pass filter.
+	// Drive 110 tokens (just below 120 burst limit) -> both endpoints should pass filter.
 	// 4 input -> 10 total tokens per request * 11 requests = 110 tokens.
 	reqs := make([]*fwksched.InferenceRequest, 0, 11)
 	for i := range 11 {
@@ -444,14 +457,19 @@ func TestDetector_TokenFilter(t *testing.T) {
 	driveTokenLoad(ctx, reg, detector, endpointName, reqs)
 
 	kept := detector.Filter(ctx, nil, endpoints)
-	require.Len(t, kept, 1, "endpoint should pass filter below burst limit")
+	require.Len(t, kept, 2, "endpoint should pass filter below burst limit")
 
-	// Add one more request to reach 120 tokens -> filtered out
+	// Add one more request to reach 120 tokens -> endpointName filtered out, cleanEndpoint kept.
 	driveTokenLoad(ctx, reg, detector, endpointName, []*fwksched.InferenceRequest{
 		makeTokenRequest("r12", 4),
 	})
 	kept = detector.Filter(ctx, nil, endpoints)
-	require.Len(t, kept, 0, "endpoint should be filtered at burst limit")
+	require.Len(t, kept, 1, "overloaded endpoint should be filtered at burst limit when clean endpoint available")
+	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+
+	// When all endpoints are at burst limit -> fail open returns all endpoints.
+	kept = detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+	require.Len(t, kept, 1, "filter should fail open when all endpoints exceed burst limit")
 }
 
 // TestDetector_TokenLifecycle verifies token accounting.
@@ -558,7 +576,8 @@ func TestDetector_HybridSaturation(t *testing.T) {
 	}
 }
 
-// TestDetector_HybridFilter verifies hybrid mode drops an endpoint when either dimension hits its limit.
+// TestDetector_HybridFilter verifies hybrid mode drops an endpoint when either dimension hits its limit,
+// and fails open when all endpoints hit their limits.
 func TestDetector_HybridFilter(t *testing.T) {
 	t.Parallel()
 
@@ -576,10 +595,10 @@ func TestDetector_HybridFilter(t *testing.T) {
 		tokens   int64
 		wantKept int
 	}{
-		{name: "below_both_limits", requests: 5, tokens: 50, wantKept: 1},
-		{name: "request_limit_reached", requests: 10, tokens: 50, wantKept: 0},
-		{name: "token_limit_reached", requests: 5, tokens: 100, wantKept: 0},
-		{name: "both_over", requests: 20, tokens: 200, wantKept: 0},
+		{name: "below_both_limits", requests: 5, tokens: 50, wantKept: 2},
+		{name: "request_limit_reached", requests: 10, tokens: 50, wantKept: 1},
+		{name: "token_limit_reached", requests: 5, tokens: 100, wantKept: 1},
+		{name: "both_over", requests: 20, tokens: 200, wantKept: 1},
 	}
 
 	for _, tc := range tests {
@@ -593,10 +612,35 @@ func TestDetector_HybridFilter(t *testing.T) {
 				load.Tokens = tc.tokens
 			})
 
-			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
+				newStubSchedulingEndpoint(reg, endpointName),
+				newStubSchedulingEndpoint(reg, cleanEndpoint),
+			})
 			require.Len(t, kept, tc.wantKept, "hybrid filter mismatch")
 		})
 	}
+
+	t.Run("all_over_fail_open", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		detector := newDetector("test-detector", config, logr.Discard())
+		endpointA := "endpoint-a"
+		endpointB := "endpoint-b"
+		reg.update(fullEndpointName(endpointA), func(load *attrconcurrency.InFlightLoad) {
+			load.Requests = 10
+			load.Tokens = 50
+		})
+		reg.update(fullEndpointName(endpointB), func(load *attrconcurrency.InFlightLoad) {
+			load.Requests = 5
+			load.Tokens = 100
+		})
+
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
+			newStubSchedulingEndpoint(reg, endpointA),
+			newStubSchedulingEndpoint(reg, endpointB),
+		})
+		require.Len(t, kept, 2, "hybrid filter should fail open when all endpoints exceed limits")
+	})
 }
 
 // TestDetector_ConcurrencyStress performs race condition check.

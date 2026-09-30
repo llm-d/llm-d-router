@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -217,7 +218,7 @@ func diffStore(store datastore.Datastore, params diffStoreParams) string {
 
 	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
 		return a.Name < b.Name
-	})); diff != "" {
+	}), cmpopts.IgnoreFields(v1alpha2.InferenceObjective{}, "ObjectMeta.ResourceVersion")); diff != "" {
 		return "models:" + diff
 	}
 	return ""

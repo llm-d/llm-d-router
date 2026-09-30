@@ -1,4 +1,4 @@
-FROM golang:1.26.7
+FROM golang:1.26.8
 
 RUN mkdir /app
 WORKDIR /app
@@ -67,6 +67,17 @@ RUN GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCH
 # --userns=keep-id / -u <uid> can use the binary without writing to root-owned
 # /usr/local/bin.
 RUN GOBIN=/usr/local/bin go install github.com/onsi/ginkgo/v2/ginkgo@v2.28.3
+
+# Install Helm for rendering the E2E standalone chart.
+ARG HELM_VERSION=v3.17.1
+RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
+    cd /tmp && \
+    curl -sSfLO "https://get.helm.sh/helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" && \
+    curl -sSfLO "https://get.helm.sh/helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz.sha256sum" && \
+    sha256sum -c "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz.sha256sum" && \
+    tar -xzf "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" --strip-components=1 \
+      -C /usr/local/bin "linux-${GOARCH}/helm" && \
+    rm "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz.sha256sum"
 
 # Go caches are mounted as volumes at runtime for persistence across image rebuilds.
 # Directories are created with open permissions so non-root users (docker -u) can write.

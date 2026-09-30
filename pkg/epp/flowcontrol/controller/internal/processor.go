@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -306,6 +307,13 @@ func (p *Processor) enqueue(item *FlowItem) {
 		return
 	}
 
+	// The active queue-wait budget includes time spent in the processor's enqueue buffer.
+	regime := p.regime.Load()
+	if isExpired(item, p.clock.Now(), regime, p.noEndpointRequestTTL) {
+		p.finalizeAndRecordDrop(item, expiryError(regime.empty))
+		return
+	}
+
 	// --- Configuration Validation ---
 	// Registry errors on both lookups are flattened with %v; see tryDistribution for why a finalized error must
 	// not preserve registry sentinels.
@@ -464,14 +472,15 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		name      string
 		endpoints []fwkdl.Endpoint
 	}{
-		{"prefill", prefill},
-		{"decode", decode},
+		{flowcontrol.SaturationStagePrefill, prefill},
+		{flowcontrol.SaturationStageDecode, decode},
 	} {
 		if len(part.endpoints) == 0 {
 			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
+			metrics.DeleteFlowControlDetectorSaturationStage(part.name)
 			continue
 		}
-		stageSat := p.saturationDetector.Saturation(ctx, part.endpoints)
+		stageSat := p.saturationDetector.Saturation(flowcontrol.WithSaturationStage(ctx, part.name), part.endpoints)
 		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
 		if stageSat > saturation {
 			saturation = stageSat
@@ -479,6 +488,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}
 	if saturation < 0 {
 		saturation = p.saturationDetector.Saturation(ctx, pool)
+	} else {
+		// Drop series recorded by an earlier unpartitioned evaluation (e.g. an empty pool at startup).
+		metrics.DeleteFlowControlDetectorSaturationStage("")
 	}
 
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -34,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // --- Mocks ---
@@ -55,16 +59,18 @@ type mockFlowController struct {
 	err     error
 	called  bool
 	delay   time.Duration
+	request flowcontrol.FlowControlRequest
 }
 
 func (m *mockFlowController) EnqueueAndWait(
 	_ context.Context,
-	_ flowcontrol.FlowControlRequest,
+	request flowcontrol.FlowControlRequest,
 ) (fctypes.QueueOutcome, error) {
 	m.called = true
 	if m.delay > 0 {
 		time.Sleep(m.delay)
 	}
+	m.request = request
 	return m.outcome, m.err
 }
 
@@ -166,6 +172,7 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 		fairnessID      string
 		priority        int
 		requestByteSize uint64
+		requestTTL      time.Duration
 		expectFlowKey   flowcontrol.FlowKey
 	}{
 		{
@@ -174,6 +181,7 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 			fairnessID:      "flow-1",
 			priority:        10,
 			requestByteSize: 1024,
+			requestTTL:      2 * time.Second,
 			expectFlowKey:   flowcontrol.FlowKey{ID: "flow-1", Priority: 10},
 		},
 	}
@@ -182,16 +190,69 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fcReq := &flowControlRequest{
-				fairnessID:       tc.fairnessID,
-				priority:         tc.priority,
-				requestByteSize:  tc.requestByteSize,
-				inferenceRequest: &fwksched.InferenceRequest{RequestID: tc.requestID},
+				fairnessID:          tc.fairnessID,
+				priority:            tc.priority,
+				requestByteSize:     tc.requestByteSize,
+				initialEffectiveTTL: tc.requestTTL,
+				inferenceRequest:    &fwksched.InferenceRequest{RequestID: tc.requestID},
 			}
 
 			assert.Equal(t, tc.requestID, fcReq.ID(), "ID() mismatch")
 			assert.Equal(t, tc.requestByteSize, fcReq.ByteSize(), "ByteSize() mismatch")
 			assert.Equal(t, tc.expectFlowKey, fcReq.FlowKey(), "FlowKey() mismatch")
-			assert.Zero(t, fcReq.InitialEffectiveTTL(), "InitialEffectiveTTL() should be zero")
+			assert.Equal(t, tc.requestTTL, fcReq.InitialEffectiveTTL(), "InitialEffectiveTTL() mismatch")
+		})
+	}
+}
+
+func TestFlowControlAdmissionController_RequestTTL(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		headerName     string
+		header         string
+		headerPresent  bool
+		wantTTL        time.Duration
+		wantInvalidLog bool
+	}{
+		{name: "valid", headerName: metadata.InferenceTTLHeaderKey, header: " 2s ", headerPresent: true, wantTTL: 2 * time.Second},
+		{name: "missing"},
+		{name: "empty", headerName: metadata.InferenceTTLHeaderKey, header: " ", headerPresent: true, wantInvalidLog: true},
+		{name: "malformed", headerName: metadata.InferenceTTLHeaderKey, header: "soon", headerPresent: true, wantInvalidLog: true},
+		{name: "overflow", headerName: metadata.InferenceTTLHeaderKey, header: "999999999999999999999h", headerPresent: true, wantInvalidLog: true},
+		{name: "zero", headerName: metadata.InferenceTTLHeaderKey, header: "0s", headerPresent: true, wantInvalidLog: true},
+		{name: "negative", headerName: metadata.InferenceTTLHeaderKey, header: "-1s", headerPresent: true, wantInvalidLog: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			writer := &strings.Builder{}
+			ctx := log.IntoContext(context.Background(), logutil.NewTestLoggerWithWriter(writer))
+			headers := map[string]string{}
+			if tc.headerPresent {
+				headers[tc.headerName] = tc.header
+			}
+			reqCtx := &handlers.RequestContext{
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+				Request:           &handlers.Request{Headers: headers, Metadata: map[string]any{}},
+			}
+			fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
+			controller := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+
+			err := controller.Admit(ctx, reqCtx, 0)
+
+			require.NoError(t, err)
+			require.NotNil(t, fc.request)
+			assert.Equal(t, tc.wantTTL, fc.request.InitialEffectiveTTL())
+			if tc.wantInvalidLog {
+				assert.Contains(t, writer.String(), "Ignoring invalid request TTL header")
+				assert.Contains(t, writer.String(), `"requestID": "test-req"`)
+				assert.Contains(t, writer.String(), fmt.Sprintf(`"value": %q`, tc.header))
+			} else {
+				assert.NotContains(t, writer.String(), "Ignoring invalid request TTL header")
+			}
 		})
 	}
 }

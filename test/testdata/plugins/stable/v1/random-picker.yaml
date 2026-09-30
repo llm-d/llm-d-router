@@ -1,0 +1,13 @@
+# Frozen configuration surface of the random-picker plugin.
+# See ../README.md: this file must not be edited to fix a failing test.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: single-profile-handler
+- type: random-picker
+  parameters:
+    maxNumOfEndpoints: 1
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: random-picker

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +19,14 @@ package utilization
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -114,6 +117,21 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 			configJSON: []byte(`{"headroom": 2.0}`),
 			wantError:  false,
 		},
+		{
+			name:       "valid staleness policy: ignore",
+			configJSON: []byte(`{"stalenessPolicy": "ignore"}`),
+			wantError:  false,
+		},
+		{
+			name:       "valid staleness policy: saturated",
+			configJSON: []byte(`{"stalenessPolicy": "saturated"}`),
+			wantError:  false,
+		},
+		{
+			name:       "invalid staleness policy",
+			configJSON: []byte(`{"stalenessPolicy": "bogus"}`),
+			wantError:  true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -130,6 +148,14 @@ func TestUtilizationDetectorFactory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildConfigDefaultsStalenessPolicy(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := buildConfig(&apiConfig{})
+	require.NoError(t, err)
+	require.Equal(t, StalenessSaturated, cfg.StalenessPolicy)
 }
 
 // TestDetector_TypedName provides structural assurance that initialization assigns proper types.
@@ -153,7 +179,8 @@ func TestDetector_Saturation(t *testing.T) {
 	config := &Config{
 		QueueDepthThreshold:       5,
 		KVCacheUtilThreshold:      0.90,
-		MetricsStalenessThreshold: 100 * time.Millisecond,
+		MetricsStalenessThreshold: time.Hour,
+		StalenessPolicy:           StalenessSaturated,
 	}
 
 	tests := []struct {
@@ -164,7 +191,7 @@ func TestDetector_Saturation(t *testing.T) {
 		{
 			name:           "No candidate pods",
 			pods:           []fwkdl.Endpoint{},
-			wantSaturation: 1.0, // Fail closed
+			wantSaturation: 1.0, // An empty pool remains saturated.
 		},
 		{
 			name: "Single pod with good capacity",
@@ -179,7 +206,7 @@ func TestDetector_Saturation(t *testing.T) {
 			name: "Single pod with stale metrics",
 			pods: []fwkdl.Endpoint{
 				// Stale = 1.0
-				makePodMetric("pod1", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
+				makePodMetric("pod1", 1, 0.1, baseTime.Add(-2*time.Hour)),
 			},
 			wantSaturation: 1.0,
 		},
@@ -227,7 +254,7 @@ func TestDetector_Saturation(t *testing.T) {
 				// Pod1 (Good): Q=1/5(0.2), KV=0.1/0.9(0.11). Max=0.2.
 				makePodMetric("pod1", 1, 0.1, baseTime),
 				// Pod2 (Stale): 1.0.
-				makePodMetric("pod2", 0, 0.2, baseTime.Add(-300*time.Millisecond)),
+				makePodMetric("pod2", 0, 0.2, baseTime.Add(-3*time.Hour)),
 			},
 			// Avg(0.2, 1.0) = 0.6
 			wantSaturation: 0.6,
@@ -247,7 +274,7 @@ func TestDetector_Saturation(t *testing.T) {
 			name: "Multiple pods, all bad capacity",
 			pods: []fwkdl.Endpoint{
 				// Pod1 (Stale): 1.0
-				makePodMetric("pod1", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
+				makePodMetric("pod1", 1, 0.1, baseTime.Add(-2*time.Hour)),
 				// Pod2 (High Q): 20/5 = 4.0
 				makePodMetric("pod2", 20, 0.2, baseTime),
 				// Pod3 (High KV): 0.99/0.90 = 1.1
@@ -268,9 +295,83 @@ func TestDetector_Saturation(t *testing.T) {
 		{
 			name: "Metrics age just over staleness threshold",
 			pods: []fwkdl.Endpoint{
-				makePodMetric("pod1", 1, 0.1, baseTime.Add(-101*time.Millisecond)),
+				makePodMetric("pod1", 1, 0.1, baseTime.Add(-time.Hour-time.Millisecond)),
 			},
 			wantSaturation: 1.0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detector := NewDetector("test-detector", *config, logr.Discard())
+
+			got := detector.Saturation(context.Background(), tc.pods)
+			require.InDelta(t, tc.wantSaturation, got, 1e-4, "Saturation mismatch")
+		})
+	}
+}
+
+func TestDetector_SaturationIgnorePolicy(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+
+	// Config: Queue=5, KV=0.9
+	config := &Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+		StalenessPolicy:           StalenessIgnore,
+	}
+
+	tests := []struct {
+		name           string
+		pods           []fwkdl.Endpoint
+		wantSaturation float64
+	}{
+		{
+			name:           "No candidate pods",
+			pods:           []fwkdl.Endpoint{},
+			wantSaturation: 1.0, // Fail closed
+		},
+		{
+			name: "Single pod with good capacity",
+			pods: []fwkdl.Endpoint{
+				makePodMetric("pod1", 2, 0.5, baseTime),
+			},
+			wantSaturation: 0.5 / 0.9,
+		},
+		{
+			name: "Single stale pod excluded; all-stale pool scores 0.0",
+			pods: []fwkdl.Endpoint{
+				makePodMetric("pod1", 1, 0.1, baseTime.Add(-2*time.Hour)),
+			},
+			wantSaturation: 0.0,
+		},
+		{
+			name: "Single pod with nil metrics scores zero",
+			pods: []fwkdl.Endpoint{
+				fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					ID: types.NamespacedName{Name: "pod1", Namespace: "ns1"},
+				}, nil),
+			},
+			wantSaturation: 0.0,
+		},
+		{
+			name: "Multiple pods, one good, one stale",
+			pods: []fwkdl.Endpoint{
+				makePodMetric("pod1", 1, 0.1, baseTime),
+				makePodMetric("pod2", 0, 0.2, baseTime.Add(-3*time.Hour)),
+			},
+			wantSaturation: 0.2,
+		},
+		{
+			name: "All pods stale",
+			pods: []fwkdl.Endpoint{
+				makePodMetric("pod1", 1, 0.1, baseTime.Add(-2*time.Hour)),
+				makePodMetric("pod2", 1, 0.1, baseTime.Add(-2*time.Hour)),
+			},
+			wantSaturation: 0.0,
 		},
 	}
 
@@ -292,7 +393,7 @@ func TestDetector_Filter(t *testing.T) {
 	config := &Config{
 		QueueDepthThreshold:       5,
 		KVCacheUtilThreshold:      0.80,
-		MetricsStalenessThreshold: 100 * time.Millisecond,
+		MetricsStalenessThreshold: time.Hour,
 		Headroom:                  0.2, // 20% burst
 	}
 
@@ -349,8 +450,8 @@ func TestDetector_Filter(t *testing.T) {
 		{
 			name: "Pass - all stale (Fail open at pool level)",
 			endpoints: []fwksched.Endpoint{
-				makeSchedulingEndpoint("pod1", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
-				makeSchedulingEndpoint("pod2", 1, 0.1, baseTime.Add(-200*time.Millisecond)),
+				makeSchedulingEndpoint("pod1", 1, 0.1, baseTime.Add(-2*time.Hour)),
+				makeSchedulingEndpoint("pod2", 1, 0.1, baseTime.Add(-2*time.Hour)),
 			},
 			wantLen: 2,
 		},
@@ -373,6 +474,27 @@ func TestDetector_Filter(t *testing.T) {
 	}
 }
 
+// staleGaugeValue reads the llm_d_epp_flow_control_stale_endpoints series for the given detector.
+// It returns -1 when the series is absent.
+func staleGaugeValue(t *testing.T, detectorName string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "llm_d_epp_flow_control_stale_endpoints" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "detector" && l.GetValue() == detectorName {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return -1 // Series absent.
+}
+
 // TestDetector_StaleEndpointObservability verifies that Saturation records the stale-endpoint
 // gauge (keyed by detector name) and that the stale-metrics log is time-bounded.
 func TestDetector_StaleEndpointObservability(t *testing.T) {
@@ -391,24 +513,6 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	detectorName := "stale-observability-test"
 	detector := NewDetector(detectorName, config, logr.Discard())
 
-	staleGaugeValue := func() float64 {
-		families, err := ctrlmetrics.Registry.Gather()
-		require.NoError(t, err)
-		for _, f := range families {
-			if f.GetName() != "llm_d_epp_flow_control_stale_endpoints" {
-				continue
-			}
-			for _, m := range f.GetMetric() {
-				for _, l := range m.GetLabel() {
-					if l.GetName() == "detector" && l.GetValue() == detectorName {
-						return m.GetGauge().GetValue()
-					}
-				}
-			}
-		}
-		return -1 // Series absent.
-	}
-
 	baseTime := time.Now()
 	pods := []fwkdl.Endpoint{
 		makePodMetric("fresh", 1, 0.1, baseTime),
@@ -419,7 +523,7 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	}
 
 	detector.Saturation(context.Background(), pods)
-	require.Equal(t, 2.0, staleGaugeValue(), "stale and nil-metrics endpoints should both be counted")
+	require.Equal(t, 2.0, staleGaugeValue(t, detectorName), "stale and nil-metrics endpoints should both be counted")
 	firstWarn := detector.lastStaleWarnNanos.Load()
 	require.NotZero(t, firstWarn, "first stale observation should record a log timestamp")
 
@@ -431,11 +535,78 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	// An empty candidate list has no stale endpoints; the gauge must not stay pinned at its last
 	// value, or an empty-pool stall reads as a metrics collection failure.
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{})
-	require.Equal(t, 0.0, staleGaugeValue(), "gauge should read zero for an empty candidate list")
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName), "gauge should read zero for an empty candidate list")
 
 	// Re-observe staleness, then confirm fresh metrics clear it.
 	detector.Saturation(context.Background(), pods)
-	require.Equal(t, 2.0, staleGaugeValue(), "staleness should be re-observed after the empty list")
+	require.Equal(t, 2.0, staleGaugeValue(t, detectorName), "staleness should be re-observed after the empty list")
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
-	require.Equal(t, 0.0, staleGaugeValue(), "gauge should return to zero when staleness clears")
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName), "gauge should return to zero when staleness clears")
+}
+
+func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {
+	t.Parallel()
+
+	eppmetrics.Register()
+	detectorName := "stale-observability-ignore-test"
+	detector := NewDetector(detectorName, Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+		StalenessPolicy:           StalenessIgnore,
+	}, logr.Discard())
+
+	detector.Saturation(context.Background(), []fwkdl.Endpoint{
+		makePodMetric("stale", 1, 0.1, time.Now().Add(-2*time.Hour)),
+	})
+
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName),
+		"the stale endpoint gauge must record under the ignore policy too")
+}
+
+// warnCountingSink records how many Info messages mention the staleness warning.
+type warnCountingSink struct {
+	warnings int
+}
+
+func (s *warnCountingSink) Init(logr.RuntimeInfo)          {}
+func (s *warnCountingSink) Enabled(int) bool               { return true }
+func (s *warnCountingSink) Error(error, string, ...any)    {}
+func (s *warnCountingSink) WithValues(...any) logr.LogSink { return s }
+func (s *warnCountingSink) WithName(string) logr.LogSink   { return s }
+
+func (s *warnCountingSink) Info(_ int, msg string, _ ...any) {
+	if strings.Contains(msg, "refresh-metrics-interval exceeds metricsStalenessThreshold") {
+		s.warnings++
+	}
+}
+
+// TestUtilizationDetectorFactory_StalenessWarning verifies the factory warns
+// only when the data-layer polling cadence exceeds the staleness threshold.
+func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		refreshInterval time.Duration
+		wantWarnings    int
+	}{
+		{"interval exceeds threshold", DefaultMetricsStalenessThreshold + time.Second, 1},
+		{"interval equals threshold", DefaultMetricsStalenessThreshold, 0},
+		{"interval below threshold", DefaultMetricsStalenessThreshold - time.Millisecond, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &warnCountingSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
+			handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithRefreshMetricsInterval(tc.refreshInterval))
+
+			_, err := UtilizationDetectorFactory("test", nil, handle)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantWarnings, sink.warnings)
+		})
+	}
 }

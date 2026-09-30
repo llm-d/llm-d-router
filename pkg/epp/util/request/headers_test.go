@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -31,6 +33,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 	systemHeaders := []string{
 		metadata.FlowFairnessIDKey,
 		metadata.OldFlowFairnessIDKey,
+		metadata.InferenceTTLHeaderKey,
 		metadata.ObjectiveKey,
 		metadata.OldObjectiveKey,
 		metadata.ModelNameRewriteKey,
@@ -43,11 +46,15 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		reqcommon.RevisionDecisionIDHeaderKey,
 		metadata.DestinationEndpointKey,
 		metadata.DestinationEndpointServedKey,
 		metadata.FlowQueueDurationHeaderKey,
 		errcommon.RequestDroppedReasonHeaderKey,
 		"Content-Length",
+		"traceparent",
+		"tracestate",
+		"baggage",
 	}
 
 	for _, header := range systemHeaders {

@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -62,6 +63,19 @@ func (s stubStep) Execute(ctx context.Context, rc *pipeline.RequestContext) erro
 // stubGatewayURL is a placeholder used by tests that never actually issue a
 // passthrough request. A real value only matters in passthrough_test.go.
 const stubGatewayURL = "http://gateway-stub.invalid"
+
+type captureRevisionDecisionStep struct {
+	requestID          string
+	revisionDecisionID string
+}
+
+func (s *captureRevisionDecisionStep) Name() string { return "capture-revision-decision" }
+
+func (s *captureRevisionDecisionStep) Execute(_ context.Context, reqCtx *pipeline.RequestContext) error {
+	s.requestID = reqCtx.RequestID
+	s.revisionDecisionID = reqCtx.RevisionDecisionID
+	return nil
+}
 
 func newTestServer(stepErr error) *Server {
 	return newTestServerWithGateway(stepErr, stubGatewayURL)
@@ -142,6 +156,29 @@ func TestHandleInference_SuccessMapsTo200(t *testing.T) {
 	rec := postInference(t, newTestServer(nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on success, got %d", rec.Code)
+	}
+}
+
+func TestHandleInferenceGeneratesCoordinatorRevisionDecisionID(t *testing.T) {
+	step := &captureRevisionDecisionStep{}
+	gw := gateway.NewWithTransport(&http.Transport{}, stubGatewayURL)
+	srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientRequestID = "client-request-id"
+	rec := postInferenceWithRequestID(t, srv, clientRequestID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if step.requestID != clientRequestID {
+		t.Fatalf("request ID = %q, want %q", step.requestID, clientRequestID)
+	}
+	if step.revisionDecisionID == "" || step.revisionDecisionID == clientRequestID {
+		t.Fatalf("revision decision ID = %q, want an independent coordinator value", step.revisionDecisionID)
+	}
+	if _, err := uuid.Parse(step.revisionDecisionID); err != nil {
+		t.Fatalf("revision decision ID %q is not a UUID: %v", step.revisionDecisionID, err)
 	}
 }
 
@@ -295,9 +332,9 @@ func TestRoutesRegistered(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
-		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
-		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
+		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"generate", http.MethodPost, reqcommon.PathVLLMGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},
 	}
@@ -735,10 +772,10 @@ func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
 	// through to the passthrough. Chi's default MethodNotAllowed handler
 	// produces this; the coordinator does not override it.
 	srv := newTestServer(nil)
-	req := httptest.NewRequest(http.MethodGet, gateway.PathChatCompletions, nil)
+	req := httptest.NewRequest(http.MethodGet, reqcommon.PathChatCompletions, nil)
 	rec := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 for GET on POST-only %s, got %d", gateway.PathChatCompletions, rec.Code)
+		t.Fatalf("expected 405 for GET on POST-only %s, got %d", reqcommon.PathChatCompletions, rec.Code)
 	}
 }

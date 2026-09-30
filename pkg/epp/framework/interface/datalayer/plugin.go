@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -72,7 +73,7 @@ type NotificationExtractor interface {
 //   - Dispatch runs bound extractors in AppendExtractor-insertion order.
 //   - Each Poll and each Extract step runs under its own timeout.
 //   - Non-nil return = poll failure; per-extractor failures record
-//     DataLayerExtractErrorsTotal and do NOT surface as the return error.
+//     LlmdDataLayerExtractErrorsTotal and do NOT surface as the return error.
 //   - AppendExtractor is a pure append; duplicate-Type detection is the caller's
 //     responsibility (see runtime.Configure).
 //   - Interval returns the desired scrape period. Zero means every base tick.

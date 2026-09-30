@@ -10,9 +10,6 @@ Label-based filters that retain or remove candidate pods based on Kubernetes lab
 
 **Type:** `label-selector-filter`
 
-> [!NOTE]
-> The previous type name `by-label-selector` is deprecated but still accepted for backward compatibility.
-
 ### What it does
 
 Retains only candidate pods that match a standard Kubernetes label selector. Supports both `matchLabels` (all key-value pairs must match, AND logic) and `matchExpressions` (operators: `In`, `NotIn`, `Exists`, `DoesNotExist`).
@@ -41,49 +38,9 @@ plugins:
 
 ---
 
-## ByLabel (Deprecated)
-
-**Type:** `by-label`
-
-> [!WARNING]
-> The `by-label` filter is deprecated. Use `label-selector-filter` for generic label-based filtering, or the role-specific filters (`decode-filter`, `prefill-filter`, `encode-filter`) for role-based filtering.
-
-### What it does
-
-Retains only candidate pods that carry a specific Kubernetes label with one of a set of allowed values; pods missing the label are included or excluded based on `allowsNoLabel`.
-
-### Inputs consumed
-
-- Pod Kubernetes labels (read from the candidate pod's metadata).
-
-### Configuration
-
-#### Parameters
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `label` | `string` | Yes | — | The name of the Kubernetes label to inspect on each pod. |
-| `validValues` | `[]string` | Yes (unless `allowsNoLabel=true`) | — | List of acceptable label values. A pod is kept if its value matches any entry. |
-| `allowsNoLabel` | `bool` | No | `false` | If `true`, pods that lack the label entirely are included. If `false`, they are filtered out. |
-
-#### Example
-```yaml
-plugins:
-  - type: by-label
-    parameters:
-      label: "gpu.type"
-      validValues: ["a100"]
-      allowsNoLabel: false
-```
-
-### Limitations
-
-- Only exact string equality is checked — no wildcards, prefix matching, or regular expressions.
-
----
-
 ## Role-Based Filters
 
-Pre-configured `by-label` filters for disaggregated inference architectures. Each checks the `llm-d.ai/role` label on candidate pods.
+Pre-configured filters for disaggregated inference architectures. Each checks the `llm-d.ai/role` label on candidate pods.
 
 **Example Target Pod:**
 ```yaml

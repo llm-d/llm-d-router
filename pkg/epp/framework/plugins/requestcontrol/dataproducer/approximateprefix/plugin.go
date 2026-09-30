@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +35,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -149,12 +151,16 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if config.MaxPrefixTokensToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixTokensToMatch must be >= 0 (current value: %d)", config.MaxPrefixTokensToMatch)
 	}
+	if config.MaxPrefixBlocksToMatch < 0 {
+		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
+	prefixmetrics.Register()
 	// Surface the override to the operator so a too-small configured value is
 	// not silently swallowed. The clamp itself happens at request time in
 	// GetBlockSize and applies uniformly across endpoint metric, autotune
@@ -181,9 +187,7 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 	}
 
-	if handle != nil {
-		go p.CleanUpInactivePods(ctx, handle)
-	}
+	go p.CleanUpInactivePods(ctx, handle)
 
 	return p, nil
 }
@@ -227,13 +231,15 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	blockSize := p.GetBlockSize(pods)
-	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
+	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
 	prefixCacheServers := make(map[ServerID]int)
+	predictedCachedTokens := make(map[ServerID]int)
 	totalBlocks := 0
-	for _, hashes := range perPromptHashes {
+	for i, hashes := range perPromptHashes {
 		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
 			prefixCacheServers[server] += matchLen
+			predictedCachedTokens[server] += min(matchLen*blockSize, perPromptTokens[i])
 		}
 		totalBlocks += len(hashes)
 	}
@@ -244,8 +250,9 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	state := &SchedulingContextState{
-		PerPromptHashes:    perPromptHashes,
-		PrefixCacheServers: prefixCacheServers,
+		PerPromptHashes:       perPromptHashes,
+		PrefixCacheServers:    prefixCacheServers,
+		PredictedCachedTokens: predictedCachedTokens,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -296,6 +303,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	const averageCharactersPerToken = 4
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	if request.Body != nil {
+		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+			state.PredictedCachedTokens[ServerID(targetEndpoint.GetMetadata().ID)],
+			request.Body.TokenizedRequest.TokenCount())
+	}
 	return nil
 }
 

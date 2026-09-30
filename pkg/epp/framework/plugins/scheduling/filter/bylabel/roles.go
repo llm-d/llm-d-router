@@ -1,10 +1,20 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package bylabel
-
-import (
-	"encoding/json"
-
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-)
 
 const (
 	// RoleLabel name
@@ -23,43 +33,4 @@ const (
 	RoleEncodePrefill = "encode-prefill"
 	// RoleEncodePrefillDecode set for workers that can handle encode+prefill+decode
 	RoleEncodePrefillDecode = "encode-prefill-decode"
-
-	// DecodeRoleType is the type of the DecodeFilter
-	DecodeRoleType = "decode-filter"
-	// PrefillRoleType is the type of the PrefillFilter
-	PrefillRoleType = "prefill-filter"
-	// EncodeRoleType is the type of the EncodeFilter
-	EncodeRoleType = "encode-filter"
 )
-
-// DecodeRoleFactory defines the factory function for the Decode filter.
-func DecodeRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return NewDecodeRole().WithName(name), nil
-}
-
-// NewDecodeRole creates and returns an instance of the Filter configured for decode role.
-func NewDecodeRole() *ByLabel {
-	return NewByLabel(DecodeRoleType, RoleLabel, true, RoleDecode, RolePrefillDecode, RoleEncodePrefillDecode)
-}
-
-// PrefillRoleFactory defines the factory function for the Prefill filter.
-func PrefillRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return NewPrefillRole().WithName(name), nil
-}
-
-// NewPrefillRole creates and returns an instance of the Filter configured for prefill role.
-func NewPrefillRole() *ByLabel {
-	return NewByLabel(PrefillRoleType, RoleLabel, false, RolePrefill, RoleEncodePrefill, RolePrefillDecode, RoleEncodePrefillDecode)
-}
-
-// EncodeRoleFactory defines the factory function for the Encode filter.
-func EncodeRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	return NewEncodeRole().WithName(name), nil
-}
-
-// NewEncodeRole creates and returns an instance of the Filter configured for encode role.
-// Encode is the first stage in the pipeline: Encode -> Prefill -> Decode.
-// Accepts pods with roles: encode, encode-prefill, or encode-prefill-decode.
-func NewEncodeRole() *ByLabel {
-	return NewByLabel(EncodeRoleType, RoleLabel, false, RoleEncode, RoleEncodePrefill, RoleEncodePrefillDecode)
-}

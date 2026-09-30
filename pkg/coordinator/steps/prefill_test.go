@@ -22,8 +22,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -125,7 +130,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		t.Fatalf("expected kwargs_data.image=[%s,%s], got %v", testKwargsA, testKwargsB, imageKwargs)
 	}
 
-	// Verify sampling_params with extra_args workaround
+	// Verify sampling_params carries only the capped generation fields, not the
+	// transfer params (those are top level in generate format).
 	samplingParams, ok := prefillBody["sampling_params"].(map[string]any)
 	if !ok {
 		t.Fatal("expected sampling_params in body")
@@ -133,26 +139,29 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 	if samplingParams["max_tokens"] != float64(1) {
 		t.Fatalf("expected sampling_params.max_tokens=1, got %v", samplingParams["max_tokens"])
 	}
+	// The request body is built from RequestContext, so this guards against the branch
+	// starting to forward client sampling_params.
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
-	extraArgs, ok := samplingParams["extra_args"].(map[string]any)
-	if !ok {
-		t.Fatal("expected sampling_params.extra_args in generate format")
+	// The transfer params are no longer nested under extra_args.
+	if _, ok := samplingParams["extra_args"]; ok {
+		t.Fatalf("expected no sampling_params.extra_args in generate format, got %v", samplingParams["extra_args"])
 	}
-	kvParams, ok := extraArgs["kv_transfer_params"].(map[string]any)
+
+	// Verify kv_transfer_params is a top-level field in generate format.
+	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
 	if !ok {
-		t.Fatal("expected kv_transfer_params in extra_args")
+		t.Fatal("expected top-level kv_transfer_params in generate format")
 	}
 	if kvParams["do_remote_decode"] != true {
 		t.Fatalf("expected kv_transfer_params.do_remote_decode=true, got %v", kvParams["do_remote_decode"])
 	}
 
-	// Verify ec_transfer_params is a flat map keyed by mm_hash, nested in
-	// extra_args alongside kv_transfer_params (the engine reads it only there).
-	ecParams, ok := extraArgs["ec_transfer_params"].(map[string]any)
+	// Verify ec_transfer_params is a top-level flat map keyed by mm_hash.
+	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
 	if !ok {
-		t.Fatal("expected ec_transfer_params in sampling_params.extra_args")
+		t.Fatal("expected top-level ec_transfer_params in generate format")
 	}
 	if len(ecParams) != 2 {
 		t.Fatalf("expected 2 ec_transfer_params entries, got %d: %v", len(ecParams), ecParams)
@@ -161,14 +170,6 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		if _, ok := ecParams[want]; !ok {
 			t.Errorf("missing hash %q in ec_transfer_params: %v", want, ecParams)
 		}
-	}
-
-	// Verify no top-level kv_transfer_params or ec_transfer_params in generate format
-	if _, ok := prefillBody["kv_transfer_params"]; ok {
-		t.Fatal("generate format should not have top-level kv_transfer_params")
-	}
-	if _, ok := prefillBody["ec_transfer_params"]; ok {
-		t.Fatal("generate format should not have top-level ec_transfer_params")
 	}
 
 	// Verify response populated KVTransferParams
@@ -379,77 +380,11 @@ func TestPrefillStep_GeneratePartialECCoverage_SplitsPerEntry(t *testing.T) {
 	}
 }
 
-func TestPrefillStep_ChatForwardsMMMetadataInTokensFeatures(t *testing.T) {
-	var prefillBody map[string]any
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &prefillBody)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"kv_transfer_params": map[string]any{"block_id": "block-xyz"},
-		})
-	}))
-	defer server.Close()
-
-	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewPrefillStep(gwClient, map[string]any{
-		"use_openai_format": true,
-		ParamECConnector:    ec.NIXL,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-chat-meta",
-		OriginalPath: gateway.PathChatCompletions,
-		Model:        "llama-3",
-		Body: map[string]any{
-			"model": "llama-3",
-			"messages": []any{
-				map[string]any{"role": "user", "content": "hi"},
-			},
-		},
-		TokenIDs: []int{1, 32000, 2345},
-		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: testKwargsA, MMMetadata: testMetadataA, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
-		},
-		ECTransferParams: []map[string]any{
-			{"hash-a": map[string]any{"peer_port": 5501}},
-		},
-		KVTransferParams: make(map[string]any),
-	}
-
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	tokens, ok := prefillBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens in chat prefill body")
-	}
-	features, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens.features")
-	}
-	if _, ok := features["kwargs_data"]; ok {
-		t.Fatal("tokens.features must not include kwargs_data")
-	}
-	md, ok := features["mm_metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected tokens.features.mm_metadata, got %v", features)
-	}
-	items, _ := md[ModalityImage].([]any)
-	if len(items) != 1 || items[0] != testMetadataA {
-		t.Fatalf("unexpected mm_metadata: %#v", items)
-	}
-}
-
 func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathCompletions {
+		if r.URL.Path != reqcommon.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -471,7 +406,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:         "req-compl",
-		OriginalPath:      gateway.PathCompletions,
+		OriginalPath:      reqcommon.PathCompletions,
 		Model:             "test-model",
 		TokenIDs:          []int{1, 2345, 6789},
 		MultimodalEntries: nil,
@@ -493,13 +428,17 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 	if prefillBody["request_id"] != "req-compl" {
 		t.Fatalf("expected request_id, got %v", prefillBody["request_id"])
 	}
-	// Prefill leg caps output to a single token: max_tokens is pinned to 1 and
-	// min_tokens is stripped (it defaults to 0, keeping min_tokens <= max_tokens).
+	// The request body is built from RequestContext, so this guards against the branch
+	// starting to forward client limits.
 	if prefillBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected max_tokens=1, got %v", prefillBody["max_tokens"])
 	}
 	if _, ok := prefillBody["min_tokens"]; ok {
 		t.Fatalf("expected min_tokens to be stripped, got %v", prefillBody["min_tokens"])
+	}
+	// The legacy Completions API does not define max_completion_tokens.
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("completions request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
 	// Completions format has top-level kv_transfer_params
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
@@ -531,7 +470,7 @@ func TestPrefillStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-compl",
-		OriginalPath:     gateway.PathCompletions,
+		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		TokenIDs:         nil,
 		Body:             map[string]any{"prompt": "Hello"},
@@ -551,7 +490,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -575,7 +514,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -606,25 +545,9 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatal("expected messages from original body in chat format")
 	}
 
-	// Verify tokens nested field
-	tokens, ok := prefillBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 5 {
-		t.Fatalf("expected 5 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("chat format should not have a tokens field")
 	}
 
 	// Verify ec_transfer_params is forwarded in chat format
@@ -641,7 +564,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	if _, ok := prefillBody["kv_transfer_params"]; !ok {
 		t.Fatal("expected kv_transfer_params in chat format")
 	}
-	// Verify no top-level token_ids (should be in tokens field)
+	// Verify no top-level token_ids
 	if _, ok := prefillBody["token_ids"]; ok {
 		t.Fatal("chat format should not have top-level token_ids")
 	}
@@ -654,7 +577,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions {
+		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
@@ -676,7 +599,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-stream",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":          "test-model",
@@ -725,7 +648,7 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":                 "test-model",
@@ -749,11 +672,11 @@ func TestPrefillStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T)
 	}
 }
 
-// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens is a regression
-// test for the one coordinator path where a client-supplied min_tokens survives
-// into the capped body: chat-completions clones reqCtx.Body, so a client
-// min_tokens > 1 would leave min_tokens > max_tokens=1 and vLLM rejects the leg.
-// The generate and completions legs build fresh bodies that never carry it.
+// TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens covers the one
+// coordinator path where a client-supplied min_tokens reaches the capped body:
+// chat-completions clones reqCtx.Body, while the generate and completions requests
+// build fresh bodies that never carry it. reqcommon.CapSingleToken documents why
+// min_tokens is stripped.
 func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 	var prefillBody map[string]any
 
@@ -774,7 +697,7 @@ func TestPrefillStep_ChatCompletionsFormat_StripsClientMinTokens(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-min-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Body: map[string]any{
 			"model":      "test-model",
@@ -815,14 +738,14 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 		{
 			name:         "ChatCompletions",
 			useOpenAI:    true,
-			originalPath: gateway.PathChatCompletions,
+			originalPath: reqcommon.PathChatCompletions,
 			body: map[string]any{
 				"model":    "m",
 				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
 			},
 		},
-		{name: "Completions", useOpenAI: true, originalPath: gateway.PathCompletions},
-		{name: "Generate", useOpenAI: false, originalPath: gateway.PathChatCompletions},
+		{name: "Completions", useOpenAI: true, originalPath: reqcommon.PathCompletions},
+		{name: "Generate", useOpenAI: false, originalPath: reqcommon.PathChatCompletions},
 	}
 
 	for _, tc := range cases {
@@ -860,14 +783,6 @@ func TestSharedStorage_OmitsECTransferParams_InPrefillBody(t *testing.T) {
 			}
 			if _, ok := parsed["ec_transfer_params"]; ok {
 				t.Errorf("ec-shared-storage must not set ec_transfer_params; body=%s", raw)
-			}
-			// Generate format nests transfer params in sampling_params.extra_args.
-			if sp, ok := parsed["sampling_params"].(map[string]any); ok {
-				if ea, ok := sp["extra_args"].(map[string]any); ok {
-					if _, ok := ea["ec_transfer_params"]; ok {
-						t.Errorf("ec-shared-storage must not set ec_transfer_params in extra_args; body=%s", raw)
-					}
-				}
 			}
 		})
 	}
@@ -929,9 +844,10 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	step, _ := NewPrefillStep(gwClient, map[string]any{})
 
 	reqCtx := &pipeline.RequestContext{
-		RequestID: "req-1",
-		Model:     "test",
-		TokenIDs:  []int{1, 2345},
+		RequestID:    "req-1",
+		Model:        "test",
+		OriginalPath: reqcommon.PathVLLMGenerate,
+		TokenIDs:     []int{1, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Index: 0, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
@@ -947,22 +863,52 @@ func TestPrefillStep_GatewayError(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test",
+		Body:             map[string]any{},
+		KVTransferParams: make(map[string]any),
+	}
+
+	body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, reqcommon.APIType(99))
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99): no coordinator route serves it"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
+	}
+}
+
 // TestPrefillStep_CoercesInvalidKVTransferParams verifies that a prefill
 // response whose kv_transfer_params is not a usable JSON object (non-object
 // type, explicit null, empty object, or absent) is coerced to no transfer
 // params rather than failing the prefill step, mirroring the EC NIXL
 // connector's ecParamsFromResponse. Each case must succeed and leave
 // KVTransferParams empty.
+//
+// For the kv-nixl connector a missing handshake is also surfaced with a
+// warning, because decode will recompute the whole prompt. The
+// kv-shared-storage connector returns no params by design, so no warning is
+// expected there.
 func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 	cases := []struct {
-		name string
-		body map[string]any
+		name     string
+		body     map[string]any
+		kvConn   string
+		wantWarn bool
 	}{
-		{name: "NonObjectString", body: map[string]any{"kv_transfer_params": "not-an-object"}},
-		{name: "NonObjectArray", body: map[string]any{"kv_transfer_params": []any{1, 2}}},
-		{name: "ExplicitNull", body: map[string]any{"kv_transfer_params": nil}},
-		{name: "EmptyObject", body: map[string]any{"kv_transfer_params": map[string]any{}}},
-		{name: "FieldAbsent", body: map[string]any{"other": "field"}},
+		{name: "NonObjectString", body: map[string]any{"kv_transfer_params": "not-an-object"}, kvConn: kv.NIXL, wantWarn: true},
+		{name: "NonObjectArray", body: map[string]any{"kv_transfer_params": []any{1, 2}}, kvConn: kv.NIXL, wantWarn: true},
+		{name: "ExplicitNull", body: map[string]any{"kv_transfer_params": nil}, kvConn: kv.NIXL, wantWarn: true},
+		{name: "EmptyObject", body: map[string]any{"kv_transfer_params": map[string]any{}}, kvConn: kv.NIXL, wantWarn: true},
+		{name: "FieldAbsent", body: map[string]any{"other": "field"}, kvConn: kv.NIXL, wantWarn: true},
+		{name: "SharedStorageNull", body: map[string]any{"kv_transfer_params": nil}, kvConn: kv.SharedStorage, wantWarn: false},
 	}
 
 	for _, tc := range cases {
@@ -974,12 +920,15 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 
 			step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
 				"use_openai_format": false,
-				ParamKVConnector:    kv.NIXL,
+				ParamKVConnector:    tc.kvConn,
 				ParamECConnector:    ec.NIXL,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
+
+			sink := &logCaptureSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
 
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-1",
@@ -988,12 +937,30 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 				KVTransferParams: make(map[string]any),
 			}
 
-			if err := step.Execute(context.Background(), reqCtx); err != nil {
+			if err := step.Execute(ctx, reqCtx); err != nil {
 				t.Fatalf("invalid kv_transfer_params should be coerced, not fail the prefill: %v", err)
 			}
 			if len(reqCtx.KVTransferParams) != 0 {
 				t.Fatalf("expected no kv_transfer_params recorded, got %v", reqCtx.KVTransferParams)
 			}
+			gotWarn := countLogMsgs(sink.infos, "prefill returned no kv_transfer_params")
+			if tc.wantWarn && gotWarn == 0 {
+				t.Fatalf("expected a warning log for missing kv_transfer_params with %s, infos=%v", tc.kvConn, sink.infos)
+			}
+			if !tc.wantWarn && gotWarn > 0 {
+				t.Fatalf("did not expect a warning log for %s, infos=%v", tc.kvConn, sink.infos)
+			}
 		})
 	}
+}
+
+// countLogMsgs counts the captured info lines whose message contains substr.
+func countLogMsgs(infos []capturedLog, substr string) int {
+	n := 0
+	for _, c := range infos {
+		if strings.Contains(c.msg, substr) {
+			n++
+		}
+	}
+	return n
 }

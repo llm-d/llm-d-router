@@ -17,6 +17,8 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -114,6 +116,50 @@ func TestInMemoryIndexPodCacheSize(t *testing.T) {
 	assert.Len(t, podsPerKey[requestKey], 2, "Should only have 2 pods due to PodCacheSize limit")
 	assert.Contains(t, podsPerKey[requestKey], PodEntry{PodIdentifier: "pod2", DeviceTier: "gpu"})
 	assert.Contains(t, podsPerKey[requestKey], PodEntry{PodIdentifier: "pod3", DeviceTier: "cpu"})
+}
+
+func TestInMemoryIndexDefaultPodCacheSize(t *testing.T) {
+	ctx := t.Context()
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1})
+	require.NoError(t, err)
+	capacity := DefaultInMemoryIndexConfig().PodCacheSize
+	entries := make([]PodEntry, capacity+1)
+	for i := range entries {
+		entries[i] = PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", i), DeviceTier: "gpu"}
+	}
+	keys := []BlockHash{1}
+	require.NoError(t, index.Add(ctx, nil, keys, entries))
+
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, entries[1:], found[keys[0]])
+}
+
+func TestInMemoryIndexClearIgnoresCancellation(t *testing.T) {
+	ctx := t.Context()
+	const numKeys = 600
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: numKeys, PodCacheSize: 3})
+	require.NoError(t, err)
+	keys := make([]BlockHash, numKeys)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	retained := PodEntry{PodIdentifier: "pod-b", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{
+		{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+		{PodIdentifier: "pod-a", DeviceTier: "cpu"},
+		retained,
+	}))
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	require.NoError(t, index.Clear(cancelled, "pod-a"))
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, found, numKeys)
+	for _, key := range keys {
+		assert.Equal(t, []PodEntry{retained}, found[key], "key %v", key)
+	}
 }
 
 // TestSpeculativeAnnotation tests that speculative and confirmed PodEntries

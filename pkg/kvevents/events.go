@@ -14,6 +14,10 @@
 
 package kvevents
 
+import (
+	"go.opentelemetry.io/otel/trace"
+)
+
 // KVCacheSpecKind identifies vLLM KV cache group semantics.
 type KVCacheSpecKind string
 
@@ -68,6 +72,14 @@ type RawMessage struct {
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
+	// SpanContext links processing back to the span that received the message,
+	// bridging the worker-queue boundary. Only the span identity crosses, never
+	// the subscriber's context: a subscriber reconnect cancels that context, and
+	// a queued task must not inherit the cancellation.
+	//
+	// A pointer keeps the 64-byte span context off messages the default
+	// configuration never traces. Nil when Config.Tracing is unset.
+	SpanContext *trace.SpanContext
 }
 
 // EngineAdapter defines the interface for engine-specific message parsers.

@@ -60,18 +60,15 @@ func u64ToBlockKeys(keys []uint64) []kvblock.BlockHash {
 	return out
 }
 
-// newTestIndexer creates an Indexer backed by an in-memory index and a
-// LongestPrefixScorer using the project's default backend weights.
+// newTestIndexer creates an Indexer backed by an in-memory index, weighted
+// by the project's default backend configuration.
 func newTestIndexer(t *testing.T, tp kvblock.TokenProcessor) *kvcache.Indexer {
 	t.Helper()
 
 	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
 	require.NoError(t, err)
 
-	scorer, err := kvcache.NewKVBlockScorer(kvcache.DefaultKVBlockScorerConfig())
-	require.NoError(t, err)
-
-	return kvcache.NewIndexerForTest(tp, idx, scorer)
+	return kvcache.NewIndexerForTest(tp, idx, kvcache.DefaultKVCacheBackendConfig())
 }
 
 // populateIndex inserts block-key -> pod entries into the index.
@@ -242,4 +239,20 @@ func TestScoreTokens(t *testing.T) {
 			assertScores(t, &tt, scores, err)
 		})
 	}
+}
+
+// A nil KVBlockIndexConfig keeps selecting kvblock's defaults.
+func TestNewKVCacheIndexerNilIndexConfig(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	cfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	cfg.KVBlockIndexConfig = nil
+
+	indexer, err := kvcache.NewKVCacheIndexer(ctx, cfg, &mockTokenProcessor{blockKeys: u64ToBlockKeys([]uint64{10})})
+	require.NoError(t, err)
+	require.NotNil(t, indexer)
+
+	scores, err := indexer.ScoreTokens(ctx, []uint32{1}, testModel, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, scores)
 }

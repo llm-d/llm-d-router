@@ -82,8 +82,13 @@ func (sm *SubscriberManager) EnsureSubscriber(
 			"newSourceEndpoint", sourceEndpoint,
 			"oldReplayEndpoint", entry.replayEndpoint,
 			"newReplayEndpoint", replayEndpoint)
-		entry.cancel()
+		sm.retireSubscriber(entry)
 		delete(sm.subscribers, podIdentifier)
+		if err := ctx.Err(); err != nil {
+			metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
+			cleanupSubscriberMetrics(podIdentifier, entry.done)
+			return err
+		}
 		// The replacement subscriber below reuses podIdentifier, so its series
 		// are kept rather than cleaned up.
 	}
@@ -116,8 +121,8 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	return nil
 }
 
-// RemoveSubscriber removes a subscriber for the given pod identifier.
-func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) {
+// RemoveSubscriber removes a subscriber for the given pod identifier and reports whether it existed.
+func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier string) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	sm.mu.Lock()
@@ -126,14 +131,32 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	entry, exists := sm.subscribers[podIdentifier]
 	if !exists {
 		debugLogger.Info("Subscriber does not exist, nothing to remove", "podIdentifier", podIdentifier)
-		return
+		return false
 	}
 
 	debugLogger.Info("Removing subscriber", "podIdentifier", podIdentifier, "endpoint", entry.endpoint)
-	entry.cancel()
+	sm.retireSubscriber(entry)
 	delete(sm.subscribers, podIdentifier)
 	metrics.SubscriberActive.Set(float64(len(sm.subscribers)))
 	cleanupSubscriberMetrics(podIdentifier, entry.done)
+	return true
+}
+
+// retireSubscriber stops a subscriber without waiting for its socket goroutine.
+// A source reset is only safe when no other subscriber still represents the
+// same serving endpoint.
+func (sm *SubscriberManager) retireSubscriber(entry *subscriberEntry) {
+	resetSource := entry.sourceEndpoint != ""
+	if resetSource {
+		for _, other := range sm.subscribers {
+			if other != entry && other.sourceEndpoint == entry.sourceEndpoint {
+				resetSource = false
+				break
+			}
+		}
+	}
+	entry.cancel()
+	entry.subscriber.retire(resetSource)
 }
 
 // cleanupSubscriberMetrics drops the per-pod series for a removed subscriber
@@ -146,22 +169,27 @@ func cleanupSubscriberMetrics(podIdentifier string, done <-chan struct{}) {
 	}()
 }
 
-// Shutdown shuts down all subscribers.
+// Shutdown shuts down all subscribers and waits for their goroutines to exit.
 func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	debugLogger.Info("Shutting down subscriber manager")
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	dones := make([]chan struct{}, 0, len(sm.subscribers))
 	for podIdentifier, entry := range sm.subscribers {
 		debugLogger.Info("Shutting down subscriber", "podIdentifier", podIdentifier)
 		entry.cancel()
 		cleanupSubscriberMetrics(podIdentifier, entry.done)
+		dones = append(dones, entry.done)
 	}
 
 	sm.subscribers = make(map[string]*subscriberEntry)
 	metrics.SubscriberActive.Set(0)
+	sm.mu.Unlock()
+
+	for _, done := range dones {
+		<-done
+	}
 	debugLogger.Info("All subscribers shut down")
 }
 

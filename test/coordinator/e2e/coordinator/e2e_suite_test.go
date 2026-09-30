@@ -242,6 +242,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 // an existing cluster (K8S_CONTEXT set), where the kind nodePort mapping is not
 // available. Sessions are tracked for teardown in AfterSuite.
 func startPortForward(target, localPort, remotePort string) {
+	//nolint:gosec // G204: fixed kubectl executable; target, ports and context are separate argv, without a shell
 	command := exec.Command("kubectl", "port-forward", target,
 		localPort+":"+remotePort,
 		"--context="+k8sContext, "--namespace="+getNamespace())
@@ -286,6 +287,7 @@ func kindLoadImage(image string) {
 	ginkgo.By(fmt.Sprintf("Loading %s into the cluster %s using %s", image, kindClusterName, containerRuntime))
 	if containerRuntime == "docker" {
 		nodeName := kindClusterName + "-control-plane"
+		//nolint:gosec // G204: fixed docker executable; image is a test-controlled image reference, without a shell
 		save := exec.Command("docker", "save", image)
 		importCmd := exec.Command("docker", "exec", "--privileged", "-i", nodeName,
 			"ctr", "--namespace=k8s.io", "images", "import", "--digests", "--snapshotter=overlayfs", "-")
@@ -300,6 +302,7 @@ func kindLoadImage(image string) {
 		gomega.Expect(importCmd.Wait()).ShouldNot(gomega.HaveOccurred())
 		return
 	}
+	//nolint:gosec // G204: fixed kind executable; cluster name and image are test-controlled, without a shell
 	command := exec.Command("kind", "--name", kindClusterName, "load", "docker-image", image)
 	session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())

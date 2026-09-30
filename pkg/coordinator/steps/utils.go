@@ -27,7 +27,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -60,59 +59,67 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
-// resolveFormat maps a request path to the wire format a step emits. Completions
-// is always honored; otherwise OpenAI formats collapse to FormatGenerate unless
-// useOpenAIFormat is set.
-func resolveFormat(useOpenAIFormat bool, path string) gateway.RequestFormat {
-	detected := gateway.DetectFormat(path)
-	if detected == gateway.FormatCompletions {
-		return gateway.FormatCompletions
+// rejectUseOpenAIFormatOverride returns an error if params sets use_openai_format.
+// decode and conditional-decode derive their body format directly from the
+// request's original path, so a step-level override has no effect; rejecting
+// the key surfaces stale config instead of silently ignoring it.
+func rejectUseOpenAIFormatOverride(step string, params map[string]any) error {
+	if _, ok := params["use_openai_format"]; ok {
+		return fmt.Errorf("%s: use_openai_format is not a valid parameter for this step", step)
 	}
-	if !useOpenAIFormat {
-		return gateway.FormatGenerate
-	}
-	return detected
+	return nil
 }
 
-// capSingleTokenOutput rewrites body into a single-output-token, non-streaming
-// request for the synthetic prefill and encode legs.
-//
-// Intentionally distinct from the sidecar's reqcommon.PrimeSingleTokenRequest
-// for now.
-// TODO: unify the two into one shared single-token helper in a future refactor.
-func capSingleTokenOutput(body map[string]any, format gateway.RequestFormat) {
-	target := body
-	if format == gateway.FormatGenerate {
-		sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any)
-		if !ok {
-			sp = map[string]any{}
-			body[reqcommon.FieldSamplingParams] = sp
+// unreachableFormatError builds an error for a request format with no
+// registered coordinator route (see server.go), signaling a routing bug
+// rather than a client error.
+func unreachableFormatError(format reqcommon.APIType) error {
+	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
+}
+
+// resolveFormat maps a request path to the wire format a step emits. The steps
+// build only Completions, Chat Completions, and generate bodies, so any other
+// API collapses to APITypeVLLMGenerate; Chat Completions additionally requires
+// useOpenAIFormat. Generate is the fallback because its body carries the prompt
+// as reqCtx.TokenIDs and does not depend on the client's request shape.
+func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
+	switch detected := reqcommon.DetectAPIType(path); detected {
+	case reqcommon.APITypeCompletions:
+		return detected
+	case reqcommon.APITypeChatCompletions:
+		if useOpenAIFormat {
+			return detected
 		}
-		target = sp
 	}
-
-	target[reqcommon.FieldMaxTokens] = 1
-	// Strip rather than clamp min_tokens: it defaults to 0 in vLLM, so removing it
-	// keeps min_tokens <= max_tokens=1 without raising the floor above the cap.
-	delete(target, reqcommon.FieldMinTokens)
-
-	if _, ok := body[reqcommon.FieldMaxCompletionTokens]; ok {
-		body[reqcommon.FieldMaxCompletionTokens] = 1
-	}
-
-	// TODO: max_output_tokens is another client-supplied output cap (Responses
-	// API) that a client can send instead of max_tokens/max_completion_tokens; it
-	// should be capped to 1 here as well so the synthetic legs stay single-token.
-
-	body[reqcommon.FieldStream] = false
-	delete(body, reqcommon.FieldStreamOptions)
+	return reqcommon.APITypeVLLMGenerate
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
 // and optionally kwargs_data) from the request's multimodal entries. It returns
 // nil when there are no entries.
 func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
-	return buildMMFeaturesOpts(entries, includeKwargs, false)
+	if len(entries) == 0 {
+		return nil
+	}
+	hashes := make([]string, len(entries))
+	placeholders := make([]any, len(entries))
+	kwargs := make([]string, len(entries))
+	for i, entry := range entries {
+		hashes[i] = entry.Hash
+		placeholders[i] = map[string]any{
+			"offset": entry.Placeholder.Offset,
+			"length": entry.Placeholder.Length,
+		}
+		kwargs[i] = entry.KwargsData
+	}
+	features := map[string]any{
+		"mm_hashes":       map[string][]string{ModalityImage: hashes},
+		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
+	}
+	if includeKwargs {
+		features["kwargs_data"] = mmBase64Field(kwargs)
+	}
+	return features
 }
 
 // buildPrefillMMFeatures builds features for the prefill request, deciding
@@ -123,13 +130,12 @@ func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map
 // always present so vLLM's per-item merge (merge_mm_kwargs_items) can
 // reconstruct each entry from whichever side is non-null.
 //
-// The whole-request "drop kwargs_data" decision that the previous version of
-// this function used silently broke the partial-coverage case: one encode
-// sub-request can return no descriptor (nixlEC.MergeEncodeResponse logs a
-// warning and continues rather than failing), leaving some entries with no
-// EC path. vLLM's own _require_ec_for_metadata_only is a request-level
-// validator and does not catch this, so partial coverage must be reconciled
-// here.
+// The choice is per entry because a single encode sub-request can return no
+// descriptor for its image (nixlEC.MergeEncodeResponse logs a warning and
+// continues rather than failing the request): that entry has no EC path, so
+// its tensor data stays inline. vLLM's _require_ec_for_metadata_only is a
+// request-level check and does not catch partial coverage, so the coverage
+// reconciliation lives here.
 func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams map[string]any) map[string]any {
 	if len(entries) == 0 {
 		return nil
@@ -158,36 +164,6 @@ func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams
 	}
 }
 
-func buildMMFeaturesOpts(entries []pipeline.MultimodalEntry, includeKwargs, includeMetadata bool) map[string]any {
-	if len(entries) == 0 {
-		return nil
-	}
-	hashes := make([]string, len(entries))
-	placeholders := make([]any, len(entries))
-	kwargs := make([]string, len(entries))
-	metadata := make([]string, len(entries))
-	for i, entry := range entries {
-		hashes[i] = entry.Hash
-		placeholders[i] = map[string]any{
-			"offset": entry.Placeholder.Offset,
-			"length": entry.Placeholder.Length,
-		}
-		kwargs[i] = entry.KwargsData
-		metadata[i] = entry.MMMetadata
-	}
-	features := map[string]any{
-		"mm_hashes":       map[string][]string{ModalityImage: hashes},
-		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
-	}
-	if includeKwargs {
-		features["kwargs_data"] = mmBase64Field(kwargs)
-	}
-	if includeMetadata {
-		features["mm_metadata"] = mmBase64Field(metadata)
-	}
-	return features
-}
-
 // mmBase64Field builds a modality-keyed feature value from per-entry base64
 // strings (kwargs_data or mm_metadata). The empty string is our internal
 // "resolve from cache" / absent sentinel and MUST serialize as JSON null, not
@@ -202,30 +178,6 @@ func mmBase64Field(values []string) map[string][]any {
 		}
 	}
 	return map[string][]any{ModalityImage: items}
-}
-
-// mmKwargsField is kept as a thin alias for tests and call sites that name the
-// kwargs_data wire field explicitly.
-func mmKwargsField(kwargs []string) map[string][]any {
-	return mmBase64Field(kwargs)
-}
-
-// setGenerateTransferParams nests the kv/ec transfer params under
-// sampling_params.extra_args, the only place the /inference/v1/generate engine
-// reads them (top-level kv_transfer_params/ec_transfer_params are ignored on
-// input). It get-or-creates extra_args on the given sampling map so a client's
-// existing generation fields survive. ecParams may be empty, in which case
-// ec_transfer_params is left unset.
-func setGenerateTransferParams(sampling map[string]any, kvParams any, ecParams map[string]any) {
-	extraArgs, ok := sampling[reqcommon.FieldExtraArgs].(map[string]any)
-	if !ok {
-		extraArgs = map[string]any{}
-		sampling[reqcommon.FieldExtraArgs] = extraArgs
-	}
-	extraArgs[reqcommon.FieldKVTransferParams] = kvParams
-	if len(ecParams) > 0 {
-		extraArgs[reqcommon.FieldECTransferParams] = ecParams
-	}
 }
 
 // coerceParamsMap coerces a transfer-params value from an upstream response to a
@@ -459,34 +411,6 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		}
 	}
 	return entries, nil
-}
-
-// validateSamplingParams checks that sampling_params and its nested extra_args,
-// when present, are JSON objects. Both are optional. The decode step merges
-// kv_transfer_params into sampling_params.extra_args; a non-object at either
-// level would fall into its fallback branch and be silently replaced with an
-// empty map, discarding client-requested generation parameters with no error.
-// Validating once at ingestion keeps that path fail-loud, consistent with
-// token_ids and features.
-func validateSamplingParams(body map[string]any) error {
-	raw, ok := body[reqcommon.FieldSamplingParams]
-	if !ok || raw == nil {
-		return nil
-	}
-	sampling, ok := raw.(map[string]any)
-	if !ok {
-		return fmt.Errorf("%s must be an object, got %T: %w",
-			reqcommon.FieldSamplingParams, raw, pipeline.ErrBadRequest)
-	}
-	ea, ok := sampling[reqcommon.FieldExtraArgs]
-	if !ok || ea == nil {
-		return nil
-	}
-	if _, ok := ea.(map[string]any); !ok {
-		return fmt.Errorf("%s.%s must be an object, got %T: %w",
-			reqcommon.FieldSamplingParams, reqcommon.FieldExtraArgs, ea, pipeline.ErrBadRequest)
-	}
-	return nil
 }
 
 // validatePlaceholderBounds checks that every placeholder span [offset,

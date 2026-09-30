@@ -18,13 +18,25 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
+	// between phases of a disaggregated request.
+	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"
+	// RevisionDecisionIDHeaderKey identifies requests that belong to the same
+	// rollout decision. This is needed only for roles such as encode that create
+	// several parallel subrequests from one user request (for example, one per
+	// image). The coordinator must give every subrequest the same value so they
+	// use the same revision.
+	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldMaxTokens            = "max_tokens"
+	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldStream               = "stream"
+	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -34,4 +46,40 @@ const (
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
+	FieldPreviousResponseID   = "previous_response_id"
+	FieldConversation         = "conversation"
+	FieldBackground           = "background"
+	FieldInput                = "input"
+	FieldContent              = "content"
+	FieldFileID               = "file_id"
+	FieldMessages             = "messages"
+	FieldModel                = "model"
+	FieldRole                 = "role"
+	FieldType                 = "type"
+	FieldURL                  = "url"
+	FieldImageURL             = "image_url"
+	FieldStore                = "store"
+	FieldMMProcessorKwargs    = "mm_processor_kwargs"
+	FieldMediaIOKwargs        = "media_io_kwargs"
+	FieldOutput               = "output"
+)
+
+// Content part types, the values a content part's FieldType takes. A
+// chat-completions *_url part nests its URL and options under one object keyed
+// by the part type, so PartTypeImageURL and FieldImageURL hold the same string
+// in different roles; a Responses input_image instead carries a bare image_url
+// string with its options as siblings.
+//
+// The Responses input content union is input_text / input_image / input_file, so
+// a Responses request carrying one of the others is refused by the model
+// server. FieldFileID on an input_image, input_file or
+// computer_screenshot names a Files API upload the serving engine has to fetch.
+const (
+	PartTypeImageURL           = "image_url"
+	PartTypeAudioURL           = "audio_url"
+	PartTypeVideoURL           = "video_url"
+	PartTypeInputAudio         = "input_audio"
+	PartTypeInputImage         = "input_image"
+	PartTypeInputFile          = "input_file"
+	PartTypeComputerScreenshot = "computer_screenshot"
 )

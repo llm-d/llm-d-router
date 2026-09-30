@@ -50,7 +50,7 @@ The data source expects responses in the OpenAI-compatible format:
 ## Complete Configuration Example
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: models-data-source

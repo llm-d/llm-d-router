@@ -17,11 +17,11 @@ package kvblock
 import (
 	"context"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
@@ -29,10 +29,47 @@ type tracedIndex struct {
 	next Index
 }
 
-// NewTracedIndex wraps an Index and emits OpenTelemetry traces for index operations.
-// This encapsulates all tracing logic for the kvblock.Index interface.
+// tracedWalker carries the KeyWalker capability of the wrapped index.
+type tracedWalker struct {
+	*tracedIndex
+	walker KeyWalker
+}
+
+// NewTracedIndex wraps an Index and emits OpenTelemetry traces for index
+// operations. The wrapper is a KeyWalker exactly when next is one.
 func NewTracedIndex(next Index) Index {
-	return &tracedIndex{next: next}
+	t := &tracedIndex{next: next}
+	if walker, ok := next.(KeyWalker); ok {
+		return &tracedWalker{tracedIndex: t, walker: walker}
+	}
+	return t
+}
+
+// WalkKeys forwards the walk under a span reporting the keys requested and
+// the keys present.
+func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, found bool, entries []EntryRef) bool,
+) error {
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "index_walk",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeyCount(len(requestKeys)))
+
+	present := 0
+	err := t.walker.WalkKeys(ctx, requestKeys, func(pos int, found bool, entries []EntryRef) bool {
+		if found {
+			present++
+		}
+		return visit(pos, found, entries)
+	})
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeysPresent(present))
+	return nil
 }
 
 func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
@@ -43,10 +80,10 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.Int("llm_d.kv_cache.index.add.engine_key_count", len(engineKeys)),
-		attribute.Int("llm_d.kv_cache.index.add.request_key_count", len(requestKeys)),
-		attribute.Int("llm_d.kv_cache.index.add.pod_entry_count", len(entries)),
-		attribute.Int("llm_d.kv_cache.index.add.device_tier_count", deviceTierCount(entries)),
+		semconv.LLMDKVCacheIndexAddEngineKeyCount(len(engineKeys)),
+		semconv.LLMDKVCacheIndexAddRequestKeyCount(len(requestKeys)),
+		semconv.LLMDKVCacheIndexAddPodEntryCount(len(entries)),
+		semconv.LLMDKVCacheIndexAddDeviceTierCount(deviceTierCount(entries)),
 	)
 
 	err := t.next.Add(ctx, engineKeys, requestKeys, entries)
@@ -66,9 +103,9 @@ func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType,
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.String("llm_d.kv_cache.index.evict.key_type", keyTypeLabel(keyType)),
-		attribute.Int("llm_d.kv_cache.index.evict.pod_entry_count", len(entries)),
-		attribute.Int("llm_d.kv_cache.index.evict.device_tier_count", deviceTierCount(entries)),
+		semconv.LLMDKVCacheIndexEvictKeyType(keyTypeLabel(keyType)),
+		semconv.LLMDKVCacheIndexEvictPodEntryCount(len(entries)),
+		semconv.LLMDKVCacheIndexEvictDeviceTierCount(deviceTierCount(entries)),
 	)
 
 	err := t.next.Evict(ctx, key, keyType, entries)
@@ -92,8 +129,8 @@ func (t *tracedIndex) Lookup(
 	defer span.End()
 
 	span.SetAttributes(
-		attribute.Int("llm_d.kv_cache.index.lookup.block_count", len(requestKeys)),
-		attribute.Int("llm_d.kv_cache.lookup.pod_filter_count", podIdentifierSet.Len()),
+		semconv.LLMDKVCacheIndexLookupBlockCount(len(requestKeys)),
+		semconv.LLMDKVCacheLookupPodFilterCount(podIdentifierSet.Len()),
 	)
 
 	result, err := t.next.Lookup(ctx, requestKeys, podIdentifierSet)
@@ -112,8 +149,8 @@ func (t *tracedIndex) Lookup(
 	cacheHit := blocksFound > 0
 
 	span.SetAttributes(
-		attribute.Bool("llm_d.kv_cache.lookup.cache_hit", cacheHit),
-		attribute.Int("llm_d.kv_cache.lookup.blocks_found", blocksFound),
+		semconv.LLMDKVCacheLookupCacheHit(cacheHit),
+		semconv.LLMDKVCacheLookupBlocksFound(blocksFound),
 	)
 
 	return result, nil
