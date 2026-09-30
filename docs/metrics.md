@@ -311,7 +311,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_queue_size` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Requests currently held in the queue. |
 | `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
-| `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector` | Candidate endpoints with missing or stale metrics. |
+| `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
 | `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
@@ -384,16 +384,15 @@ These metrics are owned by the EPP Flow Control layer.
 #### `llm_d_epp_flow_control_stale_endpoints`
 
 *   **Type:** Gauge
-*   **Labels:** `detector`
+*   **Labels:** `detector`, `stage`
 *   **Description:** Number of candidate endpoints whose metrics are missing or older than the
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
-    `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
-    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
-    out stale metrics in another stage; per-stage stale accounting is tracked in
-    [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
+    `inference_extension_*` twin). `stage` is `prefill` or `decode` when flow control evaluates a
+    pipeline stage separately, and empty when the detector is evaluated without stage partitioning.
 *   **Usage:** A nonzero value during a dispatch stall indicates a model server metrics collection
-    problem (endpoint path, port, TLS, or authentication) rather than genuine overload.
+    problem (endpoint path, port, TLS, or authentication) rather than genuine overload. Check the
+    `stage` label to localize the collection problem to one pipeline stage.
 
 #### `llm_d_epp_flow_control_capacity_utilization_requests`
 

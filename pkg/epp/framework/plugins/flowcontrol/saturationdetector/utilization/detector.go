@@ -138,12 +138,13 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // Pods with missing or stale metrics contribute 1.0 under the saturated policy, or are excluded
 // from the average under the ignore policy.
-func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
+func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
+	stage := flowcontrol.SaturationStageFromContext(ctx)
 	if len(candidates) == 0 {
 		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
 		// reading from a previous evaluation misattributing an empty-pool stall to a metrics
 		// collection failure.
-		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, 0)
+		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, 0)
 		return 1.0
 	}
 
@@ -172,7 +173,7 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		totalScore += max(qRatio, kvRatio)
 	}
 
-	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, staleCount)
+	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, staleCount)
 	if staleCount > 0 {
 		d.maybeLogStaleEndpoints(staleCount, len(candidates))
 	}

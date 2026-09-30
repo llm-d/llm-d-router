@@ -494,9 +494,16 @@ func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
 }
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
-// detector scored as fully saturated because their metrics were missing or stale.
-func RecordFlowControlStaleEndpoints(detector string, count int) {
-	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
+// detector scored as fully saturated because their metrics were missing or stale, for the
+// pipeline stage named in ctx by flowcontrol.WithSaturationStage (empty when unpartitioned).
+func RecordFlowControlStaleEndpoints(detector, stage string, count int) {
+	llmdFlowControlStaleEndpoints.WithLabelValues(detector, stage).Set(float64(count))
+}
+
+// DeleteFlowControlStaleEndpointsStage removes the stale-endpoints gauge series of every
+// detector for a pipeline stage.
+func DeleteFlowControlStaleEndpointsStage(stage string) {
+	llmdFlowControlStaleEndpoints.DeletePartialMatch(prometheus.Labels{"stage": stage})
 }
 
 // RecordFlowControlDetectorSaturation records the saturation signal reported by a single

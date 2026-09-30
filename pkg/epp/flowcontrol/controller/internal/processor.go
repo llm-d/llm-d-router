@@ -478,6 +478,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		if len(part.endpoints) == 0 {
 			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
 			metrics.DeleteFlowControlDetectorSaturationStage(part.name)
+			metrics.DeleteFlowControlStaleEndpointsStage(part.name)
 			continue
 		}
 		stageSat := p.saturationDetector.Saturation(flowcontrol.WithSaturationStage(ctx, part.name), part.endpoints)
@@ -491,6 +492,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	} else {
 		// Drop series recorded by an earlier unpartitioned evaluation (e.g. an empty pool at startup).
 		metrics.DeleteFlowControlDetectorSaturationStage("")
+		metrics.DeleteFlowControlStaleEndpointsStage("")
 	}
 
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
