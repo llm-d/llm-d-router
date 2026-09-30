@@ -59,3 +59,16 @@ var TokenCountBuckets = []float64{
 	1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
 	32768, 65536, 131072, 262144, 524288, 1048576,
 }
+
+// ResponseSizeBuckets is a response-body-size histogram ladder from 16 bytes
+// to 64 MiB. LLM responses span a wider range than request bodies: short
+// error messages (~100 bytes), non-streaming completions (hundreds of bytes
+// to a few KiB), and long streaming responses that accumulate token-by-token
+// (tens of KiB to MiB). The lower floor and tighter mid-range give better
+// resolution than RequestSizeBuckets for the typical response distribution,
+// and the 64 MiB ceiling covers very long streamed completions.
+var ResponseSizeBuckets = []float64{
+	16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
+	65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608,
+	16777216, 33554432, 67108864,
+}
