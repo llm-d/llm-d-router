@@ -117,6 +117,13 @@ type apiConfig struct {
 	//
 	// Defaults to 0.0 (no burst allowed) if unset.
 	Headroom *float64 `json:"headroom,omitempty"`
+
+	// InFlightLoadProducerName selects which inflight-load-producer's InFlightLoad
+	// attribute supplies the in-flight request count used for scrape-lag
+	// compensation (see Detector.Saturation). Empty selects the default producer.
+	// When no such producer is configured the compensation is skipped and the
+	// detector relies solely on the scraped WaitingQueueSize.
+	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
 // Config is the internal, fully-validated configuration used by the detector.
@@ -126,6 +133,7 @@ type Config struct {
 	MetricsStalenessThreshold time.Duration
 	Headroom                  float64
 	StalenessPolicy           StalenessPolicy
+	InFlightLoadProducerName  string
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -149,6 +157,7 @@ func buildConfig(apiCfg *apiConfig) (*Config, error) {
 		MetricsStalenessThreshold: safeCfg.MetricsStalenessThreshold.Duration,
 		Headroom:                  *safeCfg.Headroom,
 		StalenessPolicy:           *safeCfg.StalenessPolicy,
+		InFlightLoadProducerName:  safeCfg.InFlightLoadProducerName,
 	}, nil
 }
 
