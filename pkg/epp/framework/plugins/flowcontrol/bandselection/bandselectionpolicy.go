@@ -63,7 +63,7 @@ func (s *strictPolicy) TypedName() plugin.TypedName {
 
 // Rank leaves the order buffer untouched. The framework pre-fills it with the identity permutation
 // over priorities ordered highest first, which is already strict order.
-func (s *strictPolicy) Rank(_ context.Context, _ float64, _ []int, _ []float64, _ []int) {}
+func (s *strictPolicy) Rank(_ context.Context, _ flowcontrol.BandSelectionParameters, _ []int) {}
 
 // RecordDispatch does nothing. Strict order carries no share accounting to settle.
 func (s *strictPolicy) RecordDispatch(_ context.Context, _ int) {}
