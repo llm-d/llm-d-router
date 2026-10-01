@@ -18,6 +18,9 @@ package request
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
+	"path"
 	"strings"
 )
 
@@ -86,6 +89,46 @@ func (a APIType) Path() string {
 	default:
 		return PathChatCompletions
 	}
+}
+
+var apiPaths = map[string]APIType{
+	PathChatCompletions: APITypeChatCompletions,
+	PathCompletions:     APITypeCompletions,
+	PathResponses:       APITypeResponses,
+	PathMessages:        APITypeMessages,
+	PathVLLMGenerate:    APITypeVLLMGenerate,
+	PathSGLangGenerate:  APITypeSGLangGenerate,
+}
+
+// CanonicalAPIPath returns p cleaned by path.Clean, which drops a trailing
+// slash and collapses repeated slashes and dot segments, and reports whether
+// the result is one of the inference API paths.
+func CanonicalAPIPath(p string) (string, bool) {
+	c := path.Clean(p)
+	_, ok := apiPaths[c]
+	return c, ok
+}
+
+// CanonicalizeAPIPath rewrites the path of a request that names an inference
+// API path in another form, such as with a trailing slash, before calling next.
+// Routing, request guards, and the path forwarded upstream then all see the
+// form the route table binds, so the alternate form cannot skip any of them.
+// A request for any other path reaches next unchanged.
+func CanonicalizeAPIPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, ok := CanonicalAPIPath(r.URL.Path)
+		if !ok || (c == r.URL.Path && r.URL.RawPath == "") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = c
+		r2.URL.RawPath = ""
+		next.ServeHTTP(w, r2)
+	})
 }
 
 // DetectAPIType classifies a request path. An unrecognized path maps to

@@ -599,7 +599,7 @@ func (s *Server) setECConnector() {
 	}
 }
 
-func (s *Server) createRoutes() *http.ServeMux {
+func (s *Server) createRoutes() http.Handler {
 	// Configure handlers
 	mux := http.NewServeMux()
 
@@ -617,7 +617,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 
 	mux.Handle("/", s.decoderProxy)
 
-	return mux
+	return reqcommon.CanonicalizeAPIPath(mux)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.
