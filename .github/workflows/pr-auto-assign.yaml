@@ -1,0 +1,39 @@
+name: Auto-assign PR reviewers and assignee
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened]
+    branches:
+      - main
+      - 'release-*'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  auto-assign:
+    name: Auto assign 2 reviewers and 1 owner assignee
+    if: !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Assign reviewers and owner assignee
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 .github/scripts/auto_assign_reviewers.py \
+            --pr-number "$PR_NUMBER" \
+            --pr-author "$PR_AUTHOR" \
+            --repo "$REPO" \
+            --apply
