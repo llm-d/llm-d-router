@@ -12,7 +12,7 @@ thw = "thw"
 extend-exclude = [
     "*.png",
     "*.jpg",
-    "deploy/",
+    "test/e2e/artifacts/",
     "go.mod",
     "go.sum",
     "build/",

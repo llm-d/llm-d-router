@@ -57,7 +57,7 @@ const (
 	// kvModelName is the model name used in KV tests.
 	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
 	// renderManifest is the manifest for the standalone vLLM render deployment and service.
-	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
+	renderManifest = "artifacts/environments/dev/e2e-infra/vllm-render.yaml"
 
 	// defaultPort is the envoy gateway's NodePort.
 	defaultPort        = 30080

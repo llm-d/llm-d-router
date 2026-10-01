@@ -70,29 +70,29 @@ const (
 	// EPP resources are the shared inference-gateway component's split files.
 	// Gateway/HTTPRoute manifests in that component are unused: the coordinator
 	// e2e fronts the EPP with a hand-rolled Envoy, matching the router e2e.
-	eppManifest               = "../../../../deploy/components/inference-gateway/deployment.yaml"
-	poolManifest              = "../../../../deploy/components/inference-gateway/inference-pools.yaml"
-	eppRbacManifest           = "../../../../deploy/components/inference-gateway/rbac.yaml"
-	eppServiceAccountManifest = "../../../../deploy/components/inference-gateway/service-accounts.yaml"
-	eppServicesManifest       = "../../../../deploy/components/inference-gateway/services.yaml"
+	eppManifest               = "../../../../test/e2e/artifacts/components/inference-gateway/deployment.yaml"
+	poolManifest              = "../../../../test/e2e/artifacts/components/inference-gateway/inference-pools.yaml"
+	eppRbacManifest           = "../../../../test/e2e/artifacts/components/inference-gateway/rbac.yaml"
+	eppServiceAccountManifest = "../../../../test/e2e/artifacts/components/inference-gateway/service-accounts.yaml"
+	eppServicesManifest       = "../../../../test/e2e/artifacts/components/inference-gateway/services.yaml"
 
-	epdPoolsKustomizeDir    = "../../../../deploy/environments/dev/coordinator-epd"
-	coordinatorComponentDir = "../../../../deploy/coordinator"
-	rendererManifest        = "../../../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
+	epdPoolsKustomizeDir    = "../../../../test/e2e/artifacts/environments/dev/coordinator-epd"
+	coordinatorComponentDir = "../../../../test/e2e/artifacts/coordinator"
+	rendererManifest        = "../../../../test/e2e/artifacts/environments/dev/e2e-infra/vllm-render.yaml"
 
-	envoyManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml"
+	envoyManifest = "../../../../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy.yaml"
 
 	// sharedEnvoyManifest holds the Envoy Deployment and Service, identical
 	// across topologies; the per-topology manifests carry only the routing
 	// ConfigMap it mounts.
-	sharedEnvoyManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/shared-envoy-resources.yaml"
+	sharedEnvoyManifest = "../../../../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/shared-envoy-resources.yaml"
 
 	// 3-EPP topology manifests: the Envoy that fans EPP-Profile out to three
 	// role-scoped ext_proc clusters, and the three role-scoped InferencePools.
-	envoy3EPPManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml"
-	pool3EPPManifest  = "../../../../deploy/environments/dev/coordinator-e2e-infra/inference-pools-3-epp.yaml"
+	envoy3EPPManifest = "../../../../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml"
+	pool3EPPManifest  = "../../../../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/inference-pools-3-epp.yaml"
 
-	crdGIEPath = "../../../../deploy/components/crds-gie"
+	crdGIEPath = "../../../../test/e2e/artifacts/components/crds-gie"
 )
 
 var (
