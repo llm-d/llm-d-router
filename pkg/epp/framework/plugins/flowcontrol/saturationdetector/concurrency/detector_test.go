@@ -472,6 +472,96 @@ func TestDetector_TokenFilter(t *testing.T) {
 	require.Len(t, kept, 1, "filter should fail open when all endpoints exceed burst limit")
 }
 
+func TestDetector_FilterIncludesCurrentRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		mode            concurrencyMode
+		requests        int64
+		tokens          int64
+		projectedTokens int64
+		setProjection   bool
+		wantKept        int
+	}{
+		{
+			name:            "request reaches token limit",
+			mode:            modeTokens,
+			tokens:          60,
+			projectedTokens: 40,
+			setProjection:   true,
+			wantKept:        1,
+		},
+		{
+			name:            "hybrid request reaches token limit",
+			mode:            modeHybrid,
+			requests:        5,
+			tokens:          80,
+			projectedTokens: 20,
+			setProjection:   true,
+			wantKept:        1,
+		},
+		{
+			name:            "request below token limit remains eligible",
+			mode:            modeTokens,
+			tokens:          60,
+			projectedTokens: 39,
+			setProjection:   true,
+			wantKept:        2,
+		},
+		{
+			name:     "missing projection keeps existing token behavior",
+			mode:     modeTokens,
+			tokens:   60,
+			wantKept: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			detector := newDetector("test-detector", config{
+				mode:                tc.mode,
+				maxConcurrency:      10,
+				maxTokenConcurrency: 100,
+			}, logr.Discard())
+			endpointName := "prospective-endpoint"
+			endpoint := fwksched.NewEndpoint(
+				&datalayer.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: endpointName}},
+				&datalayer.Metrics{},
+				nil,
+			)
+			endpoint.Put(
+				detector.inFlightLoadDataKey,
+				&attrconcurrency.InFlightLoad{Requests: tc.requests, Tokens: tc.tokens},
+			)
+			if tc.setProjection {
+				endpoint.Put(
+					detector.uncachedRequestTokensDataKey,
+					&attrconcurrency.UncachedRequestTokens{Tokens: tc.projectedTokens},
+				)
+			}
+			clean := fwksched.NewEndpoint(
+				&datalayer.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: cleanEndpoint}},
+				&datalayer.Metrics{},
+				nil,
+			)
+			clean.Put(detector.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{})
+			clean.Put(detector.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{})
+			kept := detector.Filter(t.Context(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{
+				endpoint,
+				clean,
+			})
+
+			require.Len(t, kept, tc.wantKept)
+			if tc.wantKept == 1 {
+				require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+			}
+		})
+	}
+}
+
 // TestDetector_TokenLifecycle verifies token accounting.
 func TestDetector_TokenLifecycle(t *testing.T) {
 	t.Parallel()
