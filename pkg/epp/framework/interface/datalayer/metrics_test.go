@@ -29,6 +29,8 @@ func TestMetricsClone(t *testing.T) {
 		ActiveModels:            map[string]int{"modelA": 1},
 		WaitingModels:           map[string]int{"modelB": 2},
 		MaxActiveModels:         5,
+		LoadedModels:            map[string]LoraLoadState{"modelA": {Level: LoraLoadLevelGPU, Pinned: true}},
+		GPULoadedModels:         1,
 		RunningRequestsSize:     3,
 		WaitingQueueSize:        7,
 		KVCacheUsagePercent:     42.5,
@@ -46,6 +48,13 @@ func TestMetricsClone(t *testing.T) {
 	assert.Equal(t, 1, m.ActiveModels["modelA"], "mutating clone should not affect original")
 	clone.WaitingModels["modelB"] = 99
 	assert.Equal(t, 2, m.WaitingModels["modelB"], "mutating clone should not affect original")
+	clone.LoadedModels["modelA"] = LoraLoadState{Level: LoraLoadLevelCPU}
+	assert.Equal(t, LoraLoadState{Level: LoraLoadLevelGPU, Pinned: true}, m.LoadedModels["modelA"], "mutating clone should not affect original")
+}
+
+func TestMetricsClonePreservesNilLoadedModels(t *testing.T) {
+	clone := NewMetrics().Clone()
+	assert.Nil(t, clone.LoadedModels, "nil LoadedModels means residency is not reported and must survive Clone")
 }
 
 func TestMetricsCloneOfNil(t *testing.T) {
