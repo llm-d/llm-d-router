@@ -65,6 +65,7 @@ const (
 	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
+	enableSpeculativePrefill  = "enable-speculative-prefill"
 	enableTLS                 = "enable-tls"
 	tlsInsecureSkipVerify     = "tls-insecure-skip-verify"
 	tlsMinVersion             = "tls-min-version"
@@ -112,33 +113,34 @@ const (
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
-	Port                    int      `json:"port,omitempty"`
-	ModelServerPort         int      `json:"model-server-port,omitempty"`
-	VLLMPort                int      `json:"vllm-port,omitempty"`
-	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
-	DataParallelSize        int      `json:"data-parallel-size,omitempty"`
-	KVConnector             string   `json:"kv-connector,omitempty"`
-	ECConnector             string   `json:"ec-connector,omitempty"`
-	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
-	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
-	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-serving,omitempty"`
-	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
-	CertPath                string   `json:"cert-path,omitempty"`
-	EnableTLS               []string `json:"enable-tls,omitempty"`
-	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
-	TLSMinVersion           string   `json:"tls-min-version,omitempty"`
-	TLSCipherSuites         []string `json:"tls-cipher-suites,omitempty"`
-	InferencePool           string   `json:"inference-pool,omitempty"`
-	PoolGroup               string   `json:"pool-group,omitempty"`
-	MaxIdleConnsPerHost     int      `json:"max-idle-conns-per-host,omitempty"`
-	PrefillMaxRetries       *int     `json:"prefill-max-retries,omitempty"`
-	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
-	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
-	Tracing                 *bool    `json:"tracing,omitempty"`
-	MetricsPort             int      `json:"metrics-port,omitempty"`
-	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
+	Port                     int      `json:"port,omitempty"`
+	ModelServerPort          int      `json:"model-server-port,omitempty"`
+	VLLMPort                 int      `json:"vllm-port,omitempty"`
+	MooncakeBootstrapPort    int      `json:"mooncake-bootstrap-port,omitempty"`
+	P2PConnectorPort         int      `json:"p2p-connector-port,omitempty"`
+	DataParallelSize         int      `json:"data-parallel-size,omitempty"`
+	KVConnector              string   `json:"kv-connector,omitempty"`
+	ECConnector              string   `json:"ec-connector,omitempty"`
+	EnableSSRFProtection     *bool    `json:"enable-ssrf-protection,omitempty"`
+	EnablePrefillerSampling  *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableSpeculativePrefill *bool    `json:"enable-speculative-prefill,omitempty"`
+	EnableP2PPull            *bool    `json:"enable-p2p-pull,omitempty"`
+	SecureServing            *bool    `json:"secure-serving,omitempty"`
+	SecureProxy              *bool    `json:"secure-proxy,omitempty"`
+	CertPath                 string   `json:"cert-path,omitempty"`
+	EnableTLS                []string `json:"enable-tls,omitempty"`
+	TLSInsecureSkipVerify    []string `json:"tls-insecure-skip-verify,omitempty"`
+	TLSMinVersion            string   `json:"tls-min-version,omitempty"`
+	TLSCipherSuites          []string `json:"tls-cipher-suites,omitempty"`
+	InferencePool            string   `json:"inference-pool,omitempty"`
+	PoolGroup                string   `json:"pool-group,omitempty"`
+	MaxIdleConnsPerHost      int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries        *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff      string   `json:"prefill-retry-backoff,omitempty"`
+	DecodeChunkSize          int      `json:"decode-chunk-size,omitempty"`
+	Tracing                  *bool    `json:"tracing,omitempty"`
+	MetricsPort              int      `json:"metrics-port,omitempty"`
+	MetricsCertDir           string   `json:"metrics-cert-dir,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -221,19 +223,20 @@ func NewOptions() *Options {
 
 	return &Options{
 		Config: Config{
-			Port:                    defaultPort,
-			KVConnector:             KVConnectorNIXLV2,
-			DataParallelSize:        defaultDataParallelSize,
-			SecureServing:           true,
-			EnablePrefillerSampling: enablePrefillerSampling,
-			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
-			PrefillMaxRetries:       0,
-			PrefillRetryBackoff:     200 * time.Millisecond,
-			MooncakeBootstrapPort:   mooncakeBootstrapPort,
-			P2PConnectorPort:        p2pConnectorPort,
-			PoolGroup:               routing.InferencePoolAPIGroup,
-			DecodeChunkSize:         0,
-			Tracing:                 false,
+			Port:                     defaultPort,
+			KVConnector:              KVConnectorNIXLV2,
+			DataParallelSize:         defaultDataParallelSize,
+			SecureServing:            true,
+			EnablePrefillerSampling:  enablePrefillerSampling,
+			EnableSpeculativePrefill: false,
+			MaxIdleConnsPerHost:      defaultMaxIdleConnsPerHost,
+			PrefillMaxRetries:        0,
+			PrefillRetryBackoff:      200 * time.Millisecond,
+			MooncakeBootstrapPort:    mooncakeBootstrapPort,
+			P2PConnectorPort:         p2pConnectorPort,
+			PoolGroup:                routing.InferencePoolAPIGroup,
+			DecodeChunkSize:          0,
+			Tracing:                  false,
 			// MoRI-IO defaults: off, preserving existing NIXLv2 behaviour.
 			// Port defaults match vLLM's MoRI-IO connector defaults.
 			MoRIIOWriteMode:           false,
@@ -290,6 +293,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
+	fs.BoolVar(&opts.EnableSpeculativePrefill, enableSpeculativePrefill, opts.EnableSpeculativePrefill, "if true, after a chat completion finishes the sidecar warms the KV cache by sending the predicted next-turn prefix (prior messages + assistant answer) as a max_tokens=1 request. Only requests carrying the x-speculative-prefill header are eligible.")
 	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
@@ -846,6 +850,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnablePrefillerSampling != nil && !opts.isFlagSet(enablePrefillerSampling) {
 		opts.EnablePrefillerSampling = *cfg.EnablePrefillerSampling
+	}
+	if cfg.EnableSpeculativePrefill != nil && !opts.isFlagSet(enableSpeculativePrefill) {
+		opts.EnableSpeculativePrefill = *cfg.EnableSpeculativePrefill
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull

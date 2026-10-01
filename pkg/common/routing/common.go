@@ -40,6 +40,12 @@ const (
 	// instead of recomputing them
 	KVCacheSourceHeader = "x-kv-cache-source-host-port"
 
+	// SpeculativePrefillHeader opts a request into speculative prefill: after the
+	// turn completes, the sidecar warms the decoder KV cache with the predicted
+	// next-turn prefix (prior messages + assistant answer). Any truthy value
+	// (per strconv.ParseBool) enables it; absent or falsey disables it.
+	SpeculativePrefillHeader = "x-speculative-prefill"
+
 	// InferencePoolAPIGroup is the default InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
 
