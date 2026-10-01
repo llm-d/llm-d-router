@@ -41,7 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -119,7 +119,7 @@ func TestServer(t *testing.T) {
 }
 
 func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
-	model := testutil.MakeInferenceObjective("v1").
+	model := fwkgaie.MakeInferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
@@ -224,7 +224,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := fwkgaie.MakeInferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
@@ -529,7 +529,7 @@ func TestServer_Skip(t *testing.T) {
 	director := &testDirector{}
 	mockPar := &mockParser{skip: true}
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := fwkgaie.MakeInferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
@@ -604,7 +604,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	// We will send a request body that is larger than 4MB (e.g., 5MB).
 	// Since the test gRPC server defaults to 4MB receive limit, EPP should reject it.
 
-	model := testutil.MakeInferenceObjective("v1").
+	model := fwkgaie.MakeInferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}

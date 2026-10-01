@@ -26,7 +26,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	"github.com/llm-d/llm-d-router/test/integration"
 )
 
@@ -103,7 +103,7 @@ func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
 			labels["topology.kubernetes.io/region"] = p.region
 		}
 
-		pod := testutil.MakePod(fmt.Sprintf("pod-%d", p.index)).
+		pod := fwkk8s.MakePod(fmt.Sprintf("pod-%d", p.index)).
 			Namespace(h.Namespace).
 			ReadyCondition().
 			Labels(labels).
