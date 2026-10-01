@@ -63,6 +63,7 @@ declare -A test_cases_llm_d_router_gateway
 # llm_d_router_gateway Helm Chart test cases
 test_cases_llm_d_router_gateway["basic"]="--set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["http-route"]="--set httpRoute.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
@@ -97,6 +98,14 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ $? -ne 0 ]; then
     echo "Kubectl validation failed for test: ${key}"
     exit 1
+  fi
+
+  if [ "${key}" == "http-route" ]; then
+    httproute_file="${output_dir}/llm-d-router-gateway/templates/httproute.yaml"
+    if ! grep -q -- '^kind: HTTPRoute$' "${httproute_file}"; then
+      echo "Validation failed: HTTPRoute was not rendered for test: ${key}"
+      exit 1
+    fi
   fi
 
   if [ "${key}" == "triton" ]; then
