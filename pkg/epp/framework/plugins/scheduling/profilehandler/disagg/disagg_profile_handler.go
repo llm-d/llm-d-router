@@ -368,13 +368,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	}
 
 	// ── All stages done: record routing decision ───────────────────────────
-	encodeUsed := profileResults[h.encodeProfile] != nil
-	prefillUsed := profileResults[h.prefillProfile] != nil
-
-	decision := DisaggDecisionType(encodeUsed, prefillUsed)
-	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
-
+	h.recordDecision(span, request, profileResults)
 	return map[string]scheduling.SchedulerProfile{}
 }
 
@@ -392,12 +386,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 			return map[string]scheduling.SchedulerProfile{}
 		}
 
-		encodeUsed := profileResults[h.encodeProfile] != nil
-		prefillUsed := profileResults[h.prefillProfile] != nil
-
-		decision := DisaggDecisionType(encodeUsed, prefillUsed)
-		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
+		h.recordDecision(span, request, profileResults)
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -440,6 +429,32 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 }
 
+// prefillRequiredButFailed reports whether the prefill profile was picked to
+// run and found no endpoint, as opposed to the PD decider declining it.
+func (h *Handler) prefillRequiredButFailed(request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) bool {
+	prefillRes, ok := profileResults[h.prefillProfile]
+	if !ok || prefillRes != nil {
+		return false
+	}
+	declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey)
+	return !declined
+}
+
+// recordDecision records the routing decision once all stages are done.
+// Requests that ProcessResults rejects are not routed and are not counted.
+func (h *Handler) recordDecision(span trace.Span, request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) {
+	if h.prefillRequiredButFailed(request, profileResults) {
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_prefill_failed"))
+		return
+	}
+	encodeUsed := profileResults[h.encodeProfile] != nil
+	prefillUsed := profileResults[h.prefillProfile] != nil
+
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
+}
+
 // ProcessResults implements scheduling.ProfileHandler.
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
@@ -460,16 +475,13 @@ func (h *Handler) ProcessResults(
 
 	updatedResults[h.decodeProfile] = decodeRunResults
 
-	if prefillRes, ok := profileResults[h.prefillProfile]; ok {
-		if prefillRes != nil {
-			updatedResults[h.prefillProfile] = prefillRes
-		} else if declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey); !declined {
-			// The PD decider picked the prefill profile to run and it found no
-			// endpoint, instead of the decider declining to run it at all.
-			// Completing decode-only here would silently run prefill work on a
-			// decode pod instead of failing the request.
-			return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
-		}
+	if h.prefillRequiredButFailed(request, profileResults) {
+		// Completing decode-only here would silently run prefill work on a
+		// decode pod instead of failing the request.
+		return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
+	}
+	if prefillRes := profileResults[h.prefillProfile]; prefillRes != nil {
+		updatedResults[h.prefillProfile] = prefillRes
 	}
 
 	if encodeRes, ok := profileResults[h.encodeProfile]; ok && encodeRes != nil {
