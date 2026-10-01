@@ -523,7 +523,11 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	}
 
 	order := p.orderBuffer(len(priorities))
-	p.bandSelectionPolicy.Rank(ctx, saturation, priorities, ceilings, order)
+	p.bandSelectionPolicy.Rank(ctx, flowcontrol.BandSelectionParameters{
+		Saturation: saturation,
+		Priorities: priorities,
+		Ceilings:   ceilings,
+	}, order)
 
 	for _, i := range order {
 		priority := priorities[i]

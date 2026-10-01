@@ -2152,7 +2152,7 @@ func (f *fakeBandSelectionPolicy) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: "fake-band-selection-policy", Name: "fake"}
 }
 
-func (f *fakeBandSelectionPolicy) Rank(_ context.Context, _ float64, _ []int, _ []float64, order []int) {
+func (f *fakeBandSelectionPolicy) Rank(_ context.Context, _ flowcontrol.BandSelectionParameters, order []int) {
 	if len(f.order) != len(order) {
 		return
 	}

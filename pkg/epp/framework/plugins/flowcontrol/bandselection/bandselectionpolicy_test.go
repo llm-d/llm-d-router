@@ -62,7 +62,11 @@ func TestStrictPolicyRankPreservesIdentityOrder(t *testing.T) {
 			want[i] = i
 		}
 
-		DefaultPolicy().Rank(context.Background(), 0.5, priorities, ceilings, order)
+		DefaultPolicy().Rank(context.Background(), flowcontrol.BandSelectionParameters{
+			Saturation: 0.5,
+			Priorities: priorities,
+			Ceilings:   ceilings,
+		}, order)
 
 		if !slices.Equal(order, want) {
 			t.Errorf("Rank(n=%d) order = %v, want %v", n, order, want)
@@ -74,7 +78,11 @@ func TestStrictPolicyRankPreservesIdentityOrder(t *testing.T) {
 // contained on entry.
 func TestStrictPolicyRankIgnoresBufferContents(t *testing.T) {
 	order := []int{2, 0, 1}
-	DefaultPolicy().Rank(context.Background(), 0.9, []int{100, 50, 10}, []float64{1.0, 0.8, 0.5}, order)
+	DefaultPolicy().Rank(context.Background(), flowcontrol.BandSelectionParameters{
+		Saturation: 0.9,
+		Priorities: []int{100, 50, 10},
+		Ceilings:   []float64{1.0, 0.8, 0.5},
+	}, order)
 
 	if !slices.Equal(order, []int{2, 0, 1}) {
 		t.Errorf("Rank mutated the order buffer: got %v, want %v", order, []int{2, 0, 1})
