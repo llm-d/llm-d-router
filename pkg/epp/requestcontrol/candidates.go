@@ -18,19 +18,15 @@ package requestcontrol
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -42,129 +38,32 @@ const (
 	// cleanupInterval dictates how often we sweep the map for expired entries.
 	cleanupInterval = 1 * time.Minute
 
-	// defaultCacheKey is used when no subset filter is present (Return All Endpoints).
-	defaultCacheKey = "__default__"
-
-	// emptySubsetCacheKey is used when a subset filter is present but empty (Return No Endpoints).
-	emptySubsetCacheKey = "__explicit_empty__"
+	// allEndpointsCacheKey is the single cache key used now that the Delegate
+	// no longer varies its result based on request metadata. The Envoy subset
+	// filter moved to the gwsubset Screener, which observes request
+	// metadata during screening.
+	allEndpointsCacheKey = "__all_endpoints__"
 )
 
 // --- DatastoreEndpointCandidates (The Delegate) ---
 
-// EndpointCandidatesConfig holds configuration for the DatastoreEndpointCandidates.
-type EndpointCandidatesConfig struct {
-	DisableEndpointSubsetFilter bool
-}
-
-// EndpointCandidatesOption is a function that configures the EndpointCandidatesConfig.
-type EndpointCandidatesOption func(*EndpointCandidatesConfig)
-
-// WithDisableEndpointSubsetFilter sets the DisableEndpointSubsetFilter flag.
-func WithDisableEndpointSubsetFilter(disable bool) EndpointCandidatesOption {
-	return func(c *EndpointCandidatesConfig) {
-		c.DisableEndpointSubsetFilter = disable
-	}
-}
-
 // DatastoreEndpointCandidates implements contracts.EndpointCandidates by querying the EPP Datastore.
-// It centralizes the logic for resolving endpoint candidates based on request metadata (specifically Envoy subset filters).
 type DatastoreEndpointCandidates struct {
 	datastore Datastore
-	config    EndpointCandidatesConfig
 }
 
 var _ contracts.EndpointCandidates = &DatastoreEndpointCandidates{}
 
 // NewDatastoreEndpointCandidates creates a new DatastoreEndpointCandidates.
-func NewDatastoreEndpointCandidates(ds Datastore, opts ...EndpointCandidatesOption) *DatastoreEndpointCandidates {
-	cfg := EndpointCandidatesConfig{
-		DisableEndpointSubsetFilter: false,
-	}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-	return &DatastoreEndpointCandidates{
-		datastore: ds,
-		config:    cfg,
-	}
+func NewDatastoreEndpointCandidates(ds Datastore) *DatastoreEndpointCandidates {
+	return &DatastoreEndpointCandidates{datastore: ds}
 }
 
-// Locate retrieves the list of endpoint candidates from the datastore that match the criteria defined in the request
-// metadata.
-//
-// It supports:
-// 1. Returning all endpoint candidates if no specific subset filter is present.
-// 2. Returning a filtered list of endpoint candidates if "x-gateway-destination-endpoint-subset" is present.
-func (d *DatastoreEndpointCandidates) Locate(ctx context.Context, requestMetadata map[string]any) []fwkdl.Endpoint {
-	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
-
-	// If the user explicitly disabled subset filtering, return the default pool (all endpoint candidates).
-	if d.config.DisableEndpointSubsetFilter {
-		loggerTrace.Info("endpoint subset filtering is explicitly disabled, returning all endpoint candidates")
-		return d.datastore.PodList(datastore.AllPodsPredicate)
-	}
-
-	// Check if the subset filter namespace exists in metadata.
-	// If not, we assume the request targets the default pool (all endpoint candidates).
-	if requestMetadata == nil {
-		return d.datastore.PodList(datastore.AllPodsPredicate)
-	}
-
-	subsetMap, found := requestMetadata[metadata.SubsetFilterNamespace].(map[string]any)
-	if !found {
-		return d.datastore.PodList(datastore.AllPodsPredicate)
-	}
-
-	// Check if the specific endpoint key exists within the subset map.
-	endpointSubsetList, found := subsetMap[metadata.SubsetFilterKey].([]any)
-	if !found {
-		return d.datastore.PodList(datastore.AllPodsPredicate)
-	}
-
-	// If the filter key exists but the list is empty, it implies a filter that matched nothing upstream (or malformed
-	// data), so we return nothing.
-	if len(endpointSubsetList) == 0 {
-		loggerTrace.Info("found empty subset filter in request metadata, returning empty endpoint candidate list")
-		return []fwkdl.Endpoint{}
-	}
-
-	// Build a lookup map for efficient filtering.
-	// The subset list contains strings in the format "<address>:<port>" (e.g., "10.0.1.0:8080").
-	// We only care about the IP address for matching against PodMetrics.
-	endpoints := sets.New[string]()
-	for _, endpoint := range endpointSubsetList {
-		epStr, ok := endpoint.(string)
-		if !ok {
-			loggerTrace.Info("ignoring non-string endpoint in subset list", "value", endpoint)
-			continue
-		}
-		// Extract address from endpoint string.
-		if idx := strings.LastIndexByte(epStr, ':'); idx >= 0 {
-			endpoints.Insert(epStr[:idx])
-		} else {
-			endpoints.Insert(epStr)
-		}
-	}
-
-	// Query the Datastore with a predicate.
-	podTotalCount := 0
-	podFilteredList := d.datastore.PodList(func(pm fwkdl.Endpoint) bool {
-		podTotalCount++
-		// If the pod's IP is in our allowed map, include it.
-		// Note: We use GetIPAddress() which should align with the subset address.
-		if pod := pm.GetMetadata(); pod != nil {
-			if _, found := endpoints[pod.GetIPAddress()]; found {
-				return true
-			}
-		}
-		return false
-	})
-
-	loggerTrace.Info("filtered endpoint candidates by subset filtering",
-		"podTotalCount", podTotalCount,
-		"filteredCount", len(podFilteredList))
-
-	return podFilteredList
+// Locate returns every endpoint candidate in the Datastore. Per-request
+// filtering (e.g. the destination-endpoint-subset hint) is handled by
+// the gwsubset Screener, which runs after Locate.
+func (d *DatastoreEndpointCandidates) Locate(_ context.Context, _ map[string]any) []fwkdl.Endpoint {
+	return d.datastore.PodList(datastore.AllPodsPredicate)
 }
 
 // --- CachedEndpointCandidates (The Decorator) ---
@@ -178,7 +77,7 @@ type cacheEntry struct {
 // CachedEndpointCandidates is a decorator for contracts.EndpointCandidates that caches results to reduce lock contention on the
 // underlying Datastore.
 //
-// It is designed for high-throughput paths (like the Flow Control dispatch loop)cwhere fetching fresh data every
+// It is designed for high-throughput paths (like the Flow Control dispatch loop) where fetching fresh data every
 // millisecond is unnecessary and expensive.
 type CachedEndpointCandidates struct {
 	// delegate is the underlying source of truth (usually the DatastoreEndpointCandidates).
@@ -213,14 +112,11 @@ func NewCachedEndpointCandidates(ctx context.Context, delegate contracts.Endpoin
 	return c
 }
 
-// Locate returns the list of endpoint candidates for the given request metadata, using a cached result if available and
-// fresh.
-func (c *CachedEndpointCandidates) Locate(ctx context.Context, requestMetadata map[string]any) []fwkdl.Endpoint {
-	key := c.generateCacheKey(requestMetadata)
-
+// Locate returns the cached endpoint candidate list, refreshing it after the TTL expires.
+func (c *CachedEndpointCandidates) Locate(ctx context.Context, _ map[string]any) []fwkdl.Endpoint {
 	// Fast Path: Read Lock
 	c.mu.RLock()
-	entry, found := c.cache[key]
+	entry, found := c.cache[allEndpointsCacheKey]
 	c.mu.RUnlock()
 
 	if found && time.Now().Before(entry.expiry) {
@@ -233,7 +129,7 @@ func (c *CachedEndpointCandidates) Locate(ctx context.Context, requestMetadata m
 	defer c.mu.Unlock()
 
 	// Double-check: Someone else might have updated the cache while we were waiting for the lock.
-	entry, found = c.cache[key]
+	entry, found = c.cache[allEndpointsCacheKey]
 	if found && time.Now().Before(entry.expiry) {
 		return entry.pods
 	}
@@ -242,62 +138,15 @@ func (c *CachedEndpointCandidates) Locate(ctx context.Context, requestMetadata m
 	// Note: We hold the lock during the fetch. This serializes requests for the same key, preventing a "thundering herd"
 	// on the underlying Datastore.
 	// Since Datastore lookups are fast in-memory scans, this lock duration is acceptable.
-	freshPods := c.delegate.Locate(ctx, requestMetadata)
+	freshPods := c.delegate.Locate(ctx, nil)
 
 	// Update cache.
-	c.cache[key] = cacheEntry{
+	c.cache[allEndpointsCacheKey] = cacheEntry{
 		pods:   freshPods,
 		expiry: time.Now().Add(c.ttl),
 	}
 
 	return freshPods
-}
-
-// generateCacheKey creates a deterministic string key representing the endpoint selection criteria.
-// It handles the "x-gateway-destination-endpoint-subset" structure specifically.
-func (c *CachedEndpointCandidates) generateCacheKey(reqMetadata map[string]any) string {
-	// No Metadata -> All Endpoints
-	if reqMetadata == nil {
-		return defaultCacheKey
-	}
-
-	subsetMap, found := reqMetadata[metadata.SubsetFilterNamespace].(map[string]any)
-	if !found {
-		return defaultCacheKey
-	}
-
-	// The subset filter key contains a list of endpoint strings (e.g., "10.0.0.1:8080").
-	// We must treat this list as a set (order independent).
-	endpointSubsetList, found := subsetMap[metadata.SubsetFilterKey].([]any)
-
-	// Namespace exists, but "subset" key is missing -> All Endpoints
-	if !found {
-		return defaultCacheKey
-	}
-
-	// "subset" key exists, but is empty list -> No Endpoints
-	if len(endpointSubsetList) == 0 {
-		return emptySubsetCacheKey
-	}
-
-	// Optimization: If there's only one endpoint, return it directly to avoid allocation.
-	if len(endpointSubsetList) == 1 {
-		if s, ok := endpointSubsetList[0].(string); ok {
-			return s
-		}
-		return defaultCacheKey // Fallback for malformed data.
-	}
-
-	// Copy and sort to ensure determinism ( [A, B] must equal [B, A] ).
-	endpoints := make([]string, 0, len(endpointSubsetList))
-	for _, ep := range endpointSubsetList {
-		if s, ok := ep.(string); ok {
-			endpoints = append(endpoints, s)
-		}
-	}
-
-	sort.Strings(endpoints)
-	return strings.Join(endpoints, "|")
 }
 
 // runCleanup periodically removes expired entries from the cache to prevent unbounded growth.
