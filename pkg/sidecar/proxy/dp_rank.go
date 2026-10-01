@@ -61,15 +61,10 @@ func foldDPRankToLocal(dpRank, dpSize, dpSizeLocal int) int {
 	return 0
 }
 
-// resolveDecodeDPRank picks the DP rank for the decode request in serial WRITE
-// dispatch. It prefers the rank the prefill request returned in its
-// kv_transfer_params (remote_dp_rank), but only when that value is a valid
-// integer in [0, dpSize); otherwise it falls back to the deterministic hash of
-// the request id. The returned global rank is retained in the decode body's
-// remote_dp_rank for cross-pod routing. The caller folds it into the pod-local
-// range for the x-data-parallel-rank header. The second return value reports
-// whether the prefill-returned rank was used (false = hash fallback, including
-// when it was omitted, non-numeric, or out of range).
+// resolveDecodeDPRank prefers a valid prefill-returned global DP rank.
+// Missing or invalid values return a deterministic hash rank. The caller maps
+// that fallback to the selected prefill pod in multi-pod deployments.
+// usedReturned reports whether the prefill-provided rank was accepted.
 func resolveDecodeDPRank(prefillKV any, requestID string, dpSize int) (rank int, usedReturned bool) {
 	fallback := pickDPRank(requestID, dpSize)
 	if dpSize <= 1 {
