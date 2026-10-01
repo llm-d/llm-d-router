@@ -35,8 +35,8 @@ const (
 )
 
 // APIType is the inference API a request was sent to. Path and the output
-// token cap treat a value outside the constants below as
-// APITypeChatCompletions; String reports it as APIType(N).
+// token cap treat APITypeUnknown and a value outside the constants below as
+// APITypeChatCompletions; String reports the latter as APIType(N).
 type APIType int
 
 const (
@@ -52,6 +52,8 @@ const (
 	APITypeSGLangGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+	// APITypeUnknown is any path that is not one of the inference API paths.
+	APITypeUnknown
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -69,6 +71,8 @@ func (a APIType) String() string {
 		return "sglang_generate"
 	case APITypeMessages:
 		return "messages"
+	case APITypeUnknown:
+		return "unknown"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -131,25 +135,22 @@ func CanonicalizeAPIPath(next http.Handler) http.Handler {
 	})
 }
 
-// DetectAPIType classifies a request path. An unrecognized path maps to
-// APITypeChatCompletions: callers that route only known paths never reach the
-// fallback.
-func DetectAPIType(path string) APIType {
-	switch {
-	case strings.Contains(path, PathChatCompletions):
-		return APITypeChatCompletions
-	case strings.Contains(path, PathCompletions):
-		return APITypeCompletions
-	case strings.Contains(path, PathResponses):
-		return APITypeResponses
-	case strings.Contains(path, PathMessages):
-		return APITypeMessages
-	case strings.Contains(path, PathVLLMGenerate):
-		return APITypeVLLMGenerate
-	case strings.Contains(path, PathSGLangGenerate):
-		return APITypeSGLangGenerate
-	default:
-		return APITypeChatCompletions
+// DetectAPIType classifies a request path by the longest inference API path
+// that ends its cleaned form. A prefixed path such as /prefix/v1/completions
+// classifies by its API path, and a sub-resource such as
+// /v1/messages/count_tokens ends in another segment and is APITypeUnknown.
+// PathSGLangGenerate is a single segment, so any path ending in /generate,
+// such as /v1/responses/generate, classifies as APITypeSGLangGenerate.
+func DetectAPIType(p string) APIType {
+	for c := path.Clean(p); ; {
+		if t, ok := apiPaths[c]; ok {
+			return t
+		}
+		i := strings.IndexByte(c[1:], '/')
+		if i < 0 {
+			return APITypeUnknown
+		}
+		c = c[i+1:]
 	}
 }
 

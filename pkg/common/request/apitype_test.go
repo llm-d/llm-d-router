@@ -31,6 +31,7 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeVLLMGenerate:    {"vllm_generate", PathVLLMGenerate},
 		APITypeSGLangGenerate:  {"sglang_generate", PathSGLangGenerate},
 		APITypeMessages:        {"messages", PathMessages},
+		APITypeUnknown:         {"unknown", PathChatCompletions},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
@@ -55,14 +56,24 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "messages", path: PathMessages, want: APITypeMessages},
 		{name: "generate", path: PathVLLMGenerate, want: APITypeVLLMGenerate},
 		{name: "sglang generate", path: PathSGLangGenerate, want: APITypeSGLangGenerate},
+		{name: "trailing slash", path: PathResponses + "/", want: APITypeResponses},
+		{name: "repeated slash", path: "//v1/chat/completions", want: APITypeChatCompletions},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
 		{name: "prefixed responses", path: "/prefix" + PathResponses, want: APITypeResponses},
 		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
 		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeVLLMGenerate},
 		{name: "prefixed sglang generate", path: "/prefix" + PathSGLangGenerate, want: APITypeSGLangGenerate},
-		{name: "unknown path falls back to chat completions", path: "/v1/embeddings", want: APITypeChatCompletions},
-		{name: "empty path falls back to chat completions", path: "", want: APITypeChatCompletions},
+		{name: "segment ending in generate", path: "/regenerate", want: APITypeUnknown},
+		{name: "sub-path ending in generate", path: PathResponses + "/generate", want: APITypeSGLangGenerate},
+		{name: "chat completions render", path: "/v1/chat/completions/render", want: APITypeUnknown},
+		{name: "messages count_tokens", path: "/v1/messages/count_tokens", want: APITypeUnknown},
+		{name: "messages batches", path: "/v1/messages/batches", want: APITypeUnknown},
+		{name: "responses input_tokens", path: "/v1/responses/input_tokens", want: APITypeUnknown},
+		{name: "responses compact", path: "/v1/responses/compact", want: APITypeUnknown},
+		{name: "conversations", path: "/v1/conversations", want: APITypeUnknown},
+		{name: "embeddings", path: "/v1/embeddings", want: APITypeUnknown},
+		{name: "empty path", path: "", want: APITypeUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
