@@ -388,6 +388,7 @@ Enable chunked decode via the pd-sidecar flag:
 - [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)
+- [Inference API Routing](./api-routing.md)
 
 ### Canonical llm-d architecture (upstream)
 
