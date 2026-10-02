@@ -22,8 +22,10 @@ package p2psource
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,6 +65,107 @@ type Config struct {
 	// the disagg-profile-handler's profiles.prefill. Empty defaults to
 	// "prefill".
 	PrefillProfileName string `json:"prefillProfileName,omitempty"`
+	// CostModel, when set, decides the pull by comparing the prefill time the
+	// pull saves against the transfer and the waits a pull pays on busy pods,
+	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
+	CostModel *CostModelConfig `json:"costModel,omitempty"`
+}
+
+// CostModelConfig holds the calibrated constants of the pull cost model. The
+// pull is emitted when
+//
+//	delta*(prefill - transfer) + fleetWeight*running(d)*delta*prefill
+//	  > transferFixed + busy(s)*sourceWait + busy(d)*requeue
+//
+// with delta the cached-token advantage of the source over the computing
+// pod, running(d) the requests running on the computing pod, and busy(x)
+// true when pod x has at least BusyQueueThreshold requests waiting. The
+// fleet term credits the prefill a pull keeps off a loaded pod: a recompute
+// there delays every running request's decode steps, while a pull delays
+// only the pulled request. A busy destination re-admits the pulled request
+// through its waiting queue after the blocks arrive.
+type CostModelConfig struct {
+	// PrefillMicrosecondsPerToken is the destination's prefill cost per token.
+	PrefillMicrosecondsPerToken float64 `json:"prefillMicrosecondsPerToken"`
+	// TransferMicrosecondsPerToken is the P2P transfer cost per token. Must be
+	// below PrefillMicrosecondsPerToken.
+	TransferMicrosecondsPerToken float64 `json:"transferMicrosecondsPerToken"`
+	// TransferFixedMs is the fixed cost of a pull on idle pods.
+	TransferFixedMs float64 `json:"transferFixedMs,omitempty"`
+	// SourceWaitMs is added when the source is busy. Pulls are served from
+	// the source's CPU tier, not its scheduler; leave it 0 unless a busy
+	// source is measured to delay pulls.
+	SourceWaitMs float64 `json:"sourceWaitMs,omitempty"`
+	// RequeueMs is added when the computing pod is busy.
+	RequeueMs float64 `json:"requeueMs,omitempty"`
+	// FleetWeight credits a pull with the prefill time it frees for each
+	// request running on the computing pod, at this weight per running
+	// request. 0 decides on the pulled request's own latency only.
+	FleetWeight float64 `json:"fleetWeight,omitempty"`
+	// BusyQueueThreshold is the waiting-queue depth at or above which a pod
+	// counts as busy. Omitted or 0 defaults to 1; negative is rejected.
+	BusyQueueThreshold int `json:"busyQueueThreshold,omitempty"`
+}
+
+const defaultBusyQueueThreshold = 1
+
+func (c *CostModelConfig) validate() error {
+	if c.BusyQueueThreshold == 0 {
+		c.BusyQueueThreshold = defaultBusyQueueThreshold
+	}
+	switch {
+	case c.PrefillMicrosecondsPerToken <= 0:
+		return fmt.Errorf("costModel.prefillMicrosecondsPerToken must be > 0, got %v", c.PrefillMicrosecondsPerToken)
+	case c.TransferMicrosecondsPerToken < 0:
+		return fmt.Errorf("costModel.transferMicrosecondsPerToken must be >= 0, got %v", c.TransferMicrosecondsPerToken)
+	case c.TransferMicrosecondsPerToken >= c.PrefillMicrosecondsPerToken:
+		return fmt.Errorf("costModel.transferMicrosecondsPerToken (%v) must be below prefillMicrosecondsPerToken (%v)",
+			c.TransferMicrosecondsPerToken, c.PrefillMicrosecondsPerToken)
+	case c.TransferFixedMs < 0 || c.SourceWaitMs < 0 || c.RequeueMs < 0:
+		return errors.New("costModel wait constants must be >= 0")
+	case c.FleetWeight < 0:
+		return fmt.Errorf("costModel.fleetWeight must be >= 0, got %v", c.FleetWeight)
+	case c.BusyQueueThreshold < 1:
+		return fmt.Errorf("costModel.busyQueueThreshold must be >= 1, got %d", c.BusyQueueThreshold)
+	}
+	return nil
+}
+
+func (c *CostModelConfig) busy(waitingQueue int) bool {
+	return waitingQueue >= c.BusyQueueThreshold
+}
+
+// sourceCost ranks a pull source before the computing pod is known: the wait
+// a busy source adds, plus the recompute the destination pays for every
+// token this source holds short of the best-cached one. The computing pod's
+// own terms are equal across sources and drop out. The shortfall is priced
+// without the fleet credit, which depends on the computing pod: the credit
+// scales every source's shortfall by the same factor, so the ranking is
+// unchanged when SourceWaitMs is 0, and with a non-zero SourceWaitMs the
+// ranking undervalues cache for a loaded computing pod.
+func (c *CostModelConfig) sourceCost(cached, maxCached, waitingQueue int) float64 {
+	cost := float64(maxCached-cached) * (c.PrefillMicrosecondsPerToken - c.TransferMicrosecondsPerToken) / 1000
+	if c.busy(waitingQueue) {
+		cost += c.SourceWaitMs
+	}
+	return cost
+}
+
+// evaluate returns the pull's gain and cost in milliseconds for a
+// delta-token pull between a source and computing pod with the given
+// waiting-queue depths and running-request count on the computing pod.
+func (c *CostModelConfig) evaluate(delta, sourceWaiting, computingWaiting, computingRunning int) (gain, cost float64) {
+	tokens := float64(delta)
+	gain = tokens * (c.PrefillMicrosecondsPerToken - c.TransferMicrosecondsPerToken) / 1000
+	gain += c.FleetWeight * float64(computingRunning) * tokens * c.PrefillMicrosecondsPerToken / 1000
+	cost = c.TransferFixedMs
+	if c.busy(sourceWaiting) {
+		cost += c.SourceWaitMs
+	}
+	if c.busy(computingWaiting) {
+		cost += c.RequeueMs
+	}
+	return gain, cost
 }
 
 // compile-time type assertions
@@ -84,6 +187,7 @@ type Producer struct {
 	minCachedTokenDelta         int
 	prefillProfile              string
 	attrKeyValue                plugin.DataKey
+	costModel                   *CostModelConfig
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -97,6 +201,11 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	}
 	if cfg.MinCachedTokenDelta < 1 {
 		return nil, fmt.Errorf("%s: minCachedTokenDelta must be >= 1, got %d", PluginType, cfg.MinCachedTokenDelta)
+	}
+	if cfg.CostModel != nil {
+		if err := cfg.CostModel.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", PluginType, err)
+		}
 	}
 	return New(name, cfg), nil
 }
@@ -112,6 +221,12 @@ func New(name string, cfg Config) *Producer {
 	if minCachedTokenDelta < 1 {
 		minCachedTokenDelta = defaultMinCachedTokenDelta
 	}
+	costModel := cfg.CostModel
+	if costModel != nil && costModel.BusyQueueThreshold < 1 {
+		defaulted := *costModel
+		defaulted.BusyQueueThreshold = defaultBusyQueueThreshold
+		costModel = &defaulted
+	}
 	return &Producer{
 		typedName:                   plugin.TypedName{Type: PluginType, Name: name},
 		prefixMatchDataKey:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -119,6 +234,7 @@ func New(name string, cfg Config) *Producer {
 		minCachedTokenDelta:         minCachedTokenDelta,
 		prefillProfile:              prefillProfile,
 		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
+		costModel:                   costModel,
 	}
 }
 
@@ -146,6 +262,9 @@ type bestMatchPeer struct {
 	hostPort     string
 	cachedTokens int
 	hasTierData  bool
+	// waitingQueue is the source's waiting-queue depth at Produce time, read
+	// by the cost model in PreRequest.
+	waitingQueue int
 }
 
 // attrKey returns the request-attribute key carrying the best-match peer,
@@ -169,7 +288,12 @@ func (p *Producer) attrKey() plugin.DataKey {
 // the destination a single block of recompute, noise next to a queue-depth
 // difference on the source. Proportional weights spread ties uniformly,
 // mildly prefer a one-request-shorter queue, and starve deeply-queued
-// sources. No-op when no candidate holds any cached block.
+// sources. With a cost model, every source is ranked by the wait it adds
+// plus the recompute its cache shortfall costs (CostModelConfig.sourceCost),
+// and the sample is uniform among sources within one block's recompute of
+// the minimum, so an idle source beats a busy one unless the busy one's extra
+// cache outweighs the source wait. No-op when no candidate holds any cached
+// block.
 func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
 	// Endpoints without metadata cannot serve as sources (no address to
 	// join), so they must not pin the pool maximum either: an inflated
@@ -201,14 +325,35 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		var candidates []sourceMatch
 		var weights []float64
 		total := 0.0
-		for _, m := range matches {
-			if m.cached+m.blockSize < maxCached {
-				continue
+		if p.costModel != nil {
+			// Cost-aware pick: every source is ranked by sourceCost, so an idle
+			// source beats a busy one unless the busy one's extra cache is worth
+			// more than the source wait. Sources within one block's recompute of
+			// the minimum are sampled uniformly, keeping the anti-herding band.
+			costs := make([]float64, len(matches))
+			minCost := math.Inf(1)
+			for i, m := range matches {
+				costs[i] = p.costModel.sourceCost(m.cached, maxCached, waitingQueueSize(m.ep))
+				minCost = math.Min(minCost, costs[i])
 			}
-			w := 1.0 / (1.0 + float64(waitingQueueSize(m.ep)))
-			candidates = append(candidates, m)
-			weights = append(weights, w)
-			total += w
+			for i, m := range matches {
+				if costs[i]-minCost > p.costModel.sourceCost(0, m.blockSize, 0) {
+					continue
+				}
+				candidates = append(candidates, m)
+				weights = append(weights, 1)
+				total++
+			}
+		} else {
+			for _, m := range matches {
+				if m.cached+m.blockSize < maxCached {
+					continue
+				}
+				w := 1.0 / (1.0 + float64(waitingQueueSize(m.ep)))
+				candidates = append(candidates, m)
+				weights = append(weights, w)
+				total += w
+			}
 		}
 		if len(candidates) > 0 {
 			target := requestSpreadFraction(request.RequestID) * total
@@ -225,6 +370,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
 				cachedTokens: candidates[chosen].cached,
 				hasTierData:  candidates[chosen].hasTierData,
+				waitingQueue: waitingQueueSize(candidates[chosen].ep),
 			}
 		}
 	}
@@ -259,6 +405,14 @@ func waitingQueueSize(ep scheduling.Endpoint) int {
 	return m.WaitingQueueSize
 }
 
+func runningRequests(ep scheduling.Endpoint) int {
+	m := ep.GetMetrics()
+	if m == nil {
+		return 0
+	}
+	return m.RunningRequestsSize
+}
+
 // requestSpreadFraction maps a request ID onto [0, 1) so weighted source
 // sampling is uniform across requests while staying deterministic per
 // request.
@@ -270,10 +424,18 @@ func requestSpreadFraction(requestID string) float64 {
 
 // PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed
 // by Produce when it out-caches the pod computing the prefix by at least
-// minCachedTokenDelta tokens. Any inbound value of the header is removed.
+// minCachedTokenDelta tokens and, with a cost model configured, when the
+// pull's gain exceeds its cost. Any inbound value of the header is removed.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE)
 	delete(request.Headers, routing.KVCacheSourceHeader)
+
+	// One line per request with the decision and its inputs, so pull behavior
+	// can be joined to request latency without TRACE-level log volume.
+	dlog := log.FromContext(ctx).WithName(p.typedName.String())
+	outcome := "no-best-match"
+	kv := []any{"requestID", request.RequestID}
+	defer func() { dlog.Info("p2p decision", append(kv, "outcome", outcome)...) }()
 
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
 	if !ok {
@@ -286,15 +448,20 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		computing = pr
 	}
 	if computing == nil || len(computing.TargetEndpoints) == 0 {
+		outcome = "no-endpoint"
 		return nil
 	}
 	endpoint := computing.TargetEndpoints[0]
 	md := endpoint.GetMetadata()
 	if md == nil {
+		outcome = "no-endpoint"
 		return nil
 	}
 	computingHostPort := net.JoinHostPort(md.Address, md.Port)
 	computingCached := p.cachedTokenCount(endpoint)
+	kv = append(kv, "best", best.hostPort, "bestCachedTokens", best.cachedTokens, "sourceWaiting", best.waitingQueue,
+		"computing", computingHostPort, "computingCachedTokens", computingCached, "computingWaiting", waitingQueueSize(endpoint),
+		"computingRunning", runningRequests(endpoint), "deltaTokens", best.cachedTokens-computingCached)
 	logger.Info("evaluating KV cache source",
 		"requestID", request.RequestID, "best", best.hostPort, "bestCachedTokens", best.cachedTokens,
 		"computing", computingHostPort, "computingCachedTokens", computingCached)
@@ -302,11 +469,26 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	// with the delta check below while minCachedTokenDelta >= 1 (a self-match
 	// is delta 0), but explicit against a future lower floor.
 	if best.hostPort == computingHostPort {
+		outcome = "self"
 		return nil
 	}
-	if best.cachedTokens-computingCached < p.minCachedTokenDelta {
+	delta := best.cachedTokens - computingCached
+	if delta < p.minCachedTokenDelta {
+		outcome = "below-floor"
 		return nil
 	}
+	if p.costModel != nil {
+		gain, cost := p.costModel.evaluate(delta, best.waitingQueue, waitingQueueSize(endpoint), runningRequests(endpoint))
+		logger.Info("cost model", "requestID", request.RequestID, "deltaTokens", delta,
+			"sourceWaiting", best.waitingQueue, "computingWaiting", waitingQueueSize(endpoint),
+			"computingRunning", runningRequests(endpoint), "gainMs", gain, "costMs", cost)
+		kv = append(kv, "gainMs", gain, "costMs", cost)
+		if gain <= cost {
+			outcome = "declined"
+			return nil
+		}
+	}
+	outcome = "pulled"
 
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
