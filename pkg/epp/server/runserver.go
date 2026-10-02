@@ -73,6 +73,7 @@ type ExtProcServerRunner struct {
 	ParserRegistry                   *handlers.ParserRegistry
 	SaturationDetector               fwkfc.SaturationDetector
 	PriorityBandControlPlane         contracts.PriorityBandControlPlane
+	CapacityReader                   handlers.CapacityReader
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
 	EnableGRPCStreamMetrics          bool
@@ -88,7 +89,7 @@ type ExtProcServerRunner struct {
 // ExtProcServerRunner: adding an option here reaches every ext_proc server, instead of only
 // whichever call site the author happened to edit.
 //
-// GrpcListener and EvictChannelLookup stay the caller's job -- both are optional and only
+// GrpcListener, EvictChannelLookup, and CapacityReader stay the caller's job -- all are optional and only
 // some call sites have one.
 func NewExtProcServerRunner(
 	opts *Options,
@@ -270,6 +271,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		if r.CapacityReader != nil {
+			extProcServer.SetCapacityReader(r.CapacityReader)
+		}
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
 		}

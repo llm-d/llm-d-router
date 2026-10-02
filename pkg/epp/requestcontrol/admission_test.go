@@ -55,11 +55,12 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 }
 
 type mockFlowController struct {
-	outcome fctypes.QueueOutcome
-	err     error
-	called  bool
-	delay   time.Duration
-	request flowcontrol.FlowControlRequest
+	outcome          fctypes.QueueOutcome
+	err              error
+	called           bool
+	delay            time.Duration
+	request          flowcontrol.FlowControlRequest
+	effectiveFlowKey flowcontrol.FlowKey
 }
 
 func (m *mockFlowController) EnqueueAndWait(
@@ -72,6 +73,14 @@ func (m *mockFlowController) EnqueueAndWait(
 	}
 	m.request = request
 	return m.outcome, m.err
+}
+
+func (m *mockFlowController) EnqueueAndWaitWithEffectiveFlowKey(
+	ctx context.Context,
+	request flowcontrol.FlowControlRequest,
+) (fctypes.QueueOutcome, flowcontrol.FlowKey, error) {
+	outcome, err := m.EnqueueAndWait(ctx, request)
+	return outcome, m.effectiveFlowKey, err
 }
 
 // --- Legacy Controller Tests ---
@@ -399,7 +408,11 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 					Metadata: map[string]any{},
 				},
 			}
-			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
+			fc := &mockFlowController{
+				outcome:          tc.fcOutcome,
+				err:              tc.fcErr,
+				effectiveFlowKey: flowcontrol.FlowKey{Priority: 5},
+			}
 			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods})
 
 			err := ac.Admit(ctx, reqCtx, tc.priority)
@@ -416,6 +429,10 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
 					assert.Equal(t, tc.expectHeaders, e.Headers, "incorrect headers for scenario: %s", tc.name)
 				}
+			}
+			if tc.fcOutcome != fctypes.QueueOutcomeDispatched {
+				assert.False(t, reqCtx.FlowControlAdmitted)
+				assert.Zero(t, reqCtx.FlowControlEffectivePriority)
 			}
 		})
 	}
@@ -435,12 +452,13 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 	t.Run("flow control stamps duration on dispatch", func(t *testing.T) {
 		t.Parallel()
 		reqCtx := newReqCtx()
-		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}
+		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond, effectiveFlowKey: flowcontrol.FlowKey{Priority: 5}}
 		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
 
 		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
 		assert.True(t, reqCtx.FlowControlAdmitted)
 		assert.GreaterOrEqual(t, reqCtx.FlowControlQueueDuration, 5*time.Millisecond)
+		assert.Equal(t, 5, reqCtx.FlowControlEffectivePriority)
 	})
 
 	t.Run("flow control leaves fields unset on rejection", func(t *testing.T) {
@@ -450,12 +468,16 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 			outcome: fctypes.QueueOutcomeRejectedCapacity,
 			err:     fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity),
 			delay:   5 * time.Millisecond,
+			effectiveFlowKey: flowcontrol.FlowKey{
+				Priority: 5,
+			},
 		}
 		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
 
 		require.Error(t, ac.Admit(ctx, reqCtx, 0))
 		assert.False(t, reqCtx.FlowControlAdmitted)
 		assert.Zero(t, reqCtx.FlowControlQueueDuration)
+		assert.Zero(t, reqCtx.FlowControlEffectivePriority)
 	})
 
 	t.Run("legacy admission does not stamp", func(t *testing.T) {

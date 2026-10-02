@@ -237,7 +237,24 @@ func (fc *FlowController) EnqueueAndWait(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
 ) (types.QueueOutcome, error) {
+	outcome, _, err := fc.enqueueAndWait(ctx, req)
+	return outcome, err
+}
+
+// EnqueueAndWaitWithEffectiveFlowKey submits a request and returns the flow key used for admission.
+func (fc *FlowController) EnqueueAndWaitWithEffectiveFlowKey(
+	ctx context.Context,
+	req flowcontrol.FlowControlRequest,
+) (types.QueueOutcome, flowcontrol.FlowKey, error) {
+	return fc.enqueueAndWait(ctx, req)
+}
+
+func (fc *FlowController) enqueueAndWait(
+	ctx context.Context,
+	req flowcontrol.FlowControlRequest,
+) (types.QueueOutcome, flowcontrol.FlowKey, error) {
 	flowKey := req.FlowKey()
+	effectiveFlowKey := flowKey
 	priority := strconv.Itoa(flowKey.Priority)
 	reqBytes := req.ByteSize()
 	metrics.IncFlowControlQueueSize(
@@ -264,6 +281,7 @@ func (fc *FlowController) EnqueueAndWait(
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
+		effectiveFlowKey = effectiveReq.FlowKey()
 		bandDefaultRequestTTL, bandDefaultRequestTTLSet := conn.DefaultRequestTTL()
 		reqCtx, cancel, saturationTTL := fc.createRequestContext(
 			ctx, effectiveReq, bandDefaultRequestTTL, bandDefaultRequestTTLSet, enqueueTime,
@@ -307,7 +325,7 @@ func (fc *FlowController) EnqueueAndWait(
 
 	metrics.IncFlowControlRequestsTotal(finalOutcome.String(), priority, req.InferencePoolName())
 
-	return finalOutcome, err
+	return finalOutcome, effectiveFlowKey, err
 }
 
 // fallbackRequest wraps a FlowControlRequest to override its flow key, so a request that falls back to a different
