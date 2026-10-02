@@ -178,8 +178,10 @@ type Pool struct {
 	// options on every call, which is not free on the per-message event path.
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
 	// span construction on the default path.
-	tracer trace.Tracer
-	wg     sync.WaitGroup
+	tracer   trace.Tracer
+	wg       sync.WaitGroup
+	stopped  chan struct{}
+	stopOnce sync.Once
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -209,6 +211,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
+		stopped:        make(chan struct{}),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -283,6 +286,7 @@ func (p *Pool) Start(ctx context.Context) {
 func (p *Pool) Shutdown(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	logger.Info("Shutting down event processing pool...")
+	p.stopOnce.Do(func() { close(p.stopped) })
 
 	for _, queue := range p.queues {
 		queue.ShutDown()
@@ -338,7 +342,10 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 		// Use a nested func to ensure Done is always called.
 		func(task *RawMessage) {
 			defer queue.Done(task)
-			p.processRawMessage(ctx, task)
+			err := p.processRawMessage(ctx, task)
+			if task.processed != nil {
+				task.processed <- err
+			}
 			// Task succeeded, remove it from the queue.
 			queue.Forget(task)
 		}(task)
@@ -354,7 +361,7 @@ func (p *Pool) worker(ctx context.Context, workerIndex int) {
 }
 
 // processRawMessage decodes the raw message payload using the adapter and processes the resulting event batch.
-func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
+func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) error {
 	logger := log.FromContext(ctx)
 	if msg.reset {
 		podID := msg.SourceEndpoint
@@ -362,7 +369,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 			podID = p.adapter.ShardingKey(msg)
 		}
 		p.clearPod(ctx, podID)
-		return
+		return ctx.Err()
 	}
 
 	// Parent to the receive span while keeping the worker's context for
@@ -392,7 +399,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		logger.Error(err, "Failed to parse message")
-		return
+		return err
 	}
 
 	if msg.SourceEndpoint != "" {
@@ -406,6 +413,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	}
 
 	p.processEventBatch(ctx, &batch, podID, modelName)
+	return ctx.Err()
 }
 
 // decode spans the adapter's payload decode. It wraps the call rather than the

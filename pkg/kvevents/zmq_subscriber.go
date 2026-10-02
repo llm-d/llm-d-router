@@ -251,6 +251,10 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 // starts after Recv returns so it measures handoff work rather than the idle
 // wait for the next message.
 func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, payload []byte) {
+	z.enqueueTask(ctx, topic, seq, payload, nil)
+}
+
+func (z *zmqSubscriber) enqueueTask(ctx context.Context, topic string, seq uint64, payload []byte, processed chan error) {
 	// Spans route through the pool so a single Config.Tracing decision governs
 	// every stage of the pipeline.
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
@@ -273,6 +277,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		processed:      processed,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes
 	// sc escape, so it heap-allocates on every message including the ones the
@@ -394,7 +399,25 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				break
 			}
 
-			z.addTask(ctx, topic, seq, payload)
+			// Backpressure replay against the ordered worker, rather than storing
+			// the entire replay history in the unbounded processing queue.
+			idleTimer.Stop()
+			processed := make(chan error, 1)
+			z.enqueueTask(ctx, topic, seq, payload, processed)
+			select {
+			case err := <-processed:
+				if err != nil {
+					terminalErr = fmt.Errorf("replay sequence %d processing failed: %w", seq, err)
+				}
+			case <-replayCtx.Done():
+				receiveErr = replayCtx.Err()
+			case <-z.pool.stopped:
+				terminalErr = fmt.Errorf("event processing pool stopped during replay")
+			}
+			if terminalErr != nil || receiveErr != nil {
+				break
+			}
+			idleTimer.Reset(replayAttemptIdleTimeout)
 			z.lastSeq = seq
 			z.hasLastSeq = true
 			replayed++
