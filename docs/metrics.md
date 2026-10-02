@@ -168,6 +168,9 @@ decisions.
 | `llm_d_epp_plugin_duration_seconds` | Histogram | `extension_point`, `plugin_type`, `plugin_name` | Per-plugin execution time. |
 | `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
 | `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
+| `llm_d_epp_served_model_filter_decisions_total` | Counter | `plugin_name`, `outcome` | `served-model-filter` decisions. See the [filter README](../pkg/epp/framework/plugins/scheduling/filter/servedmodel/README.md#metrics). |
+| `llm_d_epp_served_model_filter_candidates_total` | Counter | `plugin_name` | Candidate endpoints evaluated by `served-model-filter`. |
+| `llm_d_epp_served_model_filter_unlisted_candidates_total` | Counter | `plugin_name` | Candidate endpoints evaluated by `served-model-filter` without a stored model list. |
 
 ### Data layer errors
 

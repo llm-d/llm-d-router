@@ -31,6 +31,8 @@ var _ fwkplugin.ProducerPlugin = &ModelExtractor{}
 
 var _ fwkdl.PollingExtractor[*ModelResponse] = &ModelExtractor{}
 
+var _ fwkdl.Registrant = &ModelExtractor{}
+
 // ModelResponse is the response from /v1/models API.
 type ModelResponse struct {
 	Object string                 `json:"object"`
@@ -74,6 +76,16 @@ func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handl
 func (me *ModelExtractor) Extract(_ context.Context, in fwkdl.PollInput[*ModelResponse]) error {
 	me.slot.Put(in.Endpoint.GetAttributes(), attrmodels.ModelDataCollection(in.Payload.Data))
 	return nil
+}
+
+func (me *ModelExtractor) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      me.typedName,
+		SourceType: attrmodels.ModelsDataSourceType,
+		Extractor:  me,
+		// No DefaultSource: scheme, TLS and interval are deployment specific.
+		IfMissing: fwkdl.Warn,
+	})
 }
 
 // Produces returns data produced by the producer.

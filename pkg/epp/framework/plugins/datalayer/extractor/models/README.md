@@ -24,6 +24,13 @@ if !ok || attr == nil {
 modelData, ok := attr.(models.ModelDataCollection)
 ```
 
+## Source binding
+
+When `dataLayer.sources` does not list the extractor under a `models-data-source`, it is
+bound to the configured `models-data-source`. When none is configured, or several are and
+none lists the extractor, the EPP logs `datalayer: skipping unresolved dependency` at
+start-up and the extractor stays unbound.
+
 ## Configuration
 
 No configuration parameters.
