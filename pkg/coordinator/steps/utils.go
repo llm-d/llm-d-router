@@ -69,14 +69,9 @@ func checkStatus(step string, resp *http.Response) error {
 	return upstreamError(step, resp.StatusCode, readErrorBody(resp.Body))
 }
 
-// defaultGatewayLogMsg is the message of the DEBUG request record when
-// gatewayRequest.logMsg is empty.
-const defaultGatewayLogMsg = "request body"
-
-// gatewayRequest is a POST that a step sends to the gateway.
+// gatewayRequest is the parameter of a POST that a step sends to the gateway.
 type gatewayRequest struct {
-	// logMsg is the message of the DEBUG request record. The default is
-	// defaultGatewayLogMsg.
+	// logMsg is the message of the DEBUG request record.
 	logMsg string
 	// step tags the errors.
 	step string
@@ -92,11 +87,7 @@ type gatewayRequest struct {
 // the body already closed when the status was other than 200.
 func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, req gatewayRequest) (*http.Response, error) {
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		logMsg := req.logMsg
-		if logMsg == "" {
-			logMsg = defaultGatewayLogMsg
-		}
-		v.Info(logMsg, "method", "POST", "path", req.path, "bodyLen", len(req.body), "headers", httplog.RedactedHeaders(req.headers))
+		v.Info(req.logMsg, "method", "POST", "path", req.path, "bodyLen", len(req.body), "headers", httplog.RedactedHeaders(req.headers))
 	}
 
 	call := coordmetrics.StartUpstreamCall(req.upstream)

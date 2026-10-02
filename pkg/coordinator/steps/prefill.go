@@ -100,6 +100,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
 	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+		logMsg:   "request body",
 		step:     PrefillStepName,
 		upstream: coordmetrics.UpstreamPrefill,
 		path:     path,
