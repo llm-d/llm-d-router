@@ -87,8 +87,9 @@ type gatewayRequest struct {
 	headers  map[string]string
 }
 
-// postToGateway sends req to the gateway and returns the response. A status
-// other than 200 is an error; on success the caller closes the response body.
+// postToGateway sends req to the gateway and returns the response. On success
+// the caller closes the response body. An error returns a nil response, with
+// the body already closed when the status was other than 200.
 func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, req gatewayRequest) (*http.Response, error) {
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		logMsg := req.logMsg
