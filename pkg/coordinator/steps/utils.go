@@ -51,8 +51,7 @@ func upstreamError(step string, statusCode int, body []byte) error {
 	return &pipeline.UpstreamError{Step: step, StatusCode: statusCode, Body: string(body)}
 }
 
-// gatewayHeaders returns the client headers that are forwarded to the gateway,
-// plus the request id and the EPP profile header for phase.
+// gatewayHeaders returns a fresh map per call, so the caller may modify it.
 func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]string {
 	headers := reqCtx.ForwardedHeaders()
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
