@@ -338,7 +338,9 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	logger := log.FromContext(ctx).WithName("zmq-replay")
 	debugLogger := logger.V(logging.DEBUG)
 
-	replayCtx, cancel := context.WithTimeout(ctx, replayTimeout)
+	// Healthy replay processing may outlast admission timeout. Receive stalls
+	// remain bounded by the idle timer and no-progress retry budget.
+	replayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	replayed := 0
@@ -348,7 +350,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	for {
 		if replayCtx.Err() != nil {
 			z.invalidateReplay(z.topicFilter)
-			logger.Info("Replay timed out",
+			logger.Info("Replay cancelled",
 				"replayed", replayed, "attempts", attempt,
 				"replayEndpoint", z.replayEndpoint)
 			return false
@@ -371,7 +373,10 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			continue
 		}
 		waitStarted := time.Now()
-		if err := processReplayLimiter.Acquire(replayCtx, 1); err != nil {
+		capacityCtx, capacityCancel := context.WithTimeout(replayCtx, replayTimeout)
+		capacityErr := processReplayLimiter.Acquire(capacityCtx, 1)
+		capacityCancel()
+		if err := capacityErr; err != nil {
 			dealer.Close()
 			attemptCancel()
 			z.invalidateReplay(z.topicFilter)
@@ -436,17 +441,19 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			// the entire replay history in the unbounded processing queue.
 			idleTimer.Stop()
 			processed := make(chan error, 1)
+			processingCtx, processingCancel := context.WithTimeout(replayCtx, replayTimeout)
 			z.enqueueTask(ctx, topic, seq, payload, processed)
 			select {
 			case err := <-processed:
 				if err != nil {
 					terminalErr = fmt.Errorf("replay sequence %d processing failed: %w", seq, err)
 				}
-			case <-replayCtx.Done():
-				receiveErr = replayCtx.Err()
+			case <-processingCtx.Done():
+				terminalErr = fmt.Errorf("replay sequence %d processing stalled: %w", seq, processingCtx.Err())
 			case <-z.pool.stopped:
 				terminalErr = fmt.Errorf("event processing pool stopped during replay")
 			}
+			processingCancel()
 			if terminalErr != nil || receiveErr != nil {
 				break
 			}
