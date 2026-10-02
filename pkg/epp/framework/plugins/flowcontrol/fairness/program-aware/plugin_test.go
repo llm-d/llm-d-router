@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -183,6 +185,23 @@ func TestPreRequest_RecordsDispatchAndWait(t *testing.T) {
 	m := p.getOrCreateMetrics("alpha")
 	assert.Equal(t, int64(1), m.DispatchedCount())
 	assert.Equal(t, int64(1), m.InFlight())
+	assert.Equal(t, int64(1), m.WaitCount())
+	assert.Greater(t, m.AverageWaitTime(), 0.0)
+}
+
+// The director hands PreRequest a request confined to the plugin's
+// declarations, so the enqueue time Pick stashed must be readable through it.
+func TestPreRequest_ReadsEnqueueTimeThroughScope(t *testing.T) {
+	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+	req.PutAttribute(enqueueTimeAttributeKey, time.Now().Add(-50*time.Millisecond))
+
+	p := &ProgramAwarePlugin{name: "scoped-program-aware"}
+	datalayer.RegisterScopeSpecs([]plugin.Plugin{p})
+	scoped, violations := datalayer.ScopeRequest(logr.Discard(), fwkrc.PreRequestExtensionPoint, p, req)
+	require.NoError(t, p.PreRequest(context.Background(), scoped, nil))
+	require.NoError(t, violations.Write())
+
+	m := p.getOrCreateMetrics("alpha")
 	assert.Equal(t, int64(1), m.WaitCount())
 	assert.Greater(t, m.AverageWaitTime(), 0.0)
 }

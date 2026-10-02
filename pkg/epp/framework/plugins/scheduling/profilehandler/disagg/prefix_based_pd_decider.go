@@ -72,6 +72,7 @@ var (
 	_ deciderPlugin           = &PrefixBasedPDDecider{}
 	_ fwkrc.PreRequest        = &PrefixBasedPDDecider{}
 	_ plugin.ConsumerPlugin   = &PrefixBasedPDDecider{}
+	_ plugin.ProducerPlugin   = &PrefixBasedPDDecider{}
 	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
 )
 
@@ -155,6 +156,17 @@ func (d *PrefixBasedPDDecider) TypedName() plugin.TypedName {
 func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	d.typedName.Name = name
 	return d
+}
+
+// Produces declares the request attributes the plugin writes: the
+// conditional-decode ownership marker the director reads to decide whether the
+// "Prefer: if-available" header was evaluated, and the memoized remote-prefill
+// outcome this plugin reads back in PreRequest.
+func (d *PrefixBasedPDDecider) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		fwkrc.ConditionalDecodeHandledAttributeKey: false,
+		remotePrefillDecisionAttributeKey:          remotePrefillDecision{},
+	}
 }
 
 // Consumes declares the request- and endpoint-scoped data the plugin reads
