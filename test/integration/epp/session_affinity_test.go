@@ -48,6 +48,7 @@ plugins:
   - type: queue-scorer
   - type: session-affinity-filter
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 schedulingProfiles:
   - name: default
     plugins:
@@ -57,6 +58,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -106,6 +108,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -190,10 +193,12 @@ plugins:
       encodedEndpointHeaderConfig:
         header: x-session-token-prefill
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 schedulingProfiles:
@@ -381,6 +386,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -415,6 +421,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `

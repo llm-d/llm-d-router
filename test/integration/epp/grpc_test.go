@@ -45,6 +45,7 @@ plugins:
   - type: lora-affinity-scorer
   - type: vllmgrpc-parser
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 schedulingProfiles:
   - name: default
     plugins:
@@ -56,6 +57,7 @@ requestHandler:
   parsers:
   - pluginRef: vllmgrpc-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
