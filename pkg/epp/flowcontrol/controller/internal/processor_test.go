@@ -1459,6 +1459,30 @@ func TestProcessor(t *testing.T) {
 				require.True(t, reserved)
 				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
 			})
+
+			t.Run("should release the reservation when the item is finalized during reserve", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-finalized-during-reserve", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+					item.FinalizeWithError(fmt.Errorf("%w: finalized during reserve", types.ErrRejected))
+					return true
+				}
+				var released []string
+				h.saturationDetector.ReleaseDispatchFunc = func(requestID string) bool {
+					released = append(released, requestID)
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
+					"The outcome set during reserve should be preserved")
+				assert.Equal(t, []string{"req-finalized-during-reserve"}, released,
+					"The reservation should be released exactly once")
+			})
 		})
 
 		t.Run("cleanup and utility methods", func(t *testing.T) {

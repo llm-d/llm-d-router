@@ -153,6 +153,11 @@ func SaturationStageFromContext(ctx context.Context) string {
 // before a request is released from the flow-control queue and removed after PreRequest hooks
 // have published the request to the endpoint load signal.
 //
+// Reservations are pool-wide: scheduling chooses the destination after dispatch, so a reservation
+// is not scoped to a stage or endpoint. An implementation that watches a subset of endpoints
+// (for example a stage-scoped child of a composite detector) counts every outstanding
+// reservation against its own capacity.
+//
 // Implementations MUST be goroutine-safe. Request IDs are the reservation identity; duplicate
 // reserve and release calls must be idempotent.
 type DispatchReservationTracker interface {
