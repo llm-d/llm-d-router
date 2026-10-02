@@ -32,6 +32,16 @@ The plugin populates several standard keys on the endpoint:
 -   `WaitingModels` (int)
 -   `UpdateTime` (time.Time)
 
+The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that does not report them carries none of these attributes.
+
+| Attribute | vLLM metric | Counted on |
+|---|---|---|
+| `NixlFailedTransfers` | `vllm:nixl_num_failed_transfers_total` | The endpoint reading the KV cache (decode). |
+| `NixlFailedNotifications` | `vllm:nixl_num_failed_notifications_total` | The endpoint reading the KV cache (decode). |
+| `NixlKVExpiredRequests` | `vllm:nixl_num_kv_expired_reqs_total` | The endpoint that produced the KV cache (prefill). |
+
+The EPP exposes the same values per endpoint, see [Inference pool metrics](../../../../../../../docs/metrics.md#inference-pool).
+
 ## Configuration
 
 The plugin config supports:
@@ -42,7 +52,11 @@ The plugin config supports:
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engine config can also include `customMetrics` entries. Each entry
-    maps a scalar metric selector to an endpoint attribute key.
+    maps a scalar metric selector to an endpoint attribute key. A missing
+    metric is an extraction error unless the entry sets `optional: true`,
+    which skips the entry on a scrape where the endpoint does not report it.
+    An engine config named after a built-in engine replaces that built-in
+    config, including its `customMetrics`.
 
 ### Built-in Engine Configurations
 

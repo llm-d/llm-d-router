@@ -582,4 +582,30 @@ var (
 			"model_server_endpoint",
 		}, nil,
 	)
+
+	// The NIXL descriptors expose counters the model server reports.
+	DescInferencePoolPerEndpointNixlFailedTransfers = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_failed_transfers_total",
+		metricsutil.HelpMsgWithStability("The number of failed NIXL KV cache transfers reported by each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
+	DescInferencePoolPerEndpointNixlFailedNotifications = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_failed_notifications_total",
+		metricsutil.HelpMsgWithStability("The number of failed NIXL KV cache notifications reported by each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
+	DescInferencePoolPerEndpointNixlKVExpiredRequests = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_kv_expired_requests_total",
+		metricsutil.HelpMsgWithStability("The number of requests whose KV cache expired before it was read, reported by each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
 )

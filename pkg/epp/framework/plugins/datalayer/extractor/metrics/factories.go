@@ -71,6 +71,9 @@ type (
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
 		MetricSpec string `json:"metricSpec"`
+		// Optional skips the metric, without an extraction error, on a scrape
+		// where the endpoint does not report it.
+		Optional bool `json:"optional,omitempty"`
 	}
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
@@ -96,6 +99,12 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// vLLM reports these only when it runs with the NixlConnector.
+		CustomMetrics: []customMetricConfigParams{
+			{AttributeKey: attrmetrics.NixlFailedTransfersKey, MetricSpec: "vllm:nixl_num_failed_transfers_total", Optional: true},
+			{AttributeKey: attrmetrics.NixlFailedNotificationsKey, MetricSpec: "vllm:nixl_num_failed_notifications_total", Optional: true},
+			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
+		},
 	},
 	{
 		Name:                "sglang",
@@ -292,6 +301,7 @@ func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []
 		custom = append(custom, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
+			Optional:     cfg.Optional,
 		})
 	}
 	return custom, errs
