@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,14 +20,17 @@ package scheduling
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -56,6 +60,8 @@ type Scheduler struct {
 // Schedule finds the target pod based on metrics and the requested lora adapter.
 func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
 	loggerVerbose := log.FromContext(ctx).V(logutil.VERBOSE)
+	verboseEnabled := loggerVerbose.Enabled()
+	handlerName := s.profileHandler.TypedName()
 
 	scheduleStart := time.Now()
 	defer func() {
@@ -64,25 +70,45 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
+	// Keyed like profileRunResults so a profile that fails in one iteration and
+	// succeeds in a later one leaves no stale error behind. Nil until a profile
+	// fails: delete and len are no-ops on a nil map, and the happy path skips
+	// the allocation.
+	var profileRunErrors map[string]error
 
 	for { // get the next set of profiles to run iteratively based on the request and the previous execution results
-		loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", s.profileHandler.TypedName())
+		if verboseEnabled {
+			loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", handlerName)
+		}
 		before := time.Now()
 		profiles := s.profileHandler.Pick(ctx, request, s.profiles, profileRunResults)
-		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
-		loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", s.profileHandler.TypedName(), "result", profiles)
+		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
+		if verboseEnabled {
+			loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", handlerName, "result", profiles)
+		}
 		if len(profiles) == 0 { // profile picker didn't pick any profile to run
 			break
 		}
 
 		for name, profile := range profiles {
-			loggerVerbose.Info("Running scheduler profile", "profile", name)
+			if verboseEnabled {
+				loggerVerbose.Info("Running scheduler profile", "profile", name)
+			}
 			// run the selected profiles and collect results (current code runs all profiles)
 			profileRunResult, err := runSchedulerProfile(ctx, name, profile, request, candidateEndpoints)
 			if err != nil {
-				loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
+				if verboseEnabled {
+					loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
+				}
+				if profileRunErrors == nil {
+					profileRunErrors = map[string]error{}
+				}
+				profileRunErrors[name] = fmt.Errorf("profile %q: %w", name, err)
 			} else {
-				loggerVerbose.Info("Completed running scheduler profile succuessfully", "profile", name)
+				if verboseEnabled {
+					loggerVerbose.Info("Completed running scheduler profile successfully", "profile", name)
+				}
+				delete(profileRunErrors, name)
 			}
 
 			profileRunResults[name] = profileRunResult // if profile failed to run, the run result is nil
@@ -94,11 +120,30 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		return nil, err
 	}
 
-	loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", s.profileHandler.TypedName())
+	if verboseEnabled {
+		loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", handlerName)
+	}
 	before := time.Now()
 	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
-	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
-	loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", s.profileHandler.TypedName())
+	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
+	if verboseEnabled && err == nil {
+		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)
+	}
+
+	// Profile handlers see failed profiles only as nil results and report them
+	// with fresh untyped errors. Join the retained profile errors so a typed
+	// errcommon.Error raised inside a profile run (e.g. filters draining the
+	// candidate set) stays reachable via errors.As in the caller.
+	if err != nil && len(profileRunErrors) > 0 {
+		errs := make([]error, 0, len(profileRunErrors)+1)
+		errs = append(errs, err)
+		// Sorted so error composition, and therefore errors.As selection when
+		// profiles fail with different typed codes, is deterministic.
+		for _, name := range slices.Sorted(maps.Keys(profileRunErrors)) {
+			errs = append(errs, profileRunErrors[name])
+		}
+		err = errors.Join(errs...)
+	}
 
 	return result, err
 }
@@ -108,7 +153,7 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 ) (*fwksched.ProfileRunResult, error) {
 	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, "run_scheduler_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attribute.String("llm_d.epp.scheduling.profile.name", name)),
+		trace.WithAttributes(semconv.LLMDEPPProfileName(name)),
 	)
 	defer span.End()
 

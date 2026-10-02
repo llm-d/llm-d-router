@@ -37,6 +37,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"golang.org/x/sync/errgroup"
 )
@@ -259,6 +260,8 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("scheme %q not allowed: %w", parsed.Scheme, pipeline.ErrBadRequest)
 	}
 	if !s.guard.hostAllowed(parsed.Hostname()) {
+		log.FromContext(ctx).WithName(ReplaceMediaURLsStepName).V(logutil.DEBUG).Info(
+			"rejecting media URL: host not in allowed_domains", "host", parsed.Hostname())
 		return nil, "", fmt.Errorf("host %q not allowed: %w", parsed.Hostname(), pipeline.ErrBadRequest)
 	}
 
@@ -266,14 +269,22 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	if err != nil {
 		return nil, "", err
 	}
+	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamReplaceMediaURLs)
+	// rawURL's host is checked against allowed_domains above, and s.client's
+	// dialer (addressGuard.dialControl) blocks the resolved IP if it is
+	// loopback, link-local, CGNAT, or private, closing the DNS-rebinding gap
+	// a hostname check alone would miss.
+	// codeql[go/request-forgery]
 	resp, err := s.client.Do(req)
+	call.Done()
 	if err != nil {
 		return nil, "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		respBody := readErrorBody(resp.Body)
+		return nil, "", upstreamError(ReplaceMediaURLsStepName, resp.StatusCode, respBody)
 	}
 
 	if resp.ContentLength > s.maxDownloadSize {

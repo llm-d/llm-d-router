@@ -24,6 +24,10 @@ import (
 
 var errInvalidJSON = errors.New("invalid JSON")
 
+// errDecodeAborted reports a decode request that aborted before relaying any of
+// its response, leaving the caller to write a status on its behalf.
+var errDecodeAborted = errors.New("decode aborted before sending a response")
+
 // vLLM error response
 type errorResponse struct {
 	Object  string `json:"object"`

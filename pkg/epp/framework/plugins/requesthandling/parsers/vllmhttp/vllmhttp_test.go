@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,15 +28,141 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
+
+var (
+	benchmarkVllmParseResult *fwkrh.ParseResult
+	benchmarkVllmPayload     []byte
+)
+
+func makeVllmTokenArrayBody(tokenCount int) []byte {
+	tokens := strings.Repeat("12345,", tokenCount-1) + "12345"
+	return []byte(`{"model":"test","token_ids":[` + tokens + `],"sampling_params":{"max_tokens":1}}`)
+}
+
+func benchmarkVllmRequestParsing(b *testing.B, rewrite bool) {
+	parser := NewVllmHTTPParser()
+	headers := map[string]string{":path": "/inference/v1/generate"}
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{"4K", 4 * 1024},
+		{"32K", 32 * 1024},
+		{"256K", 256 * 1024},
+		{"1M", 1_000_000},
+	} {
+		body := makeVllmTokenArrayBody(tc.count)
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				result, err := parser.ParseRequest(context.Background(), body, headers)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !rewrite {
+					benchmarkVllmParseResult = result
+					continue
+				}
+				payload := result.Body.Payload.(fwkrh.MarshalablePayload)
+				rewritten, err := parser.RewriteModelName(payload, "backend-model")
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkVllmPayload, err = rewritten.Marshal()
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkVllmHTTPParser_ParseRequest(b *testing.B) {
+	benchmarkVllmRequestParsing(b, false)
+}
+
+func BenchmarkVllmHTTPParser_ParseRequestAndRewrite(b *testing.B) {
+	benchmarkVllmRequestParsing(b, true)
+}
+
+func BenchmarkVllmHTTPParser_ParseRequestFallback1M(b *testing.B) {
+	parser := NewVllmHTTPParser()
+	headers := map[string]string{":path": "/inference/v1/generate"}
+	tokens := strings.Repeat("12345,", 1_000_000-1) + "12345.0"
+	body := []byte(`{"model":"test","token_ids":[` + tokens + `],"sampling_params":{"max_tokens":1}}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		result, err := parser.ParseRequest(context.Background(), body, headers)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkVllmParseResult = result
+	}
+}
 
 func TestNewVllmHTTPParser(t *testing.T) {
 	parser := NewVllmHTTPParser()
 	want := fwkplugin.TypedName{Type: VllmHTTPParserType, Name: VllmHTTPParserType}
 	if parser.TypedName() != want {
 		t.Errorf("TypedName() = %v, want %v", parser.TypedName(), want)
+	}
+}
+
+func TestVllmHTTPParser_RewritePriority(t *testing.T) {
+	plugin, err := VllmHTTPParserPluginFactory("test", nil, nil)
+	if err != nil {
+		t.Fatalf("VllmHTTPParserPluginFactory() error = %v", err)
+	}
+	parser, ok := plugin.(*VllmHTTPParser)
+	if !ok {
+		t.Fatalf("VllmHTTPParserPluginFactory() = %T, want *VllmHTTPParser", plugin)
+	}
+	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}}
+
+	got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
+	}}, payload, 2)
+	if err != nil {
+		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	if !mutated {
+		t.Errorf("RewritePriority() mutated = false, want true")
+	}
+	m, ok := got.(fwkrh.PayloadMap)
+	if !ok {
+		t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
+	}
+	if gotPriority := m["priority"]; gotPriority != -2 {
+		t.Errorf("priority = %v, want -2", gotPriority)
+	}
+}
+
+func TestVllmHTTPParser_RewritePriorityOverwritesClientPriority(t *testing.T) {
+	parser := NewVllmHTTPParser()
+	payload := fwkrh.PayloadMap{"model": "test", "token_ids": []any{1, 2, 3}, "priority": 100}
+
+	got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: &fwkdl.EndpointMetadata{
+		Labels: map[string]string{fwkplugins.EngineTypeLabelKey: "vllm"},
+	}}, payload, 2)
+	if err != nil {
+		t.Fatalf("RewritePriority() error = %v", err)
+	}
+	if !mutated {
+		t.Errorf("RewritePriority() mutated = false, want true")
+	}
+	m, ok := got.(fwkrh.PayloadMap)
+	if !ok {
+		t.Fatalf("RewritePriority() payload = %T, want PayloadMap", got)
+	}
+	if gotPriority := m["priority"]; gotPriority != -2 {
+		t.Errorf("priority = %v, want -2", gotPriority)
 	}
 }
 
@@ -61,7 +187,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"token_ids": json.RawMessage(`[1,2,3]`),
 				},
 			},
 		},
@@ -78,7 +204,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					CacheSalt: "abc123",
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids":  []any{float64(10), float64(20), float64(30)},
+					"token_ids":  json.RawMessage(`[10,20,30]`),
 					"cache_salt": "abc123",
 				},
 			},
@@ -99,10 +225,10 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{1, 2, 3},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(1), float64(2), float64(3)},
+					"token_ids": json.RawMessage(`[1,2,3]`),
 					"sampling_params": map[string]any{
-						"temperature": 0.8,
-						"max_tokens":  float64(128),
+						"temperature": json.Number("0.8"),
+						"max_tokens":  json.Number("128"),
 					},
 					"stream": true,
 				},
@@ -137,7 +263,7 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					TokenIDs: []uint32{5, 6, 7},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{float64(5), float64(6), float64(7)},
+					"token_ids": json.RawMessage(`[5,6,7]`),
 				},
 			},
 		},
@@ -174,19 +300,15 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 					},
 				},
 				Payload: fwkrh.PayloadMap{
-					"token_ids": []any{
-						float64(151644), float64(872), float64(198), float64(3838), float64(374), float64(279),
-						float64(6722), float64(315), float64(9625), float64(30), float64(151645), float64(198),
-						float64(151644), float64(77091), float64(198),
-					},
+					"token_ids": json.RawMessage(`[151644,872,198,3838,374,279,6722,315,9625,30,151645,198,151644,77091,198]`),
 					"features": map[string]any{
 						"mm_hashes": map[string]any{
 							"image": []any{"abc123hash", "def456hash"},
 						},
 						"mm_placeholders": map[string]any{
 							"image": []any{
-								map[string]any{"offset": float64(1), "length": float64(3)},
-								map[string]any{"offset": float64(4), "length": float64(3)},
+								map[string]any{"offset": json.Number("1"), "length": json.Number("3")},
+								map[string]any{"offset": json.Number("4"), "length": json.Number("3")},
 							},
 						},
 					},

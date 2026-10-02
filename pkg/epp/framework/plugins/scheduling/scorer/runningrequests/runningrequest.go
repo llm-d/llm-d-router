@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,7 +32,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &RunningRequestsSizeScorer{}
+var (
+	_ fwksched.Scorer          = &RunningRequestsSizeScorer{}
+	_ fwkplugin.ConsumerPlugin = &RunningRequestsSizeScorer{}
+)
 
 // RunningRequestsSizeScorerFactory defines the factory function for RunningRequestsSizeScorer.
 func RunningRequestsSizeScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -61,10 +65,13 @@ func (s *RunningRequestsSizeScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *RunningRequestsSizeScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.RunningRequestsSizeKey: int(0),
+// Consumes declares the scorer reads the running requests size from the
+// endpoint's Metrics struct, published by the core-metrics-extractor.
+func (s *RunningRequestsSizeScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.RunningRequestsSizeKey, metrics.MetricsExtractorType): int(0),
+		},
 	}
 }
 
@@ -74,35 +81,37 @@ func (s *RunningRequestsSizeScorer) WithName(name string) *RunningRequestsSizeSc
 	return s
 }
 
-// Score returns the scoring result for the given list of pods based on context.
+// Score scores each endpoint by running-request count, min-max normalized
+// across endpoints that have written metrics: the fewest running requests
+// score 1, the most score 0, and equal counts score a neutral 1. Endpoints
+// with no written metrics are left unscored and do not participate in the range.
 func (s *RunningRequestsSizeScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
-	minQueueSize := math.MaxInt
-	maxQueueSize := math.MinInt
+	sizes := make(map[fwksched.Endpoint]int, len(endpoints))
+	minSize := math.MaxInt
+	maxSize := math.MinInt
 
-	// Iterate through the remaining endpoints to find min and max
 	for _, endpoint := range endpoints {
-		queueSize := endpoint.GetMetrics().RunningRequestsSize
-		if queueSize < minQueueSize {
-			minQueueSize = queueSize
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
 		}
-		if queueSize > maxQueueSize {
-			maxQueueSize = queueSize
+		size := podMetrics.RunningRequestsSize
+		sizes[endpoint] = size
+		if size < minSize {
+			minSize = size
+		}
+		if size > maxSize {
+			maxSize = size
 		}
 	}
 
-	// endpointScoreFunc calculates the score based on the queue size of each endpoint. Longer queue gets a lower score.
-	endpointScoreFunc := func(endpoint fwksched.Endpoint) float64 {
-		if maxQueueSize == minQueueSize {
-			// If all endpoints have the same queue size, return a neutral score
-			return 1.0
+	scores := make(map[fwksched.Endpoint]float64, len(sizes))
+	for endpoint, size := range sizes {
+		if maxSize == minSize {
+			scores[endpoint] = 1.0
+			continue
 		}
-		return float64(maxQueueSize-endpoint.GetMetrics().RunningRequestsSize) / float64(maxQueueSize-minQueueSize)
-	}
-
-	// Create a map to hold the scores for each endpoint
-	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	for _, endpoint := range endpoints {
-		scores[endpoint] = endpointScoreFunc(endpoint)
+		scores[endpoint] = float64(maxSize-size) / float64(maxSize-minSize)
 	}
 	return scores
 }

@@ -1,7 +1,24 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package disagg_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -12,7 +29,10 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -39,8 +59,8 @@ const (
 // the input token count.
 func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
-		Completions:     &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, len(prompt)/averageCharactersPerToken)}},
+		Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
 	}
 }
 
@@ -126,15 +146,17 @@ func TestPDSchedule(t *testing.T) {
 			err:   true,
 		},
 		{
-			name: "one decode endpoint, long prompt",
+			name: "one decode endpoint, long prompt, no prefill endpoint available",
 			req: &fwksched.InferenceRequest{
 				RequestID:   uuid.NewString(),
 				TargetModel: "critical",
 				Body:        completionsBody("12345678901"),
 			},
-			// endpoint2 will be picked because it is the only endpoint with Decode role
-			input:   []fwksched.Endpoint{endpoint2},
-			wantRes: decodeResult,
+			// The long, uncached prompt makes the decider pick the prefill profile,
+			// but no Prefill-role endpoint is present: the request must fail rather
+			// than silently complete decode-only.
+			input: []fwksched.Endpoint{endpoint2},
+			err:   true,
 		},
 		{
 			name: "one prefill endpoint, long prompt",
@@ -224,6 +246,7 @@ func TestPDSchedule(t *testing.T) {
 			//  initialize scheduler with config
 			prefixScorer, err := prefix.New(ctx, prefix.PrefixCacheScorerPluginType, "")
 			assert.NoError(t, err, "Prefix plugin creation returned unexpected error")
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{prefixScorer})
 
 			prefillSchedulerProfile := scheduling.NewSchedulerProfile().
 				WithFilters(bylabel.NewPrefillRole()).
@@ -259,6 +282,14 @@ func TestPDSchedule(t *testing.T) {
 			if test.err != (err != nil) {
 				t.Errorf("Unexpected error, got %v, want %v", err, test.err)
 			}
+			if test.err {
+				var typedErr errcommon.Error
+				if !errors.As(err, &typedErr) {
+					t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
+				}
+				assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+				assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+			}
 
 			if diff := cmp.Diff(test.wantRes, got, cmpopts.IgnoreUnexported(fwkdl.Attributes{}), cmpopts.IgnoreFields(fwksched.ScoredEndpoint{}, "Score"),
 				cmpopts.IgnoreFields(fwksched.ProfileRunResult{}, "ScoredCandidates")); diff != "" {
@@ -270,7 +301,16 @@ func TestPDSchedule(t *testing.T) {
 					pod.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(inputTokens, inputTokens, 1))
 				}
 
-				got, err = scheduler.Schedule(ctx, test.req, test.input)
+				// Fresh request for the second schedule call so per-request
+				// memoization from the first call doesn't leak. Production
+				// models each schedule call as its own *InferenceRequest.
+				nextReq := &fwksched.InferenceRequest{
+					RequestID:   uuid.NewString(),
+					TargetModel: test.req.TargetModel,
+					Body:        test.req.Body,
+					Headers:     test.req.Headers,
+				}
+				got, err = scheduler.Schedule(ctx, nextReq, test.input)
 				if test.err != (err != nil) {
 					t.Errorf("Unexpected error in schedule call, got %v, want %v", err, test.err)
 				}

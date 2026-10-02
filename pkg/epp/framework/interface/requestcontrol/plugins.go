@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,6 +36,14 @@ const (
 	ResponseStreamingExtensionPoint = "ResponseStreaming"
 	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
+
+// ConditionalDecodeHandledAttributeKey is the request-attribute key a
+// PreRequest plugin sets when it has evaluated the "Prefer: if-available"
+// preference for a request. The director consults this after PreRequest
+// plugins run: a conditional-decode request that no plugin claimed is
+// rejected with 412 so misconfigurations (gate plugin forgotten) surface as a
+// fast fallback rather than a silent forward.
+var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
 
 // Screener performs preliminary filtering of located endpoints before data
 // production, admission, and scheduling profiles run. Every screener sees the
@@ -80,10 +89,12 @@ type ResponseHeaderProcessor interface {
 //   - For non-streaming: Invoked once with response.EndOfStream set to true.
 //   - Plugins must treat the call where response.EndOfStream == true as the final lifecycle hook
 //     to perform cleanup or final logging.
+//   - The end-of-stream call carries response.TerminationCause; earlier calls leave it empty.
 //
 // TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2079):
-// Update signature to pass error/termination state. This is a breaking change required for plugins to distinguish
-// between success, errors, and disconnects.
+// Upstream proposes passing error/termination state through the signature. Response.TerminationCause
+// carries the termination state without a signature change; it does not distinguish success from
+// an error response.
 type ResponseBodyProcessor interface {
 	plugin.Plugin
 	ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)

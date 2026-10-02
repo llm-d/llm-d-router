@@ -1,0 +1,48 @@
+router:
+  inferencePool:
+    create: true
+  epp:
+    pluginsConfigFile: epp-config.yaml
+    flags:
+      v: 4
+      allow-experimental-plugins: true
+      drain-timeout: "0"
+    extraContainerPorts:
+      - name: zmq
+        containerPort: 5557
+    volumes:
+      - name: cache
+        emptyDir: {}
+    volumeMounts:
+      - name: cache
+        mountPath: /cache
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+  proxy:
+    failOpen: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+  extraServicePorts:
+    - name: http
+      port: 8081
+      protocol: TCP
+      targetPort: 8081
+    - name: zmq
+      port: 5557
+      protocol: TCP
+      targetPort: 5557
+  monitoring:
+    prometheus:
+      enabled: false
+      auth:
+        enabled: false
+  tokenizer:
+    enabled: false

@@ -78,6 +78,37 @@ func TestBuildChunkedBodyResponses(t *testing.T) {
 	}
 }
 
+// TestBuildChunkedBodyResponses_PreservesBody confirms that the chunks reassemble into
+// exactly the input bytes whether or not the caller mutated the body upstream: chunking
+// itself is agnostic to mutation, so skipping a rewrite must not change what reaches Envoy.
+func TestBuildChunkedBodyResponses_PreservesBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "unmutated body",
+			body: []byte(`{"id":"cmpl-123","model":"vllm-backend-01","choices":[]}`),
+		},
+		{
+			name: "mutated body",
+			body: []byte(`{"id":"cmpl-123","model":"gpt-4-proxy","choices":[]}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			responses := BuildChunkedBodyResponses(test.body, true)
+			var got []byte
+			for _, response := range responses {
+				got = append(got, response.BodyMutation.GetStreamedResponse().GetBody()...)
+			}
+			if string(got) != string(test.body) {
+				t.Fatalf("reassembled chunks = %q, want %q", got, test.body)
+			}
+		})
+	}
+}
+
 func generateBytes(count int) []byte {
 	arr := make([]byte, count)
 	_, _ = rand.Read(arr)

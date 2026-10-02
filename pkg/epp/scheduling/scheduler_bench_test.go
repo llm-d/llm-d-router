@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
@@ -64,6 +67,9 @@ func BenchmarkSchedule(b *testing.B) {
 		b.Fatalf("prefix scorer setup: %v", err)
 	}
 	loraAffinityScorer := loraaffinity.NewLoraAffinityScorer()
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{
+		kvCacheUtilizationScorer, queueingScorer, prefixCacheScorer, loraAffinityScorer,
+	})
 
 	profile := NewSchedulerProfile().
 		WithScorers(
@@ -121,6 +127,7 @@ func BenchmarkSchedule(b *testing.B) {
 // range, KV-cache utilization is distributed, and ~1/3 of pods have the
 // benchmark's target model loaded so lora-affinity has something to find.
 func makeBenchmarkEndpoints(n int) []fwksched.Endpoint {
+	scrapedAt := time.Now()
 	endpoints := make([]fwksched.Endpoint, n)
 	for i := 0; i < n; i++ {
 		active := map[string]int{"baseline": 1}
@@ -137,6 +144,7 @@ func makeBenchmarkEndpoints(n int) []fwksched.Endpoint {
 				KVCacheUsagePercent: float64(i%10) / 10, // 0.0..0.9
 				MaxActiveModels:     2,
 				ActiveModels:        active,
+				UpdateTime:          scrapedAt,
 			},
 			fwkdl.NewAttributes(),
 		)

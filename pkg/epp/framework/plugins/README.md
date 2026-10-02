@@ -38,7 +38,7 @@ The metric scorers are not standalone. `multicluster-kv-cache-utilization-scorer
 ### Example
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: multicluster-file-discovery
@@ -62,7 +62,8 @@ plugins:
   - type: single-profile-handler
 dataLayer:
   discovery:
-    pluginRef: discovery
+    endpoints:
+      pluginRef: discovery
   sources:
     - pluginRef: metrics-source
       extractors:

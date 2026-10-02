@@ -43,9 +43,16 @@ export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
-BUILDER_TAG ?= dev
+# A locally edited Dockerfile.builder hashes to a tag that
+# was never published, so image-build-builder misses the pull and falls back
+# to a local build instead of running against a stale published image.
+BUILDER_TAG ?= $(shell git hash-object Dockerfile.builder 2>/dev/null || echo dev)
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
 export BUILDER_IMAGE ?= $(BUILDER_TAG_BASE):$(BUILDER_TAG)
+# Set BUILDER_PULL=false to skip pulling the published tag, for testing
+# local Dockerfile.builder changes or working offline. A local image under
+# the current tag is still reused ahead of both the pull and a build.
+BUILDER_PULL ?= true
 
 NAMESPACE ?= hc4ai-operator
 LINT_NEW_ONLY ?= false # Set to true to only lint new code, false to lint all code (default matches CI behavior)
@@ -126,7 +133,7 @@ E2E_NUM_PROCS ?= 5
 # Should we pass ALL env vars here?
 E2E_ENV_VARS = EPP_IMAGE VLLM_IMAGE SIDECAR_IMAGE VLLM_RENDER_IMAGE \
                E2E_KEEP_CLUSTER_ON_FAILURE E2E_PORT E2E_METRICS_PORT K8S_CONTEXT READY_TIMEOUT \
-               E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
+               EXISTS_TIMEOUT E2E_NUM_PROCS LOAD_VLLM_RENDER_IMAGE HF_TOKEN
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)
@@ -218,7 +225,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict
+presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict verify-boilerplate
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -246,7 +253,7 @@ tidy:
 
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
-	rm -rf bin build $(BUILDER_STAMP)
+	rm -rf bin build
 	-$(BUILDER_RUN) 'go clean -testcache -cache'
 
 .PHONY: format
@@ -323,10 +330,10 @@ test-e2e: image-build-builder image-build ## Build images and run e2e tests
 
 
 .PHONY: bench-tokenizer
-bench-tokenizer: image-build-builder ## Run external tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
-	@printf "\033[33;1m==== Running External Tokenizer Benchmark ====\033[0m\n"
-	@printf "Ensure the kind cluster is running with the external tokenizer config.\n"
-	@printf "Run 'EXTERNAL_TOKENIZER_ENABLED=true KV_CACHE_ENABLED=true make env-dev-kind' first.\n\n"
+bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requires kind cluster with EPP deployed)
+	@printf "\033[33;1m==== Running Tokenizer Benchmark ====\033[0m\n"
+	@printf "Ensure the kind cluster is running with the KV cache config.\n"
+	@printf "Run 'KV_CACHE_ENABLED=true VLLM_EXTRA_ARGS_D=\"--max-model-len=131072 --kv-cache-size=8192\" make env-dev-kind' first.\n\n"
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke
@@ -342,6 +349,10 @@ post-deploy-test: ## Run post deployment tests
 .PHONY: verify-manifests
 verify-manifests: kubectl-validate ## Validate deployment manifests.
 	KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-manifests.sh
+
+.PHONY: verify-boilerplate
+verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
+	hack/copyright.sh verify
 
 ##@ Helm
 
@@ -457,19 +468,17 @@ image-build-%: check-container-tool ## Build Container image using $(CONTAINER_R
 		$(if $(BASE_IMAGE),--build-arg BASE_IMAGE="$(BASE_IMAGE)") \
 		-t $($*_IMAGE) -f Dockerfile.$* .
 
-BUILDER_STAMP = build/.builder.stamp
-
 .PHONY: image-build-builder
-image-build-builder: check-container-tool ## Build builder image if missing locally, stamp missing, or Dockerfile.builder newer than stamp
+image-build-builder: check-container-tool ## Use local builder image, else pull the published tag, else build locally
 	@mkdir -p $(GO_MOD_CACHE_VOL) $(GO_BUILD_CACHE_VOL)
-	@if ! $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1 || \
-	    [ ! -f $(BUILDER_STAMP) ] || \
-	    [ Dockerfile.builder -nt $(BUILDER_STAMP) ]; then \
-		printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
-		$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .; \
-		mkdir -p $(dir $(BUILDER_STAMP)); \
-		touch $(BUILDER_STAMP); \
-	fi
+	@if $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	if [ "$(BUILDER_PULL)" = "true" ] && $(CONTAINER_RUNTIME) pull --platform linux/$(TARGETARCH) $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
+	$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .
 
 .PHONY: image-push
 image-push: image-push-epp image-push-sidecar ## Push container images to registry using $(CONTAINER_RUNTIME)
@@ -522,6 +531,10 @@ print-namespace: ## Print the current namespace
 .PHONY: print-project-name
 print-project-name: ## Print the current project name
 	@echo "$(PROJECT_NAME)"
+
+.PHONY: print-builder-tag
+print-builder-tag: ## Print the builder image tag (content hash of Dockerfile.builder)
+	@echo "$(BUILDER_TAG)"
 
 ##@ Deprecated aliases for backwards compatibility
 .PHONY: install-docker

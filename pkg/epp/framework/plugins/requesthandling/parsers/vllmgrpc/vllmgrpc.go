@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -220,12 +221,14 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		copy(copiedTokenIDsInt, inputIDs)
 		body = &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
+				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens:    [][]uint32{copiedTokenIDsInt},
-				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs:           copiedTokenIDsInt,
+					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+				}},
 			},
 		}
 	default:
@@ -282,7 +285,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 		body = &fwkrh.InferenceRequestBody{
 			Embeddings: &fwkrh.EmbeddingsRequest{
 				Input: fwkrh.EmbeddingsInput{
-					TokenIDs: tokenIDs,
+					TokenIDs: [][]uint32{tokenIDs},
 				},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},

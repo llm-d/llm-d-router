@@ -35,6 +35,8 @@ make -f Makefile.coord.mk run
 make -f Makefile.coord.mk test
 ```
 
+The listener serves HTTPS on `:8080`. See [TLS](docs/tls.md) for the certificate and cipher suite flags, and for the self-signed certificate the listener uses without `--cert-path`.
+
 ## Configuration
 
 Configuration is a YAML file passed via the `--config` flag. See `config/coordinator/coordinator.yaml` for the annotated default, and [Configuring the pipeline](docs/coordinator_architecture.md#configuring-the-pipeline) for the full reference (top-level structure, environment overrides, connector selection, and the built-in steps).

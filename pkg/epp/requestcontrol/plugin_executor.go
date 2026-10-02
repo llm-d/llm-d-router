@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -66,6 +67,10 @@ func producerTimeout(p fwkrc.DataProducer) time.Duration {
 // (e.g. abort outbound HTTP calls) and avoid committing state after the director has moved on.
 func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, plugins []fwkrc.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	// The timeout path does not join the producer goroutine. Allocate the
+	// sync.Map before launching it so any cancellation-aware producer finishing
+	// a write cannot race with scheduling over lazy store initialization.
+	request.InitializeAttributeStore()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

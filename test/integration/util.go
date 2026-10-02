@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -238,9 +240,13 @@ func CreateGrpcPayload(msg proto.Message) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(b) > math.MaxUint32 {
+		return nil, fmt.Errorf("marshaled message too large for gRPC length-prefixed framing: %d bytes", len(b))
+	}
+
 	payload := make([]byte, 5+len(b))
-	payload[0] = 0 // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b)))
+	payload[0] = 0                                           // 0 = uncompressed
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //#nosec G115 -- bounds-checked above
 	copy(payload[5:], b)
 	return payload, nil
 }
@@ -441,16 +447,20 @@ func NewResponseStreamChunk(body string, endOfStream bool) *extProcPb.Processing
 	}
 }
 
-// NewImmediateErrorResponse creates a response that immediately terminates the request with a specific HTTP status code
-// and body.
+// NewImmediateErrorResponse creates a response that immediately terminates the request with a specific HTTP status code,
+// body, and optional response headers.
 // Use this for testing Load Shedding (503), Rate Limiting (429), or Bad Request (400) logic.
-func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string) []*extProcPb.ProcessingResponse {
+func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers ...*envoyCorev3.HeaderValueOption) []*extProcPb.ProcessingResponse {
+	immediateResponse := &extProcPb.ImmediateResponse{
+		Status: &envoyTypePb.HttpStatus{Code: code},
+		Body:   []byte(body),
+	}
+	if len(headers) > 0 {
+		immediateResponse.Headers = &extProcPb.HeaderMutation{SetHeaders: headers}
+	}
 	return []*extProcPb.ProcessingResponse{{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status: &envoyTypePb.HttpStatus{Code: code},
-				Body:   []byte(body),
-			},
+			ImmediateResponse: immediateResponse,
 		},
 	}}
 }

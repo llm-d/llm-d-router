@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -127,23 +128,21 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 }
 
 // labelsMatch checks if metric labels match the specification labels.
+// Scans the label pairs directly rather than building a map: this runs per
+// series per scrape tick, and specs carry at most a couple of label matchers.
 func (spec *Spec) labelsMatch(metricLabels []*dto.LabelPair) bool {
-	if len(spec.Labels) == 0 {
-		return true // no label requirements
-	}
-
-	metricLabelMap := make(map[string]string)
-	for _, label := range metricLabels {
-		metricLabelMap[label.GetName()] = label.GetValue()
-	}
-
-	// check if all spec labels match
 	for name, value := range spec.Labels {
-		if metricValue, exists := metricLabelMap[name]; !exists || metricValue != value {
+		found := false
+		for _, label := range metricLabels {
+			if label.GetName() == name {
+				found = label.GetValue() == value
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}
-
 	return true
 }
 

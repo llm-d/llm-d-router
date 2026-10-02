@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ func TestHAPopulateNonLeaderDatastoreFeatureGate(t *testing.T) {
 
 	t.Run("disabled via config", func(t *testing.T) {
 		opts := runserver.NewOptions()
-		opts.ConfigText = `apiVersion: llm-d.ai/v1alpha1
+		opts.ConfigText = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - haPopulateNonLeaderDatastore=false
@@ -69,20 +69,21 @@ func TestFlowControlFeatureGateAdmissionControlWiring(t *testing.T) {
 	testCases := []struct {
 		name       string
 		configText string
+		extraGates []string
 		// wantEnabled nil means "expect whatever default the runner registered for the gate",
 		// read programmatically from the feature gates parsed out of the stanza-less config.
 		wantEnabled *bool
 	}{
 		{
 			name: "no featureGates stanza follows the registered default",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 `,
 			wantEnabled: nil,
 		},
 		{
 			name: "flowControl gate enabled wires the flow control admission controller",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl
@@ -91,12 +92,30 @@ featureGates:
 		},
 		{
 			name: "flowControl=false restores the legacy admission controller",
-			configText: `apiVersion: llm-d.ai/v1alpha1
+			configText: `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 featureGates:
 - flowControl=false
 `,
 			wantEnabled: boolPtr(false),
+		},
+		{
+			name: "flowControl gate enabled via flag without a featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+`,
+			extraGates:  []string{flowcontrol.FeatureGate},
+			wantEnabled: boolPtr(true),
+		},
+		{
+			name: "flag overrides the config's featureGates stanza",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl=false
+`,
+			extraGates:  []string{flowcontrol.FeatureGate + "=true"},
+			wantEnabled: boolPtr(true),
 		},
 	}
 
@@ -107,7 +126,8 @@ featureGates:
 
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
-			opts.PoolName = "test-pool"
+			opts.FeatureGates = tc.extraGates
+			opts.PoolName = testPoolName
 
 			r := NewRunner()
 			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
@@ -123,7 +143,7 @@ featureGates:
 			}
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
-			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 			require.NoError(t, err)
 
 			endpointCandidates := contracts.EndpointCandidates(
@@ -146,4 +166,25 @@ featureGates:
 			}
 		})
 	}
+}
+
+// TestFeatureGatesFlagNotDuplicatedAcrossCalls pins the r.rawConfig cache against the flag path:
+// Run calls parseConfigurationPhaseOne to choose the K8s vs file-discovery route and setup calls it
+// again, so an uncached append would grow the gate list on every call.
+func TestFeatureGatesFlagNotDuplicatedAcrossCalls(t *testing.T) {
+	ctx := context.Background()
+
+	opts := runserver.NewOptions()
+	opts.FeatureGates = []string{flowcontrol.FeatureGate}
+
+	r := NewRunner()
+	first, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Contains(t, first.FeatureGates, flowcontrol.FeatureGate,
+		"the flag gate must land in rawConfig, not only in the returned map")
+
+	second, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+	require.Same(t, first, second, "the cached config should be returned")
+	require.Len(t, second.FeatureGates, 1, "the flag gate must not be appended twice")
 }

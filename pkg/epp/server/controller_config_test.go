@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -65,30 +66,10 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			wantInferenceModelRewriteGV: inferenceAPIGV,
 		},
 		{
-			name: "Both resources exist in legacy group",
-			apiResourceLists: []*metav1.APIResourceList{
-				{
-					GroupVersion: legacyInferenceAPIGV.String(),
-					APIResources: []metav1.APIResource{
-						{Kind: "InferenceObjective"},
-						{Kind: "InferenceModelRewrite"},
-					},
-				},
-			},
-			wantInferenceObjective:      true,
-			wantInferenceModelRewrite:   true,
-			wantInferenceObjectiveGV:    legacyInferenceAPIGV,
-			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
-		},
-		{
 			name: "Resources do not exist",
 			apiResourceLists: []*metav1.APIResourceList{
 				{
 					GroupVersion: v1alpha2.GroupVersion.String(),
-					APIResources: []metav1.APIResource{},
-				},
-				{
-					GroupVersion: legacyInferenceAPIGV.String(),
 					APIResources: []metav1.APIResource{},
 				},
 			},
@@ -111,42 +92,6 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			wantInferenceModelRewrite:   false,
 			wantInferenceObjectiveGV:    inferenceAPIGV,
 			wantInferenceModelRewriteGV: schema.GroupVersion{},
-		},
-		{
-			name: "Resources exist across supported groups",
-			apiResourceLists: []*metav1.APIResourceList{
-				{
-					GroupVersion: v1alpha2.GroupVersion.String(),
-					APIResources: []metav1.APIResource{
-						{Kind: "InferenceObjective"},
-					},
-				},
-				{
-					GroupVersion: legacyInferenceAPIGV.String(),
-					APIResources: []metav1.APIResource{
-						{Kind: "InferenceModelRewrite"},
-					},
-				},
-			},
-			wantInferenceObjective:      true,
-			wantInferenceModelRewrite:   true,
-			wantInferenceObjectiveGV:    inferenceAPIGV,
-			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
-		},
-		{
-			name: "Only InferenceModelRewrite exists in legacy group",
-			apiResourceLists: []*metav1.APIResourceList{
-				{
-					GroupVersion: legacyInferenceAPIGV.String(),
-					APIResources: []metav1.APIResource{
-						{Kind: "InferenceModelRewrite"},
-					},
-				},
-			},
-			wantInferenceObjective:      false,
-			wantInferenceModelRewrite:   true,
-			wantInferenceObjectiveGV:    schema.GroupVersion{},
-			wantInferenceModelRewriteGV: legacyInferenceAPIGV,
 		},
 	}
 

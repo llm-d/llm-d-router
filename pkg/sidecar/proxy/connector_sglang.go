@@ -17,21 +17,17 @@ limitations under the License.
 package proxy
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
-	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var (
@@ -51,15 +47,10 @@ func init() {
 }
 
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(4).Info("running SGLang protocol", "url", prefillPodHostPort)
+	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
-	// Make Request
-	requestData, err := s.parseSGLangRequest(r)
-
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	_, requestData, ok := s.readJSONBody(r, w)
+	if !ok {
 		return
 	}
 
@@ -77,120 +68,21 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.handleSGLangConcurrentRequests(w, r, body, prefillPodHostPort)
-}
-
-func (s *Server) handleSGLangConcurrentRequests(w http.ResponseWriter, r *http.Request, body []byte, prefillHost string) {
-	tracer := tracing.Tracer(tracerScope)
-	ctx := r.Context()
-
-	// Prefill Stage - async
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", true),
-	)
-	prefillStart := time.Now()
-
-	// Create separate requests for prefill and decode
-	// Use context.WithoutCancel for prefillReq to prevent it from being aborted
-	// if the main HTTP handler (which serves decodeReq) finishes first.
-	prefillReq := cloneRequestWithBody(context.WithoutCancel(r.Context()), r, body)
-	decodeReq := cloneRequestWithBody(r.Context(), r, body)
-
-	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
-	if err != nil {
-		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
-		prefillSpan.End()
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
-	// Send prefill request asynchronously
-	go func() {
-		defer prefillSpan.End()
-		defer func() {
-			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
-			}
-		}()
-		pw := &bufferedResponseWriter{}
-		prefillHandler.ServeHTTP(pw, prefillReq)
-		prefillDuration := time.Since(prefillStart)
-		prefillSpan.SetAttributes(
-			attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-			attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
-		)
-		if pw.statusCode < 200 || pw.statusCode >= 300 {
-			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-		}
-		s.logger.V(5).Info("prefill request completed", "status", pw.statusCode)
-	}()
-
-	// Decode Stage - sync
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
-	defer decodeSpan.End()
-
-	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorSGLang),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", true),
-	)
-	decodeStart := time.Now()
-
-	// Send decode request synchronously
-	decodeReq = decodeReq.WithContext(ctx)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
-
-	decodeDuration := time.Since(decodeStart)
-	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
-	)
-
-	// Calculate end-to-end P/D timing metrics for concurrent P/D.
-	// True TTFT captures time from gateway request start to decode start.
-	// In SGLang's concurrent mode, prefill duration is tracked in the async prefill span.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
-		var totalDuration time.Duration
-		var trueTTFT time.Duration
-		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
-			if requestStart, ok := requestStartValue.(time.Time); ok {
-				totalDuration = time.Since(requestStart)
-				trueTTFT = decodeStart.Sub(requestStart)
-			}
-		}
-
-		currentSpan.SetAttributes(
-			attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-			attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-			attribute.Bool("llm_d.pd_proxy.concurrent_pd", true),
-		)
-	}
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil)
 }
 
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
-	modifiedRequest := make(map[string]interface{})
-	for k, v := range requestData {
-		modifiedRequest[k] = v
-	}
+	modifiedRequest := maps.Clone(requestData)
 
 	// Generate bootstrap host from prefill host
 	bootstrapHost := extractHost(prefillHostPort)
 
 	// Add bootstrap information
-	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
-	modifiedRequest[requestFieldBootstrapPort] = sglangBootstrapPort
-	modifiedRequest[requestFieldBootstrapRoom] = roomID
+	modifiedRequest[reqcommon.FieldBootstrapHost] = bootstrapHost
+	modifiedRequest[reqcommon.FieldBootstrapPort] = sglangBootstrapPort
+	modifiedRequest[reqcommon.FieldBootstrapRoom] = roomID
 
-	s.logger.V(5).Info("bootstrap info added",
+	s.logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)
@@ -198,20 +90,6 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	return modifiedRequest
 }
 
-func (s *Server) parseSGLangRequest(r *http.Request) (map[string]interface{}, error) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read request body: %w", err)
-	}
-
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		return nil, fmt.Errorf("failed to parse request body: %w", err)
-	}
-
-	return requestData, nil
-}
-
 func (s *Server) generateSGLangRoomID() int64 {
-	return time.Now().UnixNano() + int64(rand.IntN(1000))
+	return time.Now().UnixNano() + int64(rand.IntN(1000)) //#nosec G404 -- non-crypto use, a room ID disambiguator
 }

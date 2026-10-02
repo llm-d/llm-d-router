@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +22,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -59,6 +61,23 @@ type ModelNameRewriter interface {
 	RewriteModelName(payload MarshalablePayload, model string) (MarshalablePayload, error)
 }
 
+// PriorityRewriteContext carries target-specific information a parser may need
+// when translating EPP priority semantics into backend wire fields.
+type PriorityRewriteContext struct {
+	TargetEndpoint *fwkdl.EndpointMetadata
+}
+
+// PriorityRewriter is implemented by parsers whose forwarded body can carry a
+// backend-native priority field.
+type PriorityRewriter interface {
+	// RewritePriority removes any client-supplied priority field and may write the
+	// EPP-resolved priority into the payload. Taking and returning a
+	// MarshalablePayload guarantees the result is repackageable. The returned bool
+	// reports whether the payload was changed, so callers can flag it for
+	// repackaging without re-inspecting the body.
+	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, bool, error)
+}
+
 // Claims defines the matching criteria for a parser.
 type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
@@ -83,4 +102,12 @@ type ParseResult struct {
 type ParsedResponse struct {
 	// Usage is only populate when the raw response has usage.
 	Usage *Usage
+	// StreamedEvents is how many stream data events this parse observed, zero for a non-streamed
+	// response or a parser that does not count. For servers that stream one content delta per
+	// token the count approximates the tokens in the parsed chunk, but protocol events (role
+	// deltas, finish reasons, usage-only events, Responses API lifecycle events) inflate it, a
+	// server that batches tokens into one event deflates it, and the scan recognizes only the
+	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
+	// and keep-alive data lines skew it further).
+	StreamedEvents int
 }

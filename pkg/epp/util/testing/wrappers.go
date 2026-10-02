@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -212,7 +213,7 @@ func (m *InferencePoolWrapper) TargetPorts(p int32) *InferencePoolWrapper {
 }
 
 func (m *InferencePoolWrapper) EndpointPickerRef(name string) *InferencePoolWrapper {
-	m.Spec.EndpointPickerRef = v1.EndpointPickerRef{Name: v1.ObjectName(name)}
+	m.Spec.EndpointPickerRef = &v1.EndpointPickerRef{Name: v1.ObjectName(name)}
 	return m
 }
 

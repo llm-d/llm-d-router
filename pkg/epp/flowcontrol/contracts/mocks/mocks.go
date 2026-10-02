@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -52,7 +53,7 @@ type MockRegistryDataPlane struct {
 	FairnessPolicyFunc           func(priority int) (flowcontrol.FairnessPolicy, error)
 	PriorityBandAccessorFunc     func(priority int) (flowcontrol.PriorityBandAccessor, error)
 	AllOrderedPriorityLevelsFunc func() []int
-	StatsFunc                    func() contracts.AggregateStats
+	CapacitySnapshotFunc         func(priority int) (contracts.CapacitySnapshot, error)
 	WithConnectionFunc           func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error
 }
 
@@ -84,11 +85,12 @@ func (m *MockRegistryDataPlane) AllOrderedPriorityLevels() []int {
 	return nil
 }
 
-func (m *MockRegistryDataPlane) Stats() contracts.AggregateStats {
-	if m.StatsFunc != nil {
-		return m.StatsFunc()
+func (m *MockRegistryDataPlane) CapacitySnapshot(priority int) (contracts.CapacitySnapshot, error) {
+	if m.CapacitySnapshotFunc != nil {
+		return m.CapacitySnapshotFunc(priority)
 	}
-	return contracts.AggregateStats{}
+	// The zero snapshot has no limits configured, so capacity checks pass by default.
+	return contracts.CapacitySnapshot{}, nil
 }
 
 func (m *MockRegistryDataPlane) WithConnection(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error {

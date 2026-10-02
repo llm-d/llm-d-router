@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,11 +23,14 @@ import (
 	"fmt"
 	"math"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
@@ -128,16 +132,17 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 }
 
 // Score returns the scoring result for the given list of pods based on prefix cache match info.
-func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+func (p *Plugin) Score(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	logger := log.FromContext(ctx)
+	missingMatchInfo := 0
 
 	for _, endpoint := range endpoints {
 		// Default to score 0 if PrefixCacheMatchInfo is missing or invalid.
 		scores[endpoint] = 0.0
 		info, ok := endpoint.Get(p.prefixMatchDataKey)
 		if !ok {
-			logger.V(logutil.DEFAULT).Error(nil, "PrefixCacheMatchInfo not found for endpoint, assigning score 0", "endpoint", endpoint, "key", p.prefixMatchDataKey.String())
+			missingMatchInfo++
 			continue
 		}
 
@@ -165,5 +170,43 @@ func (p *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		}
 		scores[endpoint] += p.matchLengthWeight*matchLengthScore + (1.0-p.matchLengthWeight)*matchRatioScore
 	}
+	if missingMatchInfo > 0 {
+		logger.V(logutil.DEFAULT).Info("PrefixCacheMatchInfo not found for endpoints, assigning score 0",
+			"count", missingMatchInfo, "key", p.prefixMatchDataKey.String())
+	}
+
+	span := trace.SpanFromContext(ctx)
+	if span.IsRecording() {
+		span.SetAttributes(mmobs.SpanAttributes(request)...)
+		if hit, tracked := anyMMHit(endpoints, p.prefixMatchDataKey); tracked {
+			span.SetAttributes(attribute.Bool("mm.hit", hit))
+		}
+	}
+
 	return scores
+}
+
+// anyMMHit returns (hit, tracked). When no endpoint had MM tracked, the
+// caller should omit mm.hit (OTel: don't emit attributes whose value is unknown).
+func anyMMHit(endpoints []fwksched.Endpoint, key plugin.DataKey) (hit, tracked bool) {
+	for _, ep := range endpoints {
+		v, ok := ep.Get(key)
+		if !ok {
+			continue
+		}
+		info, ok := v.(*attrprefix.PrefixCacheMatchInfo)
+		if !ok {
+			continue
+		}
+		mm := info.MM()
+		if mm == nil {
+			continue
+		}
+		tracked = true
+		if mm.MatchBlocks > 0 {
+			hit = true
+			return
+		}
+	}
+	return
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 )
 
 func TestNewConfig(t *testing.T) {
@@ -42,6 +43,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -57,6 +59,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           0,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -72,6 +75,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           10 * time.Second,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
@@ -83,14 +87,32 @@ func TestNewConfig(t *testing.T) {
 			name: "WithAllOptions_ShouldUpdateConfig",
 			opts: []ConfigOption{
 				WithDefaultRequestTTL(10 * time.Second),
+				WithNoEndpointRequestTTL(5 * time.Minute),
 				WithExpiryCleanupInterval(2 * time.Second),
 				WithEnqueueChannelBufferSize(50),
 			},
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           10 * time.Second,
+				NoEndpointRequestTTL:        5 * time.Minute,
 				ExpiryCleanupInterval:       2 * time.Second,
 				EnqueueChannelBufferSize:    50,
+				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
+				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
+				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
+			},
+		},
+		{
+			name: "ZeroNoEndpointRequestTTL_ShouldDisableEvictionWhilePoolIsEmpty",
+			opts: []ConfigOption{
+				WithNoEndpointRequestTTL(0),
+			},
+			expectErr: false,
+			expectedCfg: Config{
+				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        0,
+				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
+				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				MaxRevocationsPerDecision:   defaultMaxRevocationsPerDecision,
 				EvictionConfirmationGrace:   defaultEvictionConfirmationGrace,
 				EvictionConfirmationTimeout: defaultEvictionConfirmationTimeout,
@@ -100,6 +122,13 @@ func TestNewConfig(t *testing.T) {
 			name: "NegativeDefaultRequestTTL_ShouldError",
 			opts: []ConfigOption{
 				WithDefaultRequestTTL(-1 * time.Second),
+			},
+			expectErr: true,
+		},
+		{
+			name: "NegativeNoEndpointRequestTTL_ShouldError",
+			opts: []ConfigOption{
+				WithNoEndpointRequestTTL(-1 * time.Second),
 			},
 			expectErr: true,
 		},
@@ -135,6 +164,7 @@ func TestNewConfig(t *testing.T) {
 			expectErr: false,
 			expectedCfg: Config{
 				DefaultRequestTTL:           defaultRequestTTL,
+				NoEndpointRequestTTL:        defaultNoEndpointRequestTTL,
 				ExpiryCleanupInterval:       defaultExpiryCleanupInterval,
 				EnqueueChannelBufferSize:    defaultEnqueueChannelBufferSize,
 				EnableEviction:              true,
@@ -188,7 +218,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		apiConfig   *configapi.FlowControlConfig
+		apiConfig   *configapiv1.FlowControlConfig
 		assertion   func(*testing.T, *Config)
 		expectedErr string
 	}{
@@ -201,11 +231,13 @@ func TestNewConfigFromAPI(t *testing.T) {
 				assert.Equal(t, defaultEnqueueChannelBufferSize, cfg.EnqueueChannelBufferSize,
 					"EnqueueChannelBufferSize should be defaulted")
 				assert.Equal(t, defaultRequestTTL, cfg.DefaultRequestTTL, "DefaultRequestTTL should be defaulted when unset")
+				assert.Equal(t, defaultNoEndpointRequestTTL, cfg.NoEndpointRequestTTL,
+					"NoEndpointRequestTTL should be defaulted when neither budget is configured")
 			},
 		},
 		{
 			name: "ValidConfig_ShouldTranslateFields",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Minute},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -216,7 +248,7 @@ func TestNewConfigFromAPI(t *testing.T) {
 		},
 		{
 			name: "ValidConfig_ShouldTranslateAllExposedFields",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 1 * time.Minute},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
@@ -224,24 +256,63 @@ func TestNewConfigFromAPI(t *testing.T) {
 			},
 		},
 		{
+			// Splitting the regimes is opt-in: a configuration that names only DefaultRequestTTL states one bound on
+			// queue wait, and it governs both regimes rather than picking up an unrequested cold-start budget.
+			name: "DefaultRequestTTLAlone_ShouldGovernBothRegimes",
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultRequestTTL: &metav1.Duration{Duration: 10 * time.Second},
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				assert.Equal(t, 10*time.Second, cfg.DefaultRequestTTL, "DefaultRequestTTL should be translated")
+				assert.Equal(t, 10*time.Second, cfg.NoEndpointRequestTTL,
+					"an unset NoEndpointRequestTTL should follow DefaultRequestTTL")
+			},
+		},
+		{
+			name: "NoEndpointRequestTTL_ShouldOverrideInheritance",
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultRequestTTL:    &metav1.Duration{Duration: 10 * time.Second},
+				NoEndpointRequestTTL: &metav1.Duration{Duration: 5 * time.Minute},
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				assert.Equal(t, 10*time.Second, cfg.DefaultRequestTTL, "DefaultRequestTTL should be translated")
+				assert.Equal(t, 5*time.Minute, cfg.NoEndpointRequestTTL, "an explicit no-endpoint budget wins")
+			},
+		},
+		{
+			// "0s" is the documented way to disable eviction. Inheriting it keeps that meaning whole: a deployment that
+			// disabled the TTL is not opted into shedding the moment its pool scales to zero.
 			name: "ExplicitZeroRequestTTL_ShouldBeRespected",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: 0},
 			},
 			assertion: func(t *testing.T, cfg *Config) {
 				assert.Equal(t, time.Duration(0), cfg.DefaultRequestTTL, "Explicit 0s TTL should be respected")
+				assert.Equal(t, time.Duration(0), cfg.NoEndpointRequestTTL,
+					"an explicit 0s must disable eviction in the empty-pool regime too")
+			},
+		},
+		{
+			name: "ExplicitZeroNoEndpointRequestTTL_ShouldNotInherit",
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultRequestTTL:    &metav1.Duration{Duration: 10 * time.Second},
+				NoEndpointRequestTTL: &metav1.Duration{Duration: 0},
+			},
+			assertion: func(t *testing.T, cfg *Config) {
+				assert.Equal(t, time.Duration(0), cfg.NoEndpointRequestTTL,
+					"an explicit 0s should disable eviction while the pool is empty, not inherit")
 			},
 		},
 		{
 			name: "InvalidConfig_NegativeRequestTTL_ShouldError",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				DefaultRequestTTL: &metav1.Duration{Duration: -1 * time.Minute},
 			},
 			expectedErr: "DefaultRequestTTL cannot be negative",
 		},
 		{
 			name: "EnableEviction_ShouldTranslate_WithInternalDefaults",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				EnableEviction: true,
 			},
 			assertion: func(t *testing.T, cfg *Config) {

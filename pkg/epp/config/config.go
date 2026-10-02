@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +34,9 @@ type Config struct {
 	DataConfig         *datalayer.Config
 	FlowControlConfig  *flowcontrol.Config
 	ParserRegistry     *handlers.ParserRegistry
+	// PropagatePriority mirrors requestHandler.propagatePriority: when true the
+	// director injects the resolved priority into the outbound request body.
+	PropagatePriority bool
 }
 
 func (c *Config) String() string {

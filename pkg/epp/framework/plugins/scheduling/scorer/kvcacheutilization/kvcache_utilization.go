@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +31,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &KVCacheUtilizationScorer{}
+var (
+	_ fwksched.Scorer          = &KVCacheUtilizationScorer{}
+	_ fwkplugin.ConsumerPlugin = &KVCacheUtilizationScorer{}
+)
 
 // KvCacheUtilizationScorerFactory defines the factory function for KVCacheUtilizationScorer.
 func KvCacheUtilizationScorerFactory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -59,10 +63,15 @@ func (s *KVCacheUtilizationScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes returns the list of data that is consumed by the plugin.
-func (s *KVCacheUtilizationScorer) Consumes() map[string]any {
-	return map[string]any{
-		metrics.KVCacheUsagePercentKey: float64(0),
+// Consumes declares that the scorer reads the KV-cache utilization field
+// from the endpoint's Metrics struct. The DataKey names the field the
+// core-metrics-extractor publishes; the registry validates the consumer's
+// declared type against the producer's declaration.
+func (s *KVCacheUtilizationScorer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{
+			fwkplugin.NewDataKey(metrics.KVCacheUsagePercentKey, metrics.MetricsExtractorType): float64(0),
+		},
 	}
 }
 
@@ -72,11 +81,16 @@ func (s *KVCacheUtilizationScorer) WithName(name string) *KVCacheUtilizationScor
 	return s
 }
 
-// Score returns the scoring result for the given list of endpoints based on context.
+// Score scores each endpoint as 1 minus its KV-cache usage.
+// Endpoints with no written metrics are left unscored.
 func (s *KVCacheUtilizationScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		scores[endpoint] = 1 - endpoint.GetMetrics().KVCacheUsagePercent
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		scores[endpoint] = 1 - podMetrics.KVCacheUsagePercent
 	}
 	return scores
 }

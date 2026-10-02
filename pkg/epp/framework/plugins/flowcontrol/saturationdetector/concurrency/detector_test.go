@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,8 +33,9 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 )
+
+const cleanEndpoint = "clean-endpoint"
 
 // localRegistry is a thread-safe storage for simulated endpoint load.
 type localRegistry struct {
@@ -193,13 +195,20 @@ func TestDetector_Configuration(t *testing.T) {
 		driveLoad(ctx, reg, detector, endpointName, 1)
 
 		t.Run("fallback to clean endpoint", func(t *testing.T) {
-			cleanEndpoint := "clean-endpoint"
 			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
 				newStubSchedulingEndpoint(reg, endpointName),
 				newStubSchedulingEndpoint(reg, cleanEndpoint),
 			})
 			require.Len(t, kept, 1, "Filter should drop the overloaded endpoint")
 			require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+		})
+
+		t.Run("fail open when all endpoints overloaded", func(t *testing.T) {
+			kept = detector.Filter(ctx, nil, []fwksched.Endpoint{
+				newStubSchedulingEndpoint(reg, endpointName),
+			})
+			require.Len(t, kept, 1, "Filter should fail open and return all endpoints when all are overloaded")
+			require.Equal(t, endpointName, kept[0].GetMetadata().ID.Name)
 		})
 	})
 }
@@ -434,9 +443,12 @@ func TestDetector_TokenFilter(t *testing.T) {
 	reg := newLocalRegistry()
 	detector := newDetector("test-detector", config, logr.Discard())
 	endpointName := "token-filter-endpoint"
-	endpoints := []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)}
+	endpoints := []fwksched.Endpoint{
+		newStubSchedulingEndpoint(reg, endpointName),
+		newStubSchedulingEndpoint(reg, cleanEndpoint),
+	}
 
-	// Drive 110 tokens (just below 120 burst limit) -> endpoint should pass filter.
+	// Drive 110 tokens (just below 120 burst limit) -> both endpoints should pass filter.
 	// 4 input -> 10 total tokens per request * 11 requests = 110 tokens.
 	reqs := make([]*fwksched.InferenceRequest, 0, 11)
 	for i := range 11 {
@@ -445,14 +457,19 @@ func TestDetector_TokenFilter(t *testing.T) {
 	driveTokenLoad(ctx, reg, detector, endpointName, reqs)
 
 	kept := detector.Filter(ctx, nil, endpoints)
-	require.Len(t, kept, 1, "endpoint should pass filter below burst limit")
+	require.Len(t, kept, 2, "endpoint should pass filter below burst limit")
 
-	// Add one more request to reach 120 tokens -> filtered out
+	// Add one more request to reach 120 tokens -> endpointName filtered out, cleanEndpoint kept.
 	driveTokenLoad(ctx, reg, detector, endpointName, []*fwksched.InferenceRequest{
 		makeTokenRequest("r12", 4),
 	})
 	kept = detector.Filter(ctx, nil, endpoints)
-	require.Len(t, kept, 0, "endpoint should be filtered at burst limit")
+	require.Len(t, kept, 1, "overloaded endpoint should be filtered at burst limit when clean endpoint available")
+	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+
+	// When all endpoints are at burst limit -> fail open returns all endpoints.
+	kept = detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+	require.Len(t, kept, 1, "filter should fail open when all endpoints exceed burst limit")
 }
 
 // TestDetector_TokenLifecycle verifies token accounting.
@@ -559,7 +576,8 @@ func TestDetector_HybridSaturation(t *testing.T) {
 	}
 }
 
-// TestDetector_HybridFilter verifies hybrid mode drops an endpoint when either dimension hits its limit.
+// TestDetector_HybridFilter verifies hybrid mode drops an endpoint when either dimension hits its limit,
+// and fails open when all endpoints hit their limits.
 func TestDetector_HybridFilter(t *testing.T) {
 	t.Parallel()
 
@@ -577,10 +595,10 @@ func TestDetector_HybridFilter(t *testing.T) {
 		tokens   int64
 		wantKept int
 	}{
-		{name: "below_both_limits", requests: 5, tokens: 50, wantKept: 1},
-		{name: "request_limit_reached", requests: 10, tokens: 50, wantKept: 0},
-		{name: "token_limit_reached", requests: 5, tokens: 100, wantKept: 0},
-		{name: "both_over", requests: 20, tokens: 200, wantKept: 0},
+		{name: "below_both_limits", requests: 5, tokens: 50, wantKept: 2},
+		{name: "request_limit_reached", requests: 10, tokens: 50, wantKept: 1},
+		{name: "token_limit_reached", requests: 5, tokens: 100, wantKept: 1},
+		{name: "both_over", requests: 20, tokens: 200, wantKept: 1},
 	}
 
 	for _, tc := range tests {
@@ -594,10 +612,35 @@ func TestDetector_HybridFilter(t *testing.T) {
 				load.Tokens = tc.tokens
 			})
 
-			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{newStubSchedulingEndpoint(reg, endpointName)})
+			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
+				newStubSchedulingEndpoint(reg, endpointName),
+				newStubSchedulingEndpoint(reg, cleanEndpoint),
+			})
 			require.Len(t, kept, tc.wantKept, "hybrid filter mismatch")
 		})
 	}
+
+	t.Run("all_over_fail_open", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		detector := newDetector("test-detector", config, logr.Discard())
+		endpointA := "endpoint-a"
+		endpointB := "endpoint-b"
+		reg.update(fullEndpointName(endpointA), func(load *attrconcurrency.InFlightLoad) {
+			load.Requests = 10
+			load.Tokens = 50
+		})
+		reg.update(fullEndpointName(endpointB), func(load *attrconcurrency.InFlightLoad) {
+			load.Requests = 5
+			load.Tokens = 100
+		})
+
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
+			newStubSchedulingEndpoint(reg, endpointA),
+			newStubSchedulingEndpoint(reg, endpointB),
+		})
+		require.Len(t, kept, 2, "hybrid filter should fail open when all endpoints exceed limits")
+	})
 }
 
 // TestDetector_ConcurrencyStress performs race condition check.
@@ -680,7 +723,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests++
 		if req != nil {
-			load.Tokens += inflightload.NewSimpleTokenEstimator().Estimate(req)
+			load.Tokens += simulatedTokenLoad(req)
 		}
 	})
 }
@@ -693,7 +736,7 @@ func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.I
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests--
 		if req != nil {
-			load.Tokens -= inflightload.NewSimpleTokenEstimator().Estimate(req)
+			load.Tokens -= simulatedTokenLoad(req)
 		}
 	})
 }
@@ -712,9 +755,8 @@ func driveLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName 
 func driveTokenLoad(_ context.Context, reg *localRegistry, _ *detector, endpointName string, requests []*fwksched.InferenceRequest) {
 	id := fullEndpointName(endpointName)
 	var total int64
-	estimator := inflightload.NewSimpleTokenEstimator()
 	for _, r := range requests {
-		total += estimator.Estimate(r)
+		total += simulatedTokenLoad(r)
 	}
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Tokens += total
@@ -803,13 +845,27 @@ func (f *liveSchedulingEndpoint) Keys() []fwkplugin.DataKey {
 func (f *liveSchedulingEndpoint) String() string                { return f.id }
 func (f *liveSchedulingEndpoint) Clone() datalayer.AttributeMap { return f }
 
+// simulatedTokenLoad models the per-request token contribution these saturation
+// tests rely on: input tokens plus a fixed 3:2 output allowance (1 input -> 3
+// total, 4 input -> 10 total). It is deliberately local so the saturation math
+// stays independent of the production in-flight token estimator's policy, which
+// derives output tokens from the outlen-bucket attribute rather than a fixed ratio.
+func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
+	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
+		return 0
+	}
+	input := int64(req.Body.TokenizedRequest.TokenCount())
+	// round(input * 1.5) via integer half-up, matching the numbers these tests assert.
+	return input + (input*3+1)/2
+}
+
 // makeTokenRequest builds a request with inputTokens tokenized input tokens.
-// The estimator then derives total tokens as inputTokens * (1 + OutputRatio).
+// simulatedTokenLoad then derives total tokens as inputTokens + round(inputTokens * 1.5).
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{make([]uint32, inputTokens)}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
 		},
 	}
 }

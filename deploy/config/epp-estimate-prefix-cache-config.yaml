@@ -1,6 +1,6 @@
 # Sample EPP configuration for running with prefix cache in estimate mode and load-aware scorers
 #
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: single-profile-handler

@@ -26,6 +26,8 @@ The detector implements the `Filter` interface to protect individual endpoints. 
 
 This approach allows the Flow Controller to manage average pool load, while the Scheduler retains the flexibility to burst above ideal targets (the "Headroom") to satisfy affinity or scoring objectives.
 
+**Fail-Open Fallback:** To prevent complete routing failure, if *all* candidate endpoints are filtered out (i.e., the entire cluster is over the safety limits), the filter softens and returns the original list of endpoints, allowing the scheduler's scorers to pick the least-bad option.
+
 ## Inputs consumed
 
 The plugin internally tracks active concurrency by hooking into the request lifecycle (`PreRequest` and `ResponseBody`).

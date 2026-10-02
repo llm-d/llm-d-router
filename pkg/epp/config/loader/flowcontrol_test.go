@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,15 @@ package loader
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -78,22 +80,22 @@ func TestBuildRegistryConfig(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		apiConfig   *configapi.FlowControlConfig
+		apiConfig   *configapiv1.FlowControlConfig
 		assertion   func(*testing.T, *registry.Config)
 		expectedErr string
 	}{
 		// --- Happy Paths ---
 		{
 			name: "ShouldSucceed_WithFullConfiguration",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxBytes: ptr.To(resource.MustParse("100")),
-				PriorityBands: []configapi.PriorityBandConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						MaxBytes: ptr.To(resource.MustParse("50")),
 					},
 				},
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("10")),
 				},
 			},
@@ -111,10 +113,37 @@ func TestBuildRegistryConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "ShouldResolveBandRequestTTLs",
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
+					DefaultRequestTTL: &metav1.Duration{Duration: 10 * time.Second},
+				},
+				DefaultNegativePriorityBand: &configapiv1.PriorityBandConfig{
+					DefaultRequestTTL: &metav1.Duration{Duration: 20 * time.Second},
+				},
+				PriorityBands: []configapiv1.PriorityBandConfig{
+					{Priority: 1},
+					{Priority: 2, DefaultRequestTTL: &metav1.Duration{}},
+					{Priority: 3, DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second}},
+				},
+			},
+			assertion: func(t *testing.T, cfg *registry.Config) {
+				assert.Nil(t, cfg.PriorityBands[1].DefaultRequestTTL)
+				require.NotNil(t, cfg.PriorityBands[2].DefaultRequestTTL)
+				assert.Zero(t, *cfg.PriorityBands[2].DefaultRequestTTL)
+				require.NotNil(t, cfg.PriorityBands[3].DefaultRequestTTL)
+				assert.Equal(t, 5*time.Second, *cfg.PriorityBands[3].DefaultRequestTTL)
+				require.NotNil(t, cfg.DefaultPriorityBand.DefaultRequestTTL)
+				assert.Equal(t, 10*time.Second, *cfg.DefaultPriorityBand.DefaultRequestTTL)
+				require.NotNil(t, cfg.DefaultNegativePriorityBand.DefaultRequestTTL)
+				assert.Equal(t, 20*time.Second, *cfg.DefaultNegativePriorityBand.DefaultRequestTTL)
+			},
+		},
+		{
 			name: "ShouldSucceed_WithKubernetesQuantityFormat",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxBytes: ptr.To(resource.MustParse("1Gi")),
-				PriorityBands: []configapi.PriorityBandConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						MaxBytes: ptr.To(resource.MustParse("500Mi")),
@@ -131,8 +160,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldSucceed_WithPolicyReferences",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority:          1,
 						OrderingPolicyRef: edf.EDFOrderingPolicyType,
@@ -167,8 +196,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		// --- Defaulting Logic (Nil vs Zero) ---
 		{
 			name: "ShouldApplyDefault_WhenBandMaxBytesIsNil",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						// MaxBytes and MaxRequests omitted
@@ -183,8 +212,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldApplyDefault_WhenBandMaxBytesIsZero",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						MaxBytes: ptr.To(resource.MustParse("0")), // Explicitly zero,
@@ -199,8 +228,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldApplyDefault_WhenDefaultPriorityBandMaxBytesIsZero",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("0")), // Explicitly zero,
 				},
 			},
@@ -212,8 +241,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldApplyDefault_WhenBandMaxRequestsIsNilOrZero",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						// MaxRequests omitted
@@ -242,8 +271,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldApplyDefault_WhenNegativeBandTemplateMaxRequestsIsZero",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapiv1.PriorityBandConfig{
 					MaxRequests: ptr.To(resource.MustParse("0")), // Explicitly zero
 				},
 			},
@@ -256,16 +285,25 @@ func TestBuildRegistryConfig(t *testing.T) {
 
 		// --- Validation Errors ---
 		{
+			name: "ShouldError_WithNegativePriorityBandRequestTTL",
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
+					{Priority: 1, DefaultRequestTTL: &metav1.Duration{Duration: -time.Second}},
+				},
+			},
+			expectedErr: "defaultRequestTTL cannot be negative",
+		},
+		{
 			name: "ShouldError_WithNegativeGlobalMaxBytes",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxBytes: ptr.To(resource.MustParse("-1")),
 			},
 			expectedErr: "global MaxBytes must be non-negative",
 		},
 		{
 			name: "ShouldError_WithNegativePriorityBandMaxBytes",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority: 1,
 						MaxBytes: ptr.To(resource.MustParse("-100")),
@@ -276,8 +314,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldError_WithNegativeDefaultPriorityBandMaxBytes",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("-5")),
 				},
 			},
@@ -287,10 +325,10 @@ func TestBuildRegistryConfig(t *testing.T) {
 		// --- MaxRequests: Happy Paths ---
 		{
 			name: "ShouldSucceed_WithMaxBytesAndMaxRequests",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxBytes:    ptr.To(resource.MustParse("1Gi")),
 				MaxRequests: ptr.To(resource.MustParse("5000")),
-				PriorityBands: []configapi.PriorityBandConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority:    100,
 						MaxBytes:    ptr.To(resource.MustParse("1Gi")),
@@ -310,9 +348,9 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldSucceed_WithOnlyMaxRequests_NoMaxBytes",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxRequests: ptr.To(resource.MustParse("1000")),
-				PriorityBands: []configapi.PriorityBandConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority:    1,
 						MaxRequests: ptr.To(resource.MustParse("500")),
@@ -332,8 +370,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldSucceed_WithDefaultPriorityBandMaxRequests",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxRequests: ptr.To(resource.MustParse("200")),
 				},
 			},
@@ -351,15 +389,15 @@ func TestBuildRegistryConfig(t *testing.T) {
 		// --- MaxRequests: Validation Errors ---
 		{
 			name: "ShouldError_WithNegativeGlobalMaxRequests",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxRequests: ptr.To(resource.MustParse("-1")),
 			},
 			expectedErr: "global MaxRequests must be non-negative",
 		},
 		{
 			name: "ShouldError_WithNegativePriorityBandMaxRequests",
-			apiConfig: &configapi.FlowControlConfig{
-				PriorityBands: []configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				PriorityBands: []configapiv1.PriorityBandConfig{
 					{
 						Priority:    1,
 						MaxRequests: ptr.To(resource.MustParse("-100")),
@@ -370,8 +408,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldError_WithNegativeDefaultPriorityBandMaxRequests",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxRequests: ptr.To(resource.MustParse("-5")),
 				},
 			},
@@ -381,8 +419,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		// --- DefaultNegativePriorityBand ---
 		{
 			name: "ShouldSucceed_WithDefaultNegativePriorityBand",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("100")),
 				},
 			},
@@ -396,8 +434,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldFallBackToDefaultBand_WhenNegativeBandIsNil",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultPriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultPriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("500")),
 				},
 			},
@@ -410,8 +448,8 @@ func TestBuildRegistryConfig(t *testing.T) {
 		},
 		{
 			name: "ShouldError_WithNegativeDefaultNegativePriorityBandMaxBytes",
-			apiConfig: &configapi.FlowControlConfig{
-				DefaultNegativePriorityBand: &configapi.PriorityBandConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
+				DefaultNegativePriorityBand: &configapiv1.PriorityBandConfig{
 					MaxBytes: ptr.To(resource.MustParse("-1")),
 				},
 			},
@@ -460,7 +498,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 
 	testCases := []struct {
 		name      string
-		apiConfig *configapi.FlowControlConfig
+		apiConfig *configapiv1.FlowControlConfig
 		assertion func(*testing.T, *flowcontrol.Config)
 	}{
 		{
@@ -476,7 +514,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 		},
 		{
 			name: "Success - Explicit Values",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				MaxBytes: ptr.To(resource.MustParse("2048")),
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
@@ -495,7 +533,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 		},
 		{
 			name: "Success - UsageLimitPolicyPluginRef is resolved",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				UsageLimitPolicyPluginRef: usagelimits.StaticUsageLimitPolicyType,
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
@@ -506,7 +544,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 		},
 		{
 			name: "Success - Func-based UsageLimitPolicy resolved via PluginRef",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				UsageLimitPolicyPluginRef: funcPolicyName,
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
@@ -527,7 +565,7 @@ func TestBuildFlowControlConfig(t *testing.T) {
 		},
 		{
 			name: "Success - Struct-based UsageLimitPolicy resolved via PluginRef",
-			apiConfig: &configapi.FlowControlConfig{
+			apiConfig: &configapiv1.FlowControlConfig{
 				UsageLimitPolicyPluginRef: structPolicyName,
 			},
 			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
@@ -570,7 +608,7 @@ func TestBuildFlowControlConfig_Errors(t *testing.T) {
 
 	t.Run("Error - UsageLimitPolicy plugin not found", func(t *testing.T) {
 		t.Parallel()
-		_, err := buildFlowControlConfig(&configapi.FlowControlConfig{
+		_, err := buildFlowControlConfig(&configapiv1.FlowControlConfig{
 			UsageLimitPolicyPluginRef: "non-existent-policy",
 		}, handle)
 		require.Error(t, err)

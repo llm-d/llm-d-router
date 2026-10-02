@@ -8,6 +8,7 @@
   - [Core Design Principles](#core-design-principles)
   - [Routing Flow](#routing-flow)
 - [Configuration](#configuration)
+  - [API versions](#api-versions)
   - [`Plugins` Configuration](#plugins-configuration)
   - [`SchedulingProfiles` Configuration](#schedulingprofiles-configuration)
   - [Available plugins](#available-plugins)
@@ -108,7 +109,7 @@ Specifically, this configuration establishes the following components:
 The configuration text has the following form:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - ....
@@ -119,6 +120,48 @@ schedulingProfiles:
 ```
 
 The first two lines of the configuration are constant and must appear as is.
+
+### API versions
+
+The EPP accepts two configuration API versions:
+
+| `apiVersion` | Status |
+|---|---|
+| `llm-d.ai/v1` | Current. |
+| `llm-d.ai/v1alpha1` | Deprecated, reported on startup. Support ends in a later release. |
+
+The deprecated version is read as `v1` and yields the same configuration as the equivalent `v1` document. The field placements that differ are all under `dataLayer`:
+
+| `v1alpha1` | `v1` |
+|---|---|
+| `crossReplicaSyncerPluginRef` | `crossReplica.syncerPluginRef` |
+| `crossReplicaSyncInterval` | `crossReplica.syncInterval` |
+| `crossReplicaPublishTimeout` | `crossReplica.publishTimeout` |
+| `discovery.pluginRef` | `discovery.endpoints.pluginRef` |
+
+Moving a configuration to `v1` means changing the `apiVersion` line, and, where these fields are set, writing them in their `v1` placement:
+
+```yaml
+# v1alpha1
+dataLayer:
+  discovery:
+    pluginRef: my-discovery
+  crossReplicaSyncerPluginRef: my-syncer
+  crossReplicaSyncInterval: 500ms
+  crossReplicaPublishTimeout: 2s
+
+# v1
+dataLayer:
+  discovery:
+    endpoints:
+      pluginRef: my-discovery
+  crossReplica:
+    syncerPluginRef: my-syncer
+    syncInterval: 500ms
+    publishTimeout: 2s
+```
+
+All other fields keep their names, defaults, and meaning.
 
 ### `Plugins` Configuration
 
@@ -160,14 +203,14 @@ in this section has the following form:
 The fields in a schedulingProfile entry are:
 
 - **name**: specifies the scheduling profile's name.
-- **plugins**: specifies the set of plugins to be used when this scheduling profile is chosen for a request.
+- **plugins**: references plugins that implement `Filter`, `Scorer`, or `Picker` to run when this scheduling profile is chosen for a request.
 - **pluginRef**: reference to the name of the plugin instance to be used
 - **weight**: weight to be used if the referenced plugin is a scorer.
 
 A complete configuration might look like this:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: precise-prefix-cache-producer
@@ -193,6 +236,10 @@ If the configuration is in a file, the EPP command line argument `--config-file`
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--config-text` should be used.
 
+Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
+ comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
+ entries are applied after the configuration's own `featureGates` list, so they override it.
+
 ### Default plugins
 
 The EPP injects these plugins when they are absent, so a configuration does not need to list them. Some
@@ -211,7 +258,8 @@ RequestHandler:
 
 FlowControl:
 - The flow control admission layer itself is off by default; enable it with
-  `featureGates: ["flowControl"]`.
+  `featureGates: ["flowControl"]` in the configuration, or with
+  `--feature-gates=flowControl=true` on the command line.
 - `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 

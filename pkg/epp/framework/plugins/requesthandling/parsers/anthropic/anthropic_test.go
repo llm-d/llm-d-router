@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,12 +22,34 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
+
+func TestAnthropicParser_RewritePriority(t *testing.T) {
+	t.Run("strips client priority and writes resolved priority", func(t *testing.T) {
+		parser := NewAnthropicParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test", "priority": 100}, 2)
+		require.NoError(t, err)
+		assert.True(t, mutated)
+		m := got.(fwkrh.PayloadMap)
+		assert.Equal(t, 2, m["priority"])
+	})
+	t.Run("writes priority when none supplied", func(t *testing.T) {
+		parser := NewAnthropicParser()
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test"}, 2)
+		require.NoError(t, err)
+		assert.True(t, mutated)
+		m := got.(fwkrh.PayloadMap)
+		assert.Equal(t, 2, m["priority"])
+	})
+}
 
 func TestNewAnthropicParser(t *testing.T) {
 	parser := NewAnthropicParser()
@@ -71,7 +93,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello, Claude"},
 					},
@@ -106,7 +128,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -139,7 +161,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system":     "You are a helpful assistant.",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -174,7 +196,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"system": []any{
 						map[string]any{"type": "text", "text": "You are a helpful assistant."},
 					},
@@ -228,7 +250,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{
 							"role": "user",
@@ -267,10 +289,10 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				MaxOutputTokens: ptr.To(int64(1024)),
 				Messages: &fwkrh.MessagesRequest{
-					Tools: []any{
-						map[string]any{
-							"name":        "get_weather",
-							"description": "Get the weather",
+					Tools: []fwkrh.AnthropicTool{
+						{
+							Name:        "get_weather",
+							Description: "Get the weather",
 						},
 					},
 					Messages: []fwkrh.AnthropicMessage{
@@ -279,7 +301,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"tools": []any{
 						map[string]any{
 							"name":        "get_weather",
@@ -312,7 +334,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"stream":     true,
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -342,7 +364,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"cache_salt": "test-salt-123",
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
@@ -369,7 +391,7 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "claude-sonnet-4-6",
-					"max_tokens": float64(1024),
+					"max_tokens": json.Number("1024"),
 					"messages": []any{
 						map[string]any{"role": "user", "content": "Hello"},
 					},
@@ -446,6 +468,17 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 
+			tt.want.RawBody = bodyBytes
+			payload, _ := tt.want.Payload.AsMap()
+			for key, value := range payload {
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if key == "system" || raw[0] == '{' || raw[0] == '[' {
+					payload[key] = json.RawMessage(raw)
+				}
+			}
 			// Model is extracted from the request body's "model" field.
 			tt.want.Model, _ = tt.body["model"].(string)
 
@@ -603,6 +636,13 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "content delta with usage text but no usage object",
+			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"usage\"}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
 			name:  "message_stop without usage",
 			chunk: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}"),
 			want: &fwkrh.ParsedResponse{
@@ -613,7 +653,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{contentType: eventStreamType}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{request.HeaderContentType: request.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseResponse() error = %v", err)
 			}
@@ -624,11 +664,39 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 	}
 }
 
+func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
+	parser := NewAnthropicParser()
+	tests := []struct {
+		name  string
+		chunk []byte
+	}{
+		{
+			name:  "without_usage",
+			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}"),
+		},
+		{
+			name:  "with_usage",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}"),
+		},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestAnthropicParser_Claims(t *testing.T) {
 	parser := NewAnthropicParser()
 	got := parser.Claims()
 	want := fwkrh.Claims{
-		Paths:     []string{messagesAPI, countTokensAPI},
+		Paths:     []string{messagesAPI, countTokensAPI, messagesAPI + "/render"},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 
@@ -723,4 +791,60 @@ func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseRequest_ToolBlocks verifies tool_use, tool_result, and thinking
+// blocks survive parsing with their raw JSON (input order preserved) intact.
+func TestParseRequest_ToolBlocks(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"tools": [{
+			"name": "get_weather",
+			"description": "Get the weather",
+			"input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
+		}],
+		"messages": [
+			{"role": "user", "content": "Weather in Zurich?"},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "need the tool"},
+				{"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Zurich"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "toolu_01", "content": [
+					{"type": "text", "text": "Sunny"}
+				]}
+			]}
+		]
+	}`
+
+	got, err := parser.ParseRequest(context.Background(), []byte(body), map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Body.Messages)
+
+	msgs := got.Body.Messages.Messages
+	require.Len(t, msgs, 3)
+
+	assistant := msgs[1].Content.Structured
+	require.Len(t, assistant, 2)
+	assert.Equal(t, "thinking", assistant[0].Type)
+	assert.Equal(t, "need the tool", assistant[0].Thinking)
+	assert.Equal(t, "tool_use", assistant[1].Type)
+	assert.Equal(t, "toolu_01", assistant[1].ID)
+	assert.Equal(t, "get_weather", assistant[1].Name)
+	assert.JSONEq(t, `{"city": "Zurich"}`, string(assistant[1].Input))
+	assert.Equal(t, `{"city": "Zurich"}`, string(assistant[1].Input), "input must keep wire bytes")
+
+	toolResult := msgs[2].Content.Structured
+	require.Len(t, toolResult, 1)
+	assert.Equal(t, "tool_result", toolResult[0].Type)
+	assert.Equal(t, "toolu_01", toolResult[0].ToolUseID)
+	assert.Equal(t, "Sunny", toolResult[0].Content.Structured[0].Text)
+
+	tools := got.Body.Messages.Tools
+	require.Len(t, tools, 1)
+	assert.Equal(t, "get_weather", tools[0].Name)
+	assert.Equal(t, `{"type": "object", "properties": {"city": {"type": "string"}}}`, string(tools[0].InputSchema),
+		"input_schema must keep wire bytes for order-faithful re-serialization")
 }

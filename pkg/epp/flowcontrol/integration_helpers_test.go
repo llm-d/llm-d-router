@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -310,7 +310,10 @@ func newHarness(t *testing.T, opts harnessOpts) *integrationHarness {
 	controllerCfg := opts.controllerCfg
 	if controllerCfg == nil {
 		controllerCfg = &controller.Config{
-			DefaultRequestTTL:        5 * time.Minute,
+			DefaultRequestTTL: 5 * time.Minute,
+			// Matching the saturation budget leaves the two unavailability regimes indistinguishable, as they are
+			// under the shipped defaults. Tests that exercise the split configure the budgets apart.
+			NoEndpointRequestTTL:     5 * time.Minute,
 			ExpiryCleanupInterval:    10 * time.Millisecond,
 			EnqueueChannelBufferSize: 100,
 		}

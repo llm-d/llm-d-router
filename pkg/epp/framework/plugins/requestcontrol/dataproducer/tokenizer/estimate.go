@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -36,7 +37,79 @@ import (
 // pseudo-tokens covers the same input bytes as an N-token raw-byte block.
 const bytesPerToken = 4
 
-const blockTypeText = "text"
+// Content-block types read by the estimate backend.
+const (
+	blockTypeText       = "text"
+	blockTypeImage      = "image"
+	blockTypeImageURL   = "image_url"
+	blockTypeThinking   = "thinking"
+	blockTypeToolUse    = "tool_use"
+	blockTypeToolResult = "tool_result"
+)
+
+const (
+	// Per-request billing hashes must not defeat prefix caching.
+	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
+	// The base64 image fallback matches vLLM's Anthropic conversion.
+	defaultImageMediaType = "image/jpeg"
+)
+
+func anthropicSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
+}
+
+func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.AnthropicImageSource) []tokenizerTypes.ContentBlock {
+	if url := anthropicImageToURL(src); url != "" {
+		blocks = append(blocks, tokenizerTypes.ContentBlock{
+			Type:     blockTypeImageURL,
+			ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		})
+	}
+	return blocks
+}
+
+func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
+	if b.Content.Raw != "" {
+		return b.Content.Raw, nil
+	}
+	var parts []string
+	var imageBlocks []tokenizerTypes.ContentBlock
+	for _, item := range b.Content.Structured {
+		switch item.Type {
+		case blockTypeText:
+			parts = append(parts, item.Text)
+		case blockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.Source)
+		}
+	}
+	return strings.Join(parts, "\n"), imageBlocks
+}
+
+func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
+	if src == nil {
+		return ""
+	}
+	if src.Type == "url" || src.URL != "" {
+		return src.URL
+	}
+	if src.Data == "" {
+		return ""
+	}
+	mediaType := src.MediaType
+	if mediaType == "" {
+		mediaType = defaultImageMediaType
+	}
+	return "data:" + mediaType + ";base64," + src.Data
+}
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
@@ -44,12 +117,17 @@ const blockTypeText = "text"
 type estimateBackend struct {
 	img imageEstimator
 	vid videoEstimator
+	aud audioEstimator
 }
 
 // parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
-// Only video is populated today; image and audio parsing slot in here later.
+// Video and audio are populated from headers; image parsing follows the same
+// pattern when its headers are added.
 func parseMMMetadataHeaders(headers map[string]string) mmMetadata {
-	return mmMetadata{video: parseVideoMetadataHeaders(headers)}
+	return mmMetadata{
+		video: parseVideoMetadataHeaders(headers),
+		audio: parseAudioMetadataHeaders(headers),
+	}
 }
 
 // mmMetadataCtxKey keys the request-scoped mmMetadata on the context, carrying it
@@ -90,6 +168,20 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 	return meta
 }
 
+// parseAudioMetadataHeaders reads the x-llm-d-audio- request headers into an
+// audioMetadata, using metadata.GetLowerCaseHeaderValue so aliases resolve the
+// same way as the SLO headers. Missing or malformed values leave their field zero
+// so the estimator falls back per field to config and then defaults.
+func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
+	var meta audioMetadata
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioDurationHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.duration = v
+		}
+	}
+	return meta
+}
+
 // parseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
 // zeros when the value is empty or malformed.
 func parseResolution(s string) (width, height int) {
@@ -108,27 +200,30 @@ func parseResolution(s string) (width, height int) {
 	return w, h
 }
 
-func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedPrompt, error) {
+func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
 	// Pre-tokenized inputs are already real tokens; pass them through unchanged
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
 	switch {
 	case body.Generate != nil:
-		return &fwkrh.TokenizedPrompt{
-			PerPromptTokens:    [][]uint32{body.Generate.TokenIDs},
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
-		}, nil
+		}}}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Completions.Prompt.TokenIDs}}, nil
+		return fwkrh.NewTokenizedRequest(body.Completions.Prompt.TokenIDs), nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{body.Embeddings.Input.TokenIDs}}, nil
+		return fwkrh.NewTokenizedRequest(body.Embeddings.Input.TokenIDs), nil
 	}
 
 	// Chat and Anthropic messages fold multimodal placeholders into the stream
 	// and report them as features.
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
@@ -140,7 +235,10 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 			"mmFeatureCount", len(features),
 			"mmFeatures", features,
 		)
-		return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokens}, MultiModalFeatures: features}, nil
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokens,
+			MultiModalFeatures: features,
+		}}}, nil
 	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
@@ -151,16 +249,16 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{packBytes(raw)}}, nil
+	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
 }
 
-func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedPrompt, error) {
-	allTokenIDs := make([][]uint32, 0, len(req.Prompt.Strings))
+func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedRequest, error) {
+	prompts := make([]fwkrh.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
 		ids := packBytes([]byte(s))
-		allTokenIDs = append(allTokenIDs, ids)
+		prompts = append(prompts, fwkrh.PromptTokens{TokenIDs: ids})
 	}
-	return &fwkrh.TokenizedPrompt{PerPromptTokens: allTokenIDs}, nil
+	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
 }
 
 // estimateBytes serializes the user input of a non-chat request body to a byte
@@ -225,9 +323,11 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
-		case "input_audio", "audio_url":
+		case "audio_url":
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount(false, meta.audio))
+		case "input_audio":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(true, meta.audio))
 		}
 	}
 	return out, features
@@ -243,16 +343,8 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			out = append(out, raw...)
 		}
 	}
-	// The system field accepts only text -- a string or an array of text blocks.
-	// See https://docs.anthropic.com/en/api/messages#body-system.
-	if req.System.Raw != "" {
-		out = append(out, []byte(req.System.Raw)...)
-	} else {
-		for _, block := range req.System.Structured {
-			if block.Type == blockTypeText {
-				out = append(out, []byte(block.Text)...)
-			}
-		}
+	if sys := anthropicSystemText(req.System); sys != "" {
+		out = append(out, []byte(sys)...)
 	}
 	for _, msg := range req.Messages {
 		if msg.Role != "" {
@@ -266,9 +358,22 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case "image":
+			case blockTypeImage:
 				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
 					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
+				}
+			case blockTypeThinking:
+				out = append(out, []byte(block.Thinking)...)
+			case blockTypeToolUse:
+				out = append(out, []byte(block.ID)...)
+				out = append(out, []byte(block.Name)...)
+				out = append(out, block.Input...)
+			case blockTypeToolResult:
+				text, imageBlocks := anthropicToolResultContent(block)
+				out = append(out, []byte(text)...)
+				for _, img := range imageBlocks {
+					url := img.ImageURL.URL
+					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
 		}
@@ -285,7 +390,7 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 
 	sum := xxhash.Sum64String(content)
 	token := make([]byte, bytesPerToken)
-	binary.LittleEndian.PutUint32(token, uint32(sum))
+	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {
 		out = append(out, token...)
 	}
@@ -297,15 +402,6 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 		Length:   count,
 	})
 	return out, features
-}
-
-// assetPlaceholderCount derives a deterministic placeholder count (>= 1) from an
-// asset's byte length for modalities without a dedicated estimator.
-func assetPlaceholderCount(dataLen int) int {
-	if n := (dataLen + bytesPerToken - 1) / bytesPerToken; n > 0 {
-		return n
-	}
-	return 1
 }
 
 // packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).

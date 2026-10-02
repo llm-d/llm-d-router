@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -129,6 +130,10 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 // max(requestRatio, tokenRatio) and averaged across endpoints. Evaluating each
 // endpoint independently ensures an endpoint saturated on either dimension is
 // reflected in the pool signal.
+//
+// The inflight counts are read from the InFlightLoad attribute, which the
+// InFlightLoadProducer increments at dispatch and decrements on request
+// completion, so the signal already reflects completions with no scrape lag.
 func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	if len(endpoints) == 0 {
 		return 1.0
@@ -184,6 +189,7 @@ func ratio(inflight, capacity int64) float64 {
 //
 // It applies a relaxed limit (Capacity * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 // In "hybrid" mode an endpoint is dropped when either its request load or its token load reaches the limit.
+// If all endpoints are filtered out, the filter fails open and returns all endpoints.
 func (d *detector) Filter(
 	_ context.Context,
 	_ *fwksched.InferenceRequest,
@@ -203,6 +209,13 @@ func (d *detector) Filter(
 
 		if d.admits(load, reqLimit, tokLimit) {
 			filtered = append(filtered, e)
+		}
+	}
+	if len(filtered) == 0 {
+		for _, e := range endpoints {
+			if e != nil {
+				filtered = append(filtered, e)
+			}
 		}
 	}
 	return filtered

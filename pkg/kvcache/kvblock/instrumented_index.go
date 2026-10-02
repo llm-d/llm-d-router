@@ -26,10 +26,22 @@ type instrumentedIndex struct {
 	next Index
 }
 
-// NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict, and
-// Lookup.
+// instrumentedWalker carries the KeyWalker capability of the wrapped index.
+type instrumentedWalker struct {
+	*instrumentedIndex
+	walker KeyWalker
+}
+
+// NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
+// Lookup, and WalkKeys. The wrapper is a KeyWalker exactly when next is one.
+// Read metrics count and time Lookup and WalkKeys calls; contiguous-chain
+// hit metrics are recorded by the kvcache matcher.
 func NewInstrumentedIndex(next Index) Index {
-	return &instrumentedIndex{next: next}
+	m := &instrumentedIndex{next: next}
+	if walker, ok := next.(KeyWalker); ok {
+		return &instrumentedWalker{instrumentedIndex: m, walker: walker}
+	}
+	return m
 }
 
 func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
@@ -54,14 +66,19 @@ func (m *instrumentedIndex) Lookup(
 
 	metrics.LookupRequests.Inc()
 
-	pods, err := m.next.Lookup(ctx, requestKeys, podIdentifierSet)
-	if err != nil {
-		return nil, err
-	}
+	return m.next.Lookup(ctx, requestKeys, podIdentifierSet)
+}
 
-	go recordHitMetrics(pods)
+// WalkKeys forwards the walk as a lookup request.
+func (m *instrumentedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, found bool, entries []EntryRef) bool,
+) error {
+	timer := prometheus.NewTimer(metrics.LookupLatency)
+	defer timer.ObserveDuration()
 
-	return pods, nil
+	metrics.LookupRequests.Inc()
+
+	return m.walker.WalkKeys(ctx, requestKeys, visit)
 }
 
 func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
@@ -70,27 +87,4 @@ func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHa
 
 func (m *instrumentedIndex) Clear(ctx context.Context, podIdentifier string) error {
 	return m.next.Clear(ctx, podIdentifier)
-}
-
-func recordHitMetrics(keyToPods map[BlockHash][]PodEntry) {
-	podCount := make(map[string]int)
-	for _, pods := range keyToPods {
-		for _, p := range pods {
-			// First time seeing this pod in current lookup window.
-			// set to 1 because counts are local to this call (not cumulative over time).
-			// This ensures compatibility with sliding window attention (SWA) and cache eviction,
-			// where only recent hits within the active window are considered.
-			podCount[p.PodIdentifier]++
-		}
-	}
-
-	maxHit := 0
-	for _, count := range podCount {
-		if count > maxHit {
-			maxHit = count
-		}
-	}
-
-	metrics.MaxPodHitCount.Add(float64(maxHit))
-	metrics.LookupHits.Add(float64(maxHit))
 }

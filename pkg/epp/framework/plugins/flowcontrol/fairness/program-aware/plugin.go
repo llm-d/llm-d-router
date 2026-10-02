@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package programaware implements a flow-control fairness policy that
 // schedules per-program queues using a swappable scoring strategy.
 package programaware
@@ -30,8 +46,10 @@ type Config struct {
 
 	LASWeightService   float64 `json:"lasWeightService,omitempty"`
 	LASWeightHeadWait  float64 `json:"lasWeightHeadWait,omitempty"`
-	LASDecayFactor     float64 `json:"lasDecayFactor,omitempty"`
 	LASHalfLifeSeconds float64 `json:"lasHalfLifeSeconds,omitempty"`
+
+	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
+	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -41,8 +59,10 @@ func DefaultConfig() Config {
 		EvictionSweepSeconds: 300,
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
-		LASDecayFactor:       0.99997,
-		LASHalfLifeSeconds:   0,
+		LASHalfLifeSeconds:   60,
+
+		TurnPriorityTimeWeight:        0.05,
+		TurnPriorityInactivitySeconds: 120,
 	}
 }
 
@@ -59,11 +79,14 @@ func (c Config) validate() error {
 	if c.LASWeightHeadWait < 0 {
 		return fmt.Errorf("lasWeightHeadWait must be >= 0, got %v", c.LASWeightHeadWait)
 	}
-	if c.LASDecayFactor <= 0 || c.LASDecayFactor > 1 {
-		return fmt.Errorf("lasDecayFactor must be in (0, 1], got %v", c.LASDecayFactor)
-	}
 	if c.LASHalfLifeSeconds < 0 {
 		return fmt.Errorf("lasHalfLifeSeconds must be >= 0, got %v", c.LASHalfLifeSeconds)
+	}
+	if c.TurnPriorityTimeWeight < 0 {
+		return fmt.Errorf("turnPriorityTimeWeight must be >= 0, got %v", c.TurnPriorityTimeWeight)
+	}
+	if c.TurnPriorityInactivitySeconds < 0 {
+		return fmt.Errorf("turnPriorityInactivitySeconds must be >= 0, got %v", c.TurnPriorityInactivitySeconds)
 	}
 	return nil
 }
@@ -201,6 +224,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		return nil, nil //nolint:nilnil
 	}
 
+	// IterateQueues visits only active (non-empty) queues. That is sufficient: attained-service
+	// decay is time-anchored inside the strategy, so an idle program's service ages out without its
+	// queue being visited.
 	infos := make(map[string]QueueInfo)
 	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
 		if queue == nil {

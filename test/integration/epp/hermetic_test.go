@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -44,10 +46,11 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 const (
@@ -150,15 +153,15 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 						P(1, 10, 0.4, "foo", modelSQLLoraTarget), // Winner (Affinity overrides KV)
 						P(2, 10, 0.3, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3"),
+					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test3", prio(2)),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 				{
 					name: "passthrough parser success",
 					configText: `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: queue-scorer
@@ -192,8 +195,8 @@ dataLayer:
 					},
 					wantResponses: ExpectPassthroughRouteTo("192.168.1.2:8000", []byte("passthrough-parser")),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal("", "", prio(2))),
-						"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+						"llm_d_epp_request_total":   cleanMetric(metricReqTotal("", "", prio(2))),
+						"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 					},
 				},
 				{
@@ -204,9 +207,9 @@ dataLayer:
 						P(1, 0, 0.85, "foo"),
 						P(2, 10, 0.9, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSQLLoraTarget, "test4", prio(2)),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 					},
 				},
 
@@ -222,7 +225,7 @@ dataLayer:
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - error unmarshaling request bodyMap: invalid character 'o' in literal null (expecting 'u')",
+						"inference error: BadRequest - error extracting request body: invalid character 'o' in literal null (expecting 'u')",
 					),
 				},
 				{
@@ -241,10 +244,40 @@ dataLayer:
 						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
 						P(1, 4, 0.85, "foo", modelSheddableTarget),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelSheddableTarget, "test6", prio(0)),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSheddable, modelSheddableTarget, prio(0))),
 					},
+				},
+				{
+					name: "images edits: multipart body split across chunks, routed unchanged",
+					requests: integration.ReqRaw(
+						map[string]string{
+							":path":                      "/v1/images/edits",
+							"content-type":               "multipart/form-data; boundary=" + imagesEditsBoundary,
+							reqcommon.RequestIDHeaderKey: "test-request-id",
+						},
+						imagesEditsBody[:40],
+						imagesEditsBody[40:],
+					),
+					pods: []PodState{
+						P(0, 3, 0.2),
+						P(1, 0, 0.1), // Winner (Low Queue, Low KV)
+						P(2, 10, 0.2),
+					},
+					wantResponses: expectImagesEditsRouteTo("192.168.1.2:8000"),
+				},
+				{
+					name: "images edits: non-multipart content-type rejected",
+					requests: integration.ReqRaw(
+						map[string]string{
+							":path":        "/v1/images/edits",
+							"content-type": "application/json",
+						},
+						`{"model":"my-model","prompt":"edit"}`,
+					),
+					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
+						"inference error: BadRequest - images edits request must have a multipart/form-data content-type"),
 				},
 				{
 					name:     "no backend pods available",
@@ -274,7 +307,7 @@ dataLayer:
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Low Queue + Matches Subset)
 						P(2, 10, 0.2, "foo"),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
+					wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2", prio(2)),
 				},
 				{
 					name:     "subsetting: partial match",
@@ -284,7 +317,7 @@ dataLayer:
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 						P(2, 10, 0.2, "foo"), // Winner (Matches Subset, despite load)
 					},
-					wantResponses: ExpectRouteTo("192.168.1.3:8000", modelSQLLoraTarget, "test2"),
+					wantResponses: ExpectRouteTo("192.168.1.3:8000", modelSQLLoraTarget, "test2", prio(2)),
 				},
 				{
 					name:     "subsetting: no pods match",
@@ -293,8 +326,9 @@ dataLayer:
 						P(0, 0, 0.2, "foo"),
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_ServiceUnavailable,
-						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request"),
+					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 
 				// --- Request Modification (Passthrough & Rewrite) ---
@@ -313,9 +347,9 @@ dataLayer:
 					pods: []PodState{
 						P(0, 4, 0.2, "foo", "bar", modelSheddableTarget),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelDirect, "test6", prio(2)),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelDirect, modelDirect, prio(2))),
 					},
 				},
 				{
@@ -324,9 +358,9 @@ dataLayer:
 					pods: []PodState{
 						P(0, 0, 0.1, "foo", modelAfterRewrite),
 					},
-					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite"),
+					wantResponses: ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, "test-rewrite", prio(0)),
 					wantMetrics: map[string]string{
-						"inference_objective_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
+						"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelToBeWritten, modelAfterRewrite, prio(0))),
 					},
 					requiresCRDs: true,
 				},
@@ -392,34 +426,7 @@ dataLayer:
 						"",
 					),
 					// Labels are empty because we skipped the Request phase.
-					wantMetrics: map[string]string{
-						"inference_objective_input_tokens": cleanMetric(`
-              # HELP inference_objective_input_tokens [ALPHA] [Deprecated: Use llm_d_epp_request_input_tokens] Inference objective input token count distribution for requests in each model.
-              # TYPE inference_objective_input_tokens histogram
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1"} 0
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="64"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="128"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="256"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="512"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1024"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="2048"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="4096"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="8192"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="16384"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="32778"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="65536"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="131072"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="262144"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="524288"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="1.048576e+06"} 1
-              inference_objective_input_tokens_bucket{model_name="",target_model_name="",le="+Inf"} 1
-              inference_objective_input_tokens_sum{model_name="",target_model_name=""} 7
-              inference_objective_input_tokens_count{model_name="",target_model_name=""} 1
-              `),
-					},
+					wantMetrics: map[string]string{},
 				},
 			}
 			tests := append(commonTestCases(prio), hermeticTests...)
@@ -470,6 +477,12 @@ dataLayer:
 					responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 					require.NoError(t, err)
 
+					if len(tc.wantSpans) > 0 {
+						setHeaders := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
+						require.NotEmpty(t, headerValue(setHeaders, "traceparent"), "expected traceparent when tracing is enabled")
+						removeW3CTraceContextHeaders(responses)
+					}
+
 					if diff := cmp.Diff(tc.wantResponses, responses,
 						protocmp.Transform(),
 						protocmp.SortRepeated(func(a, b *configPb.HeaderValueOption) bool {
@@ -504,6 +517,82 @@ dataLayer:
 				})
 			}
 		})
+	}
+}
+
+const imagesEditsBoundary = "imagesEditsBoundary"
+
+// imagesEditsBody is a multipart /v1/images/edits request carrying form fields and a file part.
+var imagesEditsBody = strings.Join([]string{
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="model"`,
+	"",
+	modelMyModel,
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="prompt"`,
+	"",
+	"make the sky blue",
+	"--" + imagesEditsBoundary,
+	`Content-Disposition: form-data; name="image"; filename="cat.png"`,
+	"Content-Type: image/png",
+	"",
+	"raw-png-bytes",
+	"--" + imagesEditsBoundary + "--",
+	"",
+}, "\r\n")
+
+// expectImagesEditsRouteTo asserts the multipart request is routed to endpoint with its body
+// forwarded unchanged: multipart payloads are raw bytes, so no model rewrite is applied.
+func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
+	return integration.NewRequestBufferedResponse(
+		endpoint,
+		[]byte(imagesEditsBody),
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: ":path", RawValue: []byte("/v1/images/edits"),
+		}},
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: "content-type", RawValue: []byte("multipart/form-data; boundary=" + imagesEditsBoundary),
+		}},
+		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+			Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id"),
+		}},
+	)
+}
+
+func removeW3CTraceContextHeaders(responses []*extProcPb.ProcessingResponse) {
+	for _, resp := range responses {
+		if mutation := resp.GetRequestHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+		if mutation := resp.GetResponseHeaders().GetResponse().GetHeaderMutation(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+		if mutation := resp.GetImmediateResponse().GetHeaders(); mutation != nil {
+			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
+		}
+	}
+}
+
+func filterOutW3CTraceContextHeaders(headers []*configPb.HeaderValueOption) []*configPb.HeaderValueOption {
+	if len(headers) == 0 {
+		return headers
+	}
+	filtered := make([]*configPb.HeaderValueOption, 0, len(headers))
+	for _, h := range headers {
+		if isW3CTraceContextHeader(h.GetHeader().GetKey()) {
+			continue
+		}
+		filtered = append(filtered, h)
+	}
+	return filtered
+}
+
+func isW3CTraceContextHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "traceparent", "tracestate", "baggage":
+		return true
+	default:
+		return false
 	}
 }
 

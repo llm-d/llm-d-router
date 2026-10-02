@@ -1,4 +1,4 @@
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -15,9 +15,6 @@ plugins:
           condition: "has(usage.completion_tokens)"
 schedulingProfiles:
   - name: default
-    plugins:
-      - pluginRef: openai-parser
-      - pluginRef: total-tokens-cost-reporter
 requestHandler:
   parsers:
   - pluginRef: openai-parser

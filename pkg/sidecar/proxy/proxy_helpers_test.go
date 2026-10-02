@@ -1,0 +1,401 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package proxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"maps"
+	"net/http"
+	"net/http/httptest"
+
+	"github.com/go-logr/logr/funcr"
+	. "github.com/onsi/ginkgo/v2" // nolint:revive
+	. "github.com/onsi/gomega"    // nolint:revive
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+)
+
+func postBody(body string) *http.Request {
+	return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+}
+
+var _ = Describe("bodyAsJSON", func() {
+	It("returns the raw bytes and the parsed object", func() {
+		raw, parsed, err := bodyAsJSON(postBody(`{"model":"m","max_tokens":5}`))
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(raw)).To(Equal(`{"model":"m","max_tokens":5}`))
+		Expect(parsed).To(HaveKeyWithValue("model", json.RawMessage(`"m"`)))
+		Expect(parsed).To(HaveKeyWithValue("max_tokens", BeNumerically("==", 5)))
+	})
+
+	It("accepts an empty JSON object", func() {
+		_, parsed, err := bodyAsJSON(postBody(`{}`))
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(parsed).ToNot(BeNil())
+		Expect(parsed).To(BeEmpty())
+	})
+
+	// A parsed body is copied and written into by every connector. A nil map
+	// accepts no writes, so the parser must never hand one back.
+	DescribeTable("rejects a body that is not a JSON object",
+		func(body string) {
+			_, parsed, err := bodyAsJSON(postBody(body))
+
+			Expect(err).To(MatchError(errInvalidJSON))
+			Expect(parsed).To(BeNil())
+		},
+		Entry("null", `null`),
+		Entry("array", `[]`),
+		Entry("string", `"text"`),
+		Entry("number", `7`),
+		Entry("boolean", `true`),
+		Entry("empty body", ``),
+		Entry("malformed", `{"model":`),
+	)
+
+	It("wraps a read failure without marking it invalid JSON", func() {
+		r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+
+		_, parsed, err := bodyAsJSON(r)
+
+		Expect(err).To(MatchError(ContainSubstring("failed to read request body")))
+		Expect(err).ToNot(MatchError(errInvalidJSON))
+		Expect(parsed).To(BeNil())
+	})
+
+	It("returns a map that callers can clone and write into", func() {
+		_, parsed, err := bodyAsJSON(postBody(`{"model":"m"}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		clone := maps.Clone(parsed)
+		Expect(func() { clone[reqcommon.FieldKVTransferParams] = map[string]any{} }).ToNot(Panic())
+		Expect(parsed).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
+	})
+})
+
+var _ = Describe("readJSONBody", func() {
+	var proxy *Server
+
+	BeforeEach(func() {
+		proxy = NewProxy(Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2})
+	})
+
+	It("reports success and returns the parsed body", func() {
+		w := httptest.NewRecorder()
+
+		raw, parsed, ok := proxy.readJSONBody(postBody(`{"model":"m"}`), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(string(raw)).To(Equal(`{"model":"m"}`))
+		Expect(parsed).To(HaveKeyWithValue("model", json.RawMessage(`"m"`)))
+		Expect(w.Code).To(Equal(http.StatusOK))
+	})
+
+	It("answers a null body with a vLLM-shaped 400", func() {
+		w := httptest.NewRecorder()
+
+		_, parsed, ok := proxy.readJSONBody(postBody(`null`), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(parsed).To(BeNil())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring("BadRequestError"))
+		Expect(w.Body.String()).To(ContainSubstring("is not a JSON object"))
+	})
+
+	It("answers a read failure with a vLLM-shaped 400", func() {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+
+		_, _, ok := proxy.readJSONBody(r, w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring("BadRequestError"))
+		Expect(w.Body.String()).To(ContainSubstring("failed to read request body"))
+		Expect(w.Body.String()).To(ContainSubstring("read failed"))
+	})
+
+	// A gateway unmarshals the sidecar 400 as a vLLM error. Both refusal paths
+	// must therefore answer with that envelope, not with a bare Go string.
+	DescribeTable("answers every refusal with a parseable vLLM error envelope",
+		func(newRequest func() *http.Request) {
+			w := httptest.NewRecorder()
+
+			_, _, ok := proxy.readJSONBody(newRequest(), w)
+			Expect(ok).To(BeFalse())
+
+			expectErrorEnvelope(w.Body.Bytes())
+		},
+		Entry("null body", func() *http.Request { return postBody(`null`) }),
+		Entry("malformed body", func() *http.Request { return postBody(`{"model":`) }),
+		Entry("read failure", func() *http.Request {
+			return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+		}),
+	)
+
+	// A client that hangs up before reading the refusal leaves nowhere to send
+	// it, so the error goes to the log instead of the wire.
+	It("logs the refusal when the response cannot be written", func() {
+		logged := captureLogs(proxy, 0)
+
+		_, _, ok := proxy.readJSONBody(postBody(`null`), errWriter{})
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
+	})
+
+	// The 400 reaches only the client, so the reason is also logged for operators.
+	DescribeTable("logs the refusal reason at debug level",
+		func(newRequest func() *http.Request, reason string) {
+			logged := captureLogs(proxy, logging.DEBUG)
+
+			_, _, ok := proxy.readJSONBody(newRequest(), httptest.NewRecorder())
+
+			Expect(ok).To(BeFalse())
+			Expect(*logged).To(ContainElement(And(ContainSubstring("invalid request body"), ContainSubstring(reason))))
+		},
+		Entry("null body", func() *http.Request { return postBody(`null`) }, "is not a JSON object"),
+		Entry("read failure", func() *http.Request {
+			return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+		}, "read failed"),
+	)
+
+	It("does not log the refusal reason below debug level", func() {
+		logged := captureLogs(proxy, logging.VERBOSE)
+
+		_, _, ok := proxy.readJSONBody(postBody(`null`), httptest.NewRecorder())
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
+	})
+
+	// The stateful-fields check is gated on the request path, not on which
+	// fields happen to be present, so this proves the gate itself: the same
+	// body is refused on the Responses path and forwarded elsewhere.
+	statefulBody := `{"model":"m","previous_response_id":"resp-123","conversation":"conv-123","store":true,"background":true}`
+
+	It("rejects unsupported Responses fields on the Responses path", func() {
+		w := httptest.NewRecorder()
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldPreviousResponseID))
+	})
+
+	It("leaves those fields untouched on the chat-completions path", func() {
+		w := httptest.NewRecorder()
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader([]byte(statefulBody))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldPreviousResponseID))
+		Expect(parsed).To(HaveKey(reqcommon.FieldConversation))
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
+
+	// input stays raw in parsed, so the file_id walk decodes the array itself.
+	It("rejects a file_id nested in an input content part", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]}]}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
+	})
+
+	// background is the only stateful field here on purpose: the helper returns
+	// on the first field it finds, so a body that also carries
+	// previous_response_id would pass this gate on a presence check alone and
+	// never exercise the bool decode.
+	It("rejects background when it is the only stateful field", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":true}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldBackground))
+	})
+
+	It("forwards background false, which is the default", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":"hi","background":false}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldBackground))
+	})
+
+	// decodeRequestBody leaves input raw, so the file_id walk decodes the array
+	// itself. A number outside float64 range must not stop that walk: the model
+	// server parses the same body, so the file_id beside it has to be found.
+	It("finds a file_id beside an out-of-range number", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-123"}]},1e999]}`
+
+		_, _, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		Expect(w.Body.String()).To(ContainSubstring(reqcommon.FieldFileID))
+	})
+
+	It("forwards an input carrying an out-of-range number and no file_id", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}],"pinned":1e999}]}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue(), "body=%s", w.Body.String())
+		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
+	})
+
+	It("forwards an input array with no file_id", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+
+		_, parsed, ok := proxy.readJSONBody(httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(body))), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(HaveKey(reqcommon.FieldInput))
+	})
+
+	// Unlike a malformed body, this refusal is the router overriding a request
+	// the model server would have served, so an operator has to see it without
+	// raising verbosity first.
+	It("logs the Responses refusal at default verbosity", func() {
+		logged := captureLogs(proxy, 0)
+
+		_, _, ok := proxy.readJSONBody(
+			httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), httptest.NewRecorder())
+
+		Expect(ok).To(BeFalse())
+		Expect(*logged).To(ContainElement(And(
+			ContainSubstring("rejecting unsupported responses field"),
+			ContainSubstring(reqcommon.FieldPreviousResponseID),
+		)))
+	})
+})
+
+// captureLogs points the proxy logger at the returned slice, keeping entries up
+// to the given verbosity.
+func captureLogs(proxy *Server, verbosity int) *[]string {
+	logged := &[]string{}
+	proxy.logger = funcr.New(func(prefix, args string) {
+		*logged = append(*logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: verbosity})
+	return logged
+}
+
+// expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and
+// returns its message, so a caller can additionally check the refusal reason.
+func expectErrorEnvelope(body []byte) string {
+	GinkgoHelper()
+
+	var got errorResponse
+	Expect(json.Unmarshal(body, &got)).To(Succeed())
+	Expect(got.Object).To(Equal("error"))
+	Expect(got.Type).To(Equal("BadRequestError"))
+	Expect(got.Code).To(Equal(http.StatusBadRequest))
+	Expect(got.Message).ToNot(BeEmpty())
+
+	return got.Message
+}
+
+// errWriter accepts a status code and then fails the body write, standing in
+// for a client that hangs up before it reads the response.
+type errWriter struct{}
+
+func (errWriter) Header() http.Header       { return http.Header{} }
+func (errWriter) WriteHeader(int)           {}
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+var _ http.ResponseWriter = errWriter{}
+
+// errReader fails every read, standing in for a client that drops the
+// connection mid-body.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+var _ io.Reader = errReader{}
+
+var _ = Describe("decodeRequestBody", func() {
+	It("decodes inspected fields and keeps the rest as raw bytes", func() {
+		tools := `[{"type":"function","function":{"parameters":{"properties":{"b":{},"a":{}}}}}]`
+		parsed, err := decodeRequestBody([]byte(`{"stream":true,"max_tokens":5,"tools":` + tools + `}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(parsed[reqcommon.FieldStream]).To(BeTrue())
+		Expect(parsed[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 5))
+		Expect(parsed["tools"]).To(Equal(json.RawMessage(tools)))
+
+		out, err := json.Marshal(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(out)).To(ContainSubstring(`"tools":` + tools))
+	})
+
+	It("rejects non-object bodies", func() {
+		_, err := decodeRequestBody([]byte(`[1,2]`))
+		Expect(err).To(HaveOccurred())
+
+		_, err = decodeRequestBody([]byte(`null`))
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("keeps messages raw and decodes them on use", func() {
+		messages := `[{"role":"user","content":"Hi"}]`
+		parsed, err := decodeRequestBody([]byte(`{"messages":` + messages + `}`))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(parsed[reqcommon.FieldMessages]).To(Equal(json.RawMessage(messages)))
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(HaveLen(1))
+	})
+
+	It("treats a null messages field as absent", func() {
+		parsed, err := decodeRequestBody([]byte(`{"messages":null}`))
+		Expect(err).ToNot(HaveOccurred())
+
+		decoded, err := requestMessages(parsed)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(decoded).To(BeNil())
+	})
+
+	It("reports a messages field that is not an array", func() {
+		_, err := requestMessages(map[string]any{reqcommon.FieldMessages: json.RawMessage(`{}`)})
+		Expect(err).To(HaveOccurred())
+
+		_, err = requestMessages(map[string]any{reqcommon.FieldMessages: 5})
+		Expect(err).To(HaveOccurred())
+	})
+})

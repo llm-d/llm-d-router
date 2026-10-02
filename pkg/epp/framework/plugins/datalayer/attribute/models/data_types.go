@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,8 +35,11 @@ type ModelDataCollection []ModelData
 
 // ModelData defines model's data returned from /v1/models API
 type ModelData struct {
-	ID     string `json:"id"`
-	Parent string `json:"parent,omitempty"`
+	ID      string `json:"id"`
+	Object  string `json:"object,omitempty"`
+	Created int64  `json:"created,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+	Parent  string `json:"parent,omitempty"`
 }
 
 // String returns a string representation of the model info

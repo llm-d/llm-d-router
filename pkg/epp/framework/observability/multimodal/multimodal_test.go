@@ -109,8 +109,10 @@ func TestSpanAttributes(t *testing.T) {
 func requestWith(features ...fwkrh.MultiModalFeature) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				MultiModalFeatures: features,
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					MultiModalFeatures: features,
+				}},
 			},
 		},
 	}

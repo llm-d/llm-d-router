@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -169,6 +169,43 @@ func TestParserRegistryWithPassthrough(t *testing.T) {
 			}
 			if parser.TypedName().Name != tt.wantParser {
 				t.Errorf("Resolve(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+			}
+		})
+	}
+}
+
+func TestParserRegistryLongestSuffixWins(t *testing.T) {
+	sglang := &testParser{name: "sglang", paths: []string{"generate"}}
+	vllm := &testParser{name: "vllm", paths: []string{"inference/v1/generate"}}
+
+	// SGLang registered first — vLLM must still win on /inference/v1/generate.
+	registry := NewParserRegistry([]fwkrh.Parser{sglang, vllm}, logr.Discard())
+
+	tests := []struct {
+		name        string
+		requestPath string
+		wantParser  string
+	}{
+		{
+			name:        "longer suffix wins regardless of registration order",
+			requestPath: "/inference/v1/generate",
+			wantParser:  "vllm",
+		},
+		{
+			name:        "short suffix still matches its own path",
+			requestPath: "/generate",
+			wantParser:  "sglang",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser, err := registry.Resolve(tt.requestPath)
+			if err != nil {
+				t.Fatalf("Resolve(%q) unexpected error: %v", tt.requestPath, err)
+			}
+			if parser.TypedName().Name != tt.wantParser {
+				t.Errorf("Resolve(%q) = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
 			}
 		})
 	}

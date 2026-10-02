@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +18,15 @@ limitations under the License.
 package request
 
 import "strings"
+
+const (
+	// HeaderContentType names the response header whose value selects a body
+	// reader. Envoy lowercases header keys, and parsers fold the case anyway.
+	HeaderContentType = "content-type"
+	// MediaTypeEventStream is the base media type for Server-Sent Events, without
+	// the optional parameters a server may append (for example "; charset=utf-8").
+	MediaTypeEventStream = "text/event-stream"
+)
 
 // GetRequestPath extracts the request path from headers with fallback priority.
 // Query parameters are stripped because the path is used only for parser routing.

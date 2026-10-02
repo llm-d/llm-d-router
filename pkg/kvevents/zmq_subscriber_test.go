@@ -72,7 +72,7 @@ func buildDistinctBlockStoredPayload(t *testing.T, blockHash uint64) []byte {
 
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(blockHash) + uint32(i) + 1 // #nosec G115 -- test data is small
+		tokens[i] = uint32(blockHash) + uint32(i) + 1 //#nosec G115 -- test data is small
 	}
 	return buildEventPayload(t, []any{
 		string(kvevents.EventTypeBlockStored),
@@ -97,10 +97,10 @@ func buildBlockStoredEventBatchPayload(t *testing.T, blockHashBase uint64, dataP
 	tokens := make([]uint32, 64)
 	blockHashes := make([]any, 4)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+		tokens[i] = uint32(i + 1) //#nosec G115 -- test data
 	}
 	for i := range blockHashes {
-		blockHashes[i] = blockHashBase + uint64(i) // #nosec G115 -- test data
+		blockHashes[i] = blockHashBase + uint64(i) //#nosec G115 -- test data
 	}
 
 	blockStored := []any{
@@ -144,11 +144,21 @@ type replayMessage struct {
 	payload []byte
 }
 
+const (
+	testReplayAttemptIdleTimeout = 2 * time.Second
+	testMaxNoProgressAttempts    = 3
+)
+
 type replayBuffer struct {
-	mu       sync.RWMutex
-	messages []replayMessage
-	fail     atomic.Bool
-	requests atomic.Int32
+	mu           sync.RWMutex
+	messages     []replayMessage
+	fail         atomic.Bool
+	partialOnce  atomic.Bool
+	partialAfter int
+	messageDelay time.Duration
+	silent       bool
+	requests     atomic.Int32
+	lastStartSeq atomic.Uint64
 }
 
 func (b *replayBuffer) set(messages ...replayMessage) {
@@ -166,41 +176,65 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 	require.NoError(t, router.Listen(endpoint))
 	t.Cleanup(func() { router.Close() })
 
+	// A send failure means only that this client hung up, so it abandons the
+	// response rather than the loop: subscribers close a replay socket as soon
+	// as their attempt idle timer fires, and later requests must still be served.
+	serve := func(msg zmq4.Msg) {
+		buffer.requests.Add(1)
+		if len(msg.Frames) != 3 {
+			return
+		}
+		clientID := msg.Frames[0]
+		if buffer.fail.Load() {
+			_ = router.Send(zmq4.NewMsgFrom(clientID, []byte{}, []byte("malformed")))
+			return
+		}
+
+		startSeq := binary.BigEndian.Uint64(msg.Frames[2])
+		buffer.lastStartSeq.Store(startSeq)
+		buffer.mu.RLock()
+		messages := append([]replayMessage(nil), buffer.messages...)
+		messageDelay := buffer.messageDelay
+		silent := buffer.silent
+		partialAfter := buffer.partialAfter
+		buffer.mu.RUnlock()
+		if silent {
+			return
+		}
+		partial := buffer.partialOnce.CompareAndSwap(true, false)
+		sent := 0
+		for _, replay := range messages {
+			if replay.seq < startSeq {
+				continue
+			}
+			if messageDelay > 0 {
+				time.Sleep(messageDelay)
+			}
+			if err := router.Send(zmq4.NewMsgFrom(
+				clientID, []byte{}, topic, seqFrame(replay.seq), replay.payload,
+			)); err != nil {
+				return
+			}
+			sent++
+			if partial && sent == partialAfter {
+				break
+			}
+		}
+		if partial && sent == partialAfter {
+			return
+		}
+		_ = router.Send(zmq4.NewMsgFrom(
+			clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
+		))
+	}
+
 	go func() {
 		for {
 			msg, err := router.Recv()
 			if err != nil {
 				return
 			}
-			buffer.requests.Add(1)
-			if len(msg.Frames) != 3 {
-				continue
-			}
-			clientID := msg.Frames[0]
-			if buffer.fail.Load() {
-				_ = router.Send(zmq4.NewMsgFrom(clientID, []byte{}, []byte("malformed")))
-				continue
-			}
-
-			startSeq := binary.BigEndian.Uint64(msg.Frames[2])
-			buffer.mu.RLock()
-			messages := append([]replayMessage(nil), buffer.messages...)
-			buffer.mu.RUnlock()
-			for _, replay := range messages {
-				if replay.seq < startSeq {
-					continue
-				}
-				if err := router.Send(zmq4.NewMsgFrom(
-					clientID, []byte{}, topic, seqFrame(replay.seq), replay.payload,
-				)); err != nil {
-					return
-				}
-			}
-			if err := router.Send(zmq4.NewMsgFrom(
-				clientID, []byte{}, []byte{}, seqFrame(math.MaxUint64), []byte{},
-			)); err != nil {
-				return
-			}
+			serve(msg)
 		}
 	}()
 
@@ -271,7 +305,8 @@ func TestZMQSubscriber_ReceivesMessages(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	// Start subscriber — remote=false means it binds (Listen).
@@ -313,7 +348,8 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	subManager := kvevents.NewSubscriberManager(pool)
@@ -349,7 +385,7 @@ func TestZMQSubscribers_SameTopicUsesServingEndpointIdentity(t *testing.T) {
 	}
 	tokens := make([]uint32, 64)
 	for i := range tokens {
-		tokens[i] = uint32(i + 1) // #nosec G115 -- test data
+		tokens[i] = uint32(i + 1) //#nosec G115 -- test data
 	}
 	keys, err := tokenProcessor.TokensToKVBlockKeys(
 		kvblock.EmptyBlockHash, tokens, "TestModel", nil)
@@ -394,7 +430,8 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	// Pick an available ephemeral port to avoid conflicts with parallel tests or CI.
@@ -440,6 +477,19 @@ type replayHarness struct {
 }
 
 func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replayHarness {
+	return newReplayHarnessWithBehavior(t, messages, fail, 0, 0, false)
+}
+
+func newReplayHarnessWithPartial(
+	t *testing.T, messages []replayMessage, fail bool, partialAfter int,
+) *replayHarness {
+	return newReplayHarnessWithBehavior(t, messages, fail, partialAfter, 0, false)
+}
+
+func newReplayHarnessWithBehavior(
+	t *testing.T, messages []replayMessage, fail bool, partialAfter int,
+	messageDelay time.Duration, silent bool,
+) *replayHarness {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 
@@ -447,7 +497,8 @@ func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replay
 	require.NoError(t, err)
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
 	pool.Start(ctx)
 
 	pubEndpoint := availableEndpoint(t, ctx)
@@ -455,6 +506,12 @@ func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replay
 	buffer := startReplayBuffer(t, ctx, replayEndpoint)
 	buffer.set(messages...)
 	buffer.fail.Store(fail)
+	buffer.mu.Lock()
+	buffer.partialAfter = partialAfter
+	buffer.messageDelay = messageDelay
+	buffer.silent = silent
+	buffer.mu.Unlock()
+	buffer.partialOnce.Store(partialAfter > 0)
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
@@ -479,6 +536,96 @@ func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replay
 		pub:    pub,
 		topic:  []byte("kv@10.0.0.1:8000@TestModel"),
 	}
+}
+
+func TestZMQSubscriber_ProactiveReplayResumesAfterPartialResponse(t *testing.T) {
+	h := newReplayHarnessWithPartial(t, []replayMessage{
+		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+	}, false, 2)
+
+	require.Eventually(t, func() bool { return h.buffer.requests.Load() == 2 },
+		5*time.Second, 50*time.Millisecond, "partial replay should resume on a new request")
+	require.Equal(t, uint64(2), h.buffer.lastStartSeq.Load())
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func TestZMQSubscriber_ProactiveReplayAcceptsEndAfterProgress(t *testing.T) {
+	h := newReplayHarnessWithPartial(t, []replayMessage{
+		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+	}, false, 3)
+
+	require.Eventually(t, func() bool { return h.buffer.requests.Load() == 2 },
+		5*time.Second, 50*time.Millisecond, "replay should request the terminal marker after interruption")
+	require.Equal(t, uint64(3), h.buffer.lastStartSeq.Load())
+	time.Sleep(300 * time.Millisecond)
+	key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	require.NoError(t, err)
+	hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
+	require.NoError(t, err)
+	require.Len(t, hits[key], 1, "terminal marker after replay progress must preserve the rebuilt index")
+}
+
+func TestZMQSubscriber_ProactiveReplayRejectsTruncatedHistory(t *testing.T) {
+	h := newReplayHarness(t, []replayMessage{
+		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+	}, false)
+
+	time.Sleep(300 * time.Millisecond)
+	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+	require.Error(t, err, "replay starting after the requested sequence must not populate the index")
+}
+
+func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {
+	h := newReplayHarness(t, []replayMessage{
+		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+	}, false)
+
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool {
+		key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		if err != nil {
+			return false
+		}
+		hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
+		return err == nil && len(hits[key]) == 0
+	}, 5*time.Second, 50*time.Millisecond, "incomplete replay must clear partial index state")
+}
+
+func TestZMQSubscriber_ProactiveReplayUsesInactivityDeadline(t *testing.T) {
+	started := time.Now()
+	h := newReplayHarnessWithBehavior(t, []replayMessage{
+		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
+		{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+		{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+	}, false, 0, 1100*time.Millisecond, false)
+
+	require.Eventually(t, func() bool {
+		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond)
+	require.Greater(t, time.Since(started), testReplayAttemptIdleTimeout)
+	require.Equal(t, int32(1), h.buffer.requests.Load(), "progressing replay must not reconnect")
+}
+
+func TestZMQSubscriber_ProactiveReplayStopsAfterNoProgress(t *testing.T) {
+	h := newReplayHarnessWithBehavior(t, nil, false, 0, 0, true)
+
+	require.Eventually(t, func() bool {
+		return h.buffer.requests.Load() == testMaxNoProgressAttempts
+	}, 8*time.Second, 50*time.Millisecond)
+	time.Sleep(testReplayAttemptIdleTimeout + 200*time.Millisecond)
+	require.Equal(t, int32(testMaxNoProgressAttempts), h.buffer.requests.Load())
 }
 
 func (h *replayHarness) send(t *testing.T, seq uint64, payload []byte) {

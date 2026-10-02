@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package routing contains routing constants and utilities shared between
 // the EPP/Inference-Scheduler and the Routing Sidecar.
 //
@@ -48,19 +64,35 @@ func StripScheme(endpoint string) string {
 	return u.Host
 }
 
-// IsConditionalDecode reports whether the request headers carry the
-// "Prefer: if-available" preference (see PreferIfAvailable for semantics).
+// HasPreference reports whether the request headers carry the given Prefer
+// token.
 //
-// Per RFC 7240 the Prefer header value is a comma-separated list of preference
-// tokens, each with optional ";"-delimited parameters. This function matches
-// the bare "if-available" token case-insensitively, ignoring surrounding
-// whitespace, parameters, and any other tokens that may appear alongside it.
-func IsConditionalDecode(headers map[string]string) bool {
-	for _, pref := range strings.Split(headers[PreferHeader], ",") {
+// Per RFC 7240 the Prefer header value is a comma-separated list of
+// preferences. Each preference is a token with an optional "=" value and
+// optional ";"-delimited parameters. This function matches the token
+// case-insensitively, ignoring whitespace around both the parsed token and
+// want, the value, parameters, and any other tokens that may appear alongside
+// it. For example, "return=minimal" matches the token "return". A want that is
+// empty or only whitespace always returns false. Quoted-string values that
+// contain "," or ";" are not supported.
+func HasPreference(headers map[string]string, want string) bool {
+	prefer := headers[PreferHeader]
+	want = strings.TrimSpace(want)
+	if prefer == "" || want == "" {
+		return false
+	}
+	for pref := range strings.SplitSeq(prefer, ",") {
 		token, _, _ := strings.Cut(pref, ";")
-		if strings.EqualFold(strings.TrimSpace(token), PreferIfAvailable) {
+		token, _, _ = strings.Cut(token, "=")
+		if strings.EqualFold(strings.TrimSpace(token), want) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsConditionalDecode reports whether the request headers carry the
+// "Prefer: if-available" preference (see PreferIfAvailable for semantics).
+func IsConditionalDecode(headers map[string]string) bool {
+	return HasPreference(headers, PreferIfAvailable)
 }

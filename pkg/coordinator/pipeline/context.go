@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -34,7 +36,12 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile": true,
+	"epp-profile":                         true,
+	reqcommon.RevisionDecisionIDHeaderKey: true,
+}
+
+func isForwardableHeader(name string) bool {
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
@@ -44,30 +51,80 @@ var internalForwardingHeaders = map[string]bool{
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
 	out := make(map[string]string)
-	if rc.OriginalHeaders == nil {
-		return out
-	}
 	for key, vals := range rc.OriginalHeaders {
 		lower := strings.ToLower(key)
-		if hopByHopHeaders[lower] || internalForwardingHeaders[lower] || lower == "content-length" || lower == "host" || lower == "content-type" {
+		if !isForwardableHeader(lower) {
+			continue
+		}
+		if _, reserved := rc.forwardResponseHeaders[lower]; reserved {
 			continue
 		}
 		if len(vals) > 0 {
 			out[lower] = vals[0]
 		}
 	}
+	for key, value := range rc.downstreamHeaders {
+		if !isForwardableHeader(key) {
+			continue
+		}
+		out[key] = value
+	}
+	if rc.RevisionDecisionID != "" {
+		out[reqcommon.RevisionDecisionIDHeaderKey] = rc.RevisionDecisionID
+	}
 	return out
+}
+
+// CaptureResponseHeaders records configured response headers for subsequent
+// pipeline steps. When a step has multiple responses, each response contributes
+// its first value and the most frequent value is recorded. Ties are resolved by
+// the order of the responses. Unconfigured headers are ignored. This method
+// must not be called concurrently.
+func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
+	for name := range rc.forwardResponseHeaders {
+		counts := make(map[string]int)
+		order := make([]string, 0)
+		for _, headers := range responses {
+			values := headers.Values(name)
+			if len(values) == 0 {
+				continue
+			}
+			value := values[0]
+			if value == "" {
+				continue
+			}
+			if counts[value] == 0 {
+				order = append(order, value)
+			}
+			counts[value]++
+		}
+
+		if len(order) == 0 {
+			continue
+		}
+		winner := order[0]
+		for _, value := range order[1:] {
+			if counts[value] > counts[winner] {
+				winner = value
+			}
+		}
+		if rc.downstreamHeaders == nil {
+			rc.downstreamHeaders = make(map[string]string)
+		}
+		rc.downstreamHeaders[name] = winner
+	}
 }
 
 // RequestContext carries all state for a single request through the pipeline.
 type RequestContext struct {
-	RequestID       string
-	OriginalPath    string
-	OriginalHeaders http.Header
-	OriginalBody    []byte
-	Body            map[string]any
-	Model           string
-	Stream          bool
+	RequestID          string
+	RevisionDecisionID string
+	OriginalPath       string
+	OriginalHeaders    http.Header
+	OriginalBody       []byte
+	Body               map[string]any
+	Model              string
+	Stream             bool
 
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first
@@ -85,7 +142,9 @@ type RequestContext struct {
 	// KVTransferParams carries the prefill pod's KV-cache transfer hints to the
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
-	KVTransferParams map[string]any
+	KVTransferParams       map[string]any
+	forwardResponseHeaders map[string]struct{}
+	downstreamHeaders      map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter

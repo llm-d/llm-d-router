@@ -24,18 +24,22 @@ spec:
         - --config
         - /etc/coordinator/coordinator.yaml
         ports:
-        - name: http
+        - name: https
           containerPort: 8080
+        - name: metrics
+          containerPort: 9090
         livenessProbe:
           httpGet:
             path: /healthz
             port: 8080
+            scheme: HTTPS
           initialDelaySeconds: 5
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8080
+            scheme: HTTPS
           initialDelaySeconds: 5
           periodSeconds: 10
         volumeMounts:
@@ -57,7 +61,11 @@ spec:
     app: llm-d-coordinator
   type: ClusterIP
   ports:
-  - name: http
+  - name: https
     protocol: TCP
     port: 8080
     targetPort: 8080
+  - name: metrics
+    protocol: TCP
+    port: 9090
+    targetPort: 9090

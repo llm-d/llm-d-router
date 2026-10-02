@@ -1,4 +1,4 @@
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: queue-scorer
@@ -14,5 +14,6 @@ schedulingProfiles:
       - pluginRef: prefix-cache-scorer
       - pluginRef: lora-affinity-scorer
 requestHandler:
+  propagatePriority: true
   parsers:
   - pluginRef: openai-parser

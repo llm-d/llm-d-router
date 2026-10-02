@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +27,7 @@ import (
 )
 
 // RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
-// reason a request was dropped by flow control.
+// reason the EPP dropped a request.
 const RequestDroppedReasonHeaderKey = "x-llm-d-request-dropped-reason"
 
 // RequestDroppedReason is the reason a request was rejected before dispatch or evicted after dispatch.
@@ -39,6 +40,7 @@ const (
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
+	RequestDroppedReasonInternal         RequestDroppedReason = "rejected-internal"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().

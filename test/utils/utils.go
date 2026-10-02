@@ -1,5 +1,6 @@
 /*
 Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -349,7 +350,7 @@ func ApplyYAMLFile(testConfig *TestConfig, filePath string, nsName string) []str
 // ReadYaml is a helper function to read in K8S YAML files and split by the --- separator
 func ReadYaml(filePath string) []string {
 	ginkgo.By("Reading YAML file: " + filePath)
-	yamlBytes, err := os.ReadFile(filePath)
+	yamlBytes, err := os.ReadFile(filePath) //#nosec G304 -- test helper reads a caller-provided fixture path
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Split multiple docs, if needed

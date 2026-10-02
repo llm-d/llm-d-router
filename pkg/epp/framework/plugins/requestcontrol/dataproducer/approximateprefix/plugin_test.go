@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -53,7 +54,7 @@ func disableMinBlockSizeClamp(t *testing.T) {
 // tokenizedBody returns a request body carrying only a tokenized prompt.
 func tokenizedBody(tokenIDs []uint32) *fwkrh.InferenceRequestBody {
 	return &fwkrh.InferenceRequestBody{
-		TokenizedPrompt: &fwkrh.TokenizedPrompt{PerPromptTokens: [][]uint32{tokenIDs}},
+		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
 	}
 }
 
@@ -213,6 +214,10 @@ func TestDataProducerValidation(t *testing.T) {
 	}, {
 		AutoTune:        false,
 		BlockSizeTokens: 0,
+	}, {
+		AutoTune:               false,
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: -1,
 	}}
 
 	for _, config := range validConfigs {
@@ -516,6 +521,22 @@ func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
 	assert.Equal(t, 128, got, "autotuned block size at or above minimum should not be clamped")
 }
 
+func TestGetBlockSize_AutotunePrefersPrefixMatchUnitOverBlockSize(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 128},
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, 128, got,
+		"prefix_match_unit should be preferred over block_size when both are present")
+}
+
 // TestGetBlockSize_ManualConfigClampedBelowMinimum verifies that the floor
 // applies to manual configuration as well — configured BlockSizeTokens below
 // minBlockSizeTokens is silently raised so the indexer memory bound holds
@@ -663,8 +684,8 @@ func TestProduce_MultiPrompt(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -706,8 +727,8 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -725,8 +746,8 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2, 3}, {4, 5}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
 			},
 		},
 	}
@@ -759,8 +780,8 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2}, {3, 4}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
 			},
 		},
 	}
@@ -778,8 +799,8 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{{1, 2}, {5, 6}},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{5, 6}}},
 			},
 		},
 	}

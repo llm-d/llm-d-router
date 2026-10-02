@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,13 +26,12 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	configapiv1alpha1 "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
@@ -47,27 +47,15 @@ import (
 )
 
 var (
-	scheme                       = runtime.NewScheme()
-	registeredFeatureGatesMu     sync.RWMutex
-	registeredFeatureGates       = make(map[string]bool)
-	deprecatedSchemeGroupVersion = schema.GroupVersion{Group: "inference.networking.x-k8s.io", Version: "v1alpha1"} // TODO: deprecated should be clean up
+	scheme                   = runtime.NewScheme()
+	registeredFeatureGatesMu sync.RWMutex
+	registeredFeatureGates   = make(map[string]bool)
 )
 
 func init() {
-	// Support deprecated pseudo config CRD
-	var builder runtime.SchemeBuilder
-	(&builder).Register(func(scheme *runtime.Scheme) error {
-		scheme.AddKnownTypes(deprecatedSchemeGroupVersion,
-			&configapi.EndpointPickerConfig{},
-		)
-		// AddToGroupVersion allows the serialization of client types like ListOptions.
-		v1.AddToGroupVersion(scheme, deprecatedSchemeGroupVersion)
-		return nil
-	})
-
-	utilruntime.Must(configapi.Install(scheme))
-	utilruntime.Must((&builder).AddToScheme(scheme))
-
+	utilruntime.Must(configapiv1.Install(scheme))
+	// TODO: remove together with the v1alpha1 types.
+	utilruntime.Must(configapiv1alpha1.Install(scheme))
 }
 
 // RegisterFeatureGate registers a feature gate name for validation purposes.
@@ -79,46 +67,13 @@ func RegisterFeatureGate(gate string, isEnabledByDefault bool) {
 
 // LoadRawConfig parses the raw configuration bytes, applies initial defaults, and extracts feature gates.
 // It does not instantiate plugins.
-func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointPickerConfig, map[string]bool, error) {
-	var rawConfig *configapi.EndpointPickerConfig
+func LoadRawConfig(configBytes []byte, logger logr.Logger, extraGates ...string) (*configapiv1.EndpointPickerConfig, map[string]bool, error) {
+	var rawConfig *configapiv1.EndpointPickerConfig
 	var err error
 	if len(configBytes) != 0 {
-		rawConfig, err = decodeRawConfig(configBytes)
+		rawConfig, err = decodeRawConfig(logger, configBytes)
 		if err != nil {
 			return nil, nil, err
-		}
-
-		if rawConfig.GroupVersionKind().GroupVersion() == deprecatedSchemeGroupVersion {
-			logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha1/EndpointPickerConfig is deprecated",
-				"replacement", "llm-d.ai/v1alpha1/EndpointPickerConfig")
-		}
-
-		//nolint:staticcheck // SA1019: rawConfig.SaturationDetector is deprecated: use flowControl.saturationDetector instead.
-		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-		if rawConfig.SaturationDetector != nil {
-			logger.Info("DEPRECATION: top-level saturationDetector is deprecated, use flowControl.saturationDetector instead. If both are set, the new field is used.")
-			if rawConfig.FlowControl == nil {
-				rawConfig.FlowControl = &configapi.FlowControlConfig{}
-			}
-			if rawConfig.FlowControl.SaturationDetector == nil {
-				//nolint:staticcheck // SA1019: rawConfig.SaturationDetector is deprecated: use flowControl.saturationDetector instead.
-				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-				rawConfig.FlowControl.SaturationDetector = rawConfig.SaturationDetector
-			}
-		}
-
-		//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
-		// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-		if rawConfig.Parser != nil {
-			logger.Info("DEPRECATION: top-level parser is deprecated, use requestHandler.parsers instead. If both are set, the new field is used.")
-			if rawConfig.RequestHandler == nil {
-				rawConfig.RequestHandler = &configapi.RequestHandlerConfig{}
-			}
-			if len(rawConfig.RequestHandler.Parsers) == 0 {
-				//nolint:staticcheck // SA1019: rawConfig.Parser is deprecated: use requestHandler.parsers instead.
-				// If both are set, the new field is used. Tracked in https://github.com/llm-d/llm-d-router/issues/1308 (staticcheck)
-				rawConfig.RequestHandler.Parsers = []configapi.ParserConfig{*rawConfig.Parser}
-			}
 		}
 
 		logger.Info("Loaded raw configuration", "config", rawConfig.String())
@@ -129,6 +84,16 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 	}
 
 	applyStaticDefaults(rawConfig)
+
+	// Appended after the config's own entries because loadFeatureConfig is last-wins,
+	// so flag-supplied gates override file-supplied ones. This mutates rawConfig rather
+	// than only the returned map: InstantiateAndConfigure and validateConfig each
+	// re-derive gates from rawConfig.FeatureGates, and applying a gate to only one of
+	// the three leaves the EPP inconsistent.
+	if len(extraGates) > 0 {
+		rawConfig.FeatureGates = append(rawConfig.FeatureGates, extraGates...)
+		logger.Info("Applied feature gates from flags", "gates", extraGates)
+	}
 
 	// We validate gates early because they might dictate downstream loading logic.
 	if err := validateFeatureGates(rawConfig.FeatureGates); err != nil {
@@ -146,7 +111,7 @@ func LoadRawConfig(configBytes []byte, logger logr.Logger) (*configapi.EndpointP
 // InstantiateAndConfigure performs the heavy lifting of plugin instantiation, system architecture injection, and
 // scheduler construction.
 func InstantiateAndConfigure(
-	rawConfig *configapi.EndpointPickerConfig,
+	rawConfig *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
 	logger logr.Logger,
 ) (*config.Config, error) {
@@ -216,6 +181,7 @@ func InstantiateAndConfigure(
 		DataConfig:         dataConfig,
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
+		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
 	}, nil
 }
 
@@ -223,25 +189,39 @@ func InstantiateAndConfigure(
 // beyond the saturation detector. The saturation detector is honored by the legacy admission path
 // even when the flowControl feature gate is disabled, so it alone does not indicate ignored
 // configuration.
-func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
+func flowControlSettingsConfigured(fc *configapiv1.FlowControlConfig) bool {
 	if fc == nil {
 		return false
 	}
 	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
-		fc.DefaultPriorityBand != nil || fc.DefaultNegativePriorityBand != nil ||
-		len(fc.PriorityBands) > 0 || fc.UsageLimitPolicyPluginRef != ""
+		fc.NoEndpointRequestTTL != nil || fc.DefaultPriorityBand != nil ||
+		fc.DefaultNegativePriorityBand != nil || len(fc.PriorityBands) > 0 ||
+		fc.UsageLimitPolicyPluginRef != ""
 }
 
-func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {
-	cfg := &configapi.EndpointPickerConfig{}
+// decodeRawConfig decodes a configuration in any accepted apiVersion and returns
+// it as v1, which is the only version the rest of the EPP reads. Configurations
+// in an older apiVersion are converted and logged as deprecated.
+func decodeRawConfig(logger logr.Logger, configBytes []byte) (*configapiv1.EndpointPickerConfig, error) {
 	codecs := serializer.NewCodecFactory(scheme, serializer.EnableStrict)
-	if err := runtime.DecodeInto(codecs.UniversalDecoder(), configBytes, cfg); err != nil {
+	obj, gvk, err := codecs.UniversalDeserializer().Decode(configBytes, nil, nil)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode configuration JSON/YAML: %w", err)
 	}
-	return cfg, nil
+
+	switch cfg := obj.(type) {
+	case *configapiv1.EndpointPickerConfig:
+		return cfg, nil
+	case *configapiv1alpha1.EndpointPickerConfig:
+		logger.Info("DEPRECATION: apiVersion "+gvk.GroupVersion().String()+"/EndpointPickerConfig is deprecated and is removed in a later release",
+			"replacement", configapiv1.GroupVersion.String()+"/EndpointPickerConfig")
+		return convertV1alpha1ToV1(logger, cfg), nil
+	default:
+		return nil, fmt.Errorf("unsupported configuration type %T for apiVersion %s", obj, gvk.GroupVersion())
+	}
 }
 
-func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
+func instantiatePlugins(configuredPlugins []configapiv1.PluginSpec, handle fwkplugin.Handle, logger logr.Logger) error {
 	orderedPlugins, err := buildPluginDAG(configuredPlugins, handle)
 	if err != nil {
 		return fmt.Errorf("failed to build plugin dependency graph: %w", err)
@@ -265,10 +245,10 @@ func instantiatePlugins(configuredPlugins []configapi.PluginSpec, handle fwkplug
 	return nil
 }
 
-func buildPluginDAG(configuredPlugins []configapi.PluginSpec, handle fwkplugin.Handle) ([]configapi.PluginSpec, error) {
+func buildPluginDAG(configuredPlugins []configapiv1.PluginSpec, handle fwkplugin.Handle) ([]configapiv1.PluginSpec, error) {
 	graph := map[string][]string{}
-	pluginMap := map[string]configapi.PluginSpec{}
-	orderedPlugins := []configapi.PluginSpec{}
+	pluginMap := map[string]configapiv1.PluginSpec{}
+	orderedPlugins := []configapiv1.PluginSpec{}
 
 	for _, spec := range configuredPlugins {
 		if parserFunc, ok := fwkplugin.PluginsWithPluginDependencies[spec.Type]; !ok {
@@ -346,7 +326,7 @@ func findPluginDependencies(params any) []string {
 }
 
 func buildSchedulerConfig(
-	configProfiles []configapi.SchedulingProfile,
+	configProfiles []configapiv1.SchedulingProfile,
 	handle fwkplugin.Handle,
 ) (*scheduling.SchedulerConfig, error) {
 
@@ -401,7 +381,7 @@ func buildSchedulerConfig(
 	return scheduling.NewSchedulerConfig(profileHandler, profiles), nil
 }
 
-func loadFeatureConfig(gates configapi.FeatureGates) (map[string]bool, error) {
+func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) {
 	registeredFeatureGatesMu.RLock()
 	defer registeredFeatureGatesMu.RUnlock()
 	config := make(map[string]bool, len(registeredFeatureGates))
@@ -423,7 +403,7 @@ func loadFeatureConfig(gates configapi.FeatureGates) (map[string]bool, error) {
 	return config, nil
 }
 
-func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
+func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {
 	if len(rawParserConfigs) == 0 {
 		return nil, errors.New("no parsers configured")
 	}
@@ -443,7 +423,7 @@ func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkpl
 	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
-func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
+func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
 	cfg := datalayer.Config{
 		Sources: []datalayer.DataSourceConfig{},
 	}
@@ -452,15 +432,23 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 		return &cfg, nil
 	}
 
-	if ref := rawDataConfig.CrossReplicaSyncerPluginRef; ref != "" {
-		syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
-		if !ok {
-			return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+	if cr := rawDataConfig.CrossReplica; cr != nil {
+		if ref := cr.SyncerPluginRef; ref != "" {
+			syncer, ok := handle.Plugin(ref).(fwkdl.CrossReplicaSyncer)
+			if !ok {
+				return nil, fmt.Errorf("the plugin %s is not a fwkdl.CrossReplicaSyncer", ref)
+			}
+			cfg.Syncer = syncer
 		}
-		cfg.Syncer = syncer
-	}
-	if iv := rawDataConfig.CrossReplicaSyncInterval; iv != nil {
-		cfg.SyncInterval = iv.Duration
+		if iv := cr.SyncInterval; iv != nil {
+			cfg.SyncInterval = iv.Duration
+		}
+		if timeout := cr.PublishTimeout; timeout != nil {
+			if timeout.Duration <= 0 {
+				return nil, fmt.Errorf("crossReplica.publishTimeout must be positive, got %s", timeout.Duration)
+			}
+			cfg.PublishTimeout = timeout.Duration
+		}
 	}
 
 	for _, source := range rawDataConfig.Sources {
@@ -481,5 +469,6 @@ func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkpl
 			return nil, fmt.Errorf("the plugin %s is not a fwkdl.DataSource", source.PluginRef)
 		}
 	}
+	handle.SetCrossReplicaSyncer(cfg.Syncer)
 	return &cfg, nil
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,8 +27,10 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Model name constants shared across test suites.
@@ -136,9 +139,9 @@ func ReqRequestHeadersAndResponseGRPC(
 
 // --- Response Expectations ---
 
-func buildRouteResponse(endpoint, targetModel, prompt string, stream bool) []*extProcPb.ProcessingResponse {
+func buildRouteResponse(endpoint, targetModel, prompt string, priority int, stream bool) []*extProcPb.ProcessingResponse {
 	bodyMap := map[string]any{
-		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0,
+		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0, "priority": priority,
 	}
 	if stream {
 		bodyMap["stream"] = true
@@ -170,14 +173,14 @@ func buildGRPCRouteResponse(endpoint, prompt, methodName string, stream bool) []
 }
 
 // ExpectRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
-// rewritten to match the target model.
-func ExpectRouteTo(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, false)
+// rewritten to match the target model. priority is the resolved InferenceObjective priority injected into the body.
+func ExpectRouteTo(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, false)
 }
 
 // ExpectRouteToWithStream asserts that the request was successfully routed with streaming enabled.
-func ExpectRouteToWithStream(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, true)
+func ExpectRouteToWithStream(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, true)
 }
 
 // ExpectPassthroughRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
@@ -206,6 +209,17 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 // ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
 	return integration.NewImmediateErrorResponse(code, msg)
+}
+
+// ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
+// and message, and that the response carries the drop-reason header.
+func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
+	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      errcommon.RequestDroppedReasonHeaderKey,
+			RawValue: []byte(reason),
+		},
+	})
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
@@ -300,12 +314,12 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1", prio(2)),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
-			wantSpans: []string{"gateway.request", "gateway.request_orchestration"},
+			wantSpans: []string{"request", "request_orchestration"},
 		},
 		{
 			name:     "select active lora, low queue",
@@ -315,9 +329,9 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Has LoRA)
 				P(2, 10, 0.2, "foo", "bar"),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2", prio(2)),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+				"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 			},
 		},
 		{
@@ -366,17 +380,17 @@ func labelsToString(labels []label) string {
 
 func metricReqTotal(model, target string, priority int) string {
 	return fmt.Sprintf(`
-    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_epp_request_total] Counter of inference objective requests broken out for each model and target model.
-    # TYPE inference_objective_request_total counter
-    inference_objective_request_total{%s} 1
-    `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
+    # TYPE llm_d_epp_request_total counter
+    llm_d_epp_request_total{%s} 1
+    `, labelsToString([]label{{"fairness_id", metadata.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {
 	return fmt.Sprintf(`
-    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_epp_ready_endpoints] The number of ready pods in the inference server pool.
-    # TYPE inference_pool_ready_pods gauge
-    inference_pool_ready_pods{%s} %d
+	# HELP llm_d_epp_ready_endpoints [ALPHA] The number of ready endpoints in the inference server pool.
+	# TYPE llm_d_epp_ready_endpoints gauge
+	llm_d_epp_ready_endpoints{%s} %d
     `, labelsToString([]label{{"name", testPoolName}}), count)
 }
 

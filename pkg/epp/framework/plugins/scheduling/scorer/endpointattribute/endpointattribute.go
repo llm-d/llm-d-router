@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,7 +36,10 @@ const (
 )
 
 // compile-time type assertion
-var _ fwksched.Scorer = &EndpointAttributeScorer{}
+var (
+	_ fwksched.Scorer          = &EndpointAttributeScorer{}
+	_ fwkplugin.ConsumerPlugin = &EndpointAttributeScorer{}
+)
 
 // fixedRangeParameters normalizes the attribute value against a fixed
 // [min, max] range (e.g. kv-cache utilization, which is always in [0, 1]).

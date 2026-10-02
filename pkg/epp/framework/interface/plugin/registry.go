@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -74,17 +75,6 @@ func RegisterWithPluginDependencies(pluginType string, stability StabilityLevel,
 // RegisterDeprecated registers a plugin factory function with stability and deprecation metadata.
 func RegisterDeprecated(pluginType string, stability StabilityLevel, factory FactoryFunc, deprecatedIn, scheduledRemovalIn, replacementType string) {
 	Register(pluginType, stability, factory)
-	meta := RegistryMetadata[pluginType]
-	meta.Deprecated = true
-	meta.DeprecatedIn = deprecatedIn
-	meta.ScheduledRemovalIn = scheduledRemovalIn
-	meta.ReplacementType = replacementType
-	RegistryMetadata[pluginType] = meta
-}
-
-// RegisterDeprecatedWithPluginDependencies registers a plugin with dependencies and deprecation metadata.
-func RegisterDeprecatedWithPluginDependencies(pluginType string, stability StabilityLevel, factory FactoryFunc, parser ConfigParserFunc, deprecatedIn, scheduledRemovalIn, replacementType string) {
-	RegisterWithPluginDependencies(pluginType, stability, factory, parser)
 	meta := RegistryMetadata[pluginType]
 	meta.Deprecated = true
 	meta.DeprecatedIn = deprecatedIn

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,6 +45,7 @@ func benchPlugin() fwkplugin.Plugin {
 	p := &producerConsumerPlugin{}
 	p.produces = map[fwkplugin.DataKey]any{producedKey: nil}
 	p.consumes = &fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{consumedKey: nil}}
+	RegisterScopeSpecs([]fwkplugin.Plugin{p})
 	return p
 }
 

@@ -235,7 +235,6 @@ By default, llm-d uses the label key `llm-d.ai/role` with values:
 - `"encode-decode"` → pods capable of both encode and decode (E/PD, rare)
 - `"prefill-decode"` → pods capable of both prefill and decode
 - `"encode-prefill-decode"` → pods capable of all three stages
-- `"both"` → **deprecated** (use `"prefill-decode"` instead)
 
 However, external systems may use alternative labels like:
 ```yaml
@@ -246,9 +245,6 @@ role: decode
 
 To accommodate this **without code changes**, you can configure the **EndpointPickerConfig** to use the generic `label-selector-filter` plugin instead of the hardcoded `encode-filter` / `prefill-filter` / `decode-filter`.
 
-> [!NOTE]
-> The previous filter type `by-label` is deprecated. Use `label-selector-filter` with standard Kubernetes label selector syntax instead.
-
 ### Configuration Examples
 
 #### P/D Configuration
@@ -256,7 +252,7 @@ To accommodate this **without code changes**, you can configure the **EndpointPi
 Below is a minimal `EndpointPickerConfig` for P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Prefill selection: match Pods with label role=prefill
@@ -312,7 +308,7 @@ schedulingProfiles:
 Below is an `EndpointPickerConfig` for full E/P/D disaggregation using custom labels:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   # Encoding selection: match Pods with label role=encode
@@ -396,7 +392,12 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 
 #### Prefix-Based PD Decider
 
-The `prefix-based-pd-decider` plugin makes the disaggregation decision according to the length of the non-cached suffix of the prompt relative to tokens already cached on the selected decode pod.
+The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. Which role the plugin fills depends on the deployment topology:
+
+- **Sidecar-based P/D deployments** wire the plugin as a `disagg-profile-handler` decider — it routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)). Sidecar deployments do not emit `Prefer: if-available`, so the conditional-decode gate is dormant here.
+- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate — `Prefer: if-available` requests are rejected with HTTP 412 when the same threshold would trigger remote prefill.
+
+Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
@@ -417,11 +418,39 @@ The `prefix-based-pd-decider` plugin makes the disaggregation decision according
 
 **Parameter:**
 
-- `nonCachedTokens`: Number of non-cached tokens that trigger disaggregation
-  - If set to 0, disaggregation never occurs for any request
-- `promptTokens`: Minimum prompt length in tokens before prefix-cache-based disaggregation logic is applied
-  - If set to 0, the prompt-length gate is disabled
-  - If set to a positive value, requests with fewer prompt tokens run locally on the decode worker without remote prefill
+- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
+- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode 412 gate. If unspecified, the `approx-prefix-cache-producer` is used.
+
+**Conditional-decode 412 gate**
+
+Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
+
+Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
+
+A minimal coordinator-topology configuration:
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+  - type: approx-prefix-cache-producer
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 8
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: "prefix-cache-scorer"
+      - pluginRef: "max-score-picker"
+```
+
+The plugin declares `PrefixCacheMatchInfo` and `TokenizedPrompt` as required dependencies, so a missing producer surfaces as a startup error rather than a silent per-request forward.
+
+Full P/D and E/P/D configurations that combine the decider and gate roles are in [Configuration Examples](#configuration-examples).
 
 #### Always-Disagg PD Decider
 The `always-disagg-pd-decider` is a simpler alternative used mainly for testing or benchmarking.
@@ -567,7 +596,7 @@ When the request also carries the `x-kv-cache-source-host-port` header (set by
 the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
 computing the prefix), the sidecar injects an additional `remote_kv_source` key
 so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
-Under disaggregation the prefiller leg carries `{"remote_decoder": {...},
+Under disaggregation the prefill request carries `{"remote_decoder": {...},
 "remote_kv_source": {"kv_request_id": <own id>, "remote_host": <source host>,
 "remote_port": <p2p-connector-port>}}` (the only supported multi-key
 combination); without a prefiller the decoder-only request carries
@@ -649,6 +678,10 @@ batches are unchanged.
 
 ### General Sidecar Flags
 
+The sidecar's serving TLS flags are shared with the EPP and the coordinator and are
+documented in [TLS](tls.md). `--enable-tls` and `--tls-insecure-skip-verify` configure
+the sidecar's outbound connections to the encode, prefill and decode stages.
+
 | Flag | Env var | Values | Default | Description |
 |---|---|---|---|---|
 | `--enable-tls` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Enable TLS for the specified stages. Example: `--enable-tls=prefiller,decoder` |
@@ -662,7 +695,7 @@ batches are unchanged.
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode leg so the decoder can pull KV. |
+| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---

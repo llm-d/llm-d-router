@@ -23,9 +23,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 type readerFromResponseWriter struct {
@@ -59,6 +62,54 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(replaceCachedTokens(body, 7)).To(Equal([]byte(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`)))
 	})
 
+	It("should buffer non-streaming JSON split across writes", func() {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		firstChunk := []byte(`{"usage":{"prompt_tokens":64,`)
+		n, err := writer.Write(firstChunk)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(firstChunk)))
+		Expect(recorder.Body.Len()).To(BeZero())
+
+		secondChunk := []byte(`"prompt_tokens_details":{"cached_tokens":49}}}`)
+		n, err = writer.Write(secondChunk)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(secondChunk)))
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.String()).To(Equal(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`))
+	})
+
+	It("should flush an incomplete non-streaming body unchanged", func() {
+		recorder := httptest.NewRecorder()
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		body := []byte(`{"usage":`)
+		n, err := writer.Write(body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(body)))
+		Expect(recorder.Body.Len()).To(BeZero())
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.Bytes()).To(Equal(body))
+	})
+
+	It("should use the request mode instead of the response content type", func() {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "text/event-stream")
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, false)
+
+		body := []byte(`{"usage":{"prompt_tokens_details":{"cached_tokens":49}}}`)
+		n, err := writer.Write(body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(n).To(Equal(len(body)))
+		Expect(finalize()).To(Succeed())
+
+		Expect(recorder.Body.String()).To(Equal(`{"usage":{"prompt_tokens_details":{"cached_tokens":7}}}`))
+	})
+
 	It("should add cached tokens when JSON usage details omit them", func() {
 		body := []byte(`{"usage":{"prompt_tokens":64,"prompt_tokens_details":{}}}`)
 		updated := replaceCachedTokens(body, 7)
@@ -83,8 +134,8 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should not extract cached tokens when prefill response has none", func() {
 		prefillResponse := map[string]any{
-			requestFieldKVTransferParams: map[string]any{
-				requestFieldRemoteBlockIDs: []any{float64(1), float64(2), float64(3)},
+			reqcommon.FieldKVTransferParams: map[string]any{
+				reqcommon.FieldRemoteBlockIDs: []any{float64(1), float64(2), float64(3)},
 			},
 		}
 		_, ok := extractCachedTokens(prefillResponse)
@@ -114,7 +165,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split before the data prefix", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 8)
+		writer := newCachedTokensResponseWriter(recorder, 8, true)
 
 		n, err := writer.Write([]byte("da"))
 		Expect(err).ToNot(HaveOccurred())
@@ -132,7 +183,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should buffer streamed usage chunks split inside the JSON payload", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer := newCachedTokensResponseWriter(recorder, 7)
+		writer := newCachedTokensResponseWriter(recorder, 7, true)
 
 		firstChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,`)
 		n, err := writer.Write(firstChunk)
@@ -162,7 +213,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom while rewriting cached tokens", func() {
 		base := &readerFromResponseWriter{header: http.Header{}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, false)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -175,7 +226,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should preserve ReaderFrom for streamed responses while rewriting complete lines", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, true)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -189,7 +240,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should flush a trailing streamed data line without a final newline", func() {
 		base := &readerFromResponseWriter{header: http.Header{"Content-Type": []string{"text/event-stream"}}}
-		writer := newCachedTokensResponseWriter(base, 7)
+		writer := newCachedTokensResponseWriter(base, 7, true)
 		readerFrom, ok := writer.(io.ReaderFrom)
 		Expect(ok).To(BeTrue())
 
@@ -203,7 +254,7 @@ var _ = Describe("Cached token usage rewriter", func() {
 	It("should finalize a trailing streamed data line written without a final newline", func() {
 		recorder := httptest.NewRecorder()
 		recorder.Header().Set("Content-Type", "text/event-stream")
-		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7)
+		writer, finalize := newCachedTokensResponseWriterWithFinalize(recorder, 7, true)
 
 		body := []byte(`data: {"choices":[],"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`)
 		n, err := writer.Write(body)
@@ -214,4 +265,44 @@ var _ = Describe("Cached token usage rewriter", func() {
 		Expect(finalize()).To(Succeed())
 		Expect(recorder.Body.String()).To(ContainSubstring(`"cached_tokens":7`))
 	})
+
+	It("should preserve streamed content chunks without usage", func() {
+		// The common streamed frame: the guard skips it before any unmarshalling.
+		body := []byte(`data: {"choices":[{"delta":{"content":" the"}}]}` + "\n\ndata: [DONE]\n")
+		Expect(bytes.Contains(body, usageKey)).To(BeFalse())
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
+
+	It("should preserve a streamed content chunk that gets past the guard", func() {
+		// JSON escapes any quote inside a string, so free text only produces the
+		// `"usage"` byte sequence when a whole string value is the word itself,
+		// which is what a model streaming that word one token at a time sends.
+		// This frame is valid JSON, so the guard matches and the parse does run;
+		// it must still come back byte-for-byte unchanged.
+		body := []byte(`data: {"choices":[{"delta":{"content":"usage"}}]}` + "\n")
+		Expect(bytes.Contains(body, usageKey)).To(BeTrue())
+		Expect(json.Valid(bytes.TrimPrefix(bytes.TrimRight(body, "\n"), []byte("data: ")))).To(BeTrue())
+		Expect(replaceCachedTokens(body, 7)).To(Equal(body))
+	})
 })
+
+// Streamed responses send one SSE frame per token and only the final frame carries
+// usage, so these two benchmarks bracket the per-frame cost of the rewrite.
+var (
+	benchContentFrame = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[{"index":0,"delta":{"content":" the"},"logprobs":null,"finish_reason":null}]}` + "\n")
+	benchUsageFrame   = []byte(`data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1730000000,"model":"meta-llama/Llama-3.1-8B-Instruct","choices":[],"usage":{"prompt_tokens":1024,"completion_tokens":256,"total_tokens":1280,"prompt_tokens_details":{"cached_tokens":1024}}}` + "\n")
+)
+
+func BenchmarkReplaceCachedTokensSSELineContentFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchContentFrame, 512)
+	}
+}
+
+func BenchmarkReplaceCachedTokensSSELineUsageFrame(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		replaceCachedTokensSSELine(benchUsageFrame, 512)
+	}
+}

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -343,7 +344,7 @@ func TestGetLoRAMetric(t *testing.T) {
 			// vLLM only emits vllm:lora_requests_info once at least one LoRA
 			// adapter has been loaded. A vanilla deployment with no LoRA must
 			// be treated as "no adapters" rather than a scrape error so the
-			// EPP doesn't spam DataLayerExtractErrorsTotal on every poll
+			// EPP doesn't spam LlmdDataLayerExtractErrorsTotal on every poll
 			// (#926).
 			name: "missing family treated as no adapters",
 			metricFamilies: sourcemetrics.PrometheusMetricMap{
@@ -517,5 +518,24 @@ func TestExtractValue(t *testing.T) {
 			got := extractValue(tt.metric)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// labelsMatch runs per series per scrape tick; keep it allocation-free.
+func BenchmarkLabelsMatch(b *testing.B) {
+	spec := &Spec{
+		Name:   "vllm:lora_requests_info",
+		Labels: map[string]string{"engine": "0", "model_name": "m1"},
+	}
+	// A realistic series: the two matched labels plus unrelated ones.
+	metric := makeMetric(map[string]string{
+		"engine": "0", "model_name": "m1", "pod": "p0", "namespace": "ns", "gpu": "3",
+	}, 1.0, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !spec.labelsMatch(metric.GetLabel()) {
+			b.Fatal("expected match")
+		}
 	}
 }
