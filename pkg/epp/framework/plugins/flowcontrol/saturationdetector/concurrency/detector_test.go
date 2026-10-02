@@ -499,11 +499,37 @@ func TestDetector_TokenFilterIncomingTokens(t *testing.T) {
 	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
 
 	untokenized := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
-	require.Len(t, detector.Filter(ctx, untokenized, candidates), 2,
-		"a byte-based estimate for an untokenized prompt does not filter an endpoint below its limit")
+	require.Len(t, detector.Filter(ctx, untokenized, candidates), 1,
+		"the published cost is counted whether or not the prompt is tokenized")
+}
 
-	tokenized := makeTokenRequest("tokenized", 4)
-	require.Len(t, detector.Filter(ctx, tokenized, candidates), 1, "a tokenized request's cost is counted")
+// TestDetector_TokenFilterOversizedRequest verifies that a request larger than the token limit is
+// kept off loaded endpoints and still placed on an endpoint with no in-flight tokens.
+func TestDetector_TokenFilterOversizedRequest(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	for _, mode := range []concurrencyMode{modeTokens, modeHybrid} {
+		reg := newLocalRegistry()
+		detector := newDetector("test-detector",
+			config{mode: mode, maxConcurrency: 10, maxTokenConcurrency: 100, failClosed: true}, logr.Discard())
+		loadedName := "loaded-endpoint"
+		reg.update(fullEndpointName(loadedName), func(load *attrconcurrency.InFlightLoad) {
+			load.Requests = 1
+			load.Tokens = 1
+		})
+		loaded := newStubSchedulingEndpoint(reg, loadedName)
+		loaded.incomingTokens = 120
+		idle := newStubSchedulingEndpoint(reg, cleanEndpoint)
+		idle.incomingTokens = 120
+
+		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{loaded, idle})
+		require.Len(t, kept, 1, "mode %s: only the idle endpoint takes a request above the limit", mode)
+		require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
+
+		require.Empty(t, detector.Filter(ctx, nil, []fwksched.Endpoint{loaded}),
+			"mode %s: a loaded endpoint does not take a request above the limit", mode)
+	}
 }
 
 // TestDetector_HybridFilterIncomingTokens verifies that hybrid mode projects tokens and keeps the

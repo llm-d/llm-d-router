@@ -208,13 +208,13 @@ func ratio(inflight, capacity int64) float64 {
 //
 // It applies a relaxed limit (Capacity * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
 // In "tokens" and "hybrid" mode the endpoint's token load includes the uncached tokens this request would add
-// to it, so an endpoint is dropped when admitting the request would take it over the limit. The request's cost
-// is not counted when its prompt is not tokenized: a byte-based estimate can exceed the limit for a prompt that
-// fits. In "hybrid" mode an endpoint is also dropped when its request load reaches the limit.
+// to it, so an endpoint is dropped when admitting the request would take it over the limit. An endpoint with no
+// in-flight tokens always passes the token check: it is the best placement the pool can offer a request that
+// is larger than the limit. In "hybrid" mode an endpoint is also dropped when its request load reaches the limit.
 // If all endpoints are filtered out, the filter fails open and returns all endpoints, unless FailOpen is false.
 func (d *detector) Filter(
 	_ context.Context,
-	request *fwksched.InferenceRequest,
+	_ *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint,
 ) []fwksched.Endpoint {
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
@@ -222,8 +222,7 @@ func (d *detector) Filter(
 
 	reqLimit := int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
 	tokLimit := int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
-	countIncoming := (d.config.mode == modeTokens || d.config.mode == modeHybrid) &&
-		(request == nil || request.Body == nil || request.Body.TokenizedRequest != nil)
+	countIncoming := d.config.mode == modeTokens || d.config.mode == modeHybrid
 
 	for _, e := range endpoints {
 		if e == nil {
@@ -251,9 +250,9 @@ func (d *detector) Filter(
 
 // admits reports whether an endpoint can take the request within its safety limit for the active mode.
 // An endpoint must be below each limit, and its token load plus the request's tokens must fit within
-// the token limit.
+// the token limit unless the endpoint has no in-flight tokens.
 func (d *detector) admits(load *attrconcurrency.InFlightLoad, incomingTokens, reqLimit, tokLimit int64) bool {
-	tokensFit := load.Tokens < tokLimit && load.Tokens+incomingTokens <= tokLimit
+	tokensFit := load.Tokens < tokLimit && (load.Tokens == 0 || load.Tokens+incomingTokens <= tokLimit)
 	switch d.config.mode {
 	case modeTokens:
 		return tokensFit

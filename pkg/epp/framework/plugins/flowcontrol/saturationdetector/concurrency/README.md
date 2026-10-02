@@ -28,11 +28,13 @@ In tokens and hybrid modes the token check also counts the uncached tokens the i
 
     InflightTokens + IncomingUncachedTokens <= TokenLimit
 
-The incoming cost is not counted when the prompt is not tokenized, because a byte-based estimate can exceed the limit for a prompt that fits.
+An endpoint with no in-flight tokens always passes the token check. A request larger than the limit can still be placed on an idle endpoint, which is the best placement the pool can offer, and the engine's own limits decide whether it runs.
 
 This approach allows the Flow Controller to manage average pool load, while the Scheduler retains the flexibility to burst above ideal targets (the "Headroom") to satisfy affinity or scoring objectives.
 
 **Fail-Open Fallback:** To prevent complete routing failure, if *all* candidate endpoints are filtered out (i.e., the entire cluster is over the safety limits), the filter softens and returns the original list of endpoints, allowing the scheduler's scorers to pick the least-bad option. With `failOpen: false` the filter returns no endpoints instead, so the profile finds no endpoint and the request fails rather than overloading one.
+
+`failOpen: false` sheds requests, it does not queue them. With flow control enabled, the two gates use different inputs: flow control releases a request when pool saturation, computed from current load, is below 1, while the filter checks current load plus the incoming request. A request that flow control has released can therefore still be rejected by the filter when it fits on no endpoint.
 
 ## Inputs consumed
 
