@@ -17,11 +17,16 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - State your interpretation before coding. When the task has multiple valid reads, ask; don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act; the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome: "add validation" becomes "write failing tests for invalid inputs, then make them pass". Where the issue is reproducible, the failing test IS the success criterion; write it first and let it gate the implementation.
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern; follow its structure, naming, and tests rather than introducing new conventions.
+- Before declaring a constant, grep for its value. Reuse an existing one when it describes the same contract: two names for one string diverge the moment either is renamed, and `goconst` only catches repeats inside a package, never a duplicate across packages. One string under two contracts that are free to diverge stays two constants: Anthropic's `input_tokens` is not the OpenAI Responses API's. Reuse often means moving it first, since an unexported constant in another package cannot be imported: promote it to the package that owns the contract instead of declaring a second copy where you need it. Do not re-export another package's constant under a local name, and do not group constants by the fact that they are constants.
 - The plugin model is the main extension surface. Start at [docs/architecture.md](docs/architecture.md); existing filters, scorers, and profile handlers are the canonical references.
 - Tests in the same package describe the contract. Read them before changing behavior.
 - Verify behavior against the code, not from filenames or familiarity. Run the build or read the test when uncertain.
 - Do not claim work is complete without running `make presubmit` (or the targeted test) and confirming the relevant output. "Tests pass" is a claim, not a fact, until the command output exists.
 - If execution goes sideways (unexpected state, cascading failures, a fix that breaks adjacent code), stop and replan. Restate what you know, identify where the plan broke, propose a revised path before continuing.
+
+## Code review
+
+- Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
 
 ## Pull requests
 
