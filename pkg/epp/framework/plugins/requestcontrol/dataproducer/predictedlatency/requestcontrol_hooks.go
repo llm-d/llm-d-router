@@ -157,6 +157,11 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 	}
 
 	if response.EndOfStream {
+		// Locality accuracy is judged once, on the terminal event, from the usage
+		// the handler accumulated across the stream — including a stream that ends
+		// without ever reporting usage, which is recorded as missing_usage rather
+		// than deferred to a later chunk.
+		pl.recordCacheLocality(ctx, request, response, predictedLatencyCtx)
 		if !pl.config.StreamingMode {
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}

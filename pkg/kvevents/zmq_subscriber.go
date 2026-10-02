@@ -300,8 +300,17 @@ func (z *zmqSubscriber) invalidateReplay(topic string) {
 	z.lastReplayFailure = time.Now()
 }
 
-// requestReplay requests buffered events starting from startSeq.
-func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool {
+// requestReplay requests buffered events starting from startSeq and reports
+// whether the replay completed.
+//
+// It owns the per-subscriber replay lifecycle metrics: the attempt is marked
+// active on entry and the deferred reset clears it on every return path, so a
+// replay torn down with the subscriber's context cannot leave the gauge stuck at
+// 1. An attempt that returns without completing counts as a failure; the reason is
+// already recorded by the ZMQErrors operation counters at each exit path.
+//
+//nolint:nonamedreturns // the deferred lifecycle recording reads the named result
+func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) (completed bool) {
 	logger := log.FromContext(ctx).WithName("zmq-replay")
 	debugLogger := logger.V(logging.DEBUG)
 
@@ -309,6 +318,17 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 	// remain bounded by the idle timer and no-progress retry budget.
 	replayCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	metrics.ReplayActive.WithLabelValues(z.podIdentifier).Set(1)
+	defer func() {
+		metrics.ReplayActive.WithLabelValues(z.podIdentifier).Set(0)
+		if completed {
+			metrics.ReplayCompleted.WithLabelValues(z.podIdentifier).Inc()
+			metrics.ReplayLastCompletionTimestamp.WithLabelValues(z.podIdentifier).SetToCurrentTime()
+			return
+		}
+		metrics.ReplayFailures.WithLabelValues(z.podIdentifier).Inc()
+	}()
 
 	replayed := 0
 	nextSeq := startSeq
@@ -429,6 +449,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			z.hasLastSeq = true
 			replayed++
 			attemptReplayed++
+			metrics.ReplayProcessed.WithLabelValues(z.podIdentifier).Inc()
 			expectedSeq++
 		}
 

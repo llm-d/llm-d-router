@@ -45,10 +45,17 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	var prefixCacheScore float64
 	for _, endpoint := range endpoints {
 
+		// scoreKnown separates a real 0% prediction from an endpoint the prefix
+		// producer never scored: the stored score stays 0.0 in both cases so the
+		// prediction and training features are unchanged, and only locality
+		// accuracy reads the flag. A zero-denominator match (no blocks hashed) is
+		// likewise unknown rather than a predicted miss.
+		scoreKnown := false
 		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey); ok {
 			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
 			if !math.IsNaN(prefixCacheScore) {
+				scoreKnown = true
 				logger.V(logutil.DEBUG).Info("Found prefix cache score in pod attribute", "pod", endpoint.GetMetadata().ID.Name, "score", prefixCacheScore)
 			} else {
 				prefixCacheScore = 0.0
@@ -59,6 +66,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 			prefixCacheScore = 0.0
 		}
 		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().ID.Name] = prefixCacheScore
+		predictedLatencyCtx.prefixCacheScoreKnownForEndpoints[endpoint.GetMetadata().ID.Name] = scoreKnown
 
 		if pl.config.UseEncoderCacheFeatures {
 			pl.captureEncoderCacheSizes(ctx, predictedLatencyCtx, endpoint)

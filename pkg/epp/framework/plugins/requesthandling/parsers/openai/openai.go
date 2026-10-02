@@ -575,7 +575,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
 	for _, details := range []string{promptTokensDetailsField, inputTokensDetailsField} {
 		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
-			if cachedTokens, ok := detailsMap[cachedTokensField]; ok {
+			if cachedTokens, ok := detailsMap[cachedTokensField]; ok && cachedTokens != nil {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
 				}
@@ -638,8 +638,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 				}
 				continue
 			}
-			var usage *fwkrh.Usage
-			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
+			if usage := extractRawUsage(streamResponse.Usage); usage != nil {
 				return usage
 			}
 		}

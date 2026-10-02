@@ -215,17 +215,22 @@ func Collectors() []prometheus.Collector {
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
+		ReplayActive, ReplayCompleted, ReplayFailures, ReplayProcessed,
+		ReplayLastCompletionTimestamp,
 	}
 }
 
 // CleanupSubscriber drops every per-pod kvevents series for podIdentifier so
-// stale time series do not linger after a subscriber is removed. Callers must
-// invoke it only once the subscriber's goroutine has exited, otherwise a late
-// increment resurrects the series.
+// stale time series do not linger after a subscriber is removed — including the
+// replay lifecycle series, whose per-pod gauge would otherwise pin a removed
+// endpoint in the replay panels forever. Callers must invoke it only once the
+// subscriber's goroutine has exited, otherwise a late increment resurrects the
+// series.
 func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
+	cleanupReplaySubscriber(podIdentifier)
 }
 
 var registerMetricsOnce = sync.Once{}
