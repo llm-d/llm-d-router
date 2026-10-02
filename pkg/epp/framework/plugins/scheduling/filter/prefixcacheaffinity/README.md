@@ -116,12 +116,37 @@ documents the strategy and its calibration.
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
+| `prefillCalibrationFile` | `string` | No | — | Path to a calibration record; read only when `peakPrefillThroughput` is absent |
+| `prefillCalibrationFingerprint` | `string` | No | — | Fingerprint of the deployment the record must have been measured on |
+| `prefillCalibrationRequired` | `bool` | No | `false` | Fail startup instead of falling back to the default when the calibration cannot be applied |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
 unloaded chunk of `max_num_batched_tokens` (8192) tokens. It is hardware-, model-, and
-serving-stack-specific; retune it for a different deployment, or set `ttftSource`
-to `latencyPredictor` to source TTFT from the latency predictor instead.
+serving-stack-specific; measure your own with the calibration recipe instead, or set
+`ttftSource` to `latencyPredictor` to source TTFT from the latency predictor.
+
+### Calibrated throughput
+
+`prefillCalibrationFile` points at the record the calibration recipe writes and the
+effective value follows
+
+```text
+explicit peakPrefillThroughput > fingerprint-matched calibration > built-in default
+```
+
+Presence decides what is explicit: writing `peakPrefillThroughput: 15928` in the
+parameters is still an operator choice even though it repeats the default, so it wins
+over the record. A deployment that wants the calibrated value leaves the key out and
+sets the record path plus the deployment fingerprint; the setup staging the record
+composes that fingerprint from model revision, engine image digest, dtype, accelerator,
+parallelism, batch and chunk limits and the measured pool. A record whose fingerprint
+differs is never applied — a model, TP, batch-limit or image change invalidates it — and
+neither is one that is incomplete, non-finite or carries too few valid samples. Only a
+complete measurement reaches the config: without one the default stands, and
+`prefillCalibrationRequired` turns that fallback into a startup error for setups that
+would rather not run miscalibrated. On the `latencyPredictor` path no prefill constant
+is in the picture, so no calibration is required or consulted.
 
 ## Dependencies
 
@@ -143,4 +168,18 @@ schedulingProfiles:
   - name: default
     plugins:
       - pluginRef: prefix-affinity
+```
+
+The same plugin taking its throughput from a calibration record instead of a constant:
+```yaml
+plugins:
+  - type: prefix-cache-affinity-filter
+    parameters:
+      maxTTFTPenaltyMs: 5000
+      prefillCalibrationFile: /etc/llm-d/prefix-calibration.json
+      prefillCalibrationFingerprint: sha256:<deployment fingerprint>
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-affinity-filter
 ```
