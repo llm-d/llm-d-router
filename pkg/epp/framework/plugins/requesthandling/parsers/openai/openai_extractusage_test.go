@@ -85,3 +85,28 @@ func TestExtractUsage_StringCoercion(t *testing.T) {
 		t.Errorf("TotalTokens = %d, want 1031", u.TotalTokens)
 	}
 }
+
+func TestStreamingCachedTokenPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		details string
+		known   bool
+	}{
+		{"absent", `{}`, false},
+		{"null", `{"cached_tokens":null}`, false},
+		{"zero", `{"cached_tokens":0}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := extractUsageStreaming([]byte(`data: {"usage":{"prompt_tokens":10,"prompt_tokens_details":` + tc.details + `}}`))
+			if u == nil || u.PromptTokens != 10 {
+				t.Fatalf("prompt usage lost: %+v", u)
+			}
+			if (u.PromptTokenDetails != nil) != tc.known {
+				t.Fatalf("cached-token presence = %v, want %v", u.PromptTokenDetails != nil, tc.known)
+			}
+			if tc.known && u.PromptTokenDetails.CachedTokens != 0 {
+				t.Fatalf("cached tokens = %d, want zero", u.PromptTokenDetails.CachedTokens)
+			}
+		})
+	}
+}

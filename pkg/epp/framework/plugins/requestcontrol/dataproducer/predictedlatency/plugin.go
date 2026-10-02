@@ -388,6 +388,14 @@ type predictedLatencyCtx struct {
 
 	prefixCacheScoresForEndpoints map[string]float64
 
+	// prefixCacheScoreKnownForEndpoints records whether Produce found a usable
+	// PrefixCacheMatchInfo for the endpoint, keyed by endpoint name like the
+	// scores above. Produce stores 0.0 when the attribute is absent or has a zero
+	// denominator, so without this flag a missing prediction is
+	// indistinguishable from a predicted 0% cache hit. Prediction and training
+	// features keep reading the scores map unchanged.
+	prefixCacheScoreKnownForEndpoints map[string]bool
+
 	// encoderInputSize is the request's total multimodal encoder item size;
 	// encoderMatchedSizeForEndpoints is the per-endpoint portion likely present
 	// in that endpoint's encoder cache, keyed by endpoint name. Both stay 0
@@ -423,13 +431,14 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		}
 	}
 	return &predictedLatencyCtx{
-		schedulingRequest:              *request,
-		inputTokenCount:                inputTokenCount,
-		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
-		prefixCacheScoresForEndpoints:  make(map[string]float64),
-		encoderMatchedSizeForEndpoints: make(map[string]int),
-		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
-		predictionsForScheduling:       make(map[string]endpointPredictionResult),
+		schedulingRequest:                 *request,
+		inputTokenCount:                   inputTokenCount,
+		lastSeenMetrics:                   make(map[string]*fwkdl.Metrics),
+		prefixCacheScoresForEndpoints:     make(map[string]float64),
+		prefixCacheScoreKnownForEndpoints: make(map[string]bool),
+		encoderMatchedSizeForEndpoints:    make(map[string]int),
+		inFlightLoadForEndpoints:          make(map[string]inFlightLoadSnapshot),
+		predictionsForScheduling:          make(map[string]endpointPredictionResult),
 	}
 }
 
