@@ -60,7 +60,8 @@ func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]st
 }
 
 // checkStatus returns a pipeline.UpstreamError tagged with step when the status
-// of resp is other than 200. The caller closes the response body.
+// of resp is other than 200. A non-200 consumes up to maxErrorBodySize of the
+// body; a 200 leaves it unread. Closing stays with the caller.
 func checkStatus(step string, resp *http.Response) error {
 	if resp.StatusCode == http.StatusOK {
 		return nil
