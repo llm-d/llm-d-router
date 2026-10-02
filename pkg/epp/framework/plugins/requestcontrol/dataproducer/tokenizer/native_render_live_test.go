@@ -269,7 +269,7 @@ func liveGRPCFrame(t *testing.T, msg proto.Message) []byte {
 	raw, err := proto.Marshal(msg)
 	require.NoError(t, err)
 	frame := make([]byte, 5+len(raw))
-	binary.BigEndian.PutUint32(frame[1:5], uint32(len(raw)))
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(raw))) //#nosec G115 -- test fixture, small proto messages
 	copy(frame[5:], raw)
 	return frame
 }

@@ -45,69 +45,11 @@ const (
 
 	defaultMaxIdleConnsPerHost = 1024
 
-	requestHeaderRequestID = reqcommon.RequestIDHeaderKey
-
-	requestFieldKVTransferParams     = reqcommon.FieldKVTransferParams
-	requestFieldECTransferParams     = reqcommon.FieldECTransferParams
-	requestFieldMaxTokens            = reqcommon.FieldMaxTokens
-	requestFieldMaxCompletionTokens  = reqcommon.FieldMaxCompletionTokens
-	requestFieldMaxOutputTokens      = reqcommon.FieldMaxOutputTokens
-	requestFieldMinTokens            = reqcommon.FieldMinTokens
-	requestFieldSamplingParams       = reqcommon.FieldSamplingParams
-	requestFieldDoRemotePrefill      = reqcommon.FieldDoRemotePrefill
-	requestFieldDoRemoteDecode       = reqcommon.FieldDoRemoteDecode
-	requestFieldRemoteBlockIDs       = reqcommon.FieldRemoteBlockIDs
-	requestFieldRemoteEngineID       = reqcommon.FieldRemoteEngineID
-	requestFieldRemoteHost           = reqcommon.FieldRemoteHost
-	requestFieldRemotePort           = reqcommon.FieldRemotePort
-	requestFieldStream               = reqcommon.FieldStream
-	requestFieldStreamOptions        = reqcommon.FieldStreamOptions
-	requestFieldCacheHitThreshold    = reqcommon.FieldCacheHitThreshold
-	requestFieldContinueFinalMessage = reqcommon.FieldContinueFinalMessage
-	requestFieldAddGenerationPrompt  = reqcommon.FieldAddGenerationPrompt
-
-	// requestHeaderDataParallelRank pins a request to a specific vLLM
-	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
-	requestHeaderDataParallelRank = "x-data-parallel-rank"
-
-	// MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
-	// so the prefill engine can push KV to decode via RDMA Write.
-	requestFieldRemoteNotifyPort = "remote_notify_port"
-	requestFieldRemoteDPRank     = "remote_dp_rank"
-	// requestFieldRemoteDPRankOverride tells the decode-side connector to use
-	// the sidecar's remote_dp_rank verbatim rather than recomputing its own hash.
-	requestFieldRemoteDPRankOverride = "remote_dp_rank_override"
-	requestFieldRemoteHandshakePort  = "remote_handshake_port"
-	requestFieldTransferID           = "transfer_id"
+	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
+	tracerScope = "llm-d-router/pkg/sidecar/proxy"
 
 	responseFieldChoices      = "choices"
 	responseFieldFinishReason = "finish_reason"
-
-	finishReasonCacheThreshold = "cache_threshold"
-
-	// SGLang bootstrap fields
-	requestFieldBootstrapHost = "bootstrap_host"
-	requestFieldBootstrapPort = "bootstrap_port"
-	requestFieldBootstrapRoom = "bootstrap_room"
-	// Mooncake transfer fields
-	requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
-
-	// OffloadingConnector kv_transfer_params fields. The role is encoded by the
-	// nesting key, named for the remote party it describes: "remote_decoder" on
-	// the prefill request, "remote_prefiller" on the decode request, "remote_kv_source"
-	// for a symmetric cached-prefix pull.
-	requestFieldRemoteDecoder   = "remote_decoder"
-	requestFieldRemotePrefiller = "remote_prefiller"
-	requestFieldRemoteKVSource  = "remote_kv_source"
-	requestFieldKVRequestID     = "kv_request_id"
-
-	KVConnectorNIXLV2        = constants.KVConnectorNIXLV2
-	KVConnectorSharedStorage = constants.KVConnectorSharedStorage
-	KVConnectorSGLang        = constants.KVConnectorSGLang
-	KVConnectorMooncake      = constants.KVConnectorMooncake
-	KVConnectorOffloading    = constants.KVConnectorOffloading
-	ECExampleConnector       = constants.ECExampleConnector
-	ECConnectorNIXL          = constants.ECConnectorNIXL
 )
 
 // Config represents the complete runtime configuration for the proxy server.
@@ -165,9 +107,11 @@ type Config struct {
 
 	// MetricsPort is the port for the Prometheus /metrics endpoint. 0 (the
 	// default) disables it; when > 0 the sidecar serves the shared metrics
-	// registry (carrying the moriio_dns_* counters) at /metrics on that port,
-	// on a separate address from the data-plane proxy port. Takes precedence
-	// over the MORIIO_METRICS_ADDR env var (kept for backward compatibility).
+	// registry (carrying the moriio_dns_* and llm_d_disagg_sidecar_* counters)
+	// at /metrics on that port, on a separate address from the data-plane
+	// proxy port so the model server's own /metrics path stays reachable
+	// through the proxy. Takes precedence over the MORIIO_METRICS_ADDR env
+	// var (kept for backward compatibility).
 	MetricsPort int
 	// MetricsCertDir is the directory holding tls.crt and tls.key for the
 	// metrics endpoint. Empty (the default) serves metrics over plain HTTP.
@@ -481,7 +425,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startHTTP(ctx)
 	})
 
-	// Opt-in Prometheus /metrics endpoint (MORIIO_METRICS_ADDR); no-op when unset.
+	// Opt-in Prometheus /metrics endpoint (--metrics-port or MORIIO_METRICS_ADDR); no-op when unset.
 	s.maybeStartMetrics(ctx, grp)
 
 	return grp.Wait()
@@ -529,7 +473,7 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 	t.IdleConnTimeout = 90 * time.Second
 	if scheme == schemeHTTPS {
 		t.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
+			InsecureSkipVerify: insecureSkipVerify, //#nosec
 			MinVersion:         tls.VersionTLS12,
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -547,25 +491,25 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
-	case KVConnectorSharedStorage:
+	case constants.KVConnectorSharedStorage:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
 			s.handleSharedStorage(w, r, host, apiType)
 		}
-	case KVConnectorSGLang:
+	case constants.KVConnectorSGLang:
 		// SGLang sends the same body to the prefill and decode requests and caps no
 		// output tokens, so it does not use the API type.
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}
-	case KVConnectorMooncake:
+	case constants.KVConnectorMooncake:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
 			s.handleMooncake(w, r, host, apiType)
 		}
-	case KVConnectorOffloading:
+	case constants.KVConnectorOffloading:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
 			s.handleP2P(w, r, host, kvCacheSource, apiType)
 		}
-	case KVConnectorNIXLV2:
+	case constants.KVConnectorNIXLV2:
 		fallthrough
 	default:
 		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
@@ -583,9 +527,9 @@ func (s *Server) setECConnector() {
 	}
 
 	switch ecConnector {
-	case ECExampleConnector:
+	case constants.ECExampleConnector:
 		s.handleECConnector = s.handleECSharedStorage
-	case ECConnectorNIXL:
+	case constants.ECConnectorNIXL:
 		s.handleECConnector = s.handleECNIXL
 	default:
 		// Unknown EC connector value, skip encoder stage. Validate() should

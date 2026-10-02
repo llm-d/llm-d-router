@@ -40,7 +40,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 
-	targets := targetEndpoints(schedulingResult)
+	targets := p.targetEncodeEndpoints(ctx, schedulingResult)
 	if len(targets) == 0 {
 		logger.Info("No target endpoints found, skipping encoder-cache update")
 		return nil
@@ -65,13 +65,26 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	return nil
 }
 
-func targetEndpoints(schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {
-	if schedulingResult == nil || schedulingResult.PrimaryProfileName == "" || schedulingResult.ProfileResults == nil {
+// targetEncodeEndpoints returns the endpoints that computed and hold the
+// encoder cache for the request. In disaggregated serving the encode profile
+// selects those pods; its target is recorded rather than the primary (decode)
+// profile's, whose pod does not hold the encoder cache. In aggregated serving
+// no encode profile runs and the primary profile's pod both encodes and serves.
+func (p *Producer) targetEncodeEndpoints(ctx context.Context, schedulingResult *scheduling.SchedulingResult) []scheduling.Endpoint {
+	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
 		return nil
 	}
-	result := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if result == nil {
+	profileName := experimentalDefaultEncodeProfile
+	if result := schedulingResult.ProfileResults[profileName]; result == nil {
+		log.FromContext(ctx).V(logging.DEBUG).Info("Encode profile result missing, falling back to primary profile",
+			"encodeProfile", profileName, "primaryProfile", schedulingResult.PrimaryProfileName)
+		profileName = schedulingResult.PrimaryProfileName
+	}
+	if profileName == "" {
 		return nil
 	}
-	return result.TargetEndpoints
+	if result := schedulingResult.ProfileResults[profileName]; result != nil {
+		return result.TargetEndpoints
+	}
+	return nil
 }

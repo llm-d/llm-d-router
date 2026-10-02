@@ -3,6 +3,9 @@ name: Check Typos
 on:
   pull_request:
   push:
+    branches:
+      - main
+      - 'release-*'
   merge_group:
     types: [checks_requested]
 
@@ -10,7 +13,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # github.event.pull_request.number is null outside pull_request, so the group
+  # falls back to github.ref. Creating a gh-readonly-queue branch raises both a
+  # push and a merge_group event on that same ref, so github.event_name keeps
+  # the two runs in separate groups instead of cancelling each other and
+  # reporting a cancelled "typos" required check to the merge queue.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -22,5 +30,5 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Check typos
-        uses: crate-ci/typos@v1.50.2
+        uses: crate-ci/typos@v1.50.3
 

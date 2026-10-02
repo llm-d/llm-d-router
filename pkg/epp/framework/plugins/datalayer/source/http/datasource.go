@@ -207,7 +207,7 @@ var (
 // Callers must validate that path is an absolute filesystem path (NewHTTPDataSource
 // enforces this on TLSOptions.CACertPath).
 func caCertPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path) //nolint:gosec // path is operator-configured and validated as absolute in NewHTTPDataSource
+	pem, err := os.ReadFile(path) //#nosec -- path is operator-configured and validated as absolute in NewHTTPDataSource
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, path, err)
 	}
@@ -221,7 +221,7 @@ func caCertPool(path string) (*x509.CertPool, error) {
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
 // system pool), plus an mTLS client certificate when ClientCertPath is set.
 func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //nolint:gosec // see TLSOptions doc; operator-supplied flag with documented threat model
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
 	if !opts.SkipVerify && opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {

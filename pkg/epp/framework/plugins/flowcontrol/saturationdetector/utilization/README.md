@@ -18,7 +18,7 @@ It relies on a "roofline model", evaluating both the queue depth and the KV cach
 
     EndpointScore = max(QueueDepth / QueueThreshold, KVCacheUsage / KVCacheThreshold)
 
-The global pool saturation is then evaluated across all candidate endpoints as a gradient:
+The global pool saturation is the average of the endpoint scores:
 
     PoolSaturation = Average(EndpointScore)
 
@@ -44,11 +44,25 @@ longer than the staleness threshold, every sample reads stale between polls and 
 dispatch almost continuously. The policy field is an enum so additional degradations (for example, holding
 the last known score for a bounded window) can be added later.
 
+**Scrape-lag compensation:** `WaitingQueueSize` is scraped on a poller while the Flow Controller's dispatch loop runs far faster, so between two scrapes the queue term is stale-low and the gate would let the controller over-dispatch. When an `inflight-load-producer` is configured, the queue term is corrected by the in-flight requests the scrape does not yet reflect:
+
+    Credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
+    QueueScore = (WaitingQueueSize + Credit) / QueueThreshold
+
+`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit.
+
+The correction rests on these assumptions:
+
+- **`RunningRequestsSize` must be populated.** The subtraction of running requests is only sound when the metrics mapping defines `runningRequestsSpec` (defaults exist for vLLM and SGLang). A custom mapping without it leaves `RunningRequestsSize` at 0, and the credit over-counts by the running count.
+- **In-flight view across EPP replicas.** `WaitingQueueSize + RunningRequestsSize` is engine-global. When a cross-replica syncer is configured and the producer's `syncCrossReplicaState` is true (the default), `InFlightRequests` is the sum over all EPP replicas, so the correction holds with multiple replicas. Without a syncer, or with `syncCrossReplicaState: false`, each replica sees only its own requests, the credit floors at 0, and the compensation is lost.
+
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:
 
     MaxQueueLimit = QueueThreshold * (1 + Headroom)
     MaxKVCacheLimit = min(1.0, KVCacheThreshold * (1 + Headroom))
+
+The queue depth compared against `MaxQueueLimit` includes the scrape-lag credit.
 
 This approach allows the Flow Controller to manage average pool load, while the Scheduler retains the flexibility to burst above ideal targets (the "Headroom") to satisfy affinity or scoring objectives.
 
@@ -58,8 +72,11 @@ This approach allows the Flow Controller to manage average pool load, while the 
 
 The plugin consumes standard metrics from endpoints:
 - `WaitingQueueSize` (Queue depth metric).
+- `RunningRequestsSize` (Running requests metric, used by the scrape-lag credit).
 - `KVCacheUsagePercent` (KV cache utilization metric).
 - `UpdateTime` (Timestamp used to calculate metric staleness).
+
+It optionally consumes the `InFlightLoad` endpoint attribute of an `inflight-load-producer` for the scrape-lag credit.
 
 ## Configuration
 
@@ -70,6 +87,7 @@ The plugin accepts JSON parameters decoding to the following fields:
 - `metricsStalenessThreshold` (`string` / duration): Maximum age of metrics before an endpoint is considered stale. How stale endpoints are scored is controlled by `stalenessPolicy`. Must be > 0. (Default: `"200ms"`)
 - `stalenessPolicy` (`string`): How endpoints with missing or stale metrics contribute to pool saturation: `"saturated"` scores them as fully saturated; `"ignore"` excludes them from the saturation average. (Default: `"saturated"`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal thresholds, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
+- `inFlightLoadProducerName` (`string`): Name of the `inflight-load-producer` whose `InFlightLoad` attribute supplies the scrape-lag credit. Empty selects the default producer. (Default: `""`)
 
 ## Trade-offs
 

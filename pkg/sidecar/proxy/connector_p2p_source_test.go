@@ -26,6 +26,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var _ = Describe("P2P KV cache source header", func() {
@@ -46,7 +47,7 @@ var _ = Describe("P2P KV cache source header", func() {
 				}`
 
 	BeforeEach(func() {
-		testInfo = sidecarConnectionTestSetup(KVConnectorOffloading)
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 		// SSRF allowlist disabled in-test (an enabled one requires a live
 		// InferencePool), so a well-formed source passes; the malformed and
@@ -83,18 +84,18 @@ var _ = Describe("P2P KV cache source header", func() {
 		Expect(decodeReqs).To(HaveLen(1))
 		dreq := decodeReqs[0]
 
-		kvParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
+		kvParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(kvParams).ToNot(HaveKey(requestFieldRemoteDecoder))
 		Expect(kvParams).ToNot(HaveKey(requestFieldRemotePrefiller))
 		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 		// The caller's token limits are untouched.
-		Expect(dreq[requestFieldMaxTokens]).To(BeNumerically("==", 50))
+		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -116,7 +117,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		// Prefill request: remote_decoder + remote_kv_source, each with its own
 		// kv_request_id.
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
+		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		decodeParams, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
@@ -124,13 +125,13 @@ var _ = Describe("P2P KV cache source header", func() {
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(Equal(decodeParams[requestFieldKVRequestID]))
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 		// Decode request: remote_prefiller only, never remote_kv_source.
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		decodeKVParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
+		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodeKVParams).To(HaveKey(requestFieldRemotePrefiller))
 		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteKVSource))
@@ -155,7 +156,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		}).Should(Equal(1))
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
+		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(prefillKVParams).To(HaveKey(requestFieldRemoteDecoder))
 		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemoteKVSource))
@@ -171,7 +172,7 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(requestFieldKVTransferParams))
+		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -184,7 +185,7 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(requestFieldKVTransferParams))
+		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -198,13 +199,13 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		kvParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
+		kvParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		// Only the sidecar-owned remote_kv_source key survives; the client's keys are gone.
 		Expect(kvParams).To(HaveLen(1))
 		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -217,7 +218,7 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(requestFieldKVTransferParams))
+		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -233,7 +234,7 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(requestFieldKVTransferParams))
+		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -249,11 +250,11 @@ var _ = Describe("P2P KV cache source header", func() {
 
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		kvParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
+		kvParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -269,7 +270,7 @@ var _ = Describe("P2P KV cache source header", func() {
 		Expect(decodeReqs).To(HaveLen(2))
 		ids := make([]any, 0, 2)
 		for _, dreq := range decodeReqs {
-			kvParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
+			kvParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
 			Expect(ok).To(BeTrue())
 			p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
 			Expect(ok).To(BeTrue())

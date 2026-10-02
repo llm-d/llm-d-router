@@ -59,10 +59,8 @@ func getHashAsUint64(raw any) (uint64, error) {
 	case uint64:
 		return val, nil
 	case int64:
-		// msgpack can decode small integers as int64.
-		if val < 0 {
-			return 0, fmt.Errorf("hash value is negative: %d", val)
-		}
+		// #nosec G115 -- hash values are unsigned bit patterns; a msgpack encoder
+		// may tag one as Int64 whenever its top bit is set, regardless of the number sign.
 		return uint64(val), nil
 	case []byte:
 		if len(val) == 0 {

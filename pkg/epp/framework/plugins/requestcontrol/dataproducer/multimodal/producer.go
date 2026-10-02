@@ -54,6 +54,13 @@ const (
 
 	// bytesPerImage is the assumed memory per tracked image.
 	bytesPerImage = 2 * 1024 * 1024
+
+	// experimentalDefaultEncodeProfile is the hardcoded scheduling profile that
+	// selects encode-stage endpoints. In E/PD disaggregation the encode and
+	// decode stages run as separate profiles; this matches the
+	// disagg-profile-handler default. Hardcoded until plugins can identify
+	// profile roles canonically (see https://github.com/llm-d/llm-d-router/issues/1091).
+	experimentalDefaultEncodeProfile = "encode"
 )
 
 var (

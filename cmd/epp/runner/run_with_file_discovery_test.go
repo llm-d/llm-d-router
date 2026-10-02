@@ -106,12 +106,12 @@ dataLayer:
 	grpcListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = grpcListener.Close() })
-	grpcPort := uint16(grpcListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
+	grpcPort := uint16(grpcListener.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	healthListener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = healthListener.Close() })
-	healthPort := uint16(healthListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
+	healthPort := uint16(healthListener.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = grpcPort
@@ -290,10 +290,10 @@ dataLayer:
 	// wildcard address, the same one runnable.GRPCServer binds, so the
 	// collision is guaranteed on macOS as well as Linux: fwknet.ReserveListener
 	// binds only 127.0.0.1, which does not shadow [::]:<port> on macOS.
-	decoyListener, err := net.Listen("tcp", ":0") //nolint:gosec // 0.0.0.0 needed for multi-NIC test
+	decoyListener, err := net.Listen("tcp", ":0") //#nosec -- 0.0.0.0 needed for multi-NIC test
 	require.NoError(t, err)
 	defer decoyListener.Close()
-	decoyPort := uint16(decoyListener.Addr().(*net.TCPAddr).Port) //nolint:gosec // port is an OS-assigned ephemeral TCP port, always <= 65535
+	decoyPort := uint16(decoyListener.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
 
 	opts := runserver.NewOptions()
 	opts.GRPCPort = decoyPort

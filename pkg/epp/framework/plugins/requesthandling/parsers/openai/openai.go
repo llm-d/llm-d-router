@@ -31,6 +31,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -54,29 +55,13 @@ const (
 	imagesEditsAPI = "images/edits"
 	audioSpeechAPI = "audio/speech"
 
-	streamingRespPrefix = "data: "
-	streamingEndMsg     = "data: [DONE]"
-
-	contentType = "content-type"
-	// The base media type for Server-Sent Events. responseMediaType strips
-	// optional parameters such as "; charset=utf-8".
-	eventStreamType = "text/event-stream"
 	octetStreamType = "application/octet-stream"
-
-	promptTokensField        = "prompt_tokens"
-	inputTokensField         = "input_tokens"
-	completionTokensField    = "completion_tokens"
-	outputTokensField        = "output_tokens"
-	promptTokensDetailsField = "prompt_tokens_details" //nolint:gosec // G101: JSON field name, not a credential
-	inputTokensDetailsField  = "input_tokens_details"  //nolint:gosec // G101: JSON field name, not a credential
-	cachedTokensField        = "cached_tokens"         //nolint:gosec // G101: JSON field name, not a credential
-	totalTokensField         = "total_tokens"
 
 	// Text to speech api response format:
 	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
-	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"  //nolint:gosec // G101: HTTP header name, not a credential
-	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens" //nolint:gosec // G101: HTTP header name, not a credential
-	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"  //nolint:gosec // G101: HTTP header name, not a credential
+	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"  //#nosec G101 -- HTTP header name, not a credential
+	vllmOmniOutputTokensHeader = "x-vllm-omni-output-tokens" //#nosec G101 -- HTTP header name, not a credential
+	vllmOmniTotalTokensHeader  = "x-vllm-omni-total-tokens"  //#nosec G101 -- HTTP header name, not a credential
 )
 
 // compile-time type validation
@@ -244,7 +229,7 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		// may emit a trailing empty body with the EndOfStream flag set to true.
 		return nil, nil //nolint:nilnil
 	}
-	if mediaType == eventStreamType {
+	if mediaType == request.MediaTypeEventStream {
 		return p.parseStreamResponse(body)
 	}
 
@@ -269,7 +254,7 @@ func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse,
 func countStreamEvents(chunk []byte) int {
 	count := 0
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
 		if ok && !isStreamTerminator(content) {
 			count++
 		}
@@ -280,11 +265,11 @@ func countStreamEvents(chunk []byte) int {
 // isStreamTerminator reports whether an SSE data payload is the [DONE] terminator, tolerating a
 // trailing \r left by CRLF line splitting.
 func isStreamTerminator(content []byte) bool {
-	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte("[DONE]"))
+	return bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte(reqcommon.SSEDoneMarker))
 }
 
 func responseMediaType(headers map[string]string) string {
-	value, ok := headerValue(headers, contentType)
+	value, ok := headerValue(headers, request.HeaderContentType)
 	if !ok {
 		return ""
 	}
@@ -455,7 +440,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	contentTypeValue, _ := headerValue(headers, contentType)
+	contentTypeValue, _ := headerValue(headers, request.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
 		return nil, errors.New("images edits request must have a multipart/form-data content-type")
@@ -568,7 +553,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	usage := fwkrh.Usage{}
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
-	for _, inputTokens := range []string{promptTokensField, inputTokensField} {
+	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
 		if v, ok := responseBody.Usage[inputTokens]; ok && v != nil {
 			usage.PromptTokens = toInt(v)
 			break
@@ -576,7 +561,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
-	for _, outputTokens := range []string{completionTokensField, outputTokensField} {
+	for _, outputTokens := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
 		if v, ok := responseBody.Usage[outputTokens]; ok && v != nil {
 			usage.CompletionTokens = toInt(v)
 			break
@@ -584,9 +569,9 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
-	for _, details := range []string{promptTokensDetailsField, inputTokensDetailsField} {
+	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
 		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
-			if cachedTokens, ok := detailsMap[cachedTokensField]; ok {
+			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
 				}
@@ -595,7 +580,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	// total_tokens field name is consistent across all API types.
-	if v, ok := responseBody.Usage[totalTokensField]; ok && v != nil {
+	if v, ok := responseBody.Usage[reqcommon.FieldTotalTokens]; ok && v != nil {
 		usage.TotalTokens = toInt(v)
 	}
 
@@ -623,7 +608,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
 		if !ok {
 			continue
 		}
