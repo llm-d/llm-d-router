@@ -193,6 +193,102 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	}
 }
 
+func TestHandleInference_ResponsesRejectsStatefulFields(t *testing.T) {
+	// Locks in that the handler refuses a Responses request depending on state
+	// it does not keep, before the pipeline sees the body; see
+	// reqcommon.RejectStatefulResponsesFields for the field list.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "previous_response_id", body: `{"model":"m","input":"hi","previous_response_id":"resp-123"}`},
+		{name: "conversation", body: `{"model":"m","input":"hi","conversation":"conv-1"}`},
+		{name: "background", body: `{"model":"m","input":"hi","background":true}`},
+		{name: "file_id", body: `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-1"}]}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reached := false
+			p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+				reached = true
+				return nil
+			}}})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", rec.Code)
+			}
+			if reached {
+				t.Error("expected the pipeline not to run for a rejected request")
+			}
+		})
+	}
+}
+
+func TestHandleInference_ResponsesAcceptsStatelessRequest(t *testing.T) {
+	// store and background:false carry no state the router has to resolve, so
+	// they reach the pipeline unchanged alongside the rest of the body.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","input":"hi","store":true,"background":false}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seenBody["store"] != true {
+		t.Errorf("expected store to pass through, got %v", seenBody["store"])
+	}
+	if seenBody["input"] != "hi" {
+		t.Errorf("expected unrelated fields to survive, got input=%v", seenBody["input"])
+	}
+}
+
+func TestHandleInference_ResponsesRejectionScopedToPath(t *testing.T) {
+	// The rejection must not run for other paths: a chat-completions client is
+	// free to send its own store/previous_response_id/background fields (even
+	// if meaningless there) without the coordinator refusing the request.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","previous_response_id":"resp-123","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "store", "background"} {
+		if _, ok := seenBody[field]; !ok {
+			t.Errorf("expected %q to survive on a non-responses path", field)
+		}
+	}
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
@@ -334,6 +430,7 @@ func TestRoutesRegistered(t *testing.T) {
 	}{
 		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
 		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"responses", http.MethodPost, reqcommon.PathResponses, inferenceBody},
 		{"generate", http.MethodPost, reqcommon.PathVLLMGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},

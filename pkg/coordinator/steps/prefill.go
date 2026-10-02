@@ -150,7 +150,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
 		body[reqcommon.FieldKVTransferParams] = kvParams

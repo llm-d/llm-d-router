@@ -38,8 +38,10 @@ import (
 )
 
 const (
-	testChatCompletionsPath = reqcommon.PathChatCompletions
-	testModelName           = "test-model"
+	testChatCompletionsPath  = reqcommon.PathChatCompletions
+	testModelName            = "test-model"
+	testImageHash            = "hash-a"
+	testImageJPEGContentType = "image/jpeg"
 )
 
 func TestConditionalDecodeStep_CacheHit(t *testing.T) {
@@ -152,6 +154,46 @@ func TestConditionalDecodeStep_GenerateFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
+// Responses, like chat completions, forwards the client's body as-is.
+func TestConditionalDecodeStep_ResponsesFormat_PassesBodyThrough(t *testing.T) {
+	var receivedBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer srv.Close()
+
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-responses",
+		OriginalPath:   reqcommon.PathResponses,
+		Body:           map[string]any{"model": testModelName, "input": "hello"},
+		TokenIDs:       []int{1, 2345, 6789},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatalf("expected no tokens field, got %v", receivedBody["tokens"])
+	}
+	if receivedBody["input"] != "hello" {
+		t.Fatalf("expected client input to pass through, got %v", receivedBody["input"])
+	}
+}
+
 // Completions rewrites prompt to the rendered token IDs when render supplied
 // them, mirroring decode's TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV
 // coverage for the analogous branch in conditional_decode.go's prepareBody.
@@ -189,11 +231,11 @@ func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
 
 // TestConditionalDecodeStep_UnreachableFormat_ReturnsError verifies that
 // request paths for formats prepareBody's switch does not handle explicitly
-// (APITypeMessages, APITypeResponses, APITypeSGLangGenerate) fail through
+// (APITypeMessages, APITypeSGLangGenerate) fail through
 // its default case, reporting an error instead of forwarding an unprepared
 // body.
 func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathSGLangGenerate} {
+	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathSGLangGenerate} {
 		t.Run(path, func(t *testing.T) {
 			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
 			if err != nil {

@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -393,7 +394,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "text", "text": "describe"},
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},
@@ -442,6 +443,205 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_ResponsesFormat verifies the encode sub-request for a
+// Responses-format request carries the image under "input" with an
+// input_image part whose image_url is a bare string, mirroring
+// TestEncodeStep_ChatCompletionsFormat for the "messages" shape.
+func TestEncodeStep_ResponsesFormat(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":             testModelName,
+			"max_output_tokens": 800,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["model"] != testModelName {
+		t.Fatalf("expected model from body, got %v", receivedBody["model"])
+	}
+
+	input, ok := receivedBody["input"].([]any)
+	if !ok {
+		t.Fatal("expected input in responses format")
+	}
+	item := input[0].(map[string]any)
+	content := item["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part (image only), got %d", len(content))
+	}
+	part := content[0].(map[string]any)
+	if part["type"] != inputImagePartType {
+		t.Fatalf("expected %s content part, got %v", inputImagePartType, part["type"])
+	}
+	if _, ok := part["image_url"].(string); !ok {
+		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
+	}
+
+	// The encode probe is capped on the Responses output field, not max_tokens.
+	if receivedBody[reqcommon.FieldMaxOutputTokens] != float64(1) {
+		t.Fatalf("expected max_output_tokens capped to 1, got %v", receivedBody[reqcommon.FieldMaxOutputTokens])
+	}
+
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("responses format should not have a tokens field")
+	}
+	if _, ok := receivedBody["token_ids"]; ok {
+		t.Fatal("responses format should not have top-level token_ids")
+	}
+	if _, ok := receivedBody["features"]; ok {
+		t.Fatal("responses format should not have top-level features")
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_PreservesDetail verifies that a client's
+// optional detail field on an input_image part survives onto the synthetic
+// encode sub-request. It is a sibling of image_url on the Responses part
+// rather than nested inside it, so it needs its own copy in
+// buildSingleImageContent instead of coming along for free.
+func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-detail": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-detail",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-detail", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	input := receivedBody["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["detail"] != "low" {
+		t.Fatalf("expected detail=low preserved on the encode sub-request, got %v", part["detail"])
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL verifies that a
+// Responses input_image part whose image_url isn't a string (e.g. a
+// file_id-referenced image) fails the request rather than encoding a blank
+// image_url sub-request. This normally cannot reach encode because
+// replace-media-urls rejects the same shape first, but encode must reject it
+// too: its positional indexing into imageParts, shared with the same shape
+// collectResponsesImageRefs validates, would otherwise misassign a real
+// image's hash to this malformed part if replace-media-urls were ever
+// skipped or reordered.
+func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("encode worker should not be called for a malformed input_image part")
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-bad-image",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": inputImagePartType, "file_id": "file-abc123"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-bad", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for input_image part with no string image_url")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+}
+
 // TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
 // encode chat sub-request carries max_completion_tokens=1 unconditionally
 // (via reqcommon.CapSingleToken), even though the
@@ -479,7 +679,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},

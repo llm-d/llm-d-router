@@ -78,15 +78,16 @@ func unreachableFormatError(format reqcommon.APIType) error {
 }
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeVLLMGenerate; Chat Completions additionally requires
-// useOpenAIFormat. Generate is the fallback because its body carries the prompt
-// as reqCtx.TokenIDs and does not depend on the client's request shape.
+// build only Completions, Chat Completions, Responses, and generate bodies, so
+// any other API collapses to APITypeVLLMGenerate; Chat Completions and
+// Responses additionally require useOpenAIFormat. Generate is the fallback
+// because its body carries the prompt as reqCtx.TokenIDs and does not depend
+// on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		if useOpenAIFormat {
 			return detected
 		}
