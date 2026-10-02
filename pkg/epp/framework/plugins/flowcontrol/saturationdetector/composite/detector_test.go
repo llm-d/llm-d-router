@@ -261,7 +261,7 @@ func TestReservationsReachStageScopedChildren(t *testing.T) {
 	require.NoError(t, err)
 
 	// Flow control discovers trackers by asserting on the configured detector.
-	var sd flowcontrol.SaturationDetector = p.(flowcontrol.SaturationDetector)
+	sd := p.(flowcontrol.SaturationDetector)
 	tracker, ok := sd.(flowcontrol.DispatchReservationTracker)
 	require.True(t, ok, "processor must see a reservation tracker through the composite")
 
