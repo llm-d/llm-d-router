@@ -242,21 +242,25 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 				// Without a replay buffer the publisher is rebuilt from its snapshot.
 				z.resetForSource(topic)
 				z.hasLastSeq = false
-				if !z.rebuild(ctx, topic) {
-					continue
-				}
+				z.rebuild(ctx, topic)
 			} else if !z.requestReplay(ctx, z.lastSeq+1) {
 				continue
 			}
 		}
 
 		if !z.hasLastSeq && seq > 0 {
-			if replayAttempted || !z.canAttemptReplay() {
-				continue
+			rebuilt := false
+			if !replayAttempted && z.canAttemptReplay() {
+				logger.Info("Joining mid-stream, requesting full replay",
+					"currentSeq", seq, "endpoint", z.endpoint)
+				rebuilt = z.rebuild(ctx, topic)
 			}
-			logger.Info("Joining mid-stream, requesting full replay",
-				"currentSeq", seq, "endpoint", z.endpoint)
-			if !z.rebuild(ctx, topic) {
+			if !rebuilt {
+				// Without a base the pod is indexed from live events alone,
+				// as it is with neither endpoint set.
+				if z.snapshotEndpoint != "" {
+					z.addTask(ctx, topic, seq, payload)
+				}
 				continue
 			}
 		}
@@ -379,6 +383,8 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 		logger.Error(err, "Failed to load snapshot", "snapshotEndpoint", z.snapshotEndpoint)
 		return false
 	}
+	// The snapshot replaces events indexed while no snapshot was available.
+	z.resetForSource(topic)
 	for _, batch := range batches {
 		z.addTask(ctx, topic, 0, batch)
 	}

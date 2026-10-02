@@ -52,8 +52,10 @@ to warm a pod's index from its current cache state. A subscriber that joins
 mid-stream, or sees the engine restart, loads the snapshot instead of replaying
 buffered events, then follows live events after the snapshot's sequence
 number. Without `replaySocketPort`, a gap in the event sequence reloads the
-snapshot as well. A snapshot that fails or is unavailable is retried after the
-replay cooldown; the pod contributes no cache affinity until then.
+snapshot as well. While the snapshot fails or is unavailable, the pod is
+indexed from live events alone, as it is with neither port set, and the load
+is retried after the replay cooldown. A snapshot that loads replaces that
+state.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.

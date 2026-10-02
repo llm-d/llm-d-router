@@ -883,11 +883,11 @@ func TestZMQSubscriber_SnapshotRebuildsPodOnGap(t *testing.T) {
 	assert.Equal(t, int32(2), server.requests.Load())
 }
 
-func TestZMQSubscriber_UnavailableSnapshotWaitsForCooldown(t *testing.T) {
+func TestZMQSubscriber_UnavailableSnapshotIndexesLiveEvents(t *testing.T) {
 	h, server := newSnapshotHarness(t, -2)
 	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
 	h.send(t, 6, buildDistinctBlockStoredPayload(t, 200))
-	time.Sleep(300 * time.Millisecond)
-	assert.False(t, h.indexed(100) || h.indexed(200), "frames without a base must not reach the index")
-	assert.Equal(t, int32(1), server.requests.Load())
+	require.Eventually(t, func() bool { return h.indexed(100) && h.indexed(200) },
+		5*time.Second, 50*time.Millisecond, "live frames must be indexed while the snapshot is unavailable")
+	assert.Equal(t, int32(1), server.requests.Load(), "the snapshot is retried only after the cooldown")
 }
