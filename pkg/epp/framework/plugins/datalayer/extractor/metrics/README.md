@@ -100,18 +100,21 @@ metadata:
 
 ```
 
-### Multi-Tier Offloading Configuration
+### Tiered Offloading Configuration
 
-The built-in vLLM config extracts tiered offloading metrics for tier `1:fs`,
-the label a single filesystem secondary tier reports. Single-tier deployments
-need no configuration.
+The built-in vLLM selectors skip the `0:primary` series and match a secondary
+tier without pinning its label. Deployments with one secondary tier need no
+override.
 
-Multi-tier deployments must override the vLLM engine config with one entry per
-tier. vLLM builds the label as `{position}:{type}`, where `position` is the
-entry's index in `secondary_tiers` plus one and `type` is that entry's `type`
-string. Built-in types are `fs`, `p2p`, and `obj` (S3-compatible stores); an
-out-of-tree tier reports the `type` it declares. Ordering decides the number,
-so `secondary_tiers: [p2p, fs]` reports `1:p2p` and `2:fs`, and the specs here
+Multi-tier deployments must define a vLLM entry in `engineConfigs` with one
+`tieredOffloadingSpecs` item for each tier.
+The built-in selectors read one secondary-tier series and do not aggregate
+multiple tiers.
+vLLM builds the label as `{position}:{type}`, where `position` is the entry's
+index in `secondary_tiers` plus one and `type` is that entry's `type` string.
+Built-in types are `fs`, `p2p`, and `obj` (S3-compatible stores); an out-of-tree
+tier reports the `type` it declares. Ordering decides the number, so
+`secondary_tiers: [p2p, fs]` reports `1:p2p` and `2:fs`, and the specs here
 must mirror the deployed order.
 
 > [!NOTE]

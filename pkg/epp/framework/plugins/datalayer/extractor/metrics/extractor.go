@@ -203,7 +203,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	// All specs absent means the engine is not offloading at all: leave the attributes unset so a
 	// non-tiering endpoint is distinguishable from an idle tiering one.
 	for _, tiered := range mapping.TieredOffloading {
-		metric, err := tiered.Spec.getLatestMetric(families)
+		metric, err := tiered.Spec.getLatestSecondaryTierMetric(families)
 		if err != nil {
 			continue
 		}
