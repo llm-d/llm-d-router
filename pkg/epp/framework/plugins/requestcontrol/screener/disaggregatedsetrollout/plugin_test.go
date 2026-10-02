@@ -494,15 +494,9 @@ func (s *decisionSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "decision-syncer", Name: "decision-syncer"}
 }
 
-func (s *decisionSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
+func (s *decisionSyncer) Bind(fwkdl.StateKey, string, func() fwkdl.Cloneable, func([]any) any) fwkdl.BoundCrossReplicaState {
 	return nil
 }
-
-func (s *decisionSyncer) Get(context.Context, fwkdl.StateKey, string, func() any, func([]any) any) (any, error) {
-	return nil, nil
-}
-
-func (s *decisionSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }
 
 func (s *decisionSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, id string, _ any) (any, bool, error) {
 	s.calls++

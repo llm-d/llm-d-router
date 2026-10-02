@@ -25,24 +25,29 @@ import (
 // StateKey namespaces cross-EPP shared state.
 type StateKey string
 
+// BoundCrossReplicaState synchronizes one contributor's state for one endpoint.
+type BoundCrossReplicaState interface {
+	// Set publishes the live local value and refreshes the peer aggregate used by
+	// Get.
+	Set(ctx context.Context) error
+
+	// Get reads the live local value and combines it with the prepared peer
+	// aggregate.
+	Get(ctx context.Context) (any, error)
+
+	// Delete removes this replica's value.
+	Delete(ctx context.Context) error
+}
+
 // CrossReplicaSyncer synchronizes shared state across EPP replicas.
 // Implementations own the storage mechanism and must provide the atomic
 // consistency required by GetOrSet.
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
-	// Set writes this replica's value for the given key and endpoint and prepares
-	// the peer aggregate returned by Get. The runtime calls this periodically,
-	// once per live endpoint, with a fresh local snapshot.
-	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
-
-	// Get calls local to read this replica's live value and combines it with the
-	// prepared peer aggregate using aggregate. It returns the local aggregate
-	// when no peer value is available.
-	Get(ctx context.Context, key StateKey, endpointID string, local func() any, aggregate func([]any) any) (any, error)
-
-	// Delete removes the value for the given key and endpoint.
-	Delete(ctx context.Context, key StateKey, endpointID string) error
+	// Bind creates a state handle that retains the contributor's key, endpoint,
+	// live local value supplier, and aggregation function.
+	Bind(key StateKey, endpointID string, local func() Cloneable, aggregate func([]any) any) BoundCrossReplicaState
 
 	// GetOrSet atomically returns the value already stored for key and id, or
 	// stores candidate and returns it. This is global request-level state shared

@@ -83,15 +83,7 @@ func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
 }
 
-func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
-	return nil
-}
-
-func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string, func() any, func([]any) any) (any, error) {
-	return nil, nil
-}
-
-func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
+func (testCrossReplicaSyncer) Bind(fwkdl.StateKey, string, func() fwkdl.Cloneable, func([]any) any) fwkdl.BoundCrossReplicaState {
 	return nil
 }
 
