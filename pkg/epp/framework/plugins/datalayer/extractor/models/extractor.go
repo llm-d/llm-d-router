@@ -29,13 +29,7 @@ import (
 // asynchronously and not tied to incoming requests
 var _ fwkplugin.ProducerPlugin = &ModelExtractor{}
 
-var _ fwkdl.PollingExtractor[*ModelResponse] = &ModelExtractor{}
-
-// ModelResponse is the response from /v1/models API.
-type ModelResponse struct {
-	Object string                 `json:"object"`
-	Data   []attrmodels.ModelData `json:"data"`
-}
+var _ fwkdl.PollingExtractor[*attrmodels.ModelResponse] = &ModelExtractor{}
 
 // ModelExtractor implements the models extraction.
 type ModelExtractor struct {
@@ -71,7 +65,7 @@ func ModelServerExtractorFactory(name string, _ *json.Decoder, _ fwkplugin.Handl
 }
 
 // Extract stores the model list as an endpoint attribute.
-func (me *ModelExtractor) Extract(_ context.Context, in fwkdl.PollInput[*ModelResponse]) error {
+func (me *ModelExtractor) Extract(_ context.Context, in fwkdl.PollInput[*attrmodels.ModelResponse]) error {
 	me.slot.Put(in.Endpoint.GetAttributes(), attrmodels.ModelDataCollection(in.Payload.Data))
 	return nil
 }

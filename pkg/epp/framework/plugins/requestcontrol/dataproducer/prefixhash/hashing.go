@@ -104,7 +104,7 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 
 // computeBlockHashes calculates the hash for content blocks.
 func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
+	blockHashes := make([]BlockHash, 0, max(0, maxPrefixBlocks))
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
