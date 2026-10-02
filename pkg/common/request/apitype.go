@@ -18,6 +18,9 @@ package request
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
+	"path"
 	"strings"
 )
 
@@ -32,8 +35,8 @@ const (
 )
 
 // APIType is the inference API a request was sent to. Path and the output
-// token cap treat a value outside the constants below as
-// APITypeChatCompletions; String reports it as APIType(N).
+// token cap treat APITypeUnknown and a value outside the constants below as
+// APITypeChatCompletions; String reports the latter as APIType(N).
 type APIType int
 
 const (
@@ -49,6 +52,8 @@ const (
 	APITypeSGLangGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+	// APITypeUnknown is any path that is not one of the inference API paths.
+	APITypeUnknown
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -66,6 +71,8 @@ func (a APIType) String() string {
 		return "sglang_generate"
 	case APITypeMessages:
 		return "messages"
+	case APITypeUnknown:
+		return "unknown"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -88,25 +95,62 @@ func (a APIType) Path() string {
 	}
 }
 
-// DetectAPIType classifies a request path. An unrecognized path maps to
-// APITypeChatCompletions: callers that route only known paths never reach the
-// fallback.
-func DetectAPIType(path string) APIType {
-	switch {
-	case strings.Contains(path, PathChatCompletions):
-		return APITypeChatCompletions
-	case strings.Contains(path, PathCompletions):
-		return APITypeCompletions
-	case strings.Contains(path, PathResponses):
-		return APITypeResponses
-	case strings.Contains(path, PathMessages):
-		return APITypeMessages
-	case strings.Contains(path, PathVLLMGenerate):
-		return APITypeVLLMGenerate
-	case strings.Contains(path, PathSGLangGenerate):
-		return APITypeSGLangGenerate
-	default:
-		return APITypeChatCompletions
+var apiPaths = map[string]APIType{
+	PathChatCompletions: APITypeChatCompletions,
+	PathCompletions:     APITypeCompletions,
+	PathResponses:       APITypeResponses,
+	PathMessages:        APITypeMessages,
+	PathVLLMGenerate:    APITypeVLLMGenerate,
+	PathSGLangGenerate:  APITypeSGLangGenerate,
+}
+
+// CanonicalAPIPath returns p cleaned by path.Clean, which drops a trailing
+// slash and collapses repeated slashes and dot segments, and reports whether
+// the result is one of the inference API paths.
+func CanonicalAPIPath(p string) (string, bool) {
+	c := path.Clean(p)
+	_, ok := apiPaths[c]
+	return c, ok
+}
+
+// CanonicalizeAPIPath rewrites the path of a request that names an inference
+// API path in another form, such as with a trailing slash, before calling next.
+// Routing, request guards, and the path forwarded upstream then all see the
+// form the route table binds, so the alternate form cannot skip any of them.
+// A request for any other path reaches next unchanged.
+func CanonicalizeAPIPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, ok := CanonicalAPIPath(r.URL.Path)
+		if !ok || (c == r.URL.Path && r.URL.RawPath == "") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = c
+		r2.URL.RawPath = ""
+		next.ServeHTTP(w, r2)
+	})
+}
+
+// DetectAPIType classifies a request path by the longest inference API path
+// that ends its cleaned form. A prefixed path such as /prefix/v1/completions
+// classifies by its API path, and a sub-resource such as
+// /v1/messages/count_tokens ends in another segment and is APITypeUnknown.
+// PathSGLangGenerate is a single segment, so any path ending in /generate,
+// such as /v1/responses/generate, classifies as APITypeSGLangGenerate.
+func DetectAPIType(p string) APIType {
+	for c := path.Clean(p); ; {
+		if t, ok := apiPaths[c]; ok {
+			return t
+		}
+		i := strings.IndexByte(c[1:], '/')
+		if i < 0 {
+			return APITypeUnknown
+		}
+		c = c[i+1:]
 	}
 }
 
