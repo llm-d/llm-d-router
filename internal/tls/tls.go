@@ -31,7 +31,11 @@ import (
 )
 
 // CreateSelfSignedTLSCertificate creates a self-signed cert the server can use to serve TLS.
+// The certificate carries no subject alternative names, so clients cannot verify it. The log
+// line is the only signal a caller gets.
 func CreateSelfSignedTLSCertificate(logger logr.Logger) (tls.Certificate, error) {
+	logger.Info("creating self-signed TLS certificate")
+
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
@@ -42,7 +46,7 @@ func CreateSelfSignedTLSCertificate(logger logr.Logger) (tls.Certificate, error)
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"Inference Ext"},
+			Organization: []string{"llm-d"},
 		},
 		NotBefore:             notBefore,
 		NotAfter:              now.Add(time.Hour * 24 * 365 * 10).UTC(), // 10 years

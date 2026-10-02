@@ -86,7 +86,7 @@ lifecycle handled by the router.
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority` | Total requests. |
 | `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `error_code` | Errored requests. |
-| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. |
+| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
 | `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
 | `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
@@ -97,6 +97,32 @@ lifecycle handled by the router.
 | `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `streaming` | Time to first token. |
 | `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. |
 | `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. |
+
+#### Exemplars
+
+`llm_d_epp_request_duration_seconds` attaches the request's trace context to each
+observation as a Prometheus exemplar, so a point on a latency graph can be opened as
+the trace behind it.
+
+| Exemplar label | Present when |
+|---|---|
+| `trace_id` | The request's trace is sampled. |
+| `span_id` | EPP tracing is on. With it off, only `trace_id` is attached. |
+
+Two things are needed to see them:
+
+- **Prometheus must store exemplars.** They are dropped unless it runs with
+  `--enable-feature=exemplar-storage`.
+- **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
+  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
+  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
+  ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
+  which only matters to queries matching `le` exactly. Scrapers that do not ask for
+  OpenMetrics keep receiving the classic format.
+
+Grafana turns the exemplar into a link to the trace when the Prometheus data source has
+an exemplar link configured to a traces backend.
 
 ### Inference pool
 
@@ -163,6 +189,41 @@ when the producer is created; observations require prefix lookups.
 | `llm_d_epp_prefix_indexer_size` | Gauge | `plugin_name`, `plugin_type` | Entries in the approximate prefix index. |
 | `llm_d_epp_prefix_indexer_hit_ratio` | Histogram | `plugin_name`, `plugin_type` | Prefix-match hit ratio. |
 | `llm_d_epp_prefix_indexer_hit_bytes` | Histogram | `plugin_name`, `plugin_type` | Bytes matched per lookup. |
+
+### Prefix cache prediction
+
+The `approx-prefix-cache-producer` and the `precise-prefix-cache-producer` emit these metrics,
+labelled by the producer that observed them. `burst-prefix-cache-producer` also publishes prefix
+match data but is not instrumented here. Requests that reach no endpoint are not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens the prediction was measured against. |
+
+The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
+by `llm_d_epp_prefix_prompt_tokens_sum`. Both are observed in one call, so the ratio divides counts
+taken over the same requests. The rate the model server delivered is a separate ratio,
+`llm_d_epp_request_cached_tokens_sum` divided by `llm_d_epp_request_input_tokens_sum`.
+
+Comparing the two ratios is what the prediction metrics are for, subject to three limits.
+
+The request cohorts differ. A prediction is recorded before the request is forwarded, while the
+request token metrics come from the model server's response, so a request that fails or returns no
+usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
+two pairs.
+
+Under disaggregated prefill/decode the ratios describe different pods. The prediction follows the
+primary profile's endpoint, while `llm_d_epp_request_cached_tokens` carries the count the sidecar
+takes from the prefiller. The gap between the ratios is not index accuracy in that topology.
+
+Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
+server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
+zero-config default, packs bytes into four-byte pseudo-tokens: the predicted rate stays
+self-consistent, but CJK, code, and chat-template-heavy inputs shift it against the server's figure.
+
+`llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
+candidate rather than the chosen one, which bounds the reuse available to any routing decision.
 
 ### Multimodal encoder cache
 
@@ -551,7 +612,7 @@ fallback, consulted only when `--metrics-port` is unset.
 The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a
 directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
 Missing or invalid files stop the sidecar; the metrics listener does not fall
-back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
+back to HTTP. The metrics TLS setting is independent of `--secure-serving` and
 `--cert-path`, which apply to the sidecar data-plane listener.
 
 | Full metric name | Type | Labels | Notes |
@@ -564,7 +625,7 @@ back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
 
 The legacy series listed here have been deprecated. Prefer the current `llm_d_epp_*` names in new
 dashboards and alerts. Series marked "no longer emitted" are removed; the table records their
-replacements so dashboards and alerts can be updated. The KV-cache rows remain dual-emitted.
+replacements so dashboards and alerts can be updated.
 
 | Legacy series | Current replacement | Notes |
 |---|---|---|
@@ -584,8 +645,8 @@ replacements so dashboards and alerts can be updated. The KV-cache rows remain d
 | `inference_extension_prefix_indexer_size` | `llm_d_epp_prefix_indexer_size` | Deprecated; no longer emitted. |
 | `inference_extension_prefix_indexer_hit_ratio` | `llm_d_epp_prefix_indexer_hit_ratio` | Deprecated; no longer emitted. |
 | `inference_extension_prefix_indexer_hit_bytes` | `llm_d_epp_prefix_indexer_hit_bytes` | Deprecated; no longer emitted. |
-| `kvcache_index_*` index series | `llm_d_epp_kv_cache_index_*` | Six index series are dual-emitted. |
-| `kvcache_kvevents_dedup_removed_hashes_suppressed_total`, `kvcache_kvevents_dedup_removed_hashes_forwarded_total` | Corresponding `llm_d_epp_kv_cache_events_*` series | These two KV-event series are dual-emitted. Other KV-event series are current-only. |
+| `kvcache_index_admissions_total`, `kvcache_index_evictions_total`, `kvcache_index_lookup_requests_total`, `kvcache_index_lookup_hits_total`, `kvcache_index_max_pod_hit_count_total`, `kvcache_index_lookup_latency_seconds` | `llm_d_epp_kv_cache_index_*` | Deprecated; no longer emitted. |
+| `kvcache_kvevents_dedup_removed_hashes_suppressed_total`, `kvcache_kvevents_dedup_removed_hashes_forwarded_total` | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total`, `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Deprecated; no longer emitted. |
 
 The historical `llm_d_router_epp_*` prefix is not emitted by the current Go code.
 

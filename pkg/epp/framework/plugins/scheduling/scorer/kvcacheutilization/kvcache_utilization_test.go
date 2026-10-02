@@ -20,12 +20,18 @@ package kvcacheutilization
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+func scraped(m fwkdl.Metrics) *fwkdl.Metrics {
+	m.UpdateTime = time.Now()
+	return &m
+}
 
 func TestKvCacheUtilizationScorer(t *testing.T) {
 	tests := []struct {
@@ -36,9 +42,9 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 		{
 			name: "Different KV cache utilization",
 			endpoints: []fwksched.Endpoint{
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.8}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.5}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.0}, nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.8}), nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.5}), nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.0}), nil),
 			},
 			expectedScoresEndpoint: map[int]float64{
 				0: 0.2, // Highest KV cache usage (0.8) gets lowest score (1-0.8=0.2)
@@ -49,8 +55,8 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 		{
 			name: "Same KV cache utilization",
 			endpoints: []fwksched.Endpoint{
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.6}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.6}, nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.6}), nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.6}), nil),
 			},
 			expectedScoresEndpoint: map[int]float64{
 				0: 0.4, // Both get same score (1-0.6=0.4)
@@ -60,8 +66,8 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 		{
 			name: "Zero KV cache utilization",
 			endpoints: []fwksched.Endpoint{
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.0}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.0}, nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.0}), nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.0}), nil),
 			},
 			expectedScoresEndpoint: map[int]float64{
 				0: 1.0, // No KV cache usage gets highest score
@@ -71,8 +77,8 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 		{
 			name: "Full KV cache utilization",
 			endpoints: []fwksched.Endpoint{
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 1.0}, nil),
-				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{KVCacheUsagePercent: 0.5}, nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 1.0}), nil),
+				fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.5}), nil),
 			},
 			expectedScoresEndpoint: map[int]float64{
 				0: 0.0, // Full KV cache (1.0) gets lowest score (1-1=0)
@@ -91,4 +97,21 @@ func TestKvCacheUtilizationScorer(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestKvCacheUtilizationScorerOmitsNeverScraped(t *testing.T) {
+	idle := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.1}), nil)
+	ghost := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, nil)
+	busy := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, scraped(fwkdl.Metrics{KVCacheUsagePercent: 0.8}), nil)
+	nilMetrics := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, nil, nil)
+
+	scores := NewKVCacheUtilizationScorer().Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{idle, ghost, busy, nilMetrics})
+
+	_, ghostScored := scores[ghost]
+	assert.False(t, ghostScored, "never-scraped endpoint should be unscored")
+	_, nilScored := scores[nilMetrics]
+	assert.False(t, nilScored, "nil metrics should be unscored")
+	assert.InDelta(t, 0.9, scores[idle], 1e-9)
+	assert.InDelta(t, 0.2, scores[busy], 1e-9)
+	assert.Len(t, scores, 2)
 }

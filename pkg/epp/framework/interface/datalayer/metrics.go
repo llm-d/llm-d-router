@@ -42,7 +42,13 @@ type Metrics struct {
 	CacheNumBlocks int
 
 	// UpdateTime records the last time when the metrics were updated.
+	// The zero value means no scrape has written this snapshot.
 	UpdateTime time.Time
+}
+
+// Updated reports whether a scrape has written this snapshot.
+func (m *Metrics) Updated() bool {
+	return m != nil && !m.UpdateTime.IsZero()
 }
 
 // NewMetrics initializes a new empty Metrics object.

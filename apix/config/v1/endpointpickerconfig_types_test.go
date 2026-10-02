@@ -1,0 +1,147 @@
+/*
+Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1
+
+import (
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
+
+func TestStringers(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  fmt.Stringer
+		want string
+	}{
+		{
+			name: "PluginSpec",
+			obj: PluginSpec{
+				Name:       "test-plugin",
+				Type:       "test-type",
+				Parameters: json.RawMessage(`{"key":"value"}`),
+			},
+			want: "{Name: test-plugin, Type: test-type, Parameters: {\"key\":\"value\"}}",
+		},
+		{
+			name: "SchedulingPlugin",
+			obj: SchedulingPlugin{
+				PluginRef: "test-ref",
+				Weight:    ptr.To(2.5),
+			},
+			want: "{PluginRef: test-ref, Weight: 2.50}",
+		},
+		{
+			name: "SaturationDetectorConfig",
+			obj: &SaturationDetectorConfig{
+				PluginRef: "test-plugin",
+			},
+			want: "{PluginRef: test-plugin}",
+		},
+		{
+			name: "FlowControlConfig",
+			obj: &FlowControlConfig{
+				MaxBytes:          resource.NewQuantity(1024, resource.DecimalSI),
+				DefaultRequestTTL: &metav1.Duration{Duration: 30 * time.Second},
+				PriorityBands: []PriorityBandConfig{
+					{
+						Priority:          10,
+						MaxBytes:          resource.NewQuantity(512, resource.DecimalSI),
+						DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second},
+					},
+				},
+				SaturationDetector: &SaturationDetectorConfig{
+					PluginRef: "test-plugin",
+				},
+			},
+			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512, DefaultRequestTTL: 5s}], SaturationDetector: {PluginRef: test-plugin}}",
+		},
+		{
+			name: "RequestHandlerConfig",
+			obj: &RequestHandlerConfig{
+				Parsers: []ParserConfig{
+					{PluginRef: "test-parser"},
+				},
+			},
+			want: "{Parsers: [{PluginRef: test-parser}]}",
+		},
+		{
+			name: "CrossReplicaConfig",
+			obj: &CrossReplicaConfig{
+				SyncerPluginRef: "syncer1",
+				SyncInterval:    &metav1.Duration{Duration: 5 * time.Second},
+				PublishTimeout:  &metav1.Duration{Duration: time.Second},
+			},
+			want: "{SyncerPluginRef: syncer1, SyncInterval: 5s, PublishTimeout: 1s}",
+		},
+		{
+			name: "DataLayerConfig",
+			obj: &DataLayerConfig{
+				Sources: []DataLayerSource{
+					{
+						PluginRef:  "source1",
+						Extractors: []DataLayerExtractor{{PluginRef: "extractor1"}},
+					},
+				},
+				Discovery: &DiscoveryConfig{
+					Endpoints: &EndpointDiscoveryConfig{PluginRef: "endpoints1"},
+					Peers:     &PeerDiscoveryConfig{PluginRef: "peers1"},
+				},
+				CrossReplica: &CrossReplicaConfig{
+					SyncerPluginRef: "syncer1",
+					SyncInterval:    &metav1.Duration{Duration: 5 * time.Second},
+					PublishTimeout:  &metav1.Duration{Duration: time.Second},
+				},
+			},
+			want: "{Sources: [{PluginRef: source1, Extractors: [{PluginRef: extractor1}]}], Discovery: {Endpoints: {PluginRef: endpoints1}, Peers: {PluginRef: peers1}}, CrossReplica: {SyncerPluginRef: syncer1, SyncInterval: 5s, PublishTimeout: 1s}}",
+		},
+		{
+			name: "EndpointPickerConfig",
+			obj: &EndpointPickerConfig{
+				Plugins: []PluginSpec{
+					{Name: "p1", Type: "t1"},
+				},
+				FlowControl: &FlowControlConfig{
+					SaturationDetector: &SaturationDetectorConfig{
+						PluginRef: "sd1",
+					},
+				},
+				RequestHandler: &RequestHandlerConfig{
+					Parsers: []ParserConfig{
+						{PluginRef: "parser1"},
+					},
+				},
+			},
+			want: "{Plugins: [{Name: p1, Type: t1}], FlowControl: {MaxBytes: unlimited, MaxRequests: unlimited, SaturationDetector: {PluginRef: sd1}}, RequestHandler: {Parsers: [{PluginRef: parser1}]}}",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.obj.String()
+			if got != tc.want {
+				t.Errorf("String() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

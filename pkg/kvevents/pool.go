@@ -316,7 +316,6 @@ func (p *Pool) AddTask(task *RawMessage) {
 		return
 	}
 
-	//nolint:gosec // if concurrency overflows then the world is in trouble anyway
 	queueIndex := h.Sum32() % uint32(p.concurrency)
 	p.queues[queueIndex].Add(task)
 	p.addQueueDepth(1)

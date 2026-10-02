@@ -18,8 +18,10 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +30,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // TestNewEndpointDispatchesEventWithNoPollers verifies that endpoint lifecycle
@@ -130,4 +133,72 @@ func TestUpdateEndpointDispatchesEvent(t *testing.T) {
 	require.Len(t, events, 1, "EndpointExtractor should receive EventAddOrUpdate from UpdateEndpoint")
 	assert.Equal(t, fwkdl.EventAddOrUpdate, events[0].Type)
 	assert.Equal(t, "5.6.7.8", events[0].Endpoint.GetMetadata().Address)
+}
+
+// TestUpdateEndpointRecordsExtractErrorMetric verifies that a failing endpoint
+// extractor increments datalayer_extract_errors_total with the source and
+// extractor type labels, mirroring the http polling path's recording contract.
+func TestUpdateEndpointRecordsExtractErrorMetric(t *testing.T) {
+	metrics.Reset()
+	extractor := extmocks.NewEndpointExtractor("failing-extractor").WithExtractError(errors.New("extract failed"))
+	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
+
+	r := NewRuntime(1)
+	logger := newTestLogger(t)
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{
+				Plugin:     epSrc,
+				Extractors: []fwkplugin.Plugin{extractor},
+			},
+		},
+	}
+	require.NoError(t, r.Configure(cfg, logger))
+
+	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4",
+	}, nil)
+	r.UpdateEndpoint(context.Background(), endpoint)
+
+	assert.Equal(t, 1.0, promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(epSrc.TypedName().Type, extractor.TypedName().Type)),
+		"failing endpoint extractor should record one extract error")
+}
+
+// TestUpdateEndpointRecoversPanickingExtractor verifies that a panicking
+// endpoint extractor is recovered, recorded in datalayer_extract_errors_total,
+// and neither stops the dispatch loop nor escapes the process.
+func TestUpdateEndpointRecoversPanickingExtractor(t *testing.T) {
+	metrics.Reset()
+	panicking := extmocks.NewEndpointExtractor("panicking").WithExtractPanic("boom")
+	working := extmocks.NewEndpointExtractor("working").WithType("mock-endpoint-extractor-working")
+	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
+
+	r := NewRuntime(1)
+	logger := newTestLogger(t)
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{
+				Plugin:     epSrc,
+				Extractors: []fwkplugin.Plugin{panicking, working},
+			},
+		},
+	}
+	require.NoError(t, r.Configure(cfg, logger))
+
+	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4",
+	}, nil)
+
+	assert.NotPanics(t, func() { r.UpdateEndpoint(context.Background(), endpoint) },
+		"a panicking extractor must not escape the dispatch loop")
+
+	assert.Equal(t, 1.0, promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(epSrc.TypedName().Type, panicking.TypedName().Type)),
+		"the panic should be recorded as an extract error")
+
+	events := working.GetEvents()
+	require.Len(t, events, 1, "the dispatch loop must continue to the next extractor after the panic")
 }

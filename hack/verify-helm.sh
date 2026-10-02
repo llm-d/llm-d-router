@@ -15,9 +15,9 @@
 # limitations under the License.
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")/..
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.5.1}"
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.6.2}"
 GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
-GIE_VERSION="${GIE_VERSION:-v1.5.0}"
+GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
 TEMP_DIR=$(mktemp -d)
@@ -221,6 +221,64 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     fi
   fi
   echo "Test case ${key} passed validation."
+done
+
+echo "Verifying leader-election RBAC..."
+verify_leader_election_rbac() {
+  local chart="$1" expected="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-leader-election.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template leader-election "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace election-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" "$@" > "${output}"; then
+    echo "Leader-election rendering failed for ${chart}: $*"
+    exit 1
+  fi
+  local name actual
+  for name in leader-election-epp-leader-election leader-election-epp-leader-election-binding; do
+    if grep -q -- "^  name: ${name}$" "${output}"; then
+      actual=true
+    else
+      actual=false
+    fi
+    if [ "${actual}" != "${expected}" ]; then
+      echo "${chart}: expected ${name} present=${expected}, got ${actual}; flags: $*"
+      exit 1
+    fi
+  done
+  if [ "${expected}" == "true" ]; then
+    if ! grep -Fq -- 'resources: [ "leases" ]' "${output}"; then
+      echo "${chart}: leader-election Role is missing lease permissions"
+      exit 1
+    fi
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  verify_leader_election_rbac "${chart}" false
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2 --set router.epp.flags.ha-enable-leader-election=false
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=1 --set router.epp.flags.ha-enable-leader-election=true
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=1 --set router.epp.flags.ha-enable-leader-election=false
+  for value in true True TRUE t T 1; do
+    verify_leader_election_rbac "${chart}" true --set-string "router.epp.flags.ha-enable-leader-election=${value}"
+  done
+  for value in false False FALSE f F 0; do
+    verify_leader_election_rbac "${chart}" false --set-string "router.epp.flags.ha-enable-leader-election=${value}"
+  done
+  if [ "${chart}" == "llm-d-router-gateway" ]; then
+    mode_flags=(--set provider.name=gke --set provider.gke.preferredBackends.enabled=true)
+  else
+    mode_flags=(--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.inferencePool.create=false)
+  fi
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}"
+  verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=true
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=false
+  echo "Leader-election RBAC checks passed for ${chart}."
 done
 
 echo "Running llm-d-router-standalone negative validation tests..."

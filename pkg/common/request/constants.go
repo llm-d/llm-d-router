@@ -37,7 +37,6 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -47,4 +46,71 @@ const (
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
+	FieldPreviousResponseID   = "previous_response_id"
+	FieldConversation         = "conversation"
+	FieldBackground           = "background"
+	FieldInput                = "input"
+	FieldContent              = "content"
+	FieldFileID               = "file_id"
+	FieldMessages             = "messages"
+	FieldModel                = "model"
+	FieldRole                 = "role"
+	FieldType                 = "type"
+	FieldURL                  = "url"
+	FieldImageURL             = "image_url"
+	FieldStore                = "store"
+	FieldMMProcessorKwargs    = "mm_processor_kwargs"
+	FieldMediaIOKwargs        = "media_io_kwargs"
+	FieldOutput               = "output"
+
+	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
+	// The prefill pod echoes them back so the decode pod can open the bootstrap
+	// channel to it.
+	FieldBootstrapHost = "bootstrap_host"
+	FieldBootstrapPort = "bootstrap_port"
+	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Usage fields in a response body. Chat Completions and Completions report
+// prompt_tokens and completion_tokens with details under prompt_tokens_details;
+// Responses and Conversations report input_tokens and output_tokens with details
+// under input_tokens_details. total_tokens is named the same in every API.
+const (
+	FieldUsage               = "usage"
+	FieldPromptTokens        = "prompt_tokens"
+	FieldCompletionTokens    = "completion_tokens"
+	FieldInputTokens         = "input_tokens"
+	FieldOutputTokens        = "output_tokens"
+	FieldTotalTokens         = "total_tokens"
+	FieldPromptTokensDetails = "prompt_tokens_details" //#nosec G101 -- JSON field name, not a credential
+	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
+	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
+)
+
+// Server-sent event framing for streamed responses. SGLang sends the bare
+// marker as an event payload, the OpenAI APIs send the framed line.
+const (
+	SSEDataPrefix = "data: "
+	SSEDoneMarker = "[DONE]"
+	SSEDone       = SSEDataPrefix + SSEDoneMarker
+)
+
+// Content part types, the values a content part's FieldType takes. A
+// chat-completions *_url part nests its URL and options under one object keyed
+// by the part type, so PartTypeImageURL and FieldImageURL hold the same string
+// in different roles; a Responses input_image instead carries a bare image_url
+// string with its options as siblings.
+//
+// The Responses input content union is input_text / input_image / input_file, so
+// a Responses request carrying one of the others is refused by the model
+// server. FieldFileID on an input_image, input_file or
+// computer_screenshot names a Files API upload the serving engine has to fetch.
+const (
+	PartTypeImageURL           = "image_url"
+	PartTypeAudioURL           = "audio_url"
+	PartTypeVideoURL           = "video_url"
+	PartTypeInputAudio         = "input_audio"
+	PartTypeInputImage         = "input_image"
+	PartTypeInputFile          = "input_file"
+	PartTypeComputerScreenshot = "computer_screenshot"
 )

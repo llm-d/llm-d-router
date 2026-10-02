@@ -20,6 +20,10 @@ This means:
 - lower KV-cache usage -> higher score
 - higher KV-cache usage -> lower score
 
+Endpoints with no written metrics (nil metrics, or a zero `UpdateTime`) are left unscored.
+The scheduler treats an omitted score as a zero contribution from this plugin.
+An endpoint that has reported KV-cache usage of 0 still scores 1.0.
+
 ## Scheduling intent
 
 The scorer returns category `Distribution`, so it helps spread traffic away from endpoints with high KV-cache pressure.

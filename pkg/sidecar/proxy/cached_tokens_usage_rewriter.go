@@ -23,8 +23,13 @@ import (
 	"net/http"
 
 	"github.com/felixge/httpsnoop"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+// OpenAI-compatible chat usage reports prompt cache hits at
+// usage.prompt_tokens_details.cached_tokens.
+// See: https://platform.openai.com/docs/guides/prompt-caching
 type cachedTokensUsageRewriter struct {
 	header       http.Header
 	cachedTokens int
@@ -34,10 +39,13 @@ type cachedTokensUsageRewriter struct {
 	jsonBuffer   []byte
 }
 
-// OpenAI-compatible chat usage reports prompt cache hits at
-// usage.prompt_tokens_details.cached_tokens.
-// See: https://platform.openai.com/docs/guides/prompt-caching
-const promptTokensDetailsField = "prompt_tokens_details"
+// usageKey is the JSON key that must be present before a frame can carry usage.
+// Streamed responses send one frame per token and only the final frame has usage,
+// so scanning for this is much cheaper than unmarshalling every frame to find out.
+// The openai and anthropic stream parsers scan for the same word without the
+// quotes; a JSON serializer always writes the key quoted, so keeping them here
+// skips more content frames.
+var usageKey = []byte(`"` + reqcommon.FieldUsage + `"`)
 
 func newCachedTokensResponseWriter(
 	w http.ResponseWriter, cachedTokens int, streaming bool,
@@ -202,7 +210,7 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 }
 
 func extractCachedTokens(response map[string]any) (int, bool) {
-	usage, ok := response["usage"].(map[string]any)
+	usage, ok := response[reqcommon.FieldUsage].(map[string]any)
 	if !ok {
 		return 0, false
 	}
@@ -211,11 +219,11 @@ func extractCachedTokens(response map[string]any) (int, bool) {
 
 func cachedTokensFromUsage(usage map[string]any) (int, bool) {
 	// Only the documented OpenAI-compatible field is used as the source of truth.
-	details, ok := usage[promptTokensDetailsField].(map[string]any)
+	details, ok := usage[reqcommon.FieldPromptTokensDetails].(map[string]any)
 	if !ok {
 		return 0, false
 	}
-	if cachedTokens, ok := intValue(details["cached_tokens"]); ok {
+	if cachedTokens, ok := intValue(details[reqcommon.FieldCachedTokens]); ok {
 		return cachedTokens, true
 	}
 	return 0, false
@@ -295,11 +303,15 @@ func replaceCachedTokensSSE(body []byte, cachedTokens int) ([]byte, bool) {
 func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 	trimmedLine := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmedLine):]
-	data, ok := bytes.CutPrefix(trimmedLine, []byte("data: "))
+	data, ok := bytes.CutPrefix(trimmedLine, []byte(reqcommon.SSEDataPrefix))
 	if !ok {
 		return line, false
 	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte(reqcommon.SSEDoneMarker)) {
+		return line, true
+	}
+	if !bytes.Contains(data, usageKey) {
+		// No usage in this frame, so unmarshalling it could not change anything.
 		return line, true
 	}
 	// Only JSON data frames can carry usage; other SSE frames pass through.
@@ -308,26 +320,26 @@ func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 		return line, true
 	}
 	updated := make([]byte, 0, len(line))
-	updated = append(updated, []byte("data: ")...)
+	updated = append(updated, []byte(reqcommon.SSEDataPrefix)...)
 	updated = append(updated, replacedData...)
 	updated = append(updated, lineEnding...)
 	return updated, true
 }
 
 func setCachedTokens(response map[string]any, cachedTokens int) bool {
-	usage, ok := response["usage"].(map[string]any)
+	usage, ok := response[reqcommon.FieldUsage].(map[string]any)
 	if !ok {
 		return false
 	}
 	changed := false
-	details, ok := usage[promptTokensDetailsField].(map[string]any)
+	details, ok := usage[reqcommon.FieldPromptTokensDetails].(map[string]any)
 	if !ok {
 		// Some decoder chunks omit details entirely; create the standard field.
-		usage[promptTokensDetailsField] = map[string]any{"cached_tokens": cachedTokens}
+		usage[reqcommon.FieldPromptTokensDetails] = map[string]any{reqcommon.FieldCachedTokens: cachedTokens}
 		return true
 	}
-	if current, ok := intValue(details["cached_tokens"]); !ok || current != cachedTokens {
-		details["cached_tokens"] = cachedTokens
+	if current, ok := intValue(details[reqcommon.FieldCachedTokens]); !ok || current != cachedTokens {
+		details[reqcommon.FieldCachedTokens] = cachedTokens
 		changed = true
 	}
 	return changed

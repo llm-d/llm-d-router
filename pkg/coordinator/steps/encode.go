@@ -96,7 +96,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// kwargs_data, so the encode fan-out and EC handoff are redundant. Skipping it
 	// avoids shipping the oversized preprocessed pixel tensor a second time
 	// (see https://github.com/vllm-project/vllm/issues/46722).
-	if reqcommon.DetectAPIType(reqCtx.OriginalPath) == reqcommon.APITypeGenerate {
+	if reqcommon.DetectAPIType(reqCtx.OriginalPath) == reqcommon.APITypeVLLMGenerate {
 		logger.V(logutil.DEFAULT).Info("skipping encode for generate request")
 		return nil
 	}
@@ -230,7 +230,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		}
 		reqcommon.CapSingleToken(body, format)
 		return body, nil
-	case reqcommon.APITypeGenerate:
+	case reqcommon.APITypeVLLMGenerate:
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),

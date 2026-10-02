@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -198,7 +199,7 @@ func (mq *managedQueue) applyAndPropagateLocked(mutate func()) {
 
 	afterLen := mq.queue.Len()
 	lenDelta := int64(afterLen - beforeLen)
-	byteSizeDelta := int64(mq.queue.ByteSize()) - int64(beforeBytes)
+	byteSizeDelta := clamp.Int64(mq.queue.ByteSize()) - clamp.Int64(beforeBytes)
 	if lenDelta == 0 && byteSizeDelta == 0 {
 		return
 	}

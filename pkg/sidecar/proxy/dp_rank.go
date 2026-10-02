@@ -40,7 +40,14 @@ func pickDPRank(requestID string, dpSize int) int {
 	}
 	_, _ = h.Write([]byte(requestID))
 	sum := h.Sum(nil)
-	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(dpSize))
+	// mod is bounded by dpSize, an int, so it always fits; the explicit
+	// check keeps the uint64 -> int conversion provably safe rather than
+	// relying on that invariant.
+	mod := binary.BigEndian.Uint64(sum[:8]) % uint64(dpSize)
+	if mod > uint64(math.MaxInt) {
+		return 0
+	}
+	return int(mod)
 }
 
 // resolveDecodeDPRank picks the DP rank for the decode request in serial WRITE

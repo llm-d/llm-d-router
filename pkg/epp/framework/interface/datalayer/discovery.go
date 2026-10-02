@@ -50,7 +50,7 @@ func (n *discoveryNotifier) Delete(id types.NamespacedName) {
 
 // EndpointDiscovery discovers inference endpoints and drives their lifecycle in the datastore.
 // Implementations are registered in the plugin registry and selected via
-// EndpointPickerConfig.discovery.pluginRef.
+// dataLayer.discovery.endpoints.pluginRef.
 type EndpointDiscovery interface {
 	fwkplugin.Plugin
 

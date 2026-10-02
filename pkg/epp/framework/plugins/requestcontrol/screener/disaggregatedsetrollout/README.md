@@ -281,7 +281,7 @@ header. Other label affinities, such as slice affinity, belong in a
 ## Configuration
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: disaggregatedset-rollout-screener

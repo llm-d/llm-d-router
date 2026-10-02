@@ -102,7 +102,7 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodySize*config.BytesPerMB)
 
 	proxy := newPassthroughProxy(logger, h.gatewayURL, h.transport, requestID)
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(w, r) //#nosec G704 -- h.gatewayURL is operator-configured, never request-derived
 }
 
 // newPassthroughProxy builds the reverse proxy that streams to the gateway.

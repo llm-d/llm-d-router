@@ -27,6 +27,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -652,7 +653,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{contentType: eventStreamType}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{request.HeaderContentType: request.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseResponse() error = %v", err)
 			}

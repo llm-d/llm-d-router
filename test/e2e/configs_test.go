@@ -19,7 +19,7 @@ package e2e
 import "fmt"
 
 // Simple EPP configuration for running without P/D
-const simpleConfig = `apiVersion: llm-d.ai/v1alpha1
+const simpleConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -41,7 +41,7 @@ schedulingProfiles:
 
 // epdEncodeDecodeConfig configures E/PD (encode + P/D) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
-const epdEncodeDecodeConfig = `apiVersion: llm-d.ai/v1alpha1
+const epdEncodeDecodeConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: encode-filter
@@ -63,7 +63,7 @@ schedulingProfiles:
 
 // epdConfig configures E/P/D (encode + prefill + decode) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
-const epdConfig = `apiVersion: llm-d.ai/v1alpha1
+const epdConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: encode-filter
@@ -106,7 +106,7 @@ schedulingProfiles:
 // generateEncodeConfig is the encode-only EPP config for /inference/v1/generate.
 // Uses single-profile-handler so the EPP routes directly to encode pods without
 // requiring a decode stage.
-const generateEncodeConfig = `apiVersion: llm-d.ai/v1alpha1
+const generateEncodeConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: vllmhttp-parser
@@ -126,7 +126,7 @@ schedulingProfiles:
 // generatePrefillConfig is the prefill-only EPP config for /inference/v1/generate.
 // Uses single-profile-handler so the EPP routes directly to prefill pods without
 // requiring a decode stage.
-const generatePrefillConfig = `apiVersion: llm-d.ai/v1alpha1
+const generatePrefillConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: vllmhttp-parser
@@ -148,7 +148,7 @@ schedulingProfiles:
 // both OpenAI-style and /inference/v1/generate (token-in) traffic. The parser
 // delegates non-generate paths to the embedded OpenAI parser, so existing
 // chat/completions tests are unaffected.
-const pdConfig = `apiVersion: llm-d.ai/v1alpha1
+const pdConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: vllmhttp-parser
@@ -184,7 +184,7 @@ schedulingProfiles:
 `
 
 // EPP configuration for running decode-only using disagg-profile-handler (no prefill, no encode)
-const decodeOnlyConfig = `apiVersion: llm-d.ai/v1alpha1
+const decodeOnlyConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: approx-prefix-cache-producer
@@ -209,7 +209,7 @@ schedulingProfiles:
 // kvConfig returns the EPP config for precise prefix scoring with KV events.
 // The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvConfig() string {
-	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
@@ -248,7 +248,7 @@ schedulingProfiles:
 // covers both completions and chat completions.
 // The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvExternalTokenizerConfig() string {
-	return fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: token-producer
@@ -283,7 +283,7 @@ schedulingProfiles:
 }
 
 // EPP configuration for running scale model server test
-const scaleConfig = `apiVersion: llm-d.ai/v1alpha1
+const scaleConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: max-score-picker
@@ -295,7 +295,7 @@ schedulingProfiles:
 `
 
 // EPP configuration for running with vLLM Data Parallel support
-const dataParallelConfig = `apiVersion: llm-d.ai/v1alpha1
+const dataParallelConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: decode-filter

@@ -26,7 +26,8 @@ plugins:
     name: local-syncer
 
 dataLayer:
-  crossReplicaSyncerPluginRef: local-syncer
+  crossReplica:
+    syncerPluginRef: local-syncer
 ```
 
 ## Limitations

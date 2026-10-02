@@ -30,6 +30,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -1496,7 +1497,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 			if tt.contentType != "" {
 				ct = tt.contentType
 			}
-			headers := map[string]string{":path": tt.path, contentType: ct}
+			headers := map[string]string{":path": tt.path, request.HeaderContentType: ct}
 			got, err := parser.ParseRequest(context.Background(), body, headers)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseRequest() error = %v, wantErr %v", err, tt.wantErr)
@@ -1588,7 +1589,7 @@ func TestOpenAIParser_RewriteModelNamePreservesTokenInput(t *testing.T) {
 	tests := []struct {
 		name, path, tokenField, body, wantTokens string
 	}{
-		{
+		{ //#nosec G101 -- tokenField names a JSON field, not a credential
 			name:       "nested completions",
 			path:       "/v1/completions",
 			tokenField: "prompt",
@@ -1763,7 +1764,7 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 		{
 			name:    "Audio stream chunk",
 			body:    []byte{0x52, 0x49, 0x46, 0x46},
-			headers: map[string]string{contentType: "audio/wav"},
+			headers: map[string]string{request.HeaderContentType: "audio/wav"},
 			want: &fwkrh.ParsedResponse{
 				Usage: nil,
 			},
@@ -1792,7 +1793,7 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			name: "Octet-stream response with malformed usage headers",
 			body: []byte{0x00, 0x01, 0x02},
 			headers: map[string]string{
-				contentType:                      "application/octet-stream",
+				request.HeaderContentType:        "application/octet-stream",
 				"x-vllm-omni-input-tokens":       "invalid",
 				"x-vllm-omni-output-tokens":      "-1",
 				"x-vllm-omni-total-tokens":       "3.5",
@@ -1965,7 +1966,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{contentType: eventStreamType}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{request.HeaderContentType: request.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseStreamResponse() error = %v", err)
 			}
@@ -2309,7 +2310,7 @@ func TestOpenAIParser_ParseRequestVideos(t *testing.T) {
 	for _, path := range []string{"/v1/videos", "/v1/videos/sync"} {
 		t.Run(path, func(t *testing.T) {
 			result, err := parser.ParseRequest(context.Background(), body,
-				map[string]string{":path": path, contentType: ct})
+				map[string]string{":path": path, request.HeaderContentType: ct})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2342,7 +2343,7 @@ func TestOpenAIParser_ParseRequestVideosOptionalAndDuplicateFields(t *testing.T)
 		videoFormPart{name: "prompt", value: "海边日出"},
 	)
 	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
-		map[string]string{":path": "/v1/videos", contentType: ct})
+		map[string]string{":path": "/v1/videos", request.HeaderContentType: ct})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2378,7 +2379,7 @@ func TestOpenAIParser_ParseRequestVideosInvalidForms(t *testing.T) {
 			}
 			body, ct := buildVideoForm(t, parts...)
 			if _, err := parser.ParseRequest(context.Background(), body,
-				map[string]string{":path": "/v1/videos", contentType: ct}); err == nil {
+				map[string]string{":path": "/v1/videos", request.HeaderContentType: ct}); err == nil {
 				t.Error("ParseRequest accepted invalid form")
 			}
 		})
@@ -2386,12 +2387,12 @@ func TestOpenAIParser_ParseRequestVideosInvalidForms(t *testing.T) {
 	body, ct := buildVideoForm(t, videoFormPart{name: "prompt", value: "a cat"})
 	for _, badCT := range []string{"application/json", "multipart/form-data"} {
 		if _, err := parser.ParseRequest(context.Background(), body,
-			map[string]string{":path": "/v1/videos", contentType: badCT}); err == nil {
+			map[string]string{":path": "/v1/videos", request.HeaderContentType: badCT}); err == nil {
 			t.Errorf("ParseRequest accepted content-type %q", badCT)
 		}
 	}
 	if _, err := parser.ParseRequest(context.Background(), body[:len(body)-20],
-		map[string]string{":path": "/v1/videos", contentType: ct}); err == nil {
+		map[string]string{":path": "/v1/videos", request.HeaderContentType: ct}); err == nil {
 		t.Error("ParseRequest accepted a truncated form")
 	}
 }
@@ -2403,7 +2404,7 @@ func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
 		videoFormPart{name: "image", value: string([]byte{0, 255, '\r', '\n'}), filename: "input.png", mediaType: "image/png"},
 	)
 	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
-		map[string]string{":path": "/v1/images/edits", contentType: ct})
+		map[string]string{":path": "/v1/images/edits", request.HeaderContentType: ct})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2439,7 +2440,7 @@ func BenchmarkVideoParseRequest(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			body, ct := buildVideoForm(b, tc.parts...)
-			headers := map[string]string{":path": tc.path, contentType: ct}
+			headers := map[string]string{":path": tc.path, request.HeaderContentType: ct}
 			parser := NewOpenAIParser()
 			b.SetBytes(int64(len(body)))
 			b.ReportAllocs()

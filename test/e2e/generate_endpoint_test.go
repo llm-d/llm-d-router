@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	generatePath = "/inference/v1/generate"
+	vLLMGeneratePath = "/inference/v1/generate"
 
 	requestTimeout = 60 * time.Second
 )
@@ -189,12 +189,8 @@ func prefillBody(modality string, tokenIDs []int, items []mmSpec) []byte {
 		"token_ids":          tokenIDs,
 		"features":           mmFeatures(modality, items),
 		"ec_transfer_params": map[string]any{modality: ecTransferEntries(items)},
-		"sampling_params": map[string]any{
-			"max_tokens": 1,
-			"extra_args": map[string]any{
-				"kv_transfer_params": map[string]any{"do_remote_decode": true},
-			},
-		},
+		"kv_transfer_params": map[string]any{"do_remote_decode": true},
+		"sampling_params":    map[string]any{"max_tokens": 1},
 	}
 	return mustMarshal(body)
 }
@@ -221,7 +217,7 @@ func doRequest(path string, body []byte) (*http.Response, []byte) {
 
 // doGenerate is a thin wrapper over doRequest targeting /inference/v1/generate.
 func doGenerate(body []byte) (*http.Response, []byte) {
-	return doRequest(generatePath, body)
+	return doRequest(vLLMGeneratePath, body)
 }
 
 // expectGenerateOK asserts a 2xx status and that the response body parses

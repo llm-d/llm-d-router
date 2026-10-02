@@ -334,7 +334,7 @@ func TestRoutesRegistered(t *testing.T) {
 	}{
 		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
 		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
-		{"generate", http.MethodPost, reqcommon.PathGenerate, inferenceBody},
+		{"generate", http.MethodPost, reqcommon.PathVLLMGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},
 	}

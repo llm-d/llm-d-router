@@ -98,7 +98,7 @@ export PD_ENABLED="\"${PD_ENABLED:-false}\""
 # Token length threshold to trigger P/D logic
 export PD_PROMPT_LEN_THRESHOLD="\"${PD_PROMPT_LEN_THRESHOLD:-10}\""
 
-export EPP_CONFIG="${EPP_CONFIG:-deploy/config/epp-prefix-cache-tracking-config.yaml}"
+export EPP_CONFIG="${EPP_CONFIG:-deploy/config/epp-precise-prefix-cache-config.yaml}"
 
 # Redis deployment name
 export REDIS_DEPLOYMENT_NAME="${REDIS_DEPLOYMENT_NAME:-lookup-server}"
@@ -149,6 +149,11 @@ export VLLM_DEPLOYMENT_NAME="${VLLM_HELM_RELEASE_NAME}-${MODEL_NAME_SAFE}"
 # ------------------------------------------------------------------------------
 # Deployment
 # ------------------------------------------------------------------------------
+
+if [[ "$CLEAN" != "true" && ( ! -f "${EPP_CONFIG}" || ! -r "${EPP_CONFIG}" ) ]]; then
+  echo "ERROR: EPP_CONFIG is not a readable file: ${EPP_CONFIG}" >&2
+  exit 1
+fi
 
 kubectl create namespace ${NAMESPACE} 2>/dev/null || true
 
