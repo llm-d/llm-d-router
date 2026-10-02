@@ -825,6 +825,20 @@ type Usage struct {
 	PromptTokenDetails *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
 }
 
+// MergeCumulative retains high-water counts across partial and repeated usage records.
+func (u *Usage) MergeCumulative(next Usage) {
+	u.PromptTokens = max(u.PromptTokens, next.PromptTokens)
+	u.CompletionTokens = max(u.CompletionTokens, next.CompletionTokens)
+	u.TotalTokens = max(u.TotalTokens, next.TotalTokens)
+	if next.PromptTokenDetails != nil {
+		cached := next.PromptTokenDetails.CachedTokens
+		if u.PromptTokenDetails != nil {
+			cached = max(cached, u.PromptTokenDetails.CachedTokens)
+		}
+		u.PromptTokenDetails = &PromptTokenDetails{CachedTokens: cached}
+	}
+}
+
 type PromptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
 }

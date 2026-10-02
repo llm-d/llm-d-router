@@ -133,6 +133,9 @@ type RequestContext struct {
 	RequestReceivedTimestamp time.Time
 	RequestSize              int
 	Usage                    fwkrh.Usage
+	responseUsageTail        []byte
+	discardUsageLine         bool
+	usageMetricsRecorded     bool
 	StreamedEvents           int
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool

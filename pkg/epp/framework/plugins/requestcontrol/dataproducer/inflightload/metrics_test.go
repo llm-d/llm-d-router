@@ -73,7 +73,7 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="",namespace="defaul
 `, requests)
 		require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 		expectedTokens := fmt.Sprintf(`
-# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current token charge per endpoint from the configured in-flight load accounting mode.
 # TYPE llm_d_epp_inflight_tokens gauge
 llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default",priority="0",producer_name="inflight-load-producer"} %d
 `, tokens)
@@ -127,7 +127,7 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="custom-tenant",name
 	// Prometheus text format requires a literal value; update this if UnknownOutputTokens changes.
 	//#nosec G101 -- metric name, not a credential
 	expectedTokens := `
-# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current token charge per endpoint from the configured in-flight load accounting mode.
 # TYPE llm_d_epp_inflight_tokens gauge
 llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="custom-tenant",namespace="default",priority="3",producer_name="inflight-load-producer"} 1004
 `
@@ -168,7 +168,7 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="",namespace="defaul
 
 	//#nosec G101 -- metric name, not a credential
 	expectedTokens := `
-# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current token charge per endpoint from the configured in-flight load accounting mode.
 # TYPE llm_d_epp_inflight_tokens gauge
 llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default",priority="0",producer_name="inflight-load-producer"} 4
 `
@@ -180,7 +180,7 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 
 	//#nosec G101 -- metric name, not a credential
 	expectedTokensReleased := `
-# HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.
+# HELP llm_d_epp_inflight_tokens [ALPHA] Current token charge per endpoint from the configured in-flight load accounting mode.
 # TYPE llm_d_epp_inflight_tokens gauge
 llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default",priority="0",producer_name="inflight-load-producer"} 0
 `
