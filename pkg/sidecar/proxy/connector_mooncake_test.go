@@ -31,6 +31,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var _ = Describe("Mooncake Connector", func() {
@@ -46,7 +47,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// start a mock bootstrap server that returns map
 		bootstrapServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(bootstrapResponse)) //nolint:errcheck
+			_, _ = w.Write([]byte(bootstrapResponse))
 		}))
 		DeferCleanup(bootstrapServer.Close)
 
@@ -57,7 +58,7 @@ var _ = Describe("Mooncake Connector", func() {
 		_, err = fmt.Sscanf(bootstrapURL.Port(), "%d", &bootstrapPort)
 		Expect(err).ToNot(HaveOccurred())
 
-		testInfo = sidecarConnectionTestSetup(KVConnectorMooncake)
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorMooncake)
 		testInfo.proxy.config.MooncakeBootstrapPort = bootstrapPort
 	})
 
@@ -91,17 +92,17 @@ var _ = Describe("Mooncake Connector", func() {
 		preq := prefillReqs[0]
 
 		// Prefill should have kv_transfer_params with do_remote_decode=true
-		Expect(preq).To(HaveKey(requestFieldKVTransferParams))
-		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
+		Expect(preq).To(HaveKey(reqcommon.FieldKVTransferParams))
+		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(prefillKVParams[requestFieldDoRemoteDecode]).To(BeTrue())
-		Expect(prefillKVParams[requestFieldDoRemotePrefill]).To(BeFalse())
+		Expect(prefillKVParams[reqcommon.FieldDoRemoteDecode]).To(BeTrue())
+		Expect(prefillKVParams[reqcommon.FieldDoRemotePrefill]).To(BeFalse())
 		Expect(prefillKVParams[requestFieldTransferID]).ToNot(BeEmpty())
 
 		// Prefill should have max_tokens=1, max_completion_tokens=1 and stream=false
-		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
-		Expect(preq[requestFieldStream]).To(BeFalse())
+		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 1)))
+		Expect(preq[reqcommon.FieldStream]).To(BeFalse())
 
 		// Validate decode request
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
@@ -110,13 +111,13 @@ var _ = Describe("Mooncake Connector", func() {
 		dreq := decodeReqs[0]
 
 		// Decode should have kv_transfer_params with do_remote_prefill=true
-		Expect(dreq).To(HaveKey(requestFieldKVTransferParams))
-		decodeKVParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
+		Expect(dreq).To(HaveKey(reqcommon.FieldKVTransferParams))
+		decodeKVParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams[requestFieldDoRemotePrefill]).To(BeTrue())
-		Expect(decodeKVParams[requestFieldDoRemoteDecode]).To(BeFalse())
+		Expect(decodeKVParams[reqcommon.FieldDoRemotePrefill]).To(BeTrue())
+		Expect(decodeKVParams[reqcommon.FieldDoRemoteDecode]).To(BeFalse())
 		Expect(decodeKVParams[requestFieldTransferID]).To(HavePrefix("xfer-"))
-		Expect(decodeKVParams[requestFieldRemoteEngineID]).To(Equal("test-engine-abc123"))
+		Expect(decodeKVParams[reqcommon.FieldRemoteEngineID]).To(Equal("test-engine-abc123"))
 		Expect(decodeKVParams[requestFieldRemoteBootstrapAddr]).To(ContainSubstring(fmt.Sprintf(":%d", testInfo.proxy.config.MooncakeBootstrapPort)))
 
 		// Transfer IDs must match between prefill and decode
@@ -125,11 +126,11 @@ var _ = Describe("Mooncake Connector", func() {
 		// Prefill must be pinned to the dp rank whose engine_id is sent to decode
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		Expect(prefillHeaders[0].Get(mooncakeDataParallelRankHeader)).To(Equal("0"))
+		Expect(prefillHeaders[0].Get(requestHeaderDataParallelRank)).To(Equal("0"))
 
 		// Decode should preserve original max_tokens and max_completion_tokens from request
-		Expect(dreq[requestFieldMaxTokens]).To(BeNumerically("==", 50))
-		Expect(dreq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 100)))
+		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
+		Expect(dreq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 100)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -157,12 +158,12 @@ var _ = Describe("Mooncake Connector", func() {
 		}).Should(Equal(1))
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).ToNot(HaveKey(requestFieldMinTokens))
+		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).ToNot(HaveKey(reqcommon.FieldMinTokens))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
-		Expect(dreq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+		Expect(dreq).To(HaveKeyWithValue(reqcommon.FieldMinTokens, BeNumerically("==", 5)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -203,7 +204,7 @@ var _ = Describe("Mooncake Connector", func() {
 		cfg := Config{
 			Port:                  "0",
 			DecoderURL:            testInfo.decodeURL,
-			KVConnector:           KVConnectorMooncake,
+			KVConnector:           constants.KVConnectorMooncake,
 			MooncakeBootstrapPort: bootstrapPort,
 		}
 		testInfo.proxy = NewProxy(cfg)
@@ -261,15 +262,15 @@ var _ = Describe("Mooncake Connector", func() {
 		// header includes rank_id
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		pinnedRank := prefillHeaders[0].Get(mooncakeDataParallelRankHeader)
+		pinnedRank := prefillHeaders[0].Get(requestHeaderDataParallelRank)
 		Expect(engineByRank).To(HaveKey(pinnedRank))
 
 		// decode payload body has rank_id's engine_id
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		decodeKVParams, ok := decodeReqs[0][requestFieldKVTransferParams].(map[string]any)
+		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams[requestFieldRemoteEngineID]).To(Equal(engineByRank[pinnedRank]))
+		Expect(decodeKVParams[reqcommon.FieldRemoteEngineID]).To(Equal(engineByRank[pinnedRank]))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

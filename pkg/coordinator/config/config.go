@@ -28,6 +28,7 @@ import (
 
 type Config struct {
 	LogLevel int            `mapstructure:"log_level"`
+	Tracing  bool           `mapstructure:"tracing"`
 	Server   ServerConfig   `mapstructure:"server"`
 	Gateway  GatewayConfig  `mapstructure:"gateway"`
 	Pipeline PipelineConfig `mapstructure:"pipeline"`
@@ -83,6 +84,7 @@ func Load(path string) (*Config, error) {
 	v.AutomaticEnv()
 
 	v.SetDefault("log_level", 2)
+	v.SetDefault("tracing", false)
 	v.SetDefault("server.listen_addr", ":8080")
 	v.SetDefault("server.metrics_port", 9090)
 	v.SetDefault("server.metrics_cert_dir", "")

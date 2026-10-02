@@ -1553,7 +1553,7 @@ func testLightGBMMetrics(ctx context.Context, t *testing.T, predictor *Predictor
 
 // generateTrainingEntries creates random training data for testing with prefix cache scores.
 //
-//nolint:gosec // G404: math/rand/v2 is non-cryptographic PRNG used only for test fixture values
+// #nosec G404 -- math/rand/v2 is non-cryptographic PRNG used only for test fixture values
 func generateTrainingEntries(count int) []TrainingEntry {
 	entries := make([]TrainingEntry, count)
 

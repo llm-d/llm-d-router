@@ -26,6 +26,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // NIXL PD composed with the OffloadingConnector P2P tier via vLLM MultiConnector:
@@ -40,7 +41,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 	const kvCacheSource = "10.9.9.9:8000"
 
 	BeforeEach(func() {
-		testInfo = sidecarConnectionTestSetup(KVConnectorNIXLV2)
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 		// SSRF allowlist disabled in-test (an enabled one requires a live
 		// InferencePool), so a well-formed source passes.
@@ -85,7 +86,7 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 	prefillKV := func() map[string]any {
 		reqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(reqs).To(HaveLen(1))
-		kv, ok := reqs[0][requestFieldKVTransferParams].(map[string]any)
+		kv, ok := reqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		return kv
 	}
@@ -102,14 +103,14 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 
 		kv := prefillKV()
 		// NIXL fields still drive the NixlConnector under MultiConnector.
-		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
-		Expect(kv).To(HaveKeyWithValue(requestFieldDoRemotePrefill, false))
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemotePrefill, false))
 		// The remote_kv_source block drives the OffloadingConnector's cached-prefix pull.
 		p2p, ok := kv[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 	})
 
 	It("ignores the source header on the NIXL path without --enable-p2p-pull", func() {
@@ -160,10 +161,10 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 
 		// Prefill request keeps the NIXL WRITE fields and gains the composed remote_kv_source block.
 		pkv := kvParams(env.prefillHandler, 0)
-		Expect(pkv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
 		p2p, ok := pkv[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 	})
 })

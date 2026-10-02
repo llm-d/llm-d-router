@@ -7,8 +7,6 @@ rules:
   - "inference.networking.x-k8s.io"
   resources:
   - "inferencepools"
-  - "inferenceobjectives" # TODO: remove this in issue 1298
-  - "inferencemodelrewrites"  # TODO: remove this in issue 1298
   verbs:
   - "get"
   - "watch"

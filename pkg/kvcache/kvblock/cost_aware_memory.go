@@ -88,7 +88,7 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 	// buffer that triggers these callbacks; taking mu here would deadlock.
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *CostPodCache]{
 		NumCounters: numCounters,        // number of keys to track.
-		MaxCost:     int64(sizeBytes),   // #nosec G115 , maximum cost of cache
+		MaxCost:     int64(sizeBytes),   //#nosec G115 -- maximum cost of cache
 		BufferItems: defaultBufferItems, // number of keys per Get buffer.
 		OnEvict:     index.onCostCacheRemoval,
 		OnReject:    index.onCostCacheRemoval,

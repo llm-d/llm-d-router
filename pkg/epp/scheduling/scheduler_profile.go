@@ -86,6 +86,11 @@ func (p *SchedulerProfile) WithPicker(picker fwksched.Picker) *SchedulerProfile 
 // scorer object and register it to all interfaces it implements.
 func (p *SchedulerProfile) AddPlugins(pluginObjects ...plugin.Plugin) error {
 	for _, plugin := range pluginObjects {
+		switch plugin.(type) {
+		case fwksched.Filter, fwksched.Scorer, fwksched.Picker:
+		default:
+			return fmt.Errorf("plugin '%s' must implement Filter, Scorer, or Picker", plugin.TypedName())
+		}
 		if weightedScorer, ok := plugin.(*WeightedScorer); ok {
 			p.scorers = append(p.scorers, weightedScorer)
 			plugin = weightedScorer.Scorer // if we got WeightedScorer, unwrap the plugin

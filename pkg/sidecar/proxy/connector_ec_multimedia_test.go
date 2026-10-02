@@ -34,15 +34,10 @@ import (
 )
 
 // TestHandleEC_Multimedia asserts that video_url, audio_url, and input_audio
-// items flow through both EC connectors the same way image_url items do.
-// mmTypes in connector_ec_common.go treats video_url / audio_url uniformly
-// with image_url (URL-based, dedup-eligible), while input_audio is inline and
-// never deduplicates. This table exercises those paths against handleECNIXL
-// (threads encoder ec_transfer_params into the prefill body) and
-// handleECSharedStorage (primer only — encoder responses are discarded).
-//
-// Inline audio never deduplicates (see fanoutEncoderPrimerDeduplication note),
-// so two input_audio blocks always produce two encoder calls.
+// items flow through both EC connectors the same way image_url items do. This
+// table exercises those paths against handleECNIXL (threads encoder
+// ec_transfer_params into the prefill body) and handleECSharedStorage (primer
+// only, encoder responses are discarded).
 func TestHandleEC_Multimedia(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -163,7 +158,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			var parsed map[string]any
 			assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
 
-			ec, hasEC := parsed[requestFieldECTransferParams].(map[string]any)
+			ec, hasEC := parsed[reqcommon.FieldECTransferParams].(map[string]any)
 			if tt.wantECParams {
 				assert.True(t, hasEC, "prefill body should carry ec_transfer_params")
 				assert.Len(t, ec, tt.wantECLen, "one entry per distinct multimodal item")
@@ -173,7 +168,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 					assert.Containsf(t, entry, "peer_host", "ec[%q] should carry transfer metadata", k)
 				}
 			} else {
-				_, present := parsed[requestFieldECTransferParams]
+				_, present := parsed[reqcommon.FieldECTransferParams]
 				assert.False(t, present, "shared_storage primer must not add ec_transfer_params to the prefill body")
 			}
 		})

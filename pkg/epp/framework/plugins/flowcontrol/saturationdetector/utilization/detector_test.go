@@ -19,17 +19,20 @@ package utilization
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -383,6 +386,65 @@ func TestDetector_SaturationIgnorePolicy(t *testing.T) {
 	}
 }
 
+// withInFlightLoad attaches the InFlightLoad attribute an inflight-load-producer
+// would inject, under the key the detector reads for a default (unnamed)
+// producer.
+func withInFlightLoad(e fwkdl.Endpoint, requests int64) fwkdl.Endpoint {
+	e.GetAttributes().Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
+	return e
+}
+
+func TestDetector_Saturation_ScrapeLagCredit(t *testing.T) {
+	t.Parallel()
+
+	baseTime := time.Now()
+	// Queue=3 so the credit maps cleanly: a credit of 3 == +1.0 qRatio.
+	config := &Config{
+		QueueDepthThreshold:       3,
+		KVCacheUtilThreshold:      1.0,
+		MetricsStalenessThreshold: 100 * time.Millisecond,
+	}
+	detector := NewDetector("test-detector", *config, logr.Discard())
+	ctx := context.Background()
+
+	// pod builds a single fresh endpoint with a settable scraped waiting/running
+	// split and a low fixed KV term, so the queue term drives the score.
+	pod := func(waiting, running int) fwkdl.Endpoint {
+		meta := &fwkdl.EndpointMetadata{
+			ID: types.NamespacedName{Name: "pod1", Namespace: "ns1"},
+		}
+		metrics := fwkdl.NewMetrics()
+		metrics.WaitingQueueSize = waiting
+		metrics.RunningRequestsSize = running
+		metrics.KVCacheUsagePercent = 0.1
+		metrics.UpdateTime = baseTime
+		return fwkdl.NewEndpoint(meta, metrics)
+	}
+
+	// No InFlightLoad attribute: falls back to scraped queue depth. KV=0.1 wins.
+	noAttr := []fwkdl.Endpoint{pod(0, 0)}
+	require.InDelta(t, 0.1, detector.Saturation(ctx, noAttr), 1e-4,
+		"no in-flight attribute -> scraped queue depth only")
+
+	// In-flight tracks 3 requests the scrape has not reflected (waiting+running=0):
+	// credit 3 -> qRatio (0+3)/3 = 1.0 > KV(0.1).
+	lag := []fwkdl.Endpoint{withInFlightLoad(pod(0, 0), 3)}
+	require.InDelta(t, 1.0, detector.Saturation(ctx, lag), 1e-4,
+		"3 in-flight unobserved -> qRatio 1.0")
+
+	// Scrape has caught up: waiting+running already accounts for all in-flight, so
+	// the credit floors at 0 and the term is the measured queue depth (2/3).
+	caughtUp := []fwkdl.Endpoint{withInFlightLoad(pod(2, 1), 3)}
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, caughtUp), 1e-4,
+		"scrape reflects all in-flight -> credit 0, measured queue depth")
+
+	// Running requests are not double-counted: in-flight 4, scrape shows 1 waiting +
+	// 2 running, so only 1 request is unobserved -> qRatio (1+1)/3.
+	partial := []fwkdl.Endpoint{withInFlightLoad(pod(1, 2), 4)}
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, partial), 1e-4,
+		"only unobserved in-flight credited, running not double-counted")
+}
+
 func TestDetector_Filter(t *testing.T) {
 	t.Parallel()
 
@@ -442,6 +504,20 @@ func TestDetector_Filter(t *testing.T) {
 				makeSchedulingEndpoint("pod1", 1, 0.97, baseTime),
 				// Pod2 (OK): KV=0.5/0.9=0.55...
 				makeSchedulingEndpoint("pod2", 1, 0.5, baseTime),
+			},
+			wantLen: 1,
+		},
+		{
+			name: "Filtered - in-flight credit exceeds queue burst",
+			endpoints: []fwksched.Endpoint{
+				// Pod1 (Over): scraped Q=1 but 10 in flight -> Q=10.
+				func() fwksched.Endpoint {
+					e := makeSchedulingEndpoint("pod1", 1, 0.1, baseTime)
+					e.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 10})
+					return e
+				}(),
+				// Pod2 (OK): Q=1, no in-flight attribute.
+				makeSchedulingEndpoint("pod2", 1, 0.1, baseTime),
 			},
 			wantLen: 1,
 		},
@@ -560,4 +636,51 @@ func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {
 
 	require.Equal(t, 1.0, staleGaugeValue(t, detectorName),
 		"the stale endpoint gauge must record under the ignore policy too")
+}
+
+// warnCountingSink records how many Info messages mention the staleness warning.
+type warnCountingSink struct {
+	warnings int
+}
+
+func (s *warnCountingSink) Init(logr.RuntimeInfo)          {}
+func (s *warnCountingSink) Enabled(int) bool               { return true }
+func (s *warnCountingSink) Error(error, string, ...any)    {}
+func (s *warnCountingSink) WithValues(...any) logr.LogSink { return s }
+func (s *warnCountingSink) WithName(string) logr.LogSink   { return s }
+
+func (s *warnCountingSink) Info(_ int, msg string, _ ...any) {
+	if strings.Contains(msg, "refresh-metrics-interval exceeds metricsStalenessThreshold") {
+		s.warnings++
+	}
+}
+
+// TestUtilizationDetectorFactory_StalenessWarning verifies the factory warns
+// only when the data-layer polling cadence exceeds the staleness threshold.
+func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		refreshInterval time.Duration
+		wantWarnings    int
+	}{
+		{"interval exceeds threshold", DefaultMetricsStalenessThreshold + time.Second, 1},
+		{"interval equals threshold", DefaultMetricsStalenessThreshold, 0},
+		{"interval below threshold", DefaultMetricsStalenessThreshold - time.Millisecond, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &warnCountingSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
+			handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithRefreshMetricsInterval(tc.refreshInterval))
+
+			_, err := UtilizationDetectorFactory("test", nil, handle)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantWarnings, sink.warnings)
+		})
+	}
 }

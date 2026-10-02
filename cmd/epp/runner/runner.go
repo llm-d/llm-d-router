@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -72,6 +73,7 @@ import (
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	labelproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/label"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -159,6 +161,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	"github.com/llm-d/llm-d-router/pkg/epp/statesync"
 	"github.com/llm-d/llm-d-router/version"
 )
 
@@ -392,7 +395,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return nil, nil, err
@@ -410,14 +413,8 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
-		BindAddress: fmt.Sprintf(":%d", opts.MetricsPort),
-		FilterProvider: func() func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
-			if opts.MetricsEndpointAuth {
-				return filters.WithAuthenticationAndAuthorization
-			}
-
-			return nil
-		}(),
+		BindAddress:    fmt.Sprintf(":%d", opts.MetricsPort),
+		FilterProvider: openMetricsFilterProvider(opts.MetricsEndpointAuth),
 	}
 
 	if err := runserver.ConfigureMetricsTLS(opts, &metricsServerOptions); err != nil {
@@ -500,6 +497,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		setupLog.Error(err, "Failed to setup EPP controllers")
 		return nil, nil, err
 	}
+	if err := r.setupPeerDiscovery(mgr, rawConfig); err != nil {
+		setupLog.Error(err, "Failed to setup peer discovery")
+		return nil, nil, err
+	}
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
@@ -522,6 +523,51 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
+}
+
+// metricsEndpointPath is where controller-runtime mounts the metrics handler.
+const metricsEndpointPath = "/metrics"
+
+// openMetricsFilterProvider builds the metrics server's FilterProvider.
+//
+// Exemplars only exist in the OpenMetrics format, and controller-runtime builds
+// its /metrics handler without EnableOpenMetrics. ExtraHandlers can't override
+// /metrics and there is no option for handler settings, so the filter is the
+// only place to swap in the same handler with OpenMetrics enabled.
+//
+// controller-runtime runs this filter over every handler it mounts, pprof and
+// /debug/plugins/state included, so only /metrics is swapped. Auth, when
+// enabled, wraps the result as before.
+func openMetricsFilterProvider(authEnabled bool) func(*rest.Config, *http.Client) (metricsserver.Filter, error) {
+	return func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
+		var authFilter metricsserver.Filter
+		if authEnabled {
+			var err error
+			authFilter, err = filters.WithAuthenticationAndAuthorization(c, httpClient)
+			if err != nil {
+				return nil, fmt.Errorf("build metrics authentication filter: %w", err)
+			}
+		}
+
+		openMetricsHandler := promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{
+			ErrorHandling:     promhttp.HTTPErrorOnError,
+			EnableOpenMetrics: true,
+		})
+
+		return func(log logr.Logger, next http.Handler) (http.Handler, error) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == metricsEndpointPath {
+					openMetricsHandler.ServeHTTP(w, r)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+			if authFilter == nil {
+				return handler, nil
+			}
+			return authFilter(log, handler)
+		}, nil
+	}
 }
 
 // NewEndpointPoolFromOptions constructs an EndpointPool from standalone options.
@@ -726,6 +772,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.PluginType, fwkplugin.StabilityBeta, discoveryfile.Factory)
 	// multicluster variant
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
+	// Alpha
+	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
 
 	// register request header processor plugins
 	// Alpha
@@ -787,10 +835,12 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
-func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapiv1.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
+func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapiv1.EndpointPickerConfig, ds datastore.Datastore, refreshMetricsInterval time.Duration) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds),
+		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
+		fwkplugin.WithRefreshMetricsInterval(refreshMetricsInterval))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 
@@ -954,6 +1004,35 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 	return disc, nil
 }
 
+// setupPeerDiscovery runs the PeerDiscovery plugin referenced by
+// rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
+// every replica. Discovered peers land in store. The plugin is expected to
+// have been instantiated and registered in r.PluginHandle by
+// parseConfigurationPhaseTwo.
+func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig) error {
+	dl := rawConfig.DataLayer
+	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		return nil
+	}
+
+	ref := dl.Discovery.Peers.PluginRef
+	p := r.PluginHandle.Plugin(ref)
+	if p == nil {
+		return fmt.Errorf("peerDiscovery: no plugin found with name %q", ref)
+	}
+	disc, ok := p.(fwkdl.PeerDiscovery)
+	if !ok {
+		return fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
+	}
+
+	// TODO(#1892): Connect peerStore to CrossReplicaSyncer. See TestPeerDiscoveryFullWiring.
+	peerStore := statesync.NewMemoryPeerStore()
+	notifier := fwkdl.NewPeerNotifier(peerStore)
+	return mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
+		return disc.Start(ctx, notifier)
+	})))
+}
+
 // initAdmissionControl builds the request admission controller, gated by the
 // FlowControl feature gate. With FC on it constructs the FlowRegistry and
 // FlowController and wraps endpointCandidates in a short-lived cache; with FC
@@ -1092,7 +1171,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
 		"k8s-notification-source data layer plugins); see docs/discovery.md")
 
-	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err

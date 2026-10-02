@@ -261,7 +261,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
 	defer span.End()
 	if span.IsRecording() {
-		//nolint:gosec // seq is vLLM's per-pod event counter; see parseEventFrame doc
+		//#nosec -- seq is vLLM's per-pod event counter; see parseEventFrame doc
 		seqAttr := int64(seq)
 		attrs := []attribute.KeyValue{
 			semconv.LLMDKVCacheEventsTopic(topic),

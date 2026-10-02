@@ -245,8 +245,8 @@ func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
 }
 
 const (
-	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens"
-	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"
+	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens" //#nosec G101 -- metric name, not a credential
+	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"           //#nosec G101 -- metric name, not a credential
 )
 
 // sharedPrefixHistogram reads a shared prefix metric out of the registry it is

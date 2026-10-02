@@ -218,7 +218,7 @@ func diffStore(store datastore.Datastore, params diffStoreParams) string {
 
 	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
 		return a.Name < b.Name
-	})); diff != "" {
+	}), cmpopts.IgnoreFields(v1alpha2.InferenceObjective{}, "ObjectMeta.ResourceVersion")); diff != "" {
 		return "models:" + diff
 	}
 	return ""

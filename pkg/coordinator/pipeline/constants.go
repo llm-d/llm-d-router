@@ -1,5 +1,4 @@
 /*
-Copyright 2025 The Kubernetes Authors.
 Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxy
+package pipeline
 
-// tracerScope is the OTel instrumentation scope for the sidecar proxy.
-const tracerScope = "llm-d-router/pkg/sidecar/proxy"
+// TracerScope is the OTel instrumentation scope for spans emitted by the
+// coordinator pipeline.
+const TracerScope = "llm-d-router/pkg/coordinator/pipeline"
+
+// pipelineSpanName is the span covering one run of the step list.
+const pipelineSpanName = "pipeline"

@@ -308,8 +308,8 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 
 func createGrpcFrameRaw(payload []byte) ([]byte, error) {
 	frame := make([]byte, 5+len(payload))
-	frame[0] = 0 // uncompressed
-	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload)))
+	frame[0] = 0                                                // uncompressed
+	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload))) //#nosec G115 -- test fixture, small gRPC frame payloads
 	copy(frame[5:], payload)
 	return frame, nil
 }

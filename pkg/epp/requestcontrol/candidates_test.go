@@ -274,6 +274,25 @@ func TestCachedEndpointCandidates_CacheIsolation_EmptyVsDefault(t *testing.T) {
 	assert.Equal(t, 2, mockDelegate.callCount(), "Empty subset should not hit the default cache key")
 }
 
+func TestCachedEndpointCandidates_CacheIsolation_MalformedVsDefault(t *testing.T) {
+	t.Parallel()
+
+	ep := makeMockEndpoint("p1", "1.1.1.1")
+	mockDelegate := &mockEndpointCandidates{}
+	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
+
+	// The delegate drops non-string entries, so a single malformed entry resolves to no endpoints.
+	_ = cached.Locate(context.Background(), makeMetadataWithSubset([]any{42}))
+
+	mockDelegate.mu.Lock()
+	mockDelegate.result = []fwkdl.Endpoint{ep}
+	mockDelegate.mu.Unlock()
+
+	res := cached.Locate(context.Background(), nil)
+	assert.Equal(t, []fwkdl.Endpoint{ep}, res, "A malformed subset must not populate the default cache key")
+	assert.Equal(t, 2, mockDelegate.callCount())
+}
+
 // --- Helpers & Mocks ---
 
 // mockEndpointCandidates implements contracts.EndpointCandidates.
