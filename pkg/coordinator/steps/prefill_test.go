@@ -768,26 +768,30 @@ func TestPrefillStep_DebugRequestRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sink := &logCaptureSink{}
+	logger, records := captureLogger(logutil.DEBUG)
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-1",
 		Model:            "test-model",
 		TokenIDs:         []int{1, 2345},
 		KVTransferParams: make(map[string]any),
+		OriginalHeaders:  http.Header{"Authorization": {"Bearer secret"}},
 	}
-	if err := step.Execute(log.IntoContext(context.Background(), logr.New(sink)), reqCtx); err != nil {
+	if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The gateway client writes the same message at TRACE.
-	var got int
-	for _, c := range sink.infos {
-		if c.level == logutil.DEBUG && c.msg == "request body" {
-			got++
-		}
+	want := []string{
+		`"msg"="request body"`,
+		`"path"="` + reqcommon.PathVLLMGenerate + `"`,
+		`"bodyLen"=`,
+		`"authorization"="[REDACTED]"`,
+		`"x-request-id"="req-1"`,
 	}
-	if got != 1 {
-		t.Errorf("got %d DEBUG records with the message %q, want 1, infos=%v", got, "request body", sink.infos)
+	if got := countRecords(records(), want...); got != 1 {
+		t.Errorf("%d records contain %v, want 1, records=%v", got, want, records())
+	}
+	if got := countRecords(records(), "Bearer secret"); got != 0 {
+		t.Errorf("%d records contain the authorization value, want 0, records=%v", got, records())
 	}
 }
 

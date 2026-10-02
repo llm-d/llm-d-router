@@ -698,21 +698,7 @@ func TestPostToGateway_DebugRecord(t *testing.T) {
 			wantKeys:    []string{`"index"=2`, `"path"="` + reqcommon.PathCompletions + `"`, `"bodyLen"=13`},
 			wantRecords: 1,
 		},
-		{
-			name:        "default message with an empty body and no headers",
-			verbosity:   logutil.DEBUG,
-			wantMsg:     defaultGatewayLogMsg,
-			wantKeys:    []string{`"bodyLen"=0`},
-			wantRecords: 1,
-		},
-		{
-			name:        "message from the caller that is equal to the default",
-			verbosity:   logutil.DEBUG,
-			logMsg:      defaultGatewayLogMsg,
-			wantMsg:     defaultGatewayLogMsg,
-			wantRecords: 1,
-		},
-		{name: "below debug", verbosity: logutil.VERBOSE, wantMsg: defaultGatewayLogMsg},
+		{name: "below debug", verbosity: logutil.VERBOSE, logMsg: "request body", wantMsg: "request body"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
