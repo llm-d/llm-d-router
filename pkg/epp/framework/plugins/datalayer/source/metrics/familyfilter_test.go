@@ -17,12 +17,20 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	sourcehttp "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
 const familyFilterPage = `# HELP vllm:num_requests_running Number of requests in model execution batches.
@@ -142,5 +150,74 @@ func TestMetricsDataSourceFactoryAcceptsFamilies(t *testing.T) {
 	}
 	if _, err := MetricsDataSourceFactory("metrics", json.NewDecoder(strings.NewReader(string(raw))), nil); err != nil {
 		t.Fatalf("factory with families: %v", err)
+	}
+}
+
+type familyExtractor struct {
+	name     string
+	families []string
+}
+
+func (e familyExtractor) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: e.name, Name: e.name}
+}
+
+func (familyExtractor) Extract(context.Context, fwkdl.PollInput[PrometheusMetricMap]) error {
+	return nil
+}
+
+func (e familyExtractor) MetricFamilies() []string { return e.families }
+
+const boundFamiliesPage = "# TYPE a gauge\na 1\n# TYPE b gauge\nb 2\n# TYPE c gauge\nc 3\n"
+
+func TestMetricsDataSourceParsesFamiliesOfBoundExtractors(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     string
+		extractors []fwkplugin.Plugin
+		want       string
+	}{
+		{name: "no extractor", want: "a,b,c"},
+		{name: "declared families are joined", extractors: []fwkplugin.Plugin{
+			familyExtractor{"x", []string{"a"}}, familyExtractor{"y", []string{"b"}}}, want: "a,b"},
+		{name: "an extractor without families keeps the whole response", extractors: []fwkplugin.Plugin{
+			familyExtractor{"x", []string{"a"}}, noopExtractor{}, familyExtractor{"y", []string{"b"}}}, want: "a,b,c"},
+		{name: "configured families win", params: `{"families":["c"]}`, extractors: []fwkplugin.Plugin{
+			familyExtractor{"x", []string{"a"}}}, want: "c"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(boundFamiliesPage))
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: u.Host}, nil)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var params *json.Decoder
+			if tc.params != "" {
+				params = json.NewDecoder(strings.NewReader(tc.params))
+			}
+			p, err := MetricsDataSourceFactory("metrics", params, nil)
+			if err != nil {
+				t.Fatalf("factory: %v", err)
+			}
+			src := p.(*sourcehttp.HTTPDataSource[PrometheusMetricMap])
+			for _, ext := range tc.extractors {
+				if err := src.AppendExtractor(ext); err != nil {
+					t.Fatalf("append %s: %v", ext.TypedName(), err)
+				}
+			}
+			got, err := src.Poll(context.Background(), ep)
+			if err != nil {
+				t.Fatalf("poll: %v", err)
+			}
+			if keys := strings.Join(sortedKeys(got), ","); keys != tc.want {
+				t.Fatalf("families = %s, want %s", keys, tc.want)
+			}
+		})
 	}
 }

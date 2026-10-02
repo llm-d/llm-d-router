@@ -33,9 +33,10 @@ The plugin config supports:
     response is dropped before parsing, which cuts the scrape's CPU and allocations when the
     model server exposes far more families than the extractors read. A family's samples may
     carry the `_bucket`, `_sum`, `_count`, `_total` or `_created` suffix. The list must cover
-    every family the source's extractors read; `core-metrics-extractor` reads the engine's
-    queued requests, running requests, KV cache usage, LoRA info and cache info metrics.
-    Omit to parse the whole response.
+    every family the source's extractors read. Omit to keep the families the source's
+    extractors declare: `core-metrics-extractor` declares the metrics of every configured
+    engine, `multicluster-metrics-extractor` its two pool metrics. The whole response is
+    parsed when an extractor on the source does not declare its families.
 
 ### Example Configuration
 
@@ -48,7 +49,8 @@ parameters:
   interval: "1s"
 ```
 
-Parsing only what the core metrics extractor reads from vLLM:
+Only the metrics named in `families` are parsed and passed to the extractors. All other
+metrics are dropped before parsing:
 
 ```yaml
 type: metrics-data-source

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -70,6 +71,8 @@ type metricsDatasourceParams struct {
 	// other line before parsing. Model servers expose far more families than the extractors
 	// read, so parsing only the listed ones cuts the scrape's CPU and allocations. The list must
 	// cover every family the source's extractors read; the rest are invisible to them.
+	// When omitted, the source keeps the families its extractors declare (FamilyReader), and
+	// parses the whole response if any bound extractor does not declare them.
 	Families []string `json:"families,omitempty"`
 }
 
@@ -77,8 +80,9 @@ type metricsDatasourceParams struct {
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
+	parser, observer := newMetricsParser(nil, 0)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
-		MetricsDataSourceType, name, parseMetrics)
+		MetricsDataSourceType, name, parser, observer)
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
@@ -106,10 +110,8 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
-	parser := parseMetrics
-	if len(cfg.Families) > 0 {
-		parser = newFamilyFilter(cfg.Families).parse
-	}
+	parser, observer := newMetricsParser(cfg.Families, 0)
+	opts = append(opts, observer)
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
@@ -132,6 +134,52 @@ func defaultDataSourceConfigParams() *metricsDatasourceParams {
 func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	return parser.TextToMetricFamilies(data)
+}
+
+// FamilyReader is implemented by extractors that can name the metric families they read.
+type FamilyReader interface {
+	MetricFamilies() []string
+}
+
+// newMetricsParser returns the source's parser and the option that feeds it the bound
+// extractors. Configured families are used as given. Without them the parser keeps the
+// families the bound extractors declare, and parses the whole response while any bound
+// extractor is not a FamilyReader. A positive maxBytes caps the bytes read from a response.
+func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
+	var (
+		filter   atomic.Pointer[familyFilter]
+		declared []string
+		opaque   bool
+	)
+	if len(families) > 0 {
+		filter.Store(newFamilyFilter(families))
+	}
+	parser := func(data io.Reader) (PrometheusMetricMap, error) {
+		if maxBytes > 0 {
+			data = io.LimitReader(data, maxBytes)
+		}
+		if f := filter.Load(); f != nil {
+			return f.parse(data)
+		}
+		return parseMetrics(data)
+	}
+	// AppendExtractor serializes the observer calls.
+	observer := func(ext fwkplugin.Plugin) {
+		if len(families) > 0 {
+			return
+		}
+		reader, ok := ext.(FamilyReader)
+		if !ok {
+			opaque = true
+			filter.Store(nil)
+			return
+		}
+		declared = append(declared, reader.MetricFamilies()...)
+		if !opaque && len(declared) > 0 {
+			filter.Store(newFamilyFilter(declared))
+		}
+	}
+	return parser, http.WithExtractorObserver(observer)
 }
 
 // sampleSuffixes are the sample-name suffixes a family's samples may carry in the text format.
