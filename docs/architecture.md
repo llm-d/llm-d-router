@@ -203,7 +203,7 @@ in this section has the following form:
 The fields in a schedulingProfile entry are:
 
 - **name**: specifies the scheduling profile's name.
-- **plugins**: specifies the set of plugins to be used when this scheduling profile is chosen for a request.
+- **plugins**: references plugins that implement `Filter`, `Scorer`, or `Picker` to run when this scheduling profile is chosen for a request.
 - **pluginRef**: reference to the name of the plugin instance to be used
 - **weight**: weight to be used if the referenced plugin is a scorer.
 

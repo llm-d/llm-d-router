@@ -482,7 +482,7 @@ requestHandler:
 // successExplicitPassthroughConfigText configures a fallback explicitly under a
 // custom name, alongside a claimed-path parser.
 //
-//nolint:gosec // G101: identifier contains "Passthrough", not a credential
+// #nosec G101 -- identifier contains "Passthrough", not a credential
 const successExplicitPassthroughConfigText = `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig

@@ -285,9 +285,9 @@ func (c *CachedEndpointCandidates) generateCacheKey(reqMetadata map[string]any) 
 		if s, ok := endpointSubsetList[0].(string); ok {
 			return s
 		}
-		return defaultCacheKey // Fallback for malformed data.
 	}
 
+	// Non-string entries are dropped, matching the delegate, which ignores them when filtering.
 	// Copy and sort to ensure determinism ( [A, B] must equal [B, A] ).
 	endpoints := make([]string, 0, len(endpointSubsetList))
 	for _, ep := range endpointSubsetList {

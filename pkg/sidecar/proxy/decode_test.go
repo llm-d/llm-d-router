@@ -32,6 +32,7 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -68,7 +69,7 @@ func newChunkedTestSetupWithHandler(chunkSize int, handler http.Handler) *chunke
 	cfg := Config{
 		Port:            "0",
 		DecoderURL:      decoderURL,
-		KVConnector:     KVConnectorNIXLV2,
+		KVConnector:     constants.KVConnectorNIXLV2,
 		DecodeChunkSize: chunkSize,
 	}
 	proxy := NewProxy(cfg)
@@ -220,11 +221,11 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 			Expect(secondReqBody).ToNot(BeNil())
-			msgs := secondReqBody[requestFieldMessages].([]any)
+			msgs := secondReqBody[reqcommon.FieldMessages].([]any)
 			Expect(msgs).To(HaveLen(2))
 			lastMsg := msgs[1].(map[string]any)
-			Expect(lastMsg[requestFieldRole]).To(Equal("assistant"))
-			Expect(lastMsg[requestFieldContent]).To(Equal("hello "))
+			Expect(lastMsg[reqcommon.FieldRole]).To(Equal("assistant"))
+			Expect(lastMsg[reqcommon.FieldContent]).To(Equal("hello "))
 		})
 
 		It("propagates decode backend error to client", func() {
@@ -264,16 +265,16 @@ var _ = Describe("Chunked Decode", func() {
 
 			// Two chunk data events + usage event + [DONE]
 			Expect(events).To(HaveLen(4))
-			Expect(events[3]).To(Equal(sseDone))
+			Expect(events[3]).To(Equal(reqcommon.SSEDone))
 
 			var first map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], sseDataPrefix)), &first)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
 			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
-			Expect(delta[requestFieldContent]).To(Equal("hello "))
+			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
 
 			// Verify cumulative usage in the final usage event.
 			var usageEvent map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], sseDataPrefix)), &usageEvent)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], reqcommon.SSEDataPrefix)), &usageEvent)).To(Succeed())
 			usage := usageEvent["usage"].(map[string]any)
 			promptTokens, _ := toInt(usage["prompt_tokens"])
 			completionTokens, _ := toInt(usage["completion_tokens"])
@@ -287,7 +288,7 @@ var _ = Describe("Chunked Decode", func() {
 	Describe("helper functions", func() {
 
 		It("resolveMaxTokens prefers max_completion_tokens over max_tokens", func() {
-			req := map[string]any{requestFieldMaxTokens: float64(50), requestFieldMaxCompletionTokens: float64(100)}
+			req := map[string]any{reqcommon.FieldMaxTokens: float64(50), reqcommon.FieldMaxCompletionTokens: float64(100)}
 			Expect(resolveMaxTokens(req)).To(Equal(100))
 		})
 
@@ -305,20 +306,20 @@ var _ = Describe("Chunked Decode", func() {
 
 		It("appendChunkToRequest appends assistant message to chat messages", func() {
 			req := map[string]any{
-				requestFieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
+				reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
 			}
 			appendChunkToRequest(logr.Discard(), req, "hello")
-			msgs := req[requestFieldMessages].([]json.RawMessage)
+			msgs := req[reqcommon.FieldMessages].([]json.RawMessage)
 			Expect(msgs).To(HaveLen(2))
 			var last map[string]any
 			Expect(json.Unmarshal(msgs[1], &last)).To(Succeed())
-			Expect(last[requestFieldRole]).To(Equal("assistant"))
-			Expect(last[requestFieldContent]).To(Equal("hello"))
+			Expect(last[reqcommon.FieldRole]).To(Equal("assistant"))
+			Expect(last[reqcommon.FieldContent]).To(Equal("hello"))
 		})
 
 		It("appendChunkToRequest keeps the client's messages byte-for-byte across chunks", func() {
 			userMessage := `{"role":"user","content":[{"type":"text","b":"1","a":"2"}]}`
-			req := map[string]any{requestFieldMessages: json.RawMessage(`[` + userMessage + `]`)}
+			req := map[string]any{reqcommon.FieldMessages: json.RawMessage(`[` + userMessage + `]`)}
 
 			appendChunkToRequest(logr.Discard(), req, "one")
 			appendChunkToRequest(logr.Discard(), req, "two")
@@ -329,9 +330,9 @@ var _ = Describe("Chunked Decode", func() {
 		})
 
 		It("appendChunkToRequest is a no-op for empty text", func() {
-			req := map[string]any{requestFieldMessages: json.RawMessage(`[]`)}
+			req := map[string]any{reqcommon.FieldMessages: json.RawMessage(`[]`)}
 			appendChunkToRequest(logr.Discard(), req, "")
-			Expect(req[requestFieldMessages]).To(Equal(json.RawMessage(`[]`)))
+			Expect(req[reqcommon.FieldMessages]).To(Equal(json.RawMessage(`[]`)))
 		})
 	})
 })

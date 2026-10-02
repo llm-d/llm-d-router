@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Check commenter has write access
         id: check-access
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const perm = await github.rest.repos.getCollaboratorPermissionLevel({

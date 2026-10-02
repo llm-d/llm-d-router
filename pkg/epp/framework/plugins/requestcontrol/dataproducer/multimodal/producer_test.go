@@ -237,6 +237,48 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 	assert.Contains(t, cache["hash-c"], podC.String())
 }
 
+func TestPreRequestRecordsEncodeEndpointInDisaggregatedMode(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	encodePod := k8stypes.NamespacedName{Namespace: "default", Name: "encode-pod"}
+	decodePod := k8stypes.NamespacedName{Namespace: "default", Name: "decode-pod"}
+
+	request := requestWithHashes("req-1", map[string]int{"hash-a": 1})
+
+	require.NoError(t, producer.Produce(context.Background(), request,
+		[]scheduling.Endpoint{newEndpoint(encodePod), newEndpoint(decodePod)}))
+
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{newEndpoint(decodePod)}},
+			"encode": {TargetEndpoints: []scheduling.Endpoint{newEndpoint(encodePod)}},
+		},
+	}
+
+	_ = producer.PreRequest(context.Background(), request, result)
+	producer.wg.Wait()
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], encodePod.String())
+	assert.NotContains(t, cache["hash-a"], decodePod.String())
+}
+
+func TestPreRequestFallsBackToPrimaryProfileWhenNoEncodeProfile(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	pod := k8stypes.NamespacedName{Namespace: "default", Name: "aggregated-pod"}
+
+	request := requestWithHashes("req-1", map[string]int{"hash-a": 1})
+
+	require.NoError(t, producer.Produce(context.Background(), request,
+		[]scheduling.Endpoint{newEndpoint(pod)}))
+
+	_ = producer.PreRequest(context.Background(), request, schedulingResult(newEndpoint(pod)))
+	producer.wg.Wait()
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], pod.String())
+}
+
 func TestLRUEviction(t *testing.T) {
 	producer := newTestProducer(t, &Parameters{CacheSizeInMBPerServer: 4}, nil)
 	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})

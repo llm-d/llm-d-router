@@ -31,6 +31,8 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 func writeTempYAML(t *testing.T, name, content string) string {
@@ -66,7 +68,7 @@ prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
-`, KVConnectorNIXLV2, ECExampleConnector))
+`, constants.KVConnectorNIXLV2, constants.ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
@@ -109,7 +111,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
-	}`, KVConnectorNIXLV2, ECExampleConnector)
+	}`, constants.KVConnectorNIXLV2, constants.ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---
@@ -136,8 +138,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -184,8 +186,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -226,8 +228,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                    "8111",
 				modelServerPort:         "8222",
 				dataParallelSize:        2,
-				kvConnector:             KVConnectorNIXLV2,
-				ecConnector:             ECExampleConnector,
+				kvConnector:             constants.KVConnectorNIXLV2,
+				ecConnector:             constants.ECExampleConnector,
 				enableSSRFProtection:    true,
 				enablePrefillerSampling: true,
 				enableTLS:               &[]string{prefillStage},
@@ -246,8 +248,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -285,12 +287,12 @@ func TestSidecarConfiguration(t *testing.T) {
 		{
 			name: "flags set ECConnectorNIXL",
 			inputFlags: map[string]any{
-				ecConnector: ECConnectorNIXL,
+				ecConnector: constants.ECConnectorNIXL,
 			},
 			expected: func(o *Options) {
 				o.modelServerPort = defaultVLLMPort
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECConnectorNIXL
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECConnectorNIXL
 			},
 			expectedError: nil,
 		},
@@ -300,8 +302,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                      "8111",
 				modelServerPort:           "8222",
 				dataParallelSize:          2,
-				kvConnector:               KVConnectorNIXLV2,
-				ecConnector:               ECExampleConnector,
+				kvConnector:               constants.KVConnectorNIXLV2,
+				ecConnector:               constants.ECExampleConnector,
 				enableSSRFProtection:      true,
 				enablePrefillerSampling:   true,
 				enableTLS:                 &[]string{prefillStage},
@@ -321,8 +323,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 400
 				o.MooncakeBootstrapPort = 9002
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -668,7 +670,7 @@ func TestP2PConnectorPort(t *testing.T) {
 func TestValidateOffloadingDP(t *testing.T) {
 	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 2
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -676,7 +678,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 1
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -684,7 +686,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 4
 		opts.P2PConnectorPort = 65533
 		require.NoError(t, opts.Complete())
@@ -693,7 +695,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 4
 		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
@@ -704,7 +706,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 func TestValidateEnableP2PPull(t *testing.T) {
 	t.Run("rejects enable-p2p-pull with non-NIXLv2 connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorSharedStorage
+		opts.KVConnector = constants.KVConnectorSharedStorage
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
@@ -712,7 +714,7 @@ func TestValidateEnableP2PPull(t *testing.T) {
 
 	t.Run("rejects enable-p2p-pull with offloading connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
@@ -720,7 +722,7 @@ func TestValidateEnableP2PPull(t *testing.T) {
 
 	t.Run("allows enable-p2p-pull with NIXLv2 connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorNIXLV2
+		opts.KVConnector = constants.KVConnectorNIXLV2
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -733,11 +735,11 @@ func TestValidateConnector(t *testing.T) {
 		connector string
 		wantErr   bool
 	}{
-		{"valid nixlv2", KVConnectorNIXLV2, false},
-		{"valid shared-storage", KVConnectorSharedStorage, false},
-		{"valid sglang", KVConnectorSGLang, false},
-		{"valid mooncake", KVConnectorMooncake, false},
-		{"valid offloading", KVConnectorOffloading, false},
+		{"valid nixlv2", constants.KVConnectorNIXLV2, false},
+		{"valid shared-storage", constants.KVConnectorSharedStorage, false},
+		{"valid sglang", constants.KVConnectorSGLang, false},
+		{"valid mooncake", constants.KVConnectorMooncake, false},
+		{"valid offloading", constants.KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 

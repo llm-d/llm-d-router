@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -79,13 +80,15 @@ func UtilizationDetectorFactory(
 var (
 	_ fwksched.Filter                = &Detector{}
 	_ flowcontrol.SaturationDetector = &Detector{}
+	_ fwkplugin.ConsumerPlugin       = &Detector{}
 )
 
 // Detector determines system saturation based on metrics of the given candidate pods.
 type Detector struct {
-	config    Config
-	typedName fwkplugin.TypedName
-	logger    logr.Logger
+	config              Config
+	typedName           fwkplugin.TypedName
+	inFlightLoadDataKey fwkplugin.DataKey
+	logger              logr.Logger
 
 	// lastStaleWarnNanos is the wall-clock time (UnixNano) of the most recent stale-metrics log,
 	// accessed atomically because Saturation may be called concurrently.
@@ -115,10 +118,35 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 	}
 
 	return &Detector{
-		config:    cfg,
-		typedName: typedName,
-		logger:    pluginLogger,
+		config:              cfg,
+		typedName:           typedName,
+		inFlightLoadDataKey: attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(cfg.InFlightLoadProducerName),
+		logger:              pluginLogger,
 	}
+}
+
+// Consumes declares InFlightLoad as an optional dependency: it supplies the
+// scrape-lag compensation in Saturation and Filter, but the detector still functions on
+// scraped metrics alone when no inflight-load-producer is configured.
+func (d *Detector) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Optional: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+	}
+}
+
+// queueDepth returns the scraped waiting queue plus the in-flight requests the
+// scrape does not yet reflect (see Saturation).
+func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap) int64 {
+	waiting := int64(m.WaitingQueueSize)
+	if attrs == nil {
+		return waiting
+	}
+	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {
+		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
+			return waiting + max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
+		}
+	}
+	return waiting
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -138,6 +166,25 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 // Pods with missing or stale metrics contribute 1.0 under the saturated policy, or are excluded
 // from the average under the ignore policy.
+//
+// # Scrape-lag compensation
+//
+// WaitingQueueSize is scraped on a poller (default 50ms) while the flow
+// controller's dispatch loop runs at ~1ms, so between two scrapes the queue term
+// is stale-low and the gate would let the controller over-dispatch. When an
+// inflight-load-producer is configured, the detector corrects for this using the
+// producer's per-endpoint in-flight request count, which is incremented at
+// dispatch and decremented on request completion (so it already accounts for
+// requests that returned since the last scrape). The lag is the tracked
+// in-flight requests the scrape does not yet reflect:
+//
+//	credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
+//
+// The credit corrects each endpoint's score before aggregation. It is added
+// only to the queue-depth term (the fast, controllable signal); the KV-cache
+// term is left as measured. Endpoints without the attribute contribute zero
+// credit and fall back to the scraped queue depth. See the package README for
+// the assumptions the compensation rests on.
 func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
 	if len(candidates) == 0 {
 		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
@@ -165,7 +212,7 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 			continue
 		}
 
-		qRatio := float64(podMetrics.WaitingQueueSize) / float64(d.config.QueueDepthThreshold)
+		qRatio := float64(d.queueDepth(podMetrics, e.GetAttributes())) / float64(d.config.QueueDepthThreshold)
 		kvRatio := podMetrics.KVCacheUsagePercent / d.config.KVCacheUtilThreshold
 
 		// Roofline Analysis: The pod is saturated if either resource is exhausted.
@@ -212,6 +259,7 @@ func (d *Detector) maybeLogStaleEndpoints(staleCount, total int) {
 // Filter blocks traffic to specific pods that are physically saturated or exceeding their safety limits.
 //
 // It applies a relaxed limit (Threshold * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
+// The queue depth includes the same scrape-lag compensation as Saturation.
 func (d *Detector) Filter(
 	_ context.Context,
 	_ *fwksched.InferenceRequest,
@@ -229,7 +277,7 @@ func (d *Detector) Filter(
 			continue
 		}
 
-		if float64(podMetrics.WaitingQueueSize) < qLimit && podMetrics.KVCacheUsagePercent < kvLimit {
+		if float64(d.queueDepth(podMetrics, endpoint)) < qLimit && podMetrics.KVCacheUsagePercent < kvLimit {
 			filtered = append(filtered, endpoint)
 		}
 	}
