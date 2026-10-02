@@ -186,8 +186,8 @@ func bulkPredictWithMetrics(
 	logger := log.FromContext(ctx)
 
 	if len(targetEndpointsMetadatas) != len(metricsStates) || len(metricsStates) != len(inputTokenLengths) || len(inputTokenLengths) != len(generatedTokenCounts) || len(generatedTokenCounts) != len(prefixCacheScores) {
-		return nil, fmt.Errorf("input slice lengths must match: endpoints=%d, metrics=%d, inputTokenLengths=%d, tokenCounts=%d, prefixScores=%d",
-			len(targetEndpointsMetadatas), len(metricsStates), len(inputTokenLengths), len(generatedTokenCounts), len(prefixCacheScores))
+		return nil, newPredictionFailure(predictionFailureReasonRequestError, fmt.Errorf("input slice lengths must match: endpoints=%d, metrics=%d, inputTokenLengths=%d, tokenCounts=%d, prefixScores=%d",
+			len(targetEndpointsMetadatas), len(metricsStates), len(inputTokenLengths), len(generatedTokenCounts), len(prefixCacheScores)))
 	}
 
 	if len(metricsStates) == 0 {
@@ -196,13 +196,13 @@ func bulkPredictWithMetrics(
 
 	for i, metricsState := range metricsStates {
 		if metricsState == nil {
-			return nil, fmt.Errorf("metrics state at index %d cannot be nil", i)
+			return nil, newPredictionFailure(predictionFailureReasonRequestError, fmt.Errorf("metrics state at index %d cannot be nil", i))
 		}
 	}
 
 	for i, endpointMetadata := range targetEndpointsMetadatas {
 		if endpointMetadata == nil {
-			return nil, fmt.Errorf("endpoint metadata at index %d cannot be nil", i)
+			return nil, newPredictionFailure(predictionFailureReasonRequestError, fmt.Errorf("endpoint metadata at index %d cannot be nil", i))
 		}
 	}
 
@@ -239,16 +239,28 @@ func bulkPredictWithMetrics(
 	duration := time.Since(start)
 
 	if err != nil {
-		logger.V(logutil.DEBUG).Error(err, "bulk prediction failed",
+		logger.V(logutil.DEBUG).Info("bulk prediction failed", "error", err,
 			"duration_ms", duration.Milliseconds(),
 			"request_count", len(bulkRequests))
-		return nil, err
+		return nil, newPredictionFailure(predictionFailureReasonPredictorError, err)
 	}
 
 	if bulkResponse == nil {
 		logger.V(logutil.DEBUG).Info("bulk prediction returned nil",
 			"duration_ms", duration.Milliseconds())
-		return nil, errors.New("bulk prediction returned nil result")
+		return nil, newPredictionFailure(predictionFailureReasonNilResponse, errors.New("bulk prediction returned nil result"))
+	}
+
+	if len(bulkResponse.Predictions) != len(bulkRequests) {
+		return nil, newPredictionFailure(predictionFailureReasonLengthMismatch, fmt.Errorf(
+			"bulk prediction returned %d predictions for %d requests",
+			len(bulkResponse.Predictions), len(bulkRequests)))
+	}
+
+	if bulkResponse.FailedPredictions > 0 {
+		return nil, newPredictionFailure(predictionFailureReasonPredictorError, fmt.Errorf(
+			"bulk prediction reported %d failed predictions out of %d requests",
+			bulkResponse.FailedPredictions, len(bulkRequests)))
 	}
 
 	if predictedLatencyContext != nil {

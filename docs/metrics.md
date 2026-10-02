@@ -263,6 +263,7 @@ only when that plugin is configured and records the related prediction, observat
 | `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
 | `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
+| `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Latency prediction failures. Reasons are bounded values such as `request_error`, `predictor_error`, `nil_response`, and `length_mismatch`. |
 
 ### Disaggregation
 

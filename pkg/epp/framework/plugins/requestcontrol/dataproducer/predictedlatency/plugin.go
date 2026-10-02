@@ -30,6 +30,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -76,6 +77,7 @@ type PredictedLatency struct {
 	runningRequestLists          sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
 	sloContextStore              *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
 	config                       Config
+	predictionFailureLogLimiter  *rate.Limiter
 	prefixMatchDataKey           plugin.DataKey
 	inFlightLoadDataKey          plugin.DataKey
 	encoderCacheDataKey          plugin.DataKey
@@ -316,6 +318,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		typedName:                    plugin.TypedName{Type: LatencyDataProviderPluginType, Name: name},
 		latencypredictor:             predictor,
 		config:                       config,
+		predictionFailureLogLimiter:  rate.NewLimiter(rate.Every(time.Minute), 1),
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		encoderCacheDataKey:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(config.EncoderCacheMatchInfoProducerName),
