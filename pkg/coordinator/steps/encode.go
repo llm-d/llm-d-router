@@ -108,12 +108,12 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	var imageParts []map[string]any
 	switch format {
 	case reqcommon.APITypeChatCompletions:
-		if messages, ok := reqCtx.Body["messages"].([]any); ok {
-			imageParts = collectImageParts(messages, imageURLPartType)
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
+			imageParts = collectImageParts(messages, reqcommon.PartTypeImageURL)
 		}
 	case reqcommon.APITypeResponses:
-		if input, ok := reqCtx.Body["input"].([]any); ok {
-			imageParts = collectImageParts(input, inputImagePartType)
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
+			imageParts = collectImageParts(input, reqcommon.PartTypeInputImage)
 		}
 	}
 
@@ -230,14 +230,14 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 			return nil, err
 		}
 		item := map[string]any{
-			"role":    "user",
-			"content": []any{imageContent},
+			reqcommon.FieldRole:    "user",
+			reqcommon.FieldContent: []any{imageContent},
 		}
-		body := map[string]any{"model": reqCtx.Model}
+		body := map[string]any{reqcommon.FieldModel: reqCtx.Model}
 		if format == reqcommon.APITypeResponses {
-			body["input"] = []any{item}
+			body[reqcommon.FieldInput] = []any{item}
 		} else {
-			body["messages"] = []any{item}
+			body[reqcommon.FieldMessages] = []any{item}
 		}
 		reqcommon.CapSingleToken(body, format)
 		return body, nil
@@ -275,7 +275,7 @@ func collectImageParts(items []any, partType string) []map[string]any {
 		if !ok {
 			continue
 		}
-		content, ok := itemMap["content"].([]any)
+		content, ok := itemMap[reqcommon.FieldContent].([]any)
 		if !ok {
 			continue
 		}
@@ -284,7 +284,7 @@ func collectImageParts(items []any, partType string) []map[string]any {
 			if !ok {
 				continue
 			}
-			if partMap["type"] == partType {
+			if partMap[reqcommon.FieldType] == partType {
 				parts = append(parts, partMap)
 			}
 		}
@@ -308,15 +308,15 @@ func collectImageParts(items []any, partType string) []map[string]any {
 func buildSingleImageContent(imageParts []map[string]any, index int, format reqcommon.APIType) (map[string]any, error) {
 	if format == reqcommon.APITypeResponses {
 		content := map[string]any{
-			"type":      inputImagePartType,
-			"image_url": "",
+			reqcommon.FieldType:     reqcommon.PartTypeInputImage,
+			reqcommon.FieldImageURL: "",
 		}
 		if index >= 0 && index < len(imageParts) {
-			url, ok := imageParts[index][imageURLField].(string)
+			url, ok := imageParts[index][reqcommon.FieldImageURL].(string)
 			if !ok {
 				return nil, fmt.Errorf("input_image part %d has no string image_url: %w", index, pipeline.ErrBadRequest)
 			}
-			content["image_url"] = url
+			content[reqcommon.FieldImageURL] = url
 			if detail, ok := imageParts[index][inputImageDetailField]; ok {
 				content[inputImageDetailField] = detail
 			}
@@ -325,13 +325,13 @@ func buildSingleImageContent(imageParts []map[string]any, index int, format reqc
 	}
 	if index >= 0 && index < len(imageParts) {
 		return map[string]any{
-			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLField],
+			reqcommon.FieldType:     reqcommon.PartTypeImageURL,
+			reqcommon.FieldImageURL: imageParts[index][reqcommon.FieldImageURL],
 		}, nil
 	}
 	return map[string]any{
-		"type":      imageURLPartType,
-		"image_url": map[string]any{"url": ""},
+		reqcommon.FieldType:     reqcommon.PartTypeImageURL,
+		reqcommon.FieldImageURL: map[string]any{reqcommon.FieldURL: ""},
 	}, nil
 }
 

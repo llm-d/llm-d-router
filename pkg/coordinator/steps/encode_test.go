@@ -394,7 +394,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "text", "text": "describe"},
-						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": reqcommon.PartTypeImageURL, reqcommon.FieldImageURL: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},
@@ -425,8 +425,8 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected 1 content part (image only), got %d", len(content))
 	}
 	part := content[0].(map[string]any)
-	if part["type"] != imageURLPartType {
-		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
+	if part["type"] != reqcommon.PartTypeImageURL {
+		t.Fatalf("expected %s content part, got %v", reqcommon.PartTypeImageURL, part["type"])
 	}
 
 	// Verify no tokens field (dead field, never consumed downstream)
@@ -483,7 +483,7 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "input_text", "text": "describe"},
-						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc"},
 					},
 				},
 			},
@@ -512,8 +512,8 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 		t.Fatalf("expected 1 content part (image only), got %d", len(content))
 	}
 	part := content[0].(map[string]any)
-	if part["type"] != inputImagePartType {
-		t.Fatalf("expected %s content part, got %v", inputImagePartType, part["type"])
+	if part["type"] != reqcommon.PartTypeInputImage {
+		t.Fatalf("expected %s content part, got %v", reqcommon.PartTypeInputImage, part["type"])
 	}
 	if _, ok := part["image_url"].(string); !ok {
 		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
@@ -570,7 +570,7 @@ func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": inputImagePartType, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
 					},
 				},
 			},
@@ -623,7 +623,7 @@ func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": inputImagePartType, "file_id": "file-abc123"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "file_id": "file-abc123"},
 					},
 				},
 			},
@@ -679,7 +679,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": imageURLPartType, imageURLField: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": reqcommon.PartTypeImageURL, reqcommon.FieldImageURL: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},

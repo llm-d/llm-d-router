@@ -121,8 +121,9 @@ type RequestContext struct {
 	RevisionDecisionID string
 	OriginalPath       string
 	OriginalHeaders    http.Header
-	// OriginalBody is the exact bytes the client sent, captured before Body's
-	// stripping.
+	// OriginalBody is the request body exactly as the client sent it. Body is
+	// the same payload parsed, and the steps mutate it as the request moves
+	// through the pipeline, so the two diverge once any step edits a field.
 	OriginalBody []byte
 	Body         map[string]any
 	Model        string

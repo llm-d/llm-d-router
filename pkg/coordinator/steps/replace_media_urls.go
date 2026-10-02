@@ -45,16 +45,9 @@ import (
 
 const ReplaceMediaURLsStepName = "replace-media-urls"
 
-const imageURLPartType = "image_url"
-
-// imageURLField is the map key holding the URL, in both formats: nested one
-// level under a chat-completions image_url part, or directly on a Responses
-// input_image part. It shares imageURLPartType's string value by coincidence,
-// not by relation, so it is named separately for clarity at each use site.
-const imageURLField = "image_url"
-
-const inputImagePartType = "input_image"
-
+// inputImageDetailField is the Responses input_image rendering hint. It has no
+// counterpart in pkg/common/request, which carries only keys the router itself
+// reads.
 const inputImageDetailField = "detail"
 
 const defaultContentType = "application/octet-stream"
@@ -146,13 +139,13 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	// Which body field to walk is decided by the request's own path, not by
-	// which fields happen to be present: a chat-completions request never
-	// carries "input" and a Responses request never carries "messages".
+	// Which body field to walk is decided by the request's own path, so a
+	// field belonging to the other API shape is ignored rather than merged:
+	// a chat-completions request carrying "input" keeps it untouched.
 	var imageURLs []imageRef
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
-		if messages, ok := reqCtx.Body["messages"].([]any); ok {
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
 			var err error
 			imageURLs, err = collectChatCompletionsImageRefs(messages)
 			if err != nil {
@@ -160,7 +153,7 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 			}
 		}
 	case reqcommon.APITypeResponses:
-		if input, ok := reqCtx.Body["input"].([]any); ok {
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
 			var err error
 			imageURLs, err = collectResponsesImageRefs(input)
 			if err != nil {
@@ -250,7 +243,7 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
+		content, ok := msgMap[reqcommon.FieldContent].([]any)
 		if !ok {
 			continue
 		}
@@ -259,14 +252,14 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != imageURLPartType {
+			if partMap[reqcommon.FieldType] != reqcommon.PartTypeImageURL {
 				continue
 			}
-			imageURL, ok := partMap[imageURLField].(map[string]any)
+			imageURL, ok := partMap[reqcommon.FieldImageURL].(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("message %d part %d: image_url is not an object: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
 			}
-			url, ok := imageURL["url"].(string)
+			url, ok := imageURL[reqcommon.FieldURL].(string)
 			if !ok {
 				return nil, fmt.Errorf("message %d part %d: image_url.url is not a string: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
 			}
@@ -296,7 +289,7 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		content, ok := itemMap["content"].([]any)
+		content, ok := itemMap[reqcommon.FieldContent].([]any)
 		if !ok {
 			continue
 		}
@@ -305,10 +298,10 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 			if !ok {
 				continue
 			}
-			if partMap["type"] != inputImagePartType {
+			if partMap[reqcommon.FieldType] != reqcommon.PartTypeInputImage {
 				continue
 			}
-			url, ok := partMap[imageURLField].(string)
+			url, ok := partMap[reqcommon.FieldImageURL].(string)
 			if !ok {
 				return nil, fmt.Errorf("input item %d part %d: input_image with no image_url string is not supported: %w", itemIdx, partIdx, pipeline.ErrBadRequest)
 			}
@@ -316,7 +309,7 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 				msgIdx:  itemIdx,
 				partIdx: partIdx,
 				url:     url,
-				setURL:  func(v string) { partMap[imageURLField] = v },
+				setURL:  func(v string) { partMap[reqcommon.FieldImageURL] = v },
 			})
 		}
 	}

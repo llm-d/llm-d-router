@@ -118,11 +118,11 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	return nil
 }
 
-// injectUUIDs stamps image parts with their multimodal hash, walking whichever
-// body field reqcommon.DetectAPIType's result implies: a chat-completions
-// request never carries "input" and a Responses request never carries
-// "messages", so which field to walk is decided by path, not by which fields
-// happen to be present.
+// injectUUIDs stamps image parts with their multimodal hash, walking the body
+// field reqcommon.DetectAPIType's result implies. Path selection is deliberate:
+// a field belonging to the other API shape is left alone rather than also
+// walked, so a chat-completions request that carries "input" keeps that array
+// unstamped.
 //
 // The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
 // reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
@@ -131,12 +131,12 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
-		if messages, ok := reqCtx.Body["messages"].([]any); ok {
-			injectImagePartUUIDs(messages, imageURLPartType, reqCtx.MultimodalEntries)
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
+			injectImagePartUUIDs(messages, reqcommon.PartTypeImageURL, reqCtx.MultimodalEntries)
 		}
 	case reqcommon.APITypeResponses:
-		if input, ok := reqCtx.Body["input"].([]any); ok {
-			injectImagePartUUIDs(input, inputImagePartType, reqCtx.MultimodalEntries)
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
+			injectImagePartUUIDs(input, reqcommon.PartTypeInputImage, reqCtx.MultimodalEntries)
 		}
 	}
 }
@@ -151,7 +151,7 @@ func injectImagePartUUIDs(items []any, partType string, entries []pipeline.Multi
 		if !ok {
 			continue
 		}
-		content, ok := itemMap["content"].([]any)
+		content, ok := itemMap[reqcommon.FieldContent].([]any)
 		if !ok {
 			continue
 		}
@@ -160,7 +160,7 @@ func injectImagePartUUIDs(items []any, partType string, entries []pipeline.Multi
 			if !ok {
 				continue
 			}
-			if partMap["type"] != partType {
+			if partMap[reqcommon.FieldType] != partType {
 				continue
 			}
 			if hashIdx < len(entries) {

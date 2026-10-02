@@ -3,7 +3,7 @@
 This document describes the request and response formats for each stage of the coordinator pipeline. The pipeline implements the vLLM disaggregated serving protocol for multimodal inference.
 
 > [!NOTE] 
-> The encode and prefill steps support two request protocols: `/inference/v1/generate` and `/v1/chat/completions` (the latter shared by `/v1/responses`, which uses the same wire format). 
+> The encode and prefill steps support three request protocols: `/inference/v1/generate`, `/v1/chat/completions`, and `/v1/responses`. The latter two are the OpenAI formats; `/v1/responses` is forwarded on its own path and carries its prompt in an `input` array of `input_text`/`input_image` parts rather than in `messages`. 
 The `/inference/v1/generate` format is the preferred protocol as it naturally implements tokens-in protocol, and eliminates additional tokenization.
 However, it is relatively new and may contain bugs. The `/v1/chat/completions` format is available as a fallback option, reusing the existing well-tested chat completions endpoint. The active protocol is controlled by the `use_openai_format` configuration (see [Request Format Configuration](#request-format-configuration)).
 
