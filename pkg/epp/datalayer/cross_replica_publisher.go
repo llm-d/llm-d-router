@@ -145,16 +145,14 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	supply := spec.Supply(endpointID)
 	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
 		Get: func() fwkdl.Cloneable {
-			local := supply()
-			peerAggregate, ok, _ := p.getRemote(ctx, spec, endpointID)
-			if !ok {
-				return local
+			value, err := p.get(ctx, spec, endpointID, supply)
+			if err != nil {
+				return supply()
 			}
-			combined := spec.Aggregate([]any{local, peerAggregate})
-			if cloneable, ok := combined.(fwkdl.Cloneable); ok {
+			if cloneable, ok := value.(fwkdl.Cloneable); ok {
 				return cloneable
 			}
-			return local
+			return supply()
 		},
 	})
 }
@@ -170,10 +168,10 @@ func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplica
 	return p.syncer.Set(ctx, spec.StateKey, endpointID, spec.Supply(endpointID)(), spec.Aggregate)
 }
 
-func (p *crossReplicaPublisher) getRemote(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string, local func() fwkdl.Cloneable) (any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.syncer.GetRemote(ctx, spec.StateKey, endpointID)
+	return p.syncer.Get(ctx, spec.StateKey, endpointID, func() any { return local() }, spec.Aggregate)
 }
 
 func (p *crossReplicaPublisher) delete(ctx context.Context, key types.NamespacedName) (bool, error) {

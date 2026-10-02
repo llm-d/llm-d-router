@@ -48,15 +48,12 @@ type setCall struct {
 }
 
 type fakeSyncer struct {
-	mu             sync.Mutex
-	sets           []setCall
-	deletes        []setCall
-	getValue       any
-	getOK          bool
-	getErr         error
-	getRemoteValue any
-	getRemoteOK    bool
-	getRemoteErr   error
+	mu       sync.Mutex
+	sets     []setCall
+	deletes  []setCall
+	getValue any
+	getOK    bool
+	getErr   error
 }
 
 func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
@@ -70,16 +67,17 @@ func (s *fakeSyncer) Set(_ context.Context, key fwkdl.StateKey, endpointID strin
 	return nil
 }
 
-func (s *fakeSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+func (s *fakeSyncer) Get(_ context.Context, _ fwkdl.StateKey, _ string, local func() any, aggregate func([]any) any) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.getValue, s.getOK, s.getErr
-}
-
-func (s *fakeSyncer) GetRemote(context.Context, fwkdl.StateKey, string) (any, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.getRemoteValue, s.getRemoteOK, s.getRemoteErr
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	values := []any{local()}
+	if s.getOK {
+		values = append(values, s.getValue)
+	}
+	return aggregate(values), nil
 }
 
 func (s *fakeSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID string) error {
@@ -210,18 +208,14 @@ func (s *blockingSyncer) Set(_ context.Context, _ fwkdl.StateKey, endpointID str
 	return nil
 }
 
-func (s *blockingSyncer) Get(_ context.Context, _ fwkdl.StateKey, endpointID string) (any, bool, error) {
+func (s *blockingSyncer) Get(_ context.Context, _ fwkdl.StateKey, endpointID string, local func() any, aggregate func([]any) any) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	value, ok := s.state[endpointID]
-	return value, ok, nil
-}
-
-func (s *blockingSyncer) GetRemote(_ context.Context, _ fwkdl.StateKey, endpointID string) (any, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	value, ok := s.state[endpointID]
-	return value, ok, nil
+	values := []any{local()}
+	if value, ok := s.state[endpointID]; ok {
+		values = append(values, value)
+	}
+	return aggregate(values), nil
 }
 
 func (s *blockingSyncer) Delete(_ context.Context, _ fwkdl.StateKey, endpointID string) error {
@@ -289,10 +283,8 @@ func TestCrossReplicaPublisher_CombinesLiveLocalWithCachedPeers(t *testing.T) {
 	contributor := liveLoadContributor{local: &local}
 	spec := contributor.CrossReplicaState()
 	syncer := &fakeSyncer{
-		getValue:       fakeLoad(100),
-		getOK:          true,
-		getRemoteValue: fakeLoad(7),
-		getRemoteOK:    true,
+		getValue: fakeLoad(7),
+		getOK:    true,
 	}
 	pub := &crossReplicaPublisher{syncer: syncer}
 	endpoint := testEndpoint("ep-a")
@@ -340,7 +332,7 @@ func TestCrossReplicaPublisher_UsesLiveLocalOnPeerCacheError(t *testing.T) {
 	local.Store(4)
 	contributor := liveLoadContributor{local: &local}
 	spec := contributor.CrossReplicaState()
-	pub := &crossReplicaPublisher{syncer: &fakeSyncer{getRemoteErr: assert.AnError}}
+	pub := &crossReplicaPublisher{syncer: &fakeSyncer{getErr: assert.AnError}}
 	endpoint := testEndpoint("ep-a")
 
 	pub.handleEndpointEvent(context.Background(), fwkdl.EndpointEvent{
@@ -602,8 +594,9 @@ func TestReleaseEndpointWaitsForInFlightPublish(t *testing.T) {
 		t.Fatal("ReleaseEndpoint did not complete")
 	}
 
-	_, found, err := syncer.Get(context.Background(), "inflight:test", "ns/ep-gone")
-	require.NoError(t, err)
+	syncer.mu.Lock()
+	_, found := syncer.state["ns/ep-gone"]
+	syncer.mu.Unlock()
 	assert.False(t, found, "released endpoint state must remain deleted")
 	assert.Equal(t, []string{"set", "delete"}, syncer.events)
 }
@@ -614,7 +607,8 @@ func TestReleaseEndpointDispatchesDeleteOutsidePublisherLock(t *testing.T) {
 	contributor := callbackEndpointContributor{
 		fakeContributor: fakeContributor{key: "inflight:test"},
 		onDelete: func() {
-			_, _, _ = r.crossReplicaPub.getRemote(context.Background(), fakeContributor{key: "inflight:test"}.CrossReplicaState(), "ns/ep-gone")
+			spec := fakeContributor{key: "inflight:test"}.CrossReplicaState()
+			_, _ = r.crossReplicaPub.get(context.Background(), spec, "ns/ep-gone", spec.Supply("ns/ep-gone"))
 		},
 	}
 	r.crossReplicaPub = &crossReplicaPublisher{

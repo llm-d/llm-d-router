@@ -5,9 +5,8 @@
 
 Shares endpoint and request coordination state between EPP replicas through
 Redis. Each EPP publishes its local endpoint value. During `Set`, the plugin
-prepares a full aggregate and a peer-only aggregate in its in-process cache.
-`Get` returns the full aggregate. The data layer combines `GetRemote` with the
-current local value.
+prepares a peer aggregate in its in-process cache. `Get` reads the contributor's
+live local value and combines it with the cached peer aggregate.
 
 ## Configuration
 
@@ -41,11 +40,10 @@ contributor without requiring global `gob.Register` calls.
 
 Endpoint state is stored in one Redis hash per state key and endpoint. Each EPP
 owns one field in that hash. `Set` refreshes the field TTL, reads the hash in the
-same transaction, and caches the prepared aggregates locally. Each aggregate
-expires with its oldest included value. `Get` and `GetRemote` read the cache
-without accessing Redis. The data layer combines the remote aggregate with the
-contributor's live local value. If no peer value is available, the local value
-is used by itself.
+same transaction, and caches the prepared peer aggregate locally. The aggregate
+expires with its oldest included value. `Get` reads the cache without accessing
+Redis and combines it with the contributor's live local value. If no peer value
+is available, `Get` aggregates the local value by itself.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.

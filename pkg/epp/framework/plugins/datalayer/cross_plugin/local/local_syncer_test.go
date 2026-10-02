@@ -26,23 +26,29 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
-func TestLocalSyncerReturnsFullAggregateAndNoRemoteAggregate(t *testing.T) {
+func TestLocalSyncerAggregatesLiveLocalValue(t *testing.T) {
 	syncer := NewLocalSyncer("test", "replica-a")
 	aggregate := func(values []any) any {
 		return values[0].(int) * 2
 	}
+	local := 21
 
-	require.NoError(t, syncer.Set(context.Background(), "load", "default/backend-0", 21, aggregate))
-	value, ok, err := syncer.Get(context.Background(), fwkdl.StateKey("load"), "default/backend-0")
+	require.NoError(t, syncer.Set(context.Background(), "load", "default/backend-0", local, aggregate))
+	value, err := syncer.Get(
+		context.Background(), fwkdl.StateKey("load"), "default/backend-0",
+		func() any { return local }, aggregate,
+	)
 
 	require.NoError(t, err)
-	assert.True(t, ok)
 	assert.Equal(t, 42, value)
 
-	value, ok, err = syncer.GetRemote(context.Background(), fwkdl.StateKey("load"), "default/backend-0")
+	local = 22
+	value, err = syncer.Get(
+		context.Background(), fwkdl.StateKey("load"), "default/backend-0",
+		func() any { return local }, aggregate,
+	)
 	require.NoError(t, err)
-	assert.False(t, ok)
-	assert.Nil(t, value)
+	assert.Equal(t, 44, value)
 }
 
 func TestLocalSyncerGetOrSet(t *testing.T) {

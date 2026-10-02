@@ -9,9 +9,8 @@ instances.
 
 ## What It Does
 
-- Stores endpoint state in memory and applies the contributor's aggregation
-  function when state is set.
-- Returns no remote aggregate because the state belongs to one EPP process.
+- Reads the contributor's live local endpoint value and applies its aggregation
+  function.
 - Provides atomic `GetOrSet` coordination within one EPP process.
 - Uses the local hostname to isolate state associated with the EPP replica.
 

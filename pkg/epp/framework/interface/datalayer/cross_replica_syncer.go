@@ -32,20 +32,14 @@ type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
 	// Set writes this replica's value for the given key and endpoint and prepares
-	// the aggregates returned by Get and GetRemote. The runtime calls this
-	// periodically, once per live endpoint, with a fresh local snapshot.
+	// the peer aggregate returned by Get. The runtime calls this periodically,
+	// once per live endpoint, with a fresh local snapshot.
 	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
 
-	// Get returns the prepared aggregate for the given key and endpoint across
-	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on miss,
-	// or (nil, false, err) on failure.
-	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
-
-	// GetRemote returns the prepared aggregate for the given key and endpoint
-	// across peer replicas. The runtime combines it with the live local value.
-	// Returns (value, true, nil) on hit, (nil, false, nil) on miss, or
-	// (nil, false, err) on failure.
-	GetRemote(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
+	// Get calls local to read this replica's live value and combines it with the
+	// prepared peer aggregate using aggregate. It returns the local aggregate
+	// when no peer value is available.
+	Get(ctx context.Context, key StateKey, endpointID string, local func() any, aggregate func([]any) any) (any, error)
 
 	// Delete removes the value for the given key and endpoint.
 	Delete(ctx context.Context, key StateKey, endpointID string) error
@@ -78,13 +72,13 @@ type CrossReplicaSpec struct {
 	AttributeKey fwkplugin.DataKey
 
 	// Supply returns a closure that reads the live local value for the given
-	// endpoint. The runtime calls this closure after Produce to snapshot
-	// the current local state and Set it into the store.
+	// endpoint. The runtime uses it to publish snapshots and passes it to Get for
+	// request-time reads.
 	Supply func(endpointID string) func() Cloneable
 
 	// Aggregate combines per-replica values into a single aggregate. Its output
-	// must have the same type and may be passed back as an input when the runtime
-	// combines the cached peer aggregate with the live local value.
+	// must have the same type and may be passed back as an input when Get combines
+	// the cached peer aggregate with the live local value.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization

@@ -498,12 +498,8 @@ func (s *decisionSyncer) Set(context.Context, fwkdl.StateKey, string, any, func(
 	return nil
 }
 
-func (s *decisionSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
-	return nil, false, nil
-}
-
-func (s *decisionSyncer) GetRemote(context.Context, fwkdl.StateKey, string) (any, bool, error) {
-	return nil, false, nil
+func (s *decisionSyncer) Get(context.Context, fwkdl.StateKey, string, func() any, func([]any) any) (any, error) {
+	return nil, nil
 }
 
 func (s *decisionSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }

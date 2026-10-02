@@ -140,65 +140,60 @@ func sumCustomValues(values []any) any {
 	return total
 }
 
-func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string) (int, bool) {
+func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string, local func() any) int {
 	t.Helper()
-	value, ok, err := store.Get(context.Background(), key, endpointID)
+	value, err := store.Get(context.Background(), key, endpointID, local, sumInts)
 	require.NoError(t, err)
-	if !ok {
-		return 0, false
-	}
-	return value.(int), true
+	return value.(int)
 }
 
-func getRemoteSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string) (int, bool) {
-	t.Helper()
-	value, ok, err := store.GetRemote(context.Background(), key, endpointID)
-	require.NoError(t, err)
-	if !ok {
-		return 0, false
-	}
-	return value.(int), true
+func supplyInt(value int) func() any {
+	return func() any { return value }
 }
 
-func TestSetPreparesFullAndRemoteAggregates(t *testing.T) {
+func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
+	local := 4
+	supply := func() any { return local }
 	var aggregateCalls atomic.Int64
 	aggregate := func(values []any) any {
 		aggregateCalls.Add(1)
 		return sumInts(values)
 	}
 
-	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, aggregate))
+	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, local, aggregate))
 	require.Equal(t, int64(1), counter.count.Load())
-	require.Equal(t, int64(2), aggregateCalls.Load())
+	require.Equal(t, int64(1), aggregateCalls.Load())
+	cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
+	require.True(t, ok)
+	require.Equal(t, 7, cached.(*aggregateCacheEntry).value)
 
-	for range 2 {
-		total, ok := getSum(t, store, testStateKey, testEndpointID)
-		require.True(t, ok)
-		require.Equal(t, 11, total)
+	value, err := store.Get(context.Background(), testStateKey, testEndpointID, supply, aggregate)
+	require.NoError(t, err)
+	require.Equal(t, 11, value)
 
-		remote, ok := getRemoteSum(t, store, testStateKey, testEndpointID)
-		require.True(t, ok)
-		require.Equal(t, 7, remote)
-	}
+	local = 5
+	value, err = store.Get(context.Background(), testStateKey, testEndpointID, supply, aggregate)
+	require.NoError(t, err)
+	require.Equal(t, 12, value)
+
 	require.Equal(t, int64(1), counter.count.Load(), "Get must not read Redis")
-	require.Equal(t, int64(2), aggregateCalls.Load(), "Get must not aggregate")
+	require.Equal(t, int64(3), aggregateCalls.Load())
 }
 
-func TestSetWithoutPeersPreparesLocalAggregate(t *testing.T) {
+func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
+	hashKey := store.hashKey(testStateKey, testEndpointID)
+	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testTTL)})
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	total, ok := getSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
-	require.Equal(t, 4, total)
-
-	remote, ok := getRemoteSum(t, store, testStateKey, testEndpointID)
-	require.False(t, ok)
-	require.Zero(t, remote)
+	_, cached := store.cache.Load(hashKey)
+	require.False(t, cached)
+	total := getSum(t, store, testStateKey, testEndpointID, supplyInt(5))
+	require.Equal(t, 5, total)
 }
 
 func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
@@ -209,16 +204,13 @@ func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	require.NoError(t, store.Set(
 		context.Background(), testStateKey, testEndpointID, &customValue{Count: 4}, sumCustomValues,
 	))
-	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+	value, err := store.Get(
+		context.Background(), testStateKey, testEndpointID,
+		func() any { return &customValue{Count: 4} }, sumCustomValues,
+	)
 
 	require.NoError(t, err)
-	require.True(t, ok)
 	require.Equal(t, &customValue{Count: 11}, value)
-
-	value, ok, err = store.GetRemote(context.Background(), testStateKey, testEndpointID)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, &customValue{Count: 7}, value)
 }
 
 func TestEncodeStampedUsesConcreteValueStream(t *testing.T) {
@@ -255,17 +247,12 @@ func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	seedReplica(t, server, testStateKey, "epp-b", 9, time.Now())
-	total, ok := getSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
+	total := getSum(t, store, testStateKey, testEndpointID, supplyInt(4))
 	require.Equal(t, 11, total)
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	total, ok = getSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
+	total = getSum(t, store, testStateKey, testEndpointID, supplyInt(4))
 	require.Equal(t, 13, total)
-	remote, ok := getRemoteSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
-	require.Equal(t, 9, remote)
 	require.Equal(t, int64(2), counter.count.Load())
 }
 
@@ -288,15 +275,14 @@ func TestConcurrentSet(t *testing.T) {
 	}
 }
 
-func TestGetMissesBeforeSet(t *testing.T) {
+func TestGetReturnsLiveLocalBeforeSet(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
 
-	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+	value, err := store.Get(context.Background(), testStateKey, testEndpointID, supplyInt(4), sumInts)
 
 	require.NoError(t, err)
-	require.False(t, ok)
-	require.Nil(t, value)
+	require.Equal(t, 4, value)
 	require.Zero(t, counter.count.Load())
 }
 
@@ -309,15 +295,11 @@ func TestSetSkipsStaleAndUndecodableFields(t *testing.T) {
 
 	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	total, ok := getSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
+	total := getSum(t, store, testStateKey, testEndpointID, supplyInt(4))
 	require.Equal(t, 11, total)
-	remote, ok := getRemoteSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
-	require.Equal(t, 7, remote)
 }
 
-func TestPreparedAggregateExpires(t *testing.T) {
+func TestExpiredPeerAggregateFallsBackToLiveLocal(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
 	hashKey := store.hashKey(testStateKey, testEndpointID)
@@ -326,11 +308,10 @@ func TestPreparedAggregateExpires(t *testing.T) {
 		expiresAt: time.Now().Add(-time.Second),
 	})
 
-	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+	value, err := store.Get(context.Background(), testStateKey, testEndpointID, supplyInt(4), sumInts)
 
 	require.NoError(t, err)
-	require.False(t, ok)
-	require.Nil(t, value)
+	require.Equal(t, 4, value)
 	_, cached := store.cache.Load(hashKey)
 	require.False(t, cached)
 }
@@ -349,7 +330,6 @@ func TestSetExpiresAggregatesWithOldestIncludedValue(t *testing.T) {
 	entry := cached.(*aggregateCacheEntry)
 
 	require.WithinDuration(t, oldestWrittenAt.Add(testTTL), entry.expiresAt, time.Millisecond)
-	require.WithinDuration(t, oldestWrittenAt.Add(testTTL), entry.remoteExpiresAt, time.Millisecond)
 }
 
 func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
@@ -360,7 +340,7 @@ func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 
 	require.NoError(t, store.Delete(context.Background(), testStateKey, testEndpointID))
 
-	_, ok := getSum(t, store, testStateKey, testEndpointID)
+	_, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
 	require.False(t, ok)
 	exists, err := store.client.HExists(context.Background(), store.hashKey(testStateKey, testEndpointID), testReplicaID).Result()
 	require.NoError(t, err)
@@ -492,12 +472,8 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	require.False(t, existed)
 	require.Equal(t, "decision", actual)
 
-	total, ok := getSum(t, store, "request", "request-id")
-	require.True(t, ok)
+	total := getSum(t, store, "request", "request-id", supplyInt(4))
 	require.Equal(t, 11, total)
-	remote, ok := getRemoteSum(t, store, "request", "request-id")
-	require.True(t, ok)
-	require.Equal(t, 7, remote)
 }
 
 func TestGetOrSetExpires(t *testing.T) {
@@ -557,12 +533,8 @@ func TestSetRecoversAfterRedisBecomesAvailable(t *testing.T) {
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		assert.NoError(collect, store.Set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	}, time.Second, 10*time.Millisecond)
-	total, ok := getSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
+	total := getSum(t, store, testStateKey, testEndpointID, supplyInt(4))
 	require.Equal(t, 11, total)
-	remote, ok := getRemoteSum(t, store, testStateKey, testEndpointID)
-	require.True(t, ok)
-	require.Equal(t, 7, remote)
 }
 
 func TestGetOrSetRejectsNilCandidate(t *testing.T) {
