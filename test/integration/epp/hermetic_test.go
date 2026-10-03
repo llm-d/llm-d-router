@@ -488,6 +488,7 @@ dataLayer:
 						protocmp.SortRepeated(func(a, b *configPb.HeaderValueOption) bool {
 							return a.GetHeader().GetKey() < b.GetHeader().GetKey()
 						}),
+						protocmp.SortRepeated(func(a, b string) bool { return a < b }),
 					); diff != "" {
 						t.Errorf("Response mismatch (-want +got): %v", diff)
 					}
