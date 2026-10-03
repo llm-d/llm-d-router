@@ -67,7 +67,9 @@ func TestMain(m *testing.M) {
 
 type mockSaturationDetector struct {
 	flowcontrol.SaturationDetector
-	SaturationFunc func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	SaturationFunc      func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	ReserveDispatchFunc func(requestID string) bool
+	ReleaseDispatchFunc func(requestID string) bool
 }
 
 func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods []fwkdl.Endpoint) float64 {
@@ -75,6 +77,20 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 		return m.SaturationFunc(ctx, candidatePods)
 	}
 	return 0.0
+}
+
+func (m *mockSaturationDetector) ReserveDispatch(requestID string) bool {
+	if m.ReserveDispatchFunc != nil {
+		return m.ReserveDispatchFunc(requestID)
+	}
+	return false
+}
+
+func (m *mockSaturationDetector) ReleaseDispatch(requestID string) bool {
+	if m.ReleaseDispatchFunc != nil {
+		return m.ReleaseDispatchFunc(requestID)
+	}
+	return false
 }
 
 // testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
@@ -1422,6 +1438,26 @@ func TestProcessor(t *testing.T) {
 					"The item's final outcome should be RejectedOther")
 				assert.ErrorContains(t, finalState.Err, "already done",
 					"The error should be the one from the first Finalize call")
+			})
+
+			t.Run("should reserve before finalizing dispatch", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-reserved", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				var reserved bool
+				h.saturationDetector.ReserveDispatchFunc = func(requestID string) bool {
+					require.Equal(t, "req-reserved", requestID)
+					require.Nil(t, item.FinalState(), "reservation must precede dispatch finalization")
+					reserved = true
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				require.True(t, reserved)
+				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
 			})
 		})
 

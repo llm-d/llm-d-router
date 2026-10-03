@@ -310,6 +310,14 @@ func (fc *FlowController) EnqueueAndWait(
 	return finalOutcome, err
 }
 
+// ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
+// publication by request lifecycle hooks.
+func (fc *FlowController) ReleaseDispatchReservation(requestID string) {
+	if tracker, ok := fc.saturationDetector.(flowcontrol.DispatchReservationTracker); ok {
+		tracker.ReleaseDispatch(requestID)
+	}
+}
+
 // fallbackRequest wraps a FlowControlRequest to override its flow key, so a request that falls back to a different
 // priority is enqueued under the band that was actually leased rather than its original (unprovisioned) band.
 //

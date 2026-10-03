@@ -638,8 +638,19 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
 		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
+	// The request can be finalized asynchronously while it is being removed. Do not create a
+	// reservation for work that will not proceed past flow control.
+	if removedItem.FinalState() != nil {
+		return nil
+	}
+
+	reservationTracker, tracksReservations := p.saturationDetector.(flowcontrol.DispatchReservationTracker)
+	reserved := tracksReservations && reservationTracker.ReserveDispatch(req.ID())
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithError(nil)
+	if reserved && removedItem.FinalState().Outcome != types.QueueOutcomeDispatched {
+		reservationTracker.ReleaseDispatch(req.ID())
+	}
 	return nil
 }
 

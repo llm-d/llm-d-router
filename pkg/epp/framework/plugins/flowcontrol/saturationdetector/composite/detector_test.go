@@ -23,12 +23,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 )
 
 // notADetector is a plugin that does not implement flowcontrol.SaturationDetector.
@@ -240,4 +243,43 @@ func TestNotAConsumerOrSchedulingPlugin(t *testing.T) {
 	assert.False(t, isConsumer, "composite must not declare data dependencies of its own")
 	_, isFilter := p.(fwksched.Filter)
 	assert.False(t, isFilter, "composite must not be auto-injected into scheduling profiles as a filter")
+}
+
+func TestReservationsReachStageScopedChildren(t *testing.T) {
+	handle := newHandle(t)
+	c, err := concurrency.ConcurrencyDetectorFactory("decode-concurrency", fwkplugin.StrictDecoder([]byte(
+		`{"concurrencyMode":"requests","maxConcurrency":2}`)), handle)
+	require.NoError(t, err)
+	handle.AddPlugin("decode-concurrency", c)
+	u, err := utilization.UtilizationDetectorFactory("prefill-queue", fwkplugin.StrictDecoder([]byte(
+		`{"queueDepthThreshold":2,"kvCacheUtilThreshold":1.0}`)), handle)
+	require.NoError(t, err)
+	handle.AddPlugin("prefill-queue", u)
+
+	p, err := MaxSaturationDetectorFactory("admission-split", fwkplugin.StrictDecoder([]byte(
+		`{"detectors":["decode-concurrency","prefill-queue"],"stages":{"decode-concurrency":["decode"],"prefill-queue":["prefill"]}}`)), handle)
+	require.NoError(t, err)
+
+	// Flow control discovers trackers by asserting on the configured detector.
+	var sd flowcontrol.SaturationDetector = p.(flowcontrol.SaturationDetector)
+	tracker, ok := sd.(flowcontrol.DispatchReservationTracker)
+	require.True(t, ok, "processor must see a reservation tracker through the composite")
+
+	decode := datalayer.NewEndpoint(&datalayer.EndpointMetadata{
+		ID: types.NamespacedName{Name: "d0", Namespace: "ns"},
+	}, nil)
+	ctx := flowcontrol.WithSaturationStage(context.Background(), "decode")
+	endpoints := []datalayer.Endpoint{decode}
+	assert.InDelta(t, 0.0, sd.Saturation(ctx, endpoints), 1e-9)
+
+	require.True(t, tracker.ReserveDispatch("r1"))
+	assert.InDelta(t, 0.5, sd.Saturation(ctx, endpoints), 1e-9, "a dispatched request counts before PreRequest")
+	require.True(t, tracker.ReserveDispatch("r2"))
+	assert.InDelta(t, 1.0, sd.Saturation(ctx, endpoints), 1e-9)
+	assert.False(t, tracker.ReserveDispatch("r2"), "duplicate reservation is rejected")
+
+	require.True(t, tracker.ReleaseDispatch("r1"))
+	require.True(t, tracker.ReleaseDispatch("r2"))
+	assert.False(t, tracker.ReleaseDispatch("r2"), "duplicate release is a no-op")
+	assert.InDelta(t, 0.0, sd.Saturation(ctx, endpoints), 1e-9)
 }
