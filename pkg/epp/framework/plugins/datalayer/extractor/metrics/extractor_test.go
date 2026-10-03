@@ -846,3 +846,28 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
+	ext, err := newCoreMetricsExtractorPlugin(context.Background(), "core", nil)
+	if err != nil {
+		t.Fatalf("new extractor: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, name := range ext.MetricFamilies() {
+		declared[name] = true
+	}
+	for _, engine := range defaultEngineConfigs {
+		for _, raw := range []string{
+			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
+			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+		} {
+			spec, err := parseStringToSpec(raw)
+			if err != nil {
+				t.Fatalf("engine %s spec %q: %v", engine.Name, raw, err)
+			}
+			if spec != nil && !declared[spec.Name] {
+				t.Errorf("engine %s reads %s, which MetricFamilies does not declare", engine.Name, spec.Name)
+			}
+		}
+	}
+}
