@@ -539,3 +539,66 @@ func BenchmarkLabelsMatch(b *testing.B) {
 		}
 	}
 }
+
+// TestAggregateMetric determines how a family exposing one series per engine is folded into one value.
+func TestAggregateMetric(t *testing.T) {
+	engines := makeMetricFamily("vllm:num_requests_waiting",
+		makeMetric(map[string]string{"engine": "0"}, 6, 0),
+		makeMetric(map[string]string{"engine": "1"}, 10, 0),
+		makeMetric(map[string]string{"engine": "2"}, 11, 0),
+		makeMetric(map[string]string{"engine": "3"}, 7, 0),
+	)
+	requestTypes := makeMetricFamily("nv_trt_llm_request_metrics",
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "0"}, 3, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "0"}, 50, 0),
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "1"}, 4, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "1"}, 60, 0),
+	)
+	families := sourcemetrics.PrometheusMetricMap{
+		"vllm:num_requests_waiting":  engines,
+		"nv_trt_llm_request_metrics": requestTypes,
+		"single":                     makeMetricFamily("single", makeMetric(nil, 5, 0)),
+	}
+
+	tests := []struct {
+		name    string
+		spec    *Spec
+		agg     aggregation
+		want    float64
+		wantErr bool
+	}{
+		{name: "mean over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateMean, want: 8.5},
+		{name: "max over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateMax, want: 11},
+		{
+			name: "mean only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateMean, want: 3.5,
+		},
+		{
+			name: "max only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateMax, want: 4,
+		},
+		{name: "single series mean", spec: &Spec{Name: "single"}, agg: aggregateMean, want: 5},
+		{name: "single series max", spec: &Spec{Name: "single"}, agg: aggregateMax, want: 5},
+		{
+			name: "no matching series",
+			spec: &Spec{Name: "vllm:num_requests_waiting", Labels: map[string]string{"engine": "9"}},
+			agg:  aggregateMean, wantErr: true,
+		},
+		{name: "family not found", spec: &Spec{Name: "absent"}, agg: aggregateMean, wantErr: true},
+		{name: "nil spec", spec: nil, agg: aggregateMean, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.spec.aggregateMetric(families, tt.agg)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.InDelta(t, tt.want, got, 1e-9)
+		})
+	}
+}
