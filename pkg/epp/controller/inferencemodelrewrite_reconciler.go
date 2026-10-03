@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -56,12 +55,6 @@ func (c *InferenceModelRewriteReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, fmt.Errorf("unable to get InferenceModelRewrite - %w", err)
 		}
 		notFound = true
-	}
-
-	// Keep compatibility while surfacing migration guidance for legacy group users.
-	if strings.HasPrefix(infModelRewrite.APIVersion, "inference.networking.x-k8s.io/") {
-		logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha2/InferenceModelRewrite is deprecated",
-			"replacement", "llm-d.ai/v1alpha2/InferenceModelRewrite")
 	}
 
 	isDeleted := !infModelRewrite.DeletionTimestamp.IsZero()

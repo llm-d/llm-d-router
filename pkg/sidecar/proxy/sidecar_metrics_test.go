@@ -37,6 +37,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -312,7 +313,7 @@ func TestRunConcurrentPDMetrics(t *testing.T) {
 			before := snapshotStageMetrics(t)
 			body := []byte(`{"model":"m","messages":[]}`)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
-			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, KVConnectorSGLang, nil)
+			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 
 			// Prefill runs in a goroutine; wait for its sample so it cannot leak
 			// into a later test's delta.
@@ -349,7 +350,7 @@ func TestRunConcurrentPDDecodeAbortMetrics(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, KVConnectorSGLang, nil)
+		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 
@@ -558,7 +559,7 @@ func TestHandleNIXLV2ParallelWriteMetrics(t *testing.T) {
 			s := NewProxy(Config{
 				Port:                       "0",
 				DecoderURL:                 prefillURL,
-				KVConnector:                KVConnectorNIXLV2,
+				KVConnector:                constants.KVConnectorNIXLV2,
 				MoRIIOWriteMode:            true,
 				MoRIIOParallelDispatch:     true,
 				MoRIIODecodePodIP:          "127.0.0.1",
@@ -577,7 +578,7 @@ func TestHandleNIXLV2ParallelWriteMetrics(t *testing.T) {
 			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var got map[string]any
 				if json.NewDecoder(r.Body).Decode(&got) == nil {
-					if kv, ok := got[requestFieldKVTransferParams].(map[string]any); ok && kv[requestFieldDoRemotePrefill] == true {
+					if kv, ok := got[reqcommon.FieldKVTransferParams].(map[string]any); ok && kv[reqcommon.FieldDoRemotePrefill] == true {
 						sawSynthesizedKV.Store(true)
 					}
 				}
@@ -681,7 +682,7 @@ func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
 			s := NewProxy(Config{
 				Port:                            "0",
 				DecoderURL:                      prefillURL,
-				KVConnector:                     KVConnectorNIXLV2,
+				KVConnector:                     constants.KVConnectorNIXLV2,
 				MoRIIOWriteMode:                 true,
 				MoRIIOParallelDispatch:          true,
 				MoRIIOParallelDecodeWaitTimeout: 200 * time.Millisecond,

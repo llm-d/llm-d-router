@@ -64,9 +64,9 @@ func (s *Server) fanoutEncoderCollect(
 			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
-				requestFieldECTransferParams, truncateLongStrings(encoderResponse[requestFieldECTransferParams], 64))
+				reqcommon.FieldECTransferParams, truncateLongStrings(encoderResponse[reqcommon.FieldECTransferParams], 64))
 		}
-		ec, ok := encoderResponse[requestFieldECTransferParams]
+		ec, ok := encoderResponse[reqcommon.FieldECTransferParams]
 		if !ok || ec == nil {
 			s.logger.V(logging.DEBUG).Info("missing ec_transfer_params field in encoder response",
 				"item", idx, "requestID", requestID)
@@ -143,7 +143,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
 			} else {
-				body[requestFieldECTransferParams] = params
+				body[reqcommon.FieldECTransferParams] = params
 				if contributed < total {
 					s.logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
 						"requestID", requestID, "contributed", contributed, "items", total)

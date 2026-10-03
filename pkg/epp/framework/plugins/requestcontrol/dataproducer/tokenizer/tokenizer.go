@@ -51,6 +51,7 @@ type tokenizer interface {
 	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
 	RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 	RenderMessages(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
+	RenderResponses(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 const (
@@ -301,7 +302,15 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, err
 		}
-		backend = renderBackend{tk: renderer, modelName: config.ModelName, legacyMessages: legacyMessages, warmupAuth: vllmWarmupAuthHeader()}
+		legacyResponses, err := configureLegacyResponses(ctx, name, cfg.ResponsesRenderMode)
+		if err != nil {
+			return nil, err
+		}
+		backend = renderBackend{
+			tk: renderer, modelName: config.ModelName,
+			legacyMessages: legacyMessages, legacyResponses: legacyResponses,
+			warmupAuth: vllmWarmupAuthHeader(),
+		}
 		backendName = backendVLLM
 		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {

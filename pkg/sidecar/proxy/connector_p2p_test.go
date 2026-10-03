@@ -30,6 +30,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var _ = Describe("P2P Connector", func() {
@@ -39,7 +40,7 @@ var _ = Describe("P2P Connector", func() {
 	const p2pConnectorPort = 7777
 
 	BeforeEach(func() {
-		testInfo = sidecarConnectionTestSetup(KVConnectorOffloading)
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
 		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 	})
 
@@ -71,21 +72,21 @@ var _ = Describe("P2P Connector", func() {
 		Expect(prefillReqs).To(HaveLen(1))
 		preq := prefillReqs[0]
 
-		Expect(preq).To(HaveKey(requestFieldKVTransferParams))
-		prefillKVParams, ok := preq[requestFieldKVTransferParams].(map[string]any)
+		Expect(preq).To(HaveKey(reqcommon.FieldKVTransferParams))
+		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemotePrefiller))
 		prefillDecode, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
 		prefillKVRequestID := prefillDecode[requestFieldKVRequestID]
 		Expect(prefillKVRequestID).ToNot(BeEmpty())
-		Expect(prefillDecode).ToNot(HaveKey(requestFieldRemoteHost))
-		Expect(prefillDecode).ToNot(HaveKey(requestFieldRemotePort))
+		Expect(prefillDecode).ToNot(HaveKey(reqcommon.FieldRemoteHost))
+		Expect(prefillDecode).ToNot(HaveKey(reqcommon.FieldRemotePort))
 
 		// Prefill is capped to a single output token and non-streaming.
-		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
-		Expect(preq[requestFieldStream]).To(BeFalse())
+		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 1)))
+		Expect(preq[reqcommon.FieldStream]).To(BeFalse())
 
 		// Decode request: kv_transfer_params.remote_prefiller carries the prefiller's
 		// OffloadingConnector P2P tier address plus the matching kv_request_id.
@@ -94,19 +95,19 @@ var _ = Describe("P2P Connector", func() {
 		Expect(decodeReqs).To(HaveLen(1))
 		dreq := decodeReqs[0]
 
-		Expect(dreq).To(HaveKey(requestFieldKVTransferParams))
-		decodeKVParams, ok := dreq[requestFieldKVTransferParams].(map[string]any)
+		Expect(dreq).To(HaveKey(reqcommon.FieldKVTransferParams))
+		decodeKVParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteDecoder))
 		decodePrefill, ok := decodeKVParams[requestFieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodePrefill[requestFieldKVRequestID]).To(Equal(prefillKVRequestID))
-		Expect(decodePrefill[requestFieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
-		Expect(decodePrefill[requestFieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+		Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
 		// Decode preserves the caller's original token limits.
-		Expect(dreq[requestFieldMaxTokens]).To(BeNumerically("==", 50))
-		Expect(dreq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 100)))
+		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
+		Expect(dreq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 100)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -134,12 +135,12 @@ var _ = Describe("P2P Connector", func() {
 		}).Should(Equal(1))
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).ToNot(HaveKey(requestFieldMinTokens))
+		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).ToNot(HaveKey(reqcommon.FieldMinTokens))
 
 		Expect(testInfo.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
-		Expect(dreq).To(HaveKeyWithValue(requestFieldMinTokens, BeNumerically("==", 5)))
+		Expect(dreq).To(HaveKeyWithValue(reqcommon.FieldMinTokens, BeNumerically("==", 5)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -250,8 +251,8 @@ var _ = Describe("P2P Connector", func() {
 		}).Should(Equal(1))
 
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		Expect(preq[requestFieldMaxTokens]).To(BeNumerically("==", 1))
-		Expect(preq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
+		Expect(preq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 1))
+		Expect(preq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 1)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -270,11 +271,11 @@ var _ = DescribeTable("p2pPullAvailable",
 		s := &Server{config: Config{KVConnector: connector, EnableP2PPull: enableP2PPull}}
 		Expect(s.p2pPullAvailable()).To(Equal(want))
 	},
-	Entry("offloading is always available", KVConnectorOffloading, false, true),
-	Entry("nixlv2 with the flag is available", KVConnectorNIXLV2, true, true),
-	Entry("nixlv2 without the flag is unavailable", KVConnectorNIXLV2, false, false),
-	Entry("the flag has no effect on sglang", KVConnectorSGLang, true, false),
-	Entry("the flag has no effect on shared-storage", KVConnectorSharedStorage, true, false),
+	Entry("offloading is always available", constants.KVConnectorOffloading, false, true),
+	Entry("nixlv2 with the flag is available", constants.KVConnectorNIXLV2, true, true),
+	Entry("nixlv2 without the flag is unavailable", constants.KVConnectorNIXLV2, false, false),
+	Entry("the flag has no effect on sglang", constants.KVConnectorSGLang, true, false),
+	Entry("the flag has no effect on shared-storage", constants.KVConnectorSharedStorage, true, false),
 )
 
 var _ = DescribeTable("p2pPortFor",
@@ -304,8 +305,8 @@ var _ = Describe("p2pSourceParams", func() {
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
 		params := s.p2pSourceParams("10.0.0.9:8002")
-		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
-		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
+		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
 	})
 
@@ -315,7 +316,7 @@ var _ = Describe("p2pSourceParams", func() {
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
 		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
-		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
 
 	It("derives both host and port from a scheme-prefixed source", func() {
@@ -324,8 +325,8 @@ var _ = Describe("p2pSourceParams", func() {
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
 		params := s.p2pSourceParams("http://10.0.0.9:8002")
-		Expect(params[requestFieldRemoteHost]).To(Equal("10.0.0.9"))
-		Expect(params[requestFieldRemotePort]).To(Equal(7779))
+		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
+		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
 })
 
@@ -341,8 +342,8 @@ var _ = Describe("addP2PPullToPrefill", func() {
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.0.6.107"))
-		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.0.6.107"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
 	})
 
 	It("skips the pull when source and prefiller are the same endpoint", func() {
@@ -382,8 +383,8 @@ var _ = Describe("addP2PPullToPrefill", func() {
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldRemoteHost]).To(Equal("10.0.6.107"))
-		Expect(p2p[requestFieldRemotePort]).To(Equal(7780))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.0.6.107"))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
 	})
 })
 

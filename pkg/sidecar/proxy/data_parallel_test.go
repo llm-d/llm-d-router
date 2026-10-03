@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	sidecarmock "github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
@@ -74,7 +75,7 @@ var _ = Describe("Data Parallel support", func() {
 			cfg := Config{
 				Port:             strconv.Itoa(fakeProxyPort),
 				DecoderURL:       decodeURL,
-				KVConnector:      KVConnectorNIXLV2,
+				KVConnector:      constants.KVConnectorNIXLV2,
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)

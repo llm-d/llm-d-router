@@ -28,6 +28,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // statefulResponsesTestBody is a /v1/responses body carrying the fields
@@ -59,7 +60,7 @@ func TestSharedStorage_RejectsStatefulResponsesFields(t *testing.T) {
 
 	decodeURL, err := url.Parse("http://decoder:8000")
 	require.NoError(t, err)
-	srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: KVConnectorSharedStorage})
+	srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
 	srv.logger = log.Log
 	srv.allowlistValidator = &AllowlistValidator{}
 	srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

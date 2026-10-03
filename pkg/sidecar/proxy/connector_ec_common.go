@@ -272,7 +272,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(requestHeaderRequestID, fmt.Sprintf("%s-enc-%d", requestID, idx))
+			req.Header.Set(reqcommon.RequestIDHeaderKey, fmt.Sprintf("%s-enc-%d", requestID, idx))
 
 			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
 
@@ -315,7 +315,7 @@ func (s *Server) runPDPipeline(
 	apiType reqcommon.APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
@@ -327,7 +327,7 @@ func (s *Server) runPDPipeline(
 	}
 
 	pdRequest := cloneRequestWithBody(r.Context(), r, modifiedBody)
-	pdRequest.Header.Add(requestHeaderRequestID, requestID)
+	pdRequest.Header.Add(reqcommon.RequestIDHeaderKey, requestID)
 
 	destination := "decoder"
 	if len(prefillEndPoint) > 0 {
@@ -342,8 +342,8 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := body[requestFieldECTransferParams]; ok {
-			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
+		if ec, ok := body[reqcommon.FieldECTransferParams]; ok {
+			kv = append(kv, reqcommon.FieldECTransferParams, truncateLongStrings(ec, 64))
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}

@@ -25,7 +25,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d/llm-d-router/pkg/sidecar/proxy"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/test/e2e/utils"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -123,21 +123,21 @@ func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, conn
 }
 
 func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) []string {
-	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, proxy.KVConnectorNIXLV2)
+	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, constants.KVConnectorNIXLV2)
 }
 
 func createModelServersPDSharedStorage(decodeReplicas int) {
-	createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorSharedStorage)
+	createModelServersPDWithConnector(1, decodeReplicas, constants.KVConnectorSharedStorage)
 }
 
 func createModelServersPDMooncake(decodeReplicas int) {
-	createModelServersPDWithConnector(1, decodeReplicas, proxy.KVConnectorMooncake)
+	createModelServersPDWithConnector(1, decodeReplicas, constants.KVConnectorMooncake)
 }
 
 // createModelServersEpDDisagg creates model server resources for E/PD (encode + prefill/decode) testing.
 func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 	return createModelServersFromKustomize(ePdDisaggDir, map[string]string{
-		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
+		"${EC_CONNECTOR_TYPE}":    constants.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
 	})
@@ -146,8 +146,8 @@ func createModelServersEpDDisagg(encodeReplicas, decodeReplicas int) []string {
 // createModelServersEPDDisagg creates model server resources for E/P/D (encode/prefill/decode) testing.
 func createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas int) {
 	createModelServersFromKustomize(ePDDisaggDir, map[string]string{
-		"${KV_CONNECTOR_TYPE}":    proxy.KVConnectorSharedStorage,
-		"${EC_CONNECTOR_TYPE}":    proxy.ECExampleConnector,
+		"${KV_CONNECTOR_TYPE}":    constants.KVConnectorSharedStorage,
+		"${EC_CONNECTOR_TYPE}":    constants.ECExampleConnector,
 		"${VLLM_REPLICA_COUNT_E}": strconv.Itoa(encodeReplicas),
 		"${VLLM_REPLICA_COUNT_P}": strconv.Itoa(prefillReplicas),
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),

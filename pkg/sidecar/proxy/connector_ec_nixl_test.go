@@ -162,7 +162,7 @@ func TestFanoutEncoderCollectPrimesEachItem(t *testing.T) {
 				mu.Unlock()
 
 				resp, err := json.Marshal(map[string]any{
-					requestFieldECTransferParams: map[string]any{
+					reqcommon.FieldECTransferParams: map[string]any{
 						partKey(t, part): map[string]any{"peer_host": "10.0.0.1"},
 					},
 				})
@@ -332,7 +332,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
 
-	ec, ok := parsed[requestFieldECTransferParams].(map[string]any)
+	ec, ok := parsed[reqcommon.FieldECTransferParams].(map[string]any)
 	assert.True(t, ok, "prefill body should carry ec_transfer_params as an object")
 	assert.Len(t, ec, 2, "one entry per distinct hash from the encoder responses")
 	for k, v := range ec {
@@ -341,7 +341,7 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 		assert.Containsf(t, entry, "peer_host", "ec[%q] should carry transfer metadata", k)
 	}
 
-	threshold, ok := parsed[requestFieldCacheHitThreshold]
+	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold should be set")
 	// JSON numbers unmarshal to float64.
 	assert.Equal(t, float64(0), threshold, "cache_hit_threshold should be 0")
@@ -388,10 +388,10 @@ func TestHandleECEPDAllMissingDoesNotAddField(t *testing.T) {
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
 
-	_, ok := parsed[requestFieldECTransferParams]
+	_, ok := parsed[reqcommon.FieldECTransferParams]
 	assert.False(t, ok, "prefill body must NOT carry ec_transfer_params when all encoder responses lacked it")
 
-	threshold, ok := parsed[requestFieldCacheHitThreshold]
+	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold should still be set even when ec params are absent")
 	assert.Equal(t, float64(0), threshold)
 }
@@ -450,7 +450,7 @@ func TestHandleECEPDPartiallyPopulated(t *testing.T) {
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
 
-	ec, ok := parsed[requestFieldECTransferParams].(map[string]any)
+	ec, ok := parsed[reqcommon.FieldECTransferParams].(map[string]any)
 	assert.True(t, ok, "prefill body should carry ec_transfer_params (at least one item populated)")
 	assert.Len(t, ec, 1, "only item 0 contributes a hash key; item 1 has no ec_transfer_params")
 	entry, ok := ec["hash-0"].(map[string]any)
@@ -687,9 +687,9 @@ func TestHandleECNIXLEmptyEncodeEndPoints(t *testing.T) {
 	}
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
-	_, hasEC := parsed[requestFieldECTransferParams]
+	_, hasEC := parsed[reqcommon.FieldECTransferParams]
 	assert.False(t, hasEC, "ec_transfer_params must not be set when no encoders were called")
-	threshold, ok := parsed[requestFieldCacheHitThreshold]
+	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold must be set")
 	assert.Equal(t, float64(0), threshold)
 }
@@ -738,9 +738,9 @@ func TestHandleECNIXLTextOnlyRequest(t *testing.T) {
 	}
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
-	_, hasEC := parsed[requestFieldECTransferParams]
+	_, hasEC := parsed[reqcommon.FieldECTransferParams]
 	assert.False(t, hasEC, "ec_transfer_params must not be set for a text-only request")
-	threshold, ok := parsed[requestFieldCacheHitThreshold]
+	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold must be set")
 	assert.Equal(t, float64(0), threshold)
 }
@@ -795,9 +795,9 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	}
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(decoderBody, &parsed))
-	_, hasEC := parsed[requestFieldECTransferParams]
+	_, hasEC := parsed[reqcommon.FieldECTransferParams]
 	assert.True(t, hasEC, "decoder-direct request should carry ec_transfer_params from encoder")
-	threshold, ok := parsed[requestFieldCacheHitThreshold]
+	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold must be set")
 	assert.Equal(t, float64(0), threshold)
 }
