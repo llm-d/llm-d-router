@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
@@ -59,6 +60,11 @@ func buildPredictionRequest(
 	}
 }
 
+type trainingEntryOptions struct {
+	PredictedTTFT *float64
+	PredictedTPOT *float64
+}
+
 // buildTrainingEntry constructs a training entry from actual latency measurements.
 func buildTrainingEntry(
 	endpointRoleLabel string,
@@ -72,6 +78,7 @@ func buildTrainingEntry(
 	prefixCacheScore float64,
 	encoderInputSize int,
 	encoderMatchedSize int,
+	options trainingEntryOptions,
 ) latencypredictor.TrainingEntry {
 	podType := ""
 	if endpointRoleLabel != "" && targetEndpointMetadata != nil && targetEndpointMetadata.Labels != nil {
@@ -91,6 +98,8 @@ func buildTrainingEntry(
 		EncoderInputSize:   encoderInputSize,
 		EncoderMatchedSize: encoderMatchedSize,
 		PodType:            podType,
+		PredictedTTFT:      options.PredictedTTFT,
+		PredictedTPOT:      options.PredictedTPOT,
 	}
 }
 
@@ -119,6 +128,7 @@ func recordTTFTTrainingData(
 		prefixCacheScore,
 		predictedLatencyCtx.encoderInputSize,
 		encoderMatchedSize,
+		trainingEntryOptions{PredictedTTFT: predictedLatencyMSPtr(predictedLatencyCtx.predictedTTFT)},
 	)
 	// In disaggregated serving TTFT is incurred on the prefill endpoint, so the
 	// in-flight features are snapshotted from that endpoint; otherwise the decode
@@ -134,6 +144,15 @@ func recordTTFTTrainingData(
 	if err := predictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 		logger.V(logutil.DEBUG).Error(err, "record TTFT training failed")
 	}
+}
+
+// predictedLatencyMSPtr returns a pointer for optional predicted_* JSON fields.
+// Zero or non-finite values mean no usable selected prediction and must be omitted.
+func predictedLatencyMSPtr(ms float64) *float64 {
+	if ms <= 0 || math.IsNaN(ms) || math.IsInf(ms, 0) {
+		return nil
+	}
+	return &ms
 }
 
 // refreshLastSeenMetrics updates predictedLatencyCtx.lastSeenMetrics from scheduling results.
