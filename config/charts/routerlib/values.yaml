@@ -94,6 +94,20 @@ epp:
     limits:
       memory: 16Gi
 
+  # Autoscaling configuration for the EPP Deployment.
+  # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the EPP Deployment.
+  # Note: EPP autoscaling requires Active-Active mode (ha-enable-leader-election must not be true)
+  # and is incompatible with StatefulSet deployments (such as priority routing or GKE preferred backends).
+  # router.epp.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+    # behavior: {}
+    # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics.
+
   affinity: {}
   tolerations: []
 
