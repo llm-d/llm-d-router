@@ -290,9 +290,15 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
 	}
 	// mm_metadata is optional for backward compatibility with older renderers.
-	// When present it must be parallel to mm_hashes.
+	// A mismatched length degrades rather than fails: the field is an
+	// optimization whose fallback (kwargs_data, validated just above) is on
+	// the same response, so a misbehaving renderer costs the optimization,
+	// not the request. mm_hashes/mm_placeholders/kwargs_data stay strict
+	// because they have no fallback.
 	if len(imageMetadata) > 0 && len(imageMetadata) != expected {
-		return fmt.Errorf("render returned %d mm_metadata but expected %d", len(imageMetadata), expected)
+		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; degrading to kwargs_data",
+			"got", len(imageMetadata), "expected", expected)
+		imageMetadata = nil
 	}
 
 	for i := range reqCtx.MultimodalEntries {

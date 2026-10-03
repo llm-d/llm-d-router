@@ -234,7 +234,13 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		}
 	})
 
-	t.Run("mm_metadata_parallel_to_hashes", func(t *testing.T) {
+	t.Run("mm_metadata_on_inbound_is_ignored", func(t *testing.T) {
+		// On the inbound generate leg this parser runs exactly when EncodeStep
+		// is skipped (both switch on the same DetectAPIType of the request
+		// path), so the client-supplied metadata has no consumer: ECTransferParams
+		// stays empty and prefill's per-entry choice falls back to kwargs_data.
+		// The field is therefore neither parsed nor rejected -- a client that
+		// sends it must not break, and must not gain anything either.
 		features := map[string]any{
 			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
 			"mm_placeholders": map[string]any{"image": []any{
@@ -248,29 +254,10 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if entries[0].MMMetadata != "m1" {
-			t.Fatalf("entry 0 metadata: got %q", entries[0].MMMetadata)
-		}
-		if entries[1].MMMetadata != "" {
-			t.Fatalf("entry 1 metadata: expected empty for null, got %q", entries[1].MMMetadata)
-		}
-	})
-
-	t.Run("length_mismatch_mm_metadata", func(t *testing.T) {
-		features := map[string]any{
-			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
-			"mm_placeholders": map[string]any{"image": []any{
-				map[string]any{"offset": float64(1), "length": float64(3)},
-				map[string]any{"offset": float64(4), "length": float64(3)},
-			}},
-			"mm_metadata": map[string]any{"image": []any{"m1"}},
-		}
-		_, err := extractMultimodalEntries(features)
-		if err == nil {
-			t.Fatal("expected error for mismatched mm_metadata count")
-		}
-		if !errors.Is(err, pipeline.ErrBadRequest) {
-			t.Errorf("expected ErrBadRequest, got %v", err)
+		for i, e := range entries {
+			if e.MMMetadata != "" {
+				t.Fatalf("entry %d metadata: got %q, want empty: inbound metadata must stay unread", i, e.MMMetadata)
+			}
 		}
 	})
 
@@ -511,7 +498,7 @@ func mmImageKwargs(t *testing.T, features map[string]any) []any {
 	return decoded[ModalityImage]
 }
 
-func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
+func TestBuildPrefillMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	// The empty-string KwargsData is the "resolve from cache" sentinel. On the
 	// wire it must be JSON null, not "": vLLM decodes "" as an inline tensor and
 	// fails with "Input data was truncated", while null means a cache-hit item.
@@ -520,7 +507,9 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	}
 
 	t.Run("all cache-hit -> all null", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry(""), entry("")}, true)
+		// nil ecTransferParams: every entry lacks an EC descriptor, so the
+		// per-entry decision keeps them on kwargs_data (as null sentinels).
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{entry(""), entry("")}, nil)
 		items := mmImageKwargs(t, features)
 		if len(items) != 2 {
 			t.Fatalf("expected 2 kwargs_data entries, got %d: %v", len(items), items)
@@ -538,17 +527,10 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	})
 
 	t.Run("mixed batch keeps inline, nulls cache hits", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry(testKwargs), entry("")}, true)
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{entry(testKwargs), entry("")}, nil)
 		items := mmImageKwargs(t, features)
 		if len(items) != 2 || items[0] != testKwargs || items[1] != nil {
 			t.Fatalf("expected [\"dGVuc29y\", null], got %#v", items)
-		}
-	})
-
-	t.Run("includeKwargs=false omits the field", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry("")}, false)
-		if _, ok := features["kwargs_data"]; ok {
-			t.Errorf("expected kwargs_data absent when includeKwargs is false")
 		}
 	})
 }

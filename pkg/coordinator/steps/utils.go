@@ -94,34 +94,6 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	return reqcommon.APITypeVLLMGenerate
 }
 
-// buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
-// and optionally kwargs_data) from the request's multimodal entries. It returns
-// nil when there are no entries.
-func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
-	if len(entries) == 0 {
-		return nil
-	}
-	hashes := make([]string, len(entries))
-	placeholders := make([]any, len(entries))
-	kwargs := make([]string, len(entries))
-	for i, entry := range entries {
-		hashes[i] = entry.Hash
-		placeholders[i] = map[string]any{
-			"offset": entry.Placeholder.Offset,
-			"length": entry.Placeholder.Length,
-		}
-		kwargs[i] = entry.KwargsData
-	}
-	features := map[string]any{
-		"mm_hashes":       map[string][]string{ModalityImage: hashes},
-		"mm_placeholders": map[string][]any{ModalityImage: placeholders},
-	}
-	if includeKwargs {
-		features["kwargs_data"] = mmBase64Field(kwargs)
-	}
-	return features
-}
-
 // buildPrefillMMFeatures builds features for the prefill request, deciding
 // per entry whether to ship mm_metadata or kwargs_data. An entry whose hash
 // has a descriptor in ecTransferParams and carries non-empty MMMetadata is
@@ -327,27 +299,24 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		return nil, err
 	}
 
-	rawMetadata, hasMetadata, err := mmImageArray(features, "mm_metadata")
-	if err != nil {
-		return nil, err
-	}
-
 	n := len(rawHashes)
 	if len(rawPlaceholders) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_placeholders has %d: %w",
 			n, len(rawPlaceholders), pipeline.ErrBadRequest)
 	}
 	// When present, kwargs_data is parallel to mm_hashes: full length with null
-	// placeholders for cached items, never a shortened list. The whole field is
-	// absent for metadata-only (cache-hit) requests.
+	// placeholders for cached items, never a shortened list.
 	if hasKwargs && len(rawKwargs) != n {
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
 			n, len(rawKwargs), pipeline.ErrBadRequest)
 	}
-	if hasMetadata && len(rawMetadata) != n {
-		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, mm_metadata has %d: %w",
-			n, len(rawMetadata), pipeline.ErrBadRequest)
-	}
+	// mm_metadata on the inbound generate leg has no consumer: this parser
+	// runs exactly when EncodeStep is skipped (both switch on the same
+	// DetectAPIType of the request path), so ECTransferParams stays empty and
+	// prefill's per-entry choice falls back to kwargs_data for every entry.
+	// On the inbound chat leg the optimization is driven by the render
+	// response's features, not by the client's, so the field is left unread
+	// and intentionally not rejected here.
 
 	entries := make([]pipeline.MultimodalEntry, n)
 	for i := range entries {
@@ -388,22 +357,10 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			}
 		}
 
-		var metadata string
-		if hasMetadata {
-			switch m := rawMetadata[i].(type) {
-			case string:
-				metadata = m
-			case nil:
-			default:
-				return nil, fmt.Errorf("mm_metadata[%d] must be a string or null: %w", i, pipeline.ErrBadRequest)
-			}
-		}
-
 		entries[i] = pipeline.MultimodalEntry{
 			Index:      i,
 			Hash:       hash,
 			KwargsData: kwarg,
-			MMMetadata: metadata,
 			Placeholder: pipeline.PlaceholderRange{
 				Offset: offset,
 				Length: length,
