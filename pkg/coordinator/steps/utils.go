@@ -266,8 +266,10 @@ func mmImageArray(features map[string]any, field string) (arr []any, present boo
 // encoder cache by hash (a cache-hit request), so each entry's KwargsData is "".
 // When present, kwargs_data must be parallel to mm_hashes, but an individual
 // item may be null (a cache hit within a mixed batch), which maps to "".
-// mm_metadata is optional and follows the same parallel/null rules as
-// kwargs_data when present.
+// mm_metadata is accepted and unread: this parser only runs for inbound
+// generate, where EncodeStep is skipped (encode.go:99), so no entry gets EC
+// coverage and prefill ships kwargs_data for all of them. On the chat leg the
+// metadata comes from the render response, not the client body.
 //
 // Returns ErrBadRequest when a present field has the wrong type, required slices
 // have different lengths, or any element has an unexpected type.
