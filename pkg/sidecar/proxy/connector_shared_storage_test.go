@@ -17,11 +17,14 @@ limitations under the License.
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -75,4 +78,80 @@ func TestSharedStorage_RejectsStatefulResponsesFields(t *testing.T) {
 	srv.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
 	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// signalingRecorder closes written after its first body write.
+type signalingRecorder struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	written chan struct{}
+}
+
+func (r *signalingRecorder) Write(b []byte) (int, error) {
+	defer r.once.Do(func() { close(r.written) })
+	return r.ResponseRecorder.Write(b)
+}
+
+// TestSharedStorage_StreamingDecodeFirstAbort covers a streamed decode-first
+// attempt that breaks mid-response, for example when the client disconnects.
+// The reverse proxy then panics with http.ErrAbortHandler on the goroutine that
+// runs the attempt. net/http only recovers that panic on the request
+// goroutine, so it has to reach the caller there instead of exiting the process.
+func TestSharedStorage_StreamingDecodeFirstAbort(t *testing.T) {
+	const (
+		roleEvent    = `data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"
+		contentEvent = `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"
+	)
+	tests := []struct {
+		name string
+		// relayed is closed once the start of the stream has reached the client.
+		decoder  func(relayed <-chan struct{}) http.Handler
+		wantBody string
+	}{
+		{
+			name: "abort after the stream reached the client",
+			decoder: func(relayed <-chan struct{}) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, roleEvent+contentEvent)
+					select {
+					case <-relayed:
+					case <-time.After(5 * time.Second):
+					}
+					panic(http.ErrAbortHandler)
+				})
+			},
+			wantBody: roleEvent + contentEvent,
+		},
+		{
+			name: "abort before the first chunk was inspected",
+			decoder: func(<-chan struct{}) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, roleEvent)
+					panic(http.ErrAbortHandler)
+				})
+			},
+			wantBody: roleEvent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decodeURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			srv.logger = log.Log
+			client := &signalingRecorder{ResponseRecorder: httptest.NewRecorder(), written: make(chan struct{})}
+			srv.decoderProxy = tt.decoder(client.written)
+
+			body := `{"model":"m","messages":[],"stream":true,"cache_hit_threshold":0.5}`
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+				srv.handleSharedStorage(client, req, "prefill:8000", reqcommon.APITypeChatCompletions)
+			})
+			require.Equal(t, http.StatusOK, client.Code)
+			require.Equal(t, tt.wantBody, client.Body.String())
+		})
+	}
 }

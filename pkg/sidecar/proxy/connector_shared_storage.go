@@ -136,8 +136,19 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request) (bool, error) {
 	// Run ServeHTTP in a goroutine so we can inspect the initial choice to determine if we need to prefill.
 	done := make(chan struct{})
+	// Written by the decode goroutine, read after done is closed.
+	var aborted bool
 	go func() {
 		defer close(done)
+		// net/http only recovers http.ErrAbortHandler on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
 		s.decoderProxy.ServeHTTP(w, r)
 	}()
 
@@ -173,6 +184,11 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 		return false, err
 	}
 	<-done
+	if aborted {
+		// Replay the abort on the request goroutine, where net/http recovers it
+		// and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
 	return false, nil
 }
 
