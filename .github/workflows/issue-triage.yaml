@@ -1,0 +1,197 @@
+# Keeps needs-triage in sync with the triage/* labels on issues and applies
+# triage commands from issue comments. docs/issue_triage.md lists the commands.
+
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  triage:
+    if: >-
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request) ||
+      (github.event_name == 'issues' &&
+       (github.event.action == 'opened' ||
+        github.event.action == 'reopened' ||
+        startsWith(github.event.label.name, 'triage/')))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    # Serializes runs on the same issue so the label sync reads the labels
+    # written by an earlier run.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+      # Posted when triage/accepted is applied to an issue without the labels it needs.
+      ACCEPT_HINT: >-
+        @${{ github.event.sender.login }} `triage/accepted` needs at least one `kind/*`
+        label and one `area/*` label on the issue. Add them, then apply `triage/accepted` again.
+    steps:
+      - name: Apply comment commands
+        id: commands
+        if: github.event_name == 'issue_comment'
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          # Removes fenced code blocks and HTML comments so commands inside
+          # them are not parsed.
+          STRIP_BLOCKS: |
+            s{
+              ^[ ]{0,3}(`{3,}|~{3,}) .*? (?:\n[ ]{0,3}\1|\z)   # fenced code block
+              | ^[ ]{0,3}<!-- (?:-?>|.*?(?:-->|\z))             # comment block: ends at --> or end of body
+              | <!-- (?:-?>|(?:(?!\n[ \t]*\n|<!--).)*?-->)     # inline comment: must close before a blank line
+            }{}gmsx
+        run: |
+          # Escape percent sequences before echoing comment derived text into a
+          # ::warning:: so it cannot forge additional workflow commands.
+          esc() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+
+          commands=$(printf '%s\n' "$COMMENT_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_BLOCKS" | \
+            grep -E '^/((remove-)?(triage|kind|area)|(un)?assign)([[:space:]]|$)' || true)
+          [ -z "$commands" ] && exit 0
+
+          # /triage runs last so that /kind and /area lines in the same comment count toward it.
+          others=$(grep -Ev '^/triage([[:space:]]|$)' <<< "$commands" || true)
+          triages=$(grep -E '^/triage([[:space:]]|$)' <<< "$commands" || true)
+          commands=$(printf '%s\n%s\n' "$others" "$triages" | sed '/^$/d')
+
+          role=$(gh api "repos/$REPO/collaborators/$COMMENTER/permission" -q '.role_name' || true)
+          privileged=false
+          case "$role" in
+            admin|maintain|write|triage) privileged=true ;;
+          esac
+
+          existing=$(gh label list --repo "$REPO" --limit 200 --json name -q '.[].name')
+          applied=0
+          rejected=0
+          keep=
+
+          reject() {
+            echo "::warning::Rejected '$(esc "$1")': $2"
+            rejected=$((rejected + 1))
+          }
+          has_kind_and_area() {
+            local labels
+            labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels -q '.labels[].name')
+            grep -q '^kind/' <<< "$labels" && grep -q '^area/' <<< "$labels"
+          }
+          is_assigned() {
+            gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json assignees -q '.assignees[].login' | grep -qixF "$1"
+          }
+
+          while IFS= read -r line; do
+            read -r cmd args <<< "$line"
+            read -ra values <<< "$args"
+            case "$cmd" in
+              /assign|/unassign)
+                if [ "${#values[@]}" -eq 0 ]; then
+                  values=("$COMMENTER")
+                elif [ "$privileged" != true ]; then
+                  reject "$line" "naming a user needs the triage role"
+                  continue
+                fi
+                for value in "${values[@]}"; do
+                  user=${value#@}
+                  # The login pattern also keeps the value from being read as a gh flag.
+                  if ! [[ $user =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+                    reject "$cmd $value" "not a user login"
+                  # GitHub drops users it does not allow as assignees, so read the result back.
+                  elif [ "$cmd" = /assign ] && gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-assignee "$user" && is_assigned "$user"; then
+                    applied=$((applied + 1))
+                  elif [ "$cmd" = /unassign ] && gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-assignee "$user" && ! is_assigned "$user"; then
+                    applied=$((applied + 1))
+                  else
+                    reject "$cmd $value" "GitHub did not apply it"
+                  fi
+                done
+                ;;
+              *)
+                flag=--add-label
+                prefix=${cmd#/}
+                if [[ $prefix == remove-* ]]; then
+                  flag=--remove-label
+                  prefix=${prefix#remove-}
+                fi
+                if [ "$privileged" != true ]; then
+                  reject "$line" "needs the triage role"
+                  continue
+                fi
+                if [ "${#values[@]}" -eq 0 ]; then
+                  reject "$line" "needs a value"
+                  continue
+                fi
+                if [ "$cmd" = /triage ] && [ "${#values[@]}" -ne 1 ]; then
+                  reject "$line" "takes one value"
+                  continue
+                fi
+                for value in "${values[@]}"; do
+                  label="$prefix/$value"
+                  if ! grep -qxF "$label" <<< "$existing"; then
+                    reject "$cmd $value" "label does not exist"
+                  elif [ "$cmd $value" = "/triage accepted" ] && ! has_kind_and_area; then
+                    reject "$cmd $value" "issue needs a kind/* and an area/* label"
+                    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$ACCEPT_HINT"
+                  elif gh issue edit "$ISSUE_NUMBER" --repo "$REPO" "$flag" "$label"; then
+                    applied=$((applied + 1))
+                    if [ "$prefix" = triage ]; then
+                      keep=
+                      [ "$cmd" = /triage ] && keep=$label
+                      echo "triage=true" >> "$GITHUB_OUTPUT"
+                    fi
+                  else
+                    reject "$cmd $value" "GitHub did not apply it"
+                  fi
+                done
+                ;;
+            esac
+          done <<< "$commands"
+
+          echo "applied=$applied rejected=$rejected"
+          echo "keep=$keep" >> "$GITHUB_OUTPUT"
+
+          reaction=+1
+          [ "$rejected" -gt 0 ] && reaction=confused
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$reaction" --silent
+
+      - name: Sync triage labels
+        if: github.event_name == 'issues' || steps.commands.outputs.triage == 'true'
+        env:
+          ISSUE_STATE: ${{ github.event.issue.state }}
+          # The triage/* label that was just applied. It replaces the others.
+          KEEP: ${{ steps.commands.outputs.keep || (github.event.action == 'labeled' && github.event.label.name) || '' }}
+        run: |
+          labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels -q '.labels[].name')
+
+          if [ "$KEEP" = triage/accepted ] && grep -qxF triage/accepted <<< "$labels" && \
+            ! { grep -q '^kind/' <<< "$labels" && grep -q '^area/' <<< "$labels"; }; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label triage/accepted
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$ACCEPT_HINT"
+            labels=$(grep -vxF triage/accepted <<< "$labels" || true)
+            KEEP=
+          fi
+
+          triage_labels=$(grep '^triage/' <<< "$labels" || true)
+
+          if [ -n "$KEEP" ] && grep -qxF "$KEEP" <<< "$triage_labels"; then
+            while IFS= read -r label; do
+              [ "$label" = "$KEEP" ] || gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$label"
+            done <<< "$triage_labels"
+          fi
+
+          if [ -n "$triage_labels" ]; then
+            if grep -qxF needs-triage <<< "$labels"; then
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label needs-triage
+            fi
+          elif [ "$ISSUE_STATE" = open ] && ! grep -qxF needs-triage <<< "$labels"; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label needs-triage
+          fi
