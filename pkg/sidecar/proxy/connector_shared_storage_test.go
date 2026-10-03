@@ -31,6 +31,65 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
+// TestSharedStorage_StreamingDecodeFirstHeaders covers the headers of a
+// streamed decode-first request. An attempt that ends in cache_threshold is
+// discarded, so only the decode after prefill may set the client's headers.
+func TestSharedStorage_StreamingDecodeFirstHeaders(t *testing.T) {
+	const (
+		roleEvent      = `data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n"
+		stopEvent      = `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n"
+		thresholdEvent = `data: {"choices":[{"delta":{},"finish_reason":"cache_threshold"}]}` + "\n\n"
+	)
+	tests := []struct {
+		name        string
+		firstEvents string
+		wantAttempt string
+	}{
+		{name: "decode-first response", firstEvents: roleEvent + stopEvent, wantAttempt: "decode-first"},
+		{name: "cache_threshold fallback", firstEvents: roleEvent + thresholdEvent, wantAttempt: "after-prefill"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer prefill.Close()
+
+			decodeURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			srv.logger = log.Log
+			firstAttempt := make(chan struct{}, 1)
+			firstAttempt <- struct{}{}
+			srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// Add, not Set: the reverse proxy adds upstream headers to the client's map.
+				w.Header().Add("Content-Type", "text/event-stream")
+				select {
+				case <-firstAttempt:
+					w.Header().Add("X-Decode-Attempt", "decode-first")
+					_, _ = w.Write([]byte(tt.firstEvents))
+				default:
+					w.Header().Add("X-Decode-Attempt", "after-prefill")
+					_, _ = w.Write([]byte(roleEvent + stopEvent))
+				}
+			})
+
+			body := `{"model":"m","messages":[],"stream":true,"cache_hit_threshold":0.5}`
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			recorder := httptest.NewRecorder()
+			srv.handleSharedStorage(recorder, req, strings.TrimPrefix(prefill.URL, "http://"), reqcommon.APITypeChatCompletions)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, roleEvent+stopEvent, recorder.Body.String())
+			header := recorder.Result().Header
+			require.Equal(t, []string{tt.wantAttempt}, header.Values("X-Decode-Attempt"))
+			require.Equal(t, []string{"text/event-stream"}, header.Values("Content-Type"))
+		})
+	}
+}
+
 // statefulResponsesTestBody is a /v1/responses body carrying the fields
 // reqcommon.RejectStatefulResponsesFields refuses, shared by the tests that
 // assert such a request is refused before it reaches any upstream.
