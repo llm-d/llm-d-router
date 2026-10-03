@@ -335,8 +335,8 @@ func TestReplaceMediaURLsStep_DataURIInput(t *testing.T) {
 
 // MultimodalEntry.Index must reflect the position of each image in the
 // request, regardless of whether it came from a download or an inline
-// data: URI. EncodeStep.buildSingleImageContent indexes by entry.Index so
-// drift would associate hashes/placeholders with the wrong image. Asserted
+// data: URI. EncodeStep.buildEncodeBody selects its image part by entry.Index
+// so drift would associate hashes/placeholders with the wrong image. Asserted
 // in both source orderings.
 func TestReplaceMediaURLsStep_MixedHTTPAndDataURIOrdering(t *testing.T) {
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

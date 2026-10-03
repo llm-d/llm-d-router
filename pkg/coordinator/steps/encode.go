@@ -225,23 +225,27 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
-		imageContent, err := buildSingleImageContent(imageParts, entry.Index, format)
-		if err != nil {
-			return nil, err
+		if entry.Index < 0 || entry.Index >= len(imageParts) {
+			return nil, fmt.Errorf("no image part at index %d of %d: %w", entry.Index, len(imageParts), pipeline.ErrBadRequest)
 		}
-		item := map[string]any{
-			reqcommon.FieldRole:    "user",
-			reqcommon.FieldContent: []any{imageContent},
+		part := imageParts[entry.Index]
+		// A part whose URL is absent or not a string would prime the encoder
+		// with a blank image, under a hash the prefiller later looks up.
+		// replace-media-urls rejects the same shape before building the entry
+		// this index came from, so reaching here means that step is not in the
+		// pipeline.
+		if reqcommon.MediaPartURL(part) == "" {
+			return nil, fmt.Errorf("image part %d carries no fetchable URL: %w", entry.Index, pipeline.ErrBadRequest)
 		}
-		body := map[string]any{reqcommon.FieldModel: reqCtx.Model}
-		if format == reqcommon.APITypeResponses {
-			body[reqcommon.FieldInput] = []any{item}
-		} else {
-			body[reqcommon.FieldMessages] = []any{item}
-		}
-		reqcommon.CapSingleToken(body, format)
-		return body, nil
+		// The part goes out unreshaped, so the options each API keeps beside
+		// the URL (Responses' detail sibling, chat's nested image_url fields)
+		// come along without per-format copying.
+		return reqcommon.NewEncoderPrimingBody(reqCtx.Body, part, format), nil
 	case reqcommon.APITypeVLLMGenerate:
+		// Unlike the OpenAI formats, this body carries no image: the encoder
+		// preprocesses nothing, so the client's mm_processor_kwargs and
+		// media_io_kwargs have no effect here. Render already applied them and
+		// returned the result as entry.Hash and entry.KwargsData.
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
@@ -291,49 +295,6 @@ func collectImageParts(items []any, apiType reqcommon.APIType) []map[string]any 
 		}
 	}
 	return parts
-}
-
-// buildSingleImageContent builds a synthetic single-image content part for
-// the encode sub-request. The image value's shape differs by format:
-// chat-completions nests it as image_url.url, while Responses' input_image
-// part stores it as a bare string directly on the part; Responses' optional
-// detail field is a sibling of image_url on that same part, so it is copied
-// across separately rather than coming along with the URL.
-//
-// A Responses input_image part whose image_url is not a string (e.g. a
-// file_id reference) is rejected rather than forwarded with a blank
-// image_url, for the same reason collectResponsesImageRefs rejects the
-// identical shape: encode's caller indexes imageParts positionally, so
-// substituting a placeholder here would silently encode the wrong image
-// worth of content instead of failing the request.
-func buildSingleImageContent(imageParts []map[string]any, index int, format reqcommon.APIType) (map[string]any, error) {
-	if format == reqcommon.APITypeResponses {
-		content := map[string]any{
-			reqcommon.FieldType:     reqcommon.PartTypeInputImage,
-			reqcommon.FieldImageURL: "",
-		}
-		if index >= 0 && index < len(imageParts) {
-			url, ok := imageParts[index][reqcommon.FieldImageURL].(string)
-			if !ok {
-				return nil, fmt.Errorf("input_image part %d has no string image_url: %w", index, pipeline.ErrBadRequest)
-			}
-			content[reqcommon.FieldImageURL] = url
-			if detail, ok := imageParts[index][inputImageDetailField]; ok {
-				content[inputImageDetailField] = detail
-			}
-		}
-		return content, nil
-	}
-	if index >= 0 && index < len(imageParts) {
-		return map[string]any{
-			reqcommon.FieldType:     reqcommon.PartTypeImageURL,
-			reqcommon.FieldImageURL: imageParts[index][reqcommon.FieldImageURL],
-		}, nil
-	}
-	return map[string]any{
-		reqcommon.FieldType:     reqcommon.PartTypeImageURL,
-		reqcommon.FieldImageURL: map[string]any{reqcommon.FieldURL: ""},
-	}, nil
 }
 
 type encodeResponse struct {

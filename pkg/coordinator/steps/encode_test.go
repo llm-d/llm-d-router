@@ -540,8 +540,8 @@ func TestEncodeStep_ResponsesFormat(t *testing.T) {
 // TestEncodeStep_ResponsesFormat_PreservesDetail verifies that a client's
 // optional detail field on an input_image part survives onto the synthetic
 // encode sub-request. It is a sibling of image_url on the Responses part
-// rather than nested inside it, so it needs its own copy in
-// buildSingleImageContent instead of coming along for free.
+// rather than nested inside it, so only forwarding the whole part unreshaped
+// carries it across.
 func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 	var receivedBody map[string]any
 
@@ -597,10 +597,9 @@ func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 // file_id-referenced image) fails the request rather than encoding a blank
 // image_url sub-request. This normally cannot reach encode because
 // replace-media-urls rejects the same shape first, but encode must reject it
-// too: its positional indexing into imageParts, shared with the same shape
-// collectResponsesImageRefs validates, would otherwise misassign a real
-// image's hash to this malformed part if replace-media-urls were ever
-// skipped or reordered.
+// too: it selects its part by entry.Index, so a pipeline without
+// replace-media-urls would otherwise prime the encoder with a blank image
+// under a real image's hash.
 func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("encode worker should not be called for a malformed input_image part")
@@ -1030,5 +1029,97 @@ func TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage(t *testing.T)
 		if !seen[want] {
 			t.Fatalf("no encode sub-request carried %s, got %v", want, gotURLs)
 		}
+	}
+}
+
+// TestEncodeStep_ForwardsPreprocessingKwargs pins the two client fields the
+// encode sub-request has to carry. Both change multimodal preprocessing and
+// feed vLLM's multimodal hash, and the prefill leg forwards them by cloning
+// the client body, so an encode leg that dropped them would prime the encoder
+// under a hash the prefiller never looks up. Covers both OpenAI formats,
+// since the fan-out builds them through one path.
+func TestEncodeStep_ForwardsPreprocessingKwargs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		path      string
+		promptKey string
+		item      map[string]any
+	}{
+		{
+			name:      "chat completions",
+			path:      reqcommon.PathChatCompletions,
+			promptKey: reqcommon.FieldMessages,
+			item: map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type":      reqcommon.PartTypeImageURL,
+						"image_url": map[string]any{"url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		{
+			name:      "responses",
+			path:      reqcommon.PathResponses,
+			promptKey: reqcommon.FieldInput,
+			item: map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc"},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedBody map[string]any
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &receivedBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+			}))
+			defer server.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID:    "req-kwargs",
+				OriginalPath: tc.path,
+				Model:        testModelName,
+				TokenIDs:     []int{1, 32000, 2345},
+				Body: map[string]any{
+					"model":                          testModelName,
+					tc.promptKey:                     []any{tc.item},
+					reqcommon.FieldMMProcessorKwargs: map[string]any{"num_crops": 4},
+					reqcommon.FieldMediaIOKwargs:     map[string]any{"image": map[string]any{"mode": "RGB"}},
+					// A client field outside the allowlist must not reach the
+					// encoder, whose API may not define it.
+					"frequency_penalty": 0.5,
+				},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Index: 0, Hash: "hash-kwargs", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+				},
+			}
+
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			mm, ok := receivedBody[reqcommon.FieldMMProcessorKwargs].(map[string]any)
+			if !ok || mm["num_crops"] != float64(4) {
+				t.Fatalf("expected mm_processor_kwargs forwarded, got %v", receivedBody[reqcommon.FieldMMProcessorKwargs])
+			}
+			if _, ok := receivedBody[reqcommon.FieldMediaIOKwargs].(map[string]any); !ok {
+				t.Fatalf("expected media_io_kwargs forwarded, got %v", receivedBody[reqcommon.FieldMediaIOKwargs])
+			}
+			if _, ok := receivedBody["frequency_penalty"]; ok {
+				t.Fatal("a client field outside the allowlist reached the encoder")
+			}
+		})
 	}
 }

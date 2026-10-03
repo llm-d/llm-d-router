@@ -45,11 +45,6 @@ import (
 
 const ReplaceMediaURLsStepName = "replace-media-urls"
 
-// inputImageDetailField is the Responses input_image rendering hint. It has no
-// counterpart in pkg/common/request, which carries only keys the router itself
-// reads.
-const inputImageDetailField = "detail"
-
 const defaultContentType = "application/octet-stream"
 
 // defaultMaxDownloadSize is the default cap for max_download_size, in megabytes.
