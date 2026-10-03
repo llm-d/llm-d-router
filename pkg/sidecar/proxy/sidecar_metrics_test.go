@@ -119,7 +119,7 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 				encoderHeader: []string{"enc1:8000"},
 				prefillHeader: []string{"prefill1:8000"},
 			},
-			allowed: []string{"prefill1"},
+			allowed: []string{"prefill1:8000"},
 			want:    metrics.DisaggTypePD,
 		},
 		{

@@ -192,33 +192,115 @@ var _ = Describe("AllowlistValidator", func() {
 		})
 	})
 
+	Context("poolTargetPorts", func() {
+		gaValidator := &AllowlistValidator{
+			gvr: schema.GroupVersionResource{
+				Group:    routing.InferencePoolAPIGroup,
+				Version:  "v1",
+				Resource: "inferencepools",
+			},
+		}
+
+		It("should extract every target port from GA InferencePool", func() {
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"spec": map[string]interface{}{
+						"targetPorts": []interface{}{
+							map[string]interface{}{"number": int64(8000)},
+							map[string]interface{}{"number": int64(8001)},
+						},
+					},
+				},
+			}
+
+			ports, err := gaValidator.poolTargetPorts(pool)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ports).To(Equal([]string{"8000", "8001"}))
+		})
+
+		It("should extract targetPortNumber from deprecated alpha InferencePool", func() {
+			av := &AllowlistValidator{
+				gvr: schema.GroupVersionResource{
+					Group:    "inference.networking.x-k8s.io",
+					Version:  "v1alpha2",
+					Resource: "inferencepools",
+				},
+			}
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"spec": map[string]interface{}{"targetPortNumber": int64(8000)},
+				},
+			}
+
+			ports, err := av.poolTargetPorts(pool)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(ports).To(Equal([]string{"8000"}))
+		})
+
+		It("should fail when GA InferencePool has no target ports", func() {
+			pool := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"spec": map[string]interface{}{"targetPorts": []interface{}{}},
+				},
+			}
+
+			_, err := gaValidator.poolTargetPorts(pool)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("targetPorts"))
+		})
+	})
+
 	Context("when SSRF protection is enabled", func() {
 		var validator *AllowlistValidator
 
 		BeforeEach(func() {
 			validator = &AllowlistValidator{
-				enabled:   true,
-				namespace: "test-namespace",
-				allowedTargets: set.New(
-					"10.244.1.100",
-					"valid-pod",
-					"valid-pod.test-namespace.svc.cluster.local",
-				),
+				enabled:        true,
+				namespace:      "test-namespace",
+				allowedTargets: set.New[string](),
 			}
+			pod := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{"name": "valid-pod"},
+					"status":   map[string]interface{}{"podIP": "10.244.1.100"},
+				},
+			}
+			validator.addPodToAllowlist(pod, "test-pool", []string{"8000", "8001"})
 		})
 
-		It("should allow targets in the allowlist", func() {
+		It("should allow pod addresses on each target port", func() {
 			Expect(validator.IsAllowed("10.244.1.100:8000")).To(BeTrue())
+			Expect(validator.IsAllowed("10.244.1.100:8001")).To(BeTrue())
 			Expect(validator.IsAllowed("valid-pod:8000")).To(BeTrue())
-			Expect(validator.IsAllowed("valid-pod.test-namespace.svc.cluster.local:8000")).To(BeTrue())
-			Expect(validator.IsAllowed("10.244.1.100:8001")).To(BeTrue()) // Different port, same host
-			Expect(validator.IsAllowed("valid-pod:9999")).To(BeTrue())    // Any port on allowed host
+			Expect(validator.IsAllowed("http://10.244.1.100:8000")).To(BeTrue())
+		})
+
+		It("should block allowlisted hosts on ports outside the pool target ports", func() {
+			Expect(validator.IsAllowed("10.244.1.100:9090")).To(BeFalse())
+			Expect(validator.IsAllowed("valid-pod:9999")).To(BeFalse())
+		})
+
+		It("should block targets without a port", func() {
+			Expect(validator.IsAllowed("10.244.1.100")).To(BeFalse())
+			Expect(validator.IsAllowed("valid-pod")).To(BeFalse())
 		})
 
 		It("should block targets not in the allowlist", func() {
 			Expect(validator.IsAllowed("malicious.example.com:8080")).To(BeFalse())
 			Expect(validator.IsAllowed("10.0.0.1:8000")).To(BeFalse())
 			Expect(validator.IsAllowed("evil-pod:8000")).To(BeFalse())
+		})
+
+		It("should bracket IPv6 pod addresses", func() {
+			pod := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{"name": "v6-pod"},
+					"status":   map[string]interface{}{"podIP": "fd00::1"},
+				},
+			}
+			validator.addPodToAllowlist(pod, "test-pool", []string{"8000"})
+			Expect(validator.IsAllowed("[fd00::1]:8000")).To(BeTrue())
+			Expect(validator.IsAllowed("[fd00::1]:9090")).To(BeFalse())
 		})
 
 		It("should parse host:port correctly", func() {
