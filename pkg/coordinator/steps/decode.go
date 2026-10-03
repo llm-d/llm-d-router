@@ -129,43 +129,44 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 // the client sent. resolveFormat's answer instead reflects the encode/prefill
 // wire-format setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	switch detected := reqcommon.DetectAPIType(reqCtx.OriginalPath); detected {
 	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
-			injectImagePartUUIDs(messages, reqcommon.PartTypeImageURL, reqCtx.MultimodalEntries)
+			injectImagePartUUIDs(messages, detected, reqCtx.MultimodalEntries)
 		}
 	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
-			injectImagePartUUIDs(input, reqcommon.PartTypeInputImage, reqCtx.MultimodalEntries)
+			injectImagePartUUIDs(input, detected, reqCtx.MultimodalEntries)
 		}
 	}
 }
 
 // injectImagePartUUIDs walks items (chat-completions messages or a Responses
-// input array) for content parts of partType and stamps each with the hash of
-// its corresponding multimodal entry, in order.
-func injectImagePartUUIDs(items []any, partType string, entries []pipeline.MultimodalEntry) {
+// input array) for image content parts and stamps each with the hash of its
+// corresponding multimodal entry, in order. The arrays walked and the parts
+// counted come from itemPartArrays and imagePartType, matching the walk that
+// built entries.
+func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipeline.MultimodalEntry) {
+	partType := imagePartType(apiType)
 	hashIdx := 0
 	for _, item := range items {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := itemMap[reqcommon.FieldContent].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap[reqcommon.FieldType] != partType {
-				continue
-			}
-			if hashIdx < len(entries) {
-				partMap["uuid"] = entries[hashIdx].Hash
-				hashIdx++
+		for _, array := range itemPartArrays(itemMap, apiType) {
+			for _, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != partType {
+					continue
+				}
+				if hashIdx < len(entries) {
+					partMap["uuid"] = entries[hashIdx].Hash
+					hashIdx++
+				}
 			}
 		}
 	}

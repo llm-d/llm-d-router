@@ -109,11 +109,11 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	switch format {
 	case reqcommon.APITypeChatCompletions:
 		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
-			imageParts = collectImageParts(messages, reqcommon.PartTypeImageURL)
+			imageParts = collectImageParts(messages, format)
 		}
 	case reqcommon.APITypeResponses:
 		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
-			imageParts = collectImageParts(input, reqcommon.PartTypeInputImage)
+			imageParts = collectImageParts(input, format)
 		}
 	}
 
@@ -265,27 +265,28 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 }
 
 // collectImageParts walks a chat-completions messages array or a Responses
-// input array once and returns the content parts matching partType in order,
-// so the fan-out loop can index by position instead of re-walking all parts
-// per image (O(N*M) -> O(N+M)).
-func collectImageParts(items []any, partType string) []map[string]any {
+// input array once and returns the image content parts in order, so the
+// fan-out loop can index by position instead of re-walking all parts per image
+// (O(N*M) -> O(N+M)). The arrays walked and the parts counted come from
+// itemPartArrays and imagePartType, so this walk sees the same set
+// replace-media-urls built reqCtx.MultimodalEntries from.
+func collectImageParts(items []any, apiType reqcommon.APIType) []map[string]any {
+	partType := imagePartType(apiType)
 	var parts []map[string]any
 	for _, item := range items {
 		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := itemMap[reqcommon.FieldContent].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap[reqcommon.FieldType] == partType {
-				parts = append(parts, partMap)
+		for _, array := range itemPartArrays(itemMap, apiType) {
+			for _, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] == partType {
+					parts = append(parts, partMap)
+				}
 			}
 		}
 	}

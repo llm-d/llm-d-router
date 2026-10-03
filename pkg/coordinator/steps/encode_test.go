@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -936,5 +937,98 @@ func TestEncodeStep_UnsupportedFormat(t *testing.T) {
 	}
 	if want := "unsupported request format APIType(99)"; err.Error() != want {
 		t.Fatalf("expected error %q, got %q", want, err.Error())
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage pins the
+// positional agreement between replace-media-urls' walk and this step's. An
+// image under a function_call_output's output gets a multimodal entry there,
+// so it has to be counted here too: otherwise that entry's index runs past the
+// collected parts and its sub-request primes the encoder with a blank
+// image_url under a hash the prefiller later looks up.
+func TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage(t *testing.T) {
+	const (
+		contentImage = "data:image/jpeg;base64,Y29udGVudA=="
+		outputImage  = "data:image/jpeg;base64,b3V0cHV0"
+	)
+
+	var mu sync.Mutex
+	var gotURLs []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("sub-request body did not parse: %v", err)
+			return
+		}
+		url := ""
+		if input, ok := parsed["input"].([]any); ok && len(input) == 1 {
+			if item, ok := input[0].(map[string]any); ok {
+				if content, ok := item["content"].([]any); ok && len(content) == 1 {
+					if part, ok := content[0].(map[string]any); ok {
+						url, _ = part["image_url"].(string)
+					}
+				}
+			}
+		}
+		mu.Lock()
+		gotURLs = append(gotURLs, url)
+		mu.Unlock()
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-output",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": contentImage},
+					},
+				},
+				map[string]any{
+					"type":    "function_call_output",
+					"call_id": "call-1",
+					"output": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": outputImage},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-content", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: "hash-output", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotURLs) != 2 {
+		t.Fatalf("expected 2 encode sub-requests, got %d", len(gotURLs))
+	}
+	seen := map[string]bool{gotURLs[0]: true, gotURLs[1]: true}
+	for _, want := range []string{contentImage, outputImage} {
+		if !seen[want] {
+			t.Fatalf("no encode sub-request carried %s, got %v", want, gotURLs)
+		}
 	}
 }

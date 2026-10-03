@@ -1340,3 +1340,100 @@ func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
+
+// TestReplaceMediaURLsStep_Responses_InlinesFunctionCallOutputImage covers a
+// Responses function_call_output, which carries its parts under output rather
+// than content. vLLM forwards that array as a tool message's content, so media
+// in it reaches the model like any other part and has to be fetched under this
+// step's address guard and size limit rather than left for the model server to
+// fetch itself.
+func TestReplaceMediaURLsStep_Responses_InlinesFunctionCallOutputImage(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testImageJPEGContentType)
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
+		Body: map[string]any{
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": imageServer.URL + "/content.jpg"},
+					},
+				},
+				map[string]any{
+					"type":    "function_call_output",
+					"call_id": "call-1",
+					"output": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": imageServer.URL + "/output.jpg"},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 2 {
+		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+
+	input := reqCtx.Body["input"].([]any)
+	contentURL := input[0].(map[string]any)["content"].([]any)[1].(map[string]any)["image_url"].(string)
+	if !strings.HasPrefix(contentURL, "data:image/jpeg;base64,") {
+		t.Fatalf("expected the content image inlined, got %s", contentURL)
+	}
+	outputURL := input[1].(map[string]any)["output"].([]any)[0].(map[string]any)["image_url"].(string)
+	if !strings.HasPrefix(outputURL, "data:image/jpeg;base64,") {
+		t.Fatalf("expected the output image inlined, got %s", outputURL)
+	}
+}
+
+// A chat-completions message defines no output array, so an image_url part
+// under one names content the client never sent and is left alone.
+func TestReplaceMediaURLsStep_IgnoresOutputOnChatCompletions(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", testImageJPEGContentType)
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"output": []any{
+						map[string]any{
+							"type":      reqcommon.PartTypeImageURL,
+							"image_url": map[string]any{"url": imageServer.URL + "/stray.jpg"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("expected no download for an output array on a chat request, got %d", got)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}

@@ -186,10 +186,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		if strings.HasPrefix(ref.url, "data:") {
 			contentType, b64, err := parseDataURI(ref.url)
 			if err != nil {
-				return fmt.Errorf("parsing data URI at item %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
+				return fmt.Errorf("parsing data URI at %s: %w: %w", ref.location, err, pipeline.ErrBadRequest)
 			}
 			if !allowedImageContentType(contentType) {
-				return fmt.Errorf("data URI content type %q not allowed at item %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
+				return fmt.Errorf("data URI content type %q not allowed at %s: %w", contentType, ref.location, pipeline.ErrBadRequest)
 			}
 			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
 			continue
@@ -243,45 +243,43 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		content, ok := msgMap[reqcommon.FieldContent].([]any)
-		if !ok {
-			continue
-		}
-		for partIdx, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
+		for _, array := range itemPartArrays(msgMap, reqcommon.APITypeChatCompletions) {
+			for partIdx, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != reqcommon.PartTypeImageURL {
+					continue
+				}
+				location := fmt.Sprintf("message %d %s part %d", msgIdx, array.field, partIdx)
+				imageURL, ok := partMap[reqcommon.FieldImageURL].(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("%s: image_url is not an object: %w", location, pipeline.ErrBadRequest)
+				}
+				url, ok := imageURL[reqcommon.FieldURL].(string)
+				if !ok {
+					return nil, fmt.Errorf("%s: image_url.url is not a string: %w", location, pipeline.ErrBadRequest)
+				}
+				refs = append(refs, imageRef{
+					location: location,
+					url:      url,
+					setURL:   func(v string) { imageURL[reqcommon.FieldURL] = v },
+				})
 			}
-			if partMap[reqcommon.FieldType] != reqcommon.PartTypeImageURL {
-				continue
-			}
-			imageURL, ok := partMap[reqcommon.FieldImageURL].(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("message %d part %d: image_url is not an object: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
-			}
-			url, ok := imageURL[reqcommon.FieldURL].(string)
-			if !ok {
-				return nil, fmt.Errorf("message %d part %d: image_url.url is not a string: %w", msgIdx, partIdx, pipeline.ErrBadRequest)
-			}
-			refs = append(refs, imageRef{
-				msgIdx:  msgIdx,
-				partIdx: partIdx,
-				url:     url,
-				setURL:  func(v string) { imageURL["url"] = v },
-			})
 		}
 	}
 	return refs, nil
 }
 
 // collectResponsesImageRefs walks a Responses-API input array for input_image
-// parts. Unlike chat-completions' image_url part, the URL here is a bare
-// string field on the part itself (part["image_url"]), not a nested object.
+// parts, under both arrays itemPartArrays yields. Unlike chat-completions'
+// image_url part, the URL here is a bare string field on the part itself
+// (part["image_url"]), not a nested object.
 //
-// An input_image part with no string image_url (e.g. a file_id reference to a
-// previously uploaded file) is rejected for the same reason
-// collectChatCompletionsImageRefs rejects its equivalent malformed shape:
-// see that function's doc comment.
+// An input_image part with no string image_url is rejected for the same reason
+// collectChatCompletionsImageRefs rejects its equivalent malformed shape: see
+// that function's doc comment.
 func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 	var refs []imageRef
 	for itemIdx, item := range input {
@@ -289,28 +287,26 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		content, ok := itemMap[reqcommon.FieldContent].([]any)
-		if !ok {
-			continue
-		}
-		for partIdx, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
+		for _, array := range itemPartArrays(itemMap, reqcommon.APITypeResponses) {
+			for partIdx, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != reqcommon.PartTypeInputImage {
+					continue
+				}
+				location := fmt.Sprintf("input item %d %s part %d", itemIdx, array.field, partIdx)
+				url, ok := partMap[reqcommon.FieldImageURL].(string)
+				if !ok {
+					return nil, fmt.Errorf("%s: input_image with no image_url string is not supported: %w", location, pipeline.ErrBadRequest)
+				}
+				refs = append(refs, imageRef{
+					location: location,
+					url:      url,
+					setURL:   func(v string) { partMap[reqcommon.FieldImageURL] = v },
+				})
 			}
-			if partMap[reqcommon.FieldType] != reqcommon.PartTypeInputImage {
-				continue
-			}
-			url, ok := partMap[reqcommon.FieldImageURL].(string)
-			if !ok {
-				return nil, fmt.Errorf("input item %d part %d: input_image with no image_url string is not supported: %w", itemIdx, partIdx, pipeline.ErrBadRequest)
-			}
-			refs = append(refs, imageRef{
-				msgIdx:  itemIdx,
-				partIdx: partIdx,
-				url:     url,
-				setURL:  func(v string) { partMap[reqcommon.FieldImageURL] = v },
-			})
 		}
 	}
 	return refs, nil
@@ -379,9 +375,12 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 }
 
 type imageRef struct {
-	msgIdx  int
-	partIdx int
-	url     string
+	// location names where this ref's part sits in the client body, for error
+	// messages: "message 0 content part 2", "input item 1 output part 0". The
+	// array name is part of it because a Responses item can carry parts under
+	// both content and output, so a part index alone is ambiguous.
+	location string
+	url      string
 	// setURL writes the rewritten data URI back to wherever this ref's URL
 	// lives in reqCtx.Body, since that location's shape differs by API
 	// format (chat-completions nests it at image_url.url; Responses stores

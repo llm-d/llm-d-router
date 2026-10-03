@@ -660,3 +660,80 @@ func TestDecodeStep_TransportError(t *testing.T) {
 		t.Fatalf("expected ErrorHandler-written 502, got %d", result.StatusCode)
 	}
 }
+
+// TestDecodeStep_Responses_StampsFunctionCallOutputImage verifies the uuid
+// stamping walk sees the same image set replace-media-urls built entries from,
+// including an image under a function_call_output's output. An unstamped part
+// makes the worker compute its own hash, so the entry primed into the encoder
+// cache for it is never looked up.
+func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
+	const outputImageHash = "hash-b"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("decode body did not parse: %v", err)
+			return
+		}
+
+		input, ok := parsed["input"].([]any)
+		if !ok || len(input) != 2 {
+			t.Errorf("expected 2 input items, got %v", parsed["input"])
+			return
+		}
+		contentPart := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if contentPart["uuid"] != testImageHash {
+			t.Errorf("content image uuid = %v, want %s", contentPart["uuid"], testImageHash)
+		}
+		outputPart := input[1].(map[string]any)["output"].([]any)[0].(map[string]any)
+		if outputPart["uuid"] != outputImageHash {
+			t.Errorf("output image uuid = %v, want %s", outputPart["uuid"], outputImageHash)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-output",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz"},
+		Body: map[string]any{
+			"model": "llama-3",
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "https://example.com/cat.jpg"},
+					},
+				},
+				map[string]any{
+					"type":    "function_call_output",
+					"call_id": "call-1",
+					"output": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "https://example.com/dog.jpg"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
