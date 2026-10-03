@@ -34,6 +34,7 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldN                    = "n"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldSamplingParams       = "sampling_params"

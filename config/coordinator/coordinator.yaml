@@ -330,3 +330,15 @@ pipeline:
     - type: decode
       # params:
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #   force_stream opts a non-streaming client request into streaming
+      #   upstream: the decode step sends stream:true, buffers the SSE frames,
+      #   and reassembles them into one non-streaming reply. Off by default;
+      #   streaming and non-streaming upstream responses can carry different
+      #   fields, so enabling it is a deliberate choice. A request with no output
+      #   token limit, or one that arrives while the shared buffer budget is
+      #   full, falls back to the pass-through and streams through unchanged.
+      #   force_stream: true
+      #   force_stream_buffer_size caps the total bytes all concurrent forced
+      #   requests may buffer at once (human-readable, default 1GiB). When the
+      #   budget is exhausted, further requests fall back to the pass-through.
+      #   force_stream_buffer_size: 1GiB

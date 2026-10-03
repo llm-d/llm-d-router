@@ -40,8 +40,10 @@ func init() {
 }
 
 type DecodeStep struct {
-	gwClient *gateway.Client
-	kv       kv.Connector
+	gwClient    *gateway.Client
+	kv          kv.Connector
+	forceStream bool
+	budget      *forceStreamBudget
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -59,7 +61,19 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
+	forceStream, _, err := paramBool(params, ParamForceStream)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, forceStream: forceStream}
+	if forceStream {
+		budget, err := parseForceStreamBudget(params)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		step.budget = budget
+	}
+	return step, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -69,6 +83,19 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
 		return err
+	}
+
+	// Force-streaming applies only to a client that asked for a non-streaming
+	// reply and only while budget remains to buffer it. A request with no token
+	// limit (unbounded) or a full budget falls through to the pass-through below,
+	// which buffers nothing.
+	if s.forceStream && !reqCtx.Stream {
+		if reserved, ok := s.estimateReservation(reqCtx); ok {
+			if s.budget.tryReserve(reserved) {
+				return s.executeForceStream(ctx, logger, reqCtx, reserved)
+			}
+			coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackBudget)
+		}
 	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)

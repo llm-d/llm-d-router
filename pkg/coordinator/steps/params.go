@@ -27,6 +27,13 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	// ParamForceStream opts the decode step into force-streaming: a
+	// non-streaming client request is sent upstream with stream enabled, and
+	// the streamed response is reassembled into one non-streaming reply.
+	ParamForceStream = "force_stream"
+	// ParamForceStreamBufferSize is the total byte budget, as a human-readable
+	// string ("1GiB"), shared across all concurrent forced requests.
+	ParamForceStreamBufferSize = "force_stream_buffer_size"
 )
 
 const ModalityImage = "image"

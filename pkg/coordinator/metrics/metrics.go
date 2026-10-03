@@ -83,6 +83,18 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Result label values for force_stream_total. Forced is a request the
+// coordinator streamed from the upstream and reassembled into one non-streaming
+// response. FallbackBudget is a request that could have been forced but found
+// the buffer budget full, so it took the non-forced pass-through instead.
+// ErrorCeiling is a forced request whose reassembled response exceeded its
+// reserved budget and was aborted before any bytes reached the client.
+const (
+	ForceStreamResultForced         = "forced"
+	ForceStreamResultFallbackBudget = "fallback_budget"
+	ForceStreamResultErrorCeiling   = "error_ceiling"
+)
+
 var (
 	modelLabel    = []string{"model_name"}
 	stepLabel     = []string{"step"}
@@ -125,6 +137,8 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		forceStreamBufferedBytes,
+		forceStreamTotal,
 	}
 }
 
