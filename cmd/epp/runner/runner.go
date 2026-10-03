@@ -196,6 +196,7 @@ type Runner struct {
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   uint16
 	draining         *atomic.Bool
+	isLeader         *atomic.Bool
 
 	// grpcListener and healthListener are optional pre-bound listeners for the
 	// runWithFileDiscovery path; when set, the ext_proc and health servers serve
@@ -301,27 +302,48 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // runWithGracefulShutdown runs the ext_proc and health servers on a context that
-// outlives the manager. On SIGTERM (ctx cancelled) the manager stops and releases
-// its leader lease, the pod is marked NotServing (so Kubernetes drains it from the
-// Service endpoints), and the ext_proc server keeps accepting requests for
-// drainTimeout so in-flight and pre-DNS-refresh requests are served rather than
-// rejected. A drainTimeout of 0 stops the servers as soon as the manager
-// terminates. setup() has stashed the servers on r.
+// outlives the manager; see serveWithDrain. setup() has stashed the servers on r.
 func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, drainTimeout time.Duration) error {
+	extProc := func(c context.Context) error {
+		return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+	}
+	health := func(c context.Context) error {
+		return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
+	}
+	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, r.isLeader, drainTimeout)
+}
+
+// serveWithDrain runs extProc and health on a context that outlives the manager.
+// The drain starts on SIGTERM (ctx cancelled; the manager stops and releases its
+// leader lease) and when the manager stops on its own after this instance was
+// elected, which is how a lost lease surfaces. The pod is marked NotServing (so
+// Kubernetes drains it from the Service endpoints), and the ext_proc server keeps
+// accepting requests for drainTimeout so in-flight and pre-DNS-refresh requests
+// are served rather than rejected. ext_proc then stops gracefully, finishing its
+// streams, and the health server stops after it so liveness holds meanwhile. A
+// drainTimeout of 0 stops ext_proc as soon as the manager terminates. A manager
+// that fails before election stops both servers at once.
+func serveWithDrain(ctx context.Context, startManager func(context.Context) error, extProc, health func(context.Context) error,
+	draining, elected *atomic.Bool, drainTimeout time.Duration) error {
 	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
-	// immediately stop the ext_proc/health servers.
+	// immediately stop the ext_proc/health servers. stopExtProc ends ext_proc alone.
 	serveCtx, serveCancel := context.WithCancel(context.Background())
 	defer serveCancel()
+	extProcStop, stopExtProc := context.WithCancel(context.Background())
+	defer stopExtProc()
 
+	extProcDone := make(chan struct{})
 	serveErr := make(chan error, 1)
 	go func() {
 		g := newRunnableGroup()
 		g.Add("ext-proc", func(c context.Context) error {
-			return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+			defer close(extProcDone)
+			c, cancel := context.WithCancel(c)
+			defer cancel()
+			defer context.AfterFunc(extProcStop, cancel)()
+			return extProc(c)
 		})
-		g.Add("health", func(c context.Context) error {
-			return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
-		})
+		g.Add("health", health)
 		serveErr <- g.Run(serveCtx)
 	}()
 
@@ -330,33 +352,40 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	// the Service endpoints while we keep serving in-flight traffic.
 	go func() {
 		<-ctx.Done()
-		r.draining.Store(true)
+		draining.Store(true)
 		setupLog.Info("Shutdown signal received: draining (NotServing) while finishing in-flight requests", "drainTimeout", drainTimeout)
 	}()
 
 	// Blocks until SIGTERM cancels ctx; returns once the manager has stopped and
 	// released the leader lease (LeaderElectionReleaseOnCancel).
 	setupLog.Info("Controller manager starting")
-	mgrErr := mgr.Start(ctx)
-	if mgrErr != nil {
+	mgrErr := startManager(ctx)
+	switch {
+	case mgrErr == nil:
+		setupLog.Info("Controller manager terminated; starting drain window")
+	case elected != nil && elected.Load() && ctx.Err() == nil:
+		draining.Store(true)
+		setupLog.Error(mgrErr, "Controller manager stopped after this instance led: draining (NotServing) while finishing in-flight requests", "drainTimeout", drainTimeout)
+	default:
 		setupLog.Error(mgrErr, "Error starting controller manager")
 		serveCancel()
 		<-serveErr
 		return mgrErr
 	}
-	setupLog.Info("Controller manager terminated; starting drain window")
 
-	// Keep serving ext_proc for the drain window, then stop. GracefulStop drains
-	// in-flight streams.
+	// Keep serving ext_proc for the drain window, then stop it. GracefulStop
+	// drains in-flight streams while the health server keeps answering.
 	select {
 	case <-time.After(drainTimeout):
 		setupLog.Info("Drain window elapsed, stopping ext_proc server")
 	case err := <-serveErr:
 		// The servers exited on their own (e.g. listener error) during the drain.
-		return err
+		return errors.Join(mgrErr, err)
 	}
+	stopExtProc()
+	<-extProcDone
 	serveCancel()
-	return <-serveErr
+	return errors.Join(mgrErr, <-serveErr)
 }
 
 // setup configures the internal state of the Runner, including the manager,
@@ -423,8 +452,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	isLeader := &atomic.Bool{}
 	isLeader.Store(false)
+	r.isLeader = isLeader
 
-	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, managerOverrides...)
+	overrides := append([]func(*ctrl.Options){opts.LeaderElectionOverride()}, managerOverrides...)
+	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, overrides...)
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
 		return nil, nil, err
