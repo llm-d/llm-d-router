@@ -79,10 +79,13 @@ to estimation when rendering fails.
 Legacy conversion uses the configured `modelName` and logs a deprecation
 warning once per plugin instance. It reshapes string Input, Input items that
 are simple `{role, content}` messages, and Instructions as a leading system
-message. An Input item or content part it cannot represent this way — for
-example `function_call`, `function_call_output`, `reasoning`, or an image
-part — fails the conversion rather than tokenizing a prompt shorter than the
-one vLLM serves. The forwarded request is unchanged.
+message; `input_text`/`output_text` and `input_image` content parts convert,
+the latter carrying its URL as a bare string rather than chat completions'
+nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
+cannot represent this way — for example `function_call`,
+`function_call_output`, `reasoning`, or `input_audio` — fails the conversion
+rather than tokenizing a prompt shorter than the one vLLM serves. The
+forwarded request is unchanged.
 
 The compatibility implementation and tests are contained in `responses.go`
 and `responses_test.go`. Its integration points are the

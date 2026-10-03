@@ -165,6 +165,104 @@ func TestEstimateBackend_ChatImageFeature(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_ResponsesImageFeature mirrors
+// TestEstimateBackend_ChatImageFeature for a /v1/responses body: an
+// input_image content part must report a multimodal feature, since the
+// disagg profile handler selects the encode profile from
+// MultiModalFeatures alone.
+func TestEstimateBackend_ResponsesImageFeature(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "Describe what you see."},
+				map[string]any{"type": "input_image", "image_url": pngBase64DataURL},
+			},
+		}},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	f := tp.Prompts[0].MultiModalFeatures[0]
+	assert.Equal(t, fwkrh.ModalityImage, f.Modality)
+	assert.Equal(t, strconv.FormatUint(xxhash.Sum64String(pngBase64DataURL), 16), f.Hash)
+}
+
+//nolint:goconst // "role"/"content"/"type" JSON keys read clearly inline; not worth naming
+func TestEstimateBackend_ResponsesTextOnlyNoFeatures(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{map[string]any{"role": "user", "content": "hello there"}},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
+	assert.NotEmpty(t, tp.Prompts[0].TokenIDs)
+}
+
+// responsesTokenCount runs the estimate backend on a single Input item and
+// returns its token count, for comparing how much a field contributes.
+func responsesTokenCount(t *testing.T, item map[string]any) int {
+	t.Helper()
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{Input: []any{item}}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	return len(tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_ResponsesAgenticItemsCounted verifies that
+// function_call, function_call_output, and reasoning items contribute their
+// text-bearing fields to the byte estimate rather than counting as zero.
+// Undercounting these item types -- the bulk of an agentic Responses turn --
+// feeds a too-short estimate into the P/D disaggregation decider,
+// context-length admission, and prefix-hash scoring.
+func TestEstimateBackend_ResponsesAgenticItemsCounted(t *testing.T) {
+	long := strings.Repeat("x", 4000)
+
+	empty := responsesTokenCount(t, map[string]any{"type": "function_call", "call_id": "call_1"})
+
+	withArgs := responsesTokenCount(t, map[string]any{
+		"type": "function_call", "call_id": "call_1", "name": "search", "arguments": long,
+	})
+	assert.Greater(t, withArgs, empty, "function_call arguments must count toward the estimate")
+
+	withOutput := responsesTokenCount(t, map[string]any{
+		"type": "function_call_output", "call_id": "call_1", "output": long,
+	})
+	assert.Greater(t, withOutput, empty, "function_call_output output must count toward the estimate")
+
+	withOutputParts := responsesTokenCount(t, map[string]any{
+		"type": "function_call_output", "call_id": "call_1",
+		"output": []any{map[string]any{"type": "output_text", "text": long}},
+	})
+	assert.Greater(t, withOutputParts, empty, "function_call_output output parts must count toward the estimate")
+
+	withSummary := responsesTokenCount(t, map[string]any{
+		"type": "reasoning", "id": "r1",
+		"summary": []any{map[string]any{"type": "summary_text", "text": long}},
+	})
+	assert.Greater(t, withSummary, empty, "reasoning summary must count toward the estimate")
+}
+
+// TestEstimateBackend_ResponsesSkipsUnrecognizedItems documents that an item
+// of a type this code does not know contributes nothing, rather than
+// guessing at its shape -- unlike function_call/function_call_output/
+// reasoning, which are now recognized (see
+// TestEstimateBackend_ResponsesAgenticItemsCounted).
+func TestEstimateBackend_ResponsesSkipsUnrecognizedItems(t *testing.T) {
+	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
+		Input: []any{
+			map[string]any{"type": "some_future_item_type", "payload": strings.Repeat("x", 4000)},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
+	assert.NotEmpty(t, tp.Prompts[0].TokenIDs)
+}
+
 func TestEstimateBackend_ChatModalityLabels(t *testing.T) {
 	chat := func(block fwkrh.ContentBlock) *fwkrh.InferenceRequestBody {
 		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
