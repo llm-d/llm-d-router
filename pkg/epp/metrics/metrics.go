@@ -95,6 +95,11 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(llmdCacheLocalityPredictedFraction)
+		metrics.Registry.MustRegister(llmdCacheLocalityActualFraction)
+		metrics.Registry.MustRegister(llmdCacheLocalityUnderpredictionFraction)
+		metrics.Registry.MustRegister(llmdCacheLocalityOverpredictionFraction)
+		metrics.Registry.MustRegister(llmdCacheLocalityObservationsTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -152,6 +157,11 @@ func Reset() {
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	LlmdDataLayerPollErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	llmdCacheLocalityPredictedFraction.Reset()
+	llmdCacheLocalityActualFraction.Reset()
+	llmdCacheLocalityUnderpredictionFraction.Reset()
+	llmdCacheLocalityOverpredictionFraction.Reset()
+	llmdCacheLocalityObservationsTotal.Reset()
 }
 
 // RecordRequestCounter records the number of requests.
@@ -265,6 +275,41 @@ func RecordPromptCachedTokens(modelName, targetModelName, fairnessID, priority s
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+}
+
+// RecordCacheLocalityObservation counts one selected-endpoint locality outcome
+// for a completed request. It is called exactly once per request, from the
+// chosen-endpoint response hook at end of stream, never per response chunk.
+//
+// The four fraction histograms are observed only when outcome is
+// CacheLocalityObserved, so predicted, actual, under- and over-prediction always
+// describe the same request population, and that population is exactly the
+// outcome=observed series of the observations counter. A request whose response
+// reported no cached-token detail must be passed as
+// CacheLocalityMissingUsage rather than with an actual fraction of 0.
+//
+// predicted and actual are ignored for every non-observed outcome, which is why
+// callers may pass 0 for them.
+func RecordCacheLocalityObservation(modelServerEndpoint, targetModelName string, predicted, actual float64, outcome CacheLocalityOutcome) {
+	modelServerEndpoint = boundModelServerEndpoint(modelServerEndpoint)
+	targetModelName = boundModel(targetModelName)
+	if outcome == CacheLocalityObserved {
+		// The signed error splits into two non-negative magnitudes: exactly one
+		// is nonzero per request, so their rates give the directional error
+		// distribution without exposing negative observations.
+		under, over := actual-predicted, predicted-actual
+		if under < 0 {
+			under = 0
+		}
+		if over < 0 {
+			over = 0
+		}
+		llmdCacheLocalityPredictedFraction.WithLabelValues(modelServerEndpoint, targetModelName).Observe(predicted)
+		llmdCacheLocalityActualFraction.WithLabelValues(modelServerEndpoint, targetModelName).Observe(actual)
+		llmdCacheLocalityUnderpredictionFraction.WithLabelValues(modelServerEndpoint, targetModelName).Observe(under)
+		llmdCacheLocalityOverpredictionFraction.WithLabelValues(modelServerEndpoint, targetModelName).Observe(over)
+	}
+	llmdCacheLocalityObservationsTotal.WithLabelValues(modelServerEndpoint, targetModelName, string(outcome)).Inc()
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.

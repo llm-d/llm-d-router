@@ -70,6 +70,10 @@ Client-derived label values are cardinality-bounded on EPP metrics that use them
 `target_model_name` from the request body share a cap of 1000 distinct values. Model names configured
 through InferenceModelRewrite rules never fold to `other`.
 
+The `model_server_endpoint` label on cache-locality metrics shares a separate cap of 1000 distinct
+values. Endpoint names come from the datastore rather than client input, so the cap is a backstop
+against a discovery source that emits unbounded identities.
+
 The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header or an agent
 identity, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
@@ -263,6 +267,40 @@ only when that plugin is configured and records the related prediction, observat
 | `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
 | `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
+
+#### Cache locality accuracy
+
+These metrics are also recorded by the `predicted-latency-producer`, at the end of each response
+stream. They answer a different question from the latency series above: not how fast the endpoint
+was predicted to be, but whether the router's belief about the endpoint's prompt cache matched what
+the engine actually reused. Predicting a cache hit that is not there costs prefill work the router
+expected to skip, so this is the feedback signal for prefix-aware routing and for the
+`precise-prefix-cache-producer` behind it.
+
+The predicted fraction is the value captured for the selected endpoint when the routing decision was
+made, taken from the prefix-cache producer's match (`MatchBlocks / TotalBlocks`); under
+disaggregation that is the prefill endpoint, otherwise the decode endpoint. The actual fraction is
+`prompt_tokens_details.cached_tokens / prompt_tokens` from the response's usage block. One outcome is
+recorded per request, from the terminal response event only, never per stream chunk.
+
+The four histograms are observed only for requests whose outcome is `observed`, so predicted, actual,
+under- and over-prediction always describe the same population, and
+`sum(llm_d_epp_cache_locality_observations_total{outcome="observed"})` is that population's size.
+A request whose response reported no cached-token detail — no usage block, no `prompt_tokens_details`, or a
+details object that reports other counters but not `cached_tokens` — is counted as `missing_usage` and enters no
+histogram: it must not be read as a 0% cache hit. The remaining non-observed outcomes name why
+locality stopped being reported — `missing_prediction` when the selected endpoint carried no
+prefix-cache match info (the producer did not run, or the request had no tokens), and `invalid_usage`
+when usage or prediction could not form a ratio (non-positive `prompt_tokens`, cached tokens outside
+`[0, prompt_tokens]`, or a predicted fraction outside `[0,1]`).
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_cache_locality_predicted_fraction` | Histogram | `model_server_endpoint`, `target_model_name` | Prompt-cached fraction predicted for the selected endpoint. |
+| `llm_d_epp_cache_locality_actual_fraction` | Histogram | `model_server_endpoint`, `target_model_name` | Prompt-cached fraction reported by the engine. |
+| `llm_d_epp_cache_locality_underprediction_fraction` | Histogram | `model_server_endpoint`, `target_model_name` | Non-negative `actual - predicted`; zero when the prediction was not low. |
+| `llm_d_epp_cache_locality_overprediction_fraction` | Histogram | `model_server_endpoint`, `target_model_name` | Non-negative `predicted - actual`; zero when the prediction was not high. |
+| `llm_d_epp_cache_locality_observations_total` | Counter | `model_server_endpoint`, `target_model_name`, `outcome` | Per-request outcome: `observed`, `missing_usage`, `missing_prediction`, `invalid_usage`. |
 
 ### Disaggregation
 
@@ -594,6 +632,15 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_zmq_errors_total` | Counter | `pod_identifier`, `operation` | ZMQ subscriber errors. |
 | `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
+| `llm_d_epp_kv_cache_events_replay_active` | Gauge | `pod_identifier` | 1 while a replay attempt is in flight for that subscriber; cleared on every exit path. |
+| `llm_d_epp_kv_cache_events_replay_completed_total` | Counter | `pod_identifier` | Replay attempts that received the full requested history. |
+| `llm_d_epp_kv_cache_events_replay_failures_total` | Counter | `pod_identifier` | Replay attempts that ended without completing; the reason is in `llm_d_epp_kv_cache_events_zmq_errors_total{operation}` (`replay-connect`, `replay-capacity`, `replay-send`, `replay-incomplete`, `replay-no-progress`). |
+| `llm_d_epp_kv_cache_events_replay_processed_total` | Counter | `pod_identifier` | Events forwarded to the processing pool by replay. |
+| `llm_d_epp_kv_cache_events_replay_last_completion_timestamp_seconds` | Gauge | `pod_identifier` | Unix time of the most recent successful replay; absent until the first success. |
+
+Per-`pod_identifier` replay series are removed with the subscriber's other series once its
+goroutine exits, so a scaled-away endpoint stops reporting a stale rebuild rather than pinning a
+series in the replay panels.
 
 ### MoRI-IO DNS re-resolution
 

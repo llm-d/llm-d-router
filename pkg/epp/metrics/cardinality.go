@@ -57,3 +57,18 @@ func boundModel(modelName string) string {
 func boundModels(modelName, targetModelName string) (string, string) {
 	return modelLabelLimiter.Bound(modelName), modelLabelLimiter.Bound(targetModelName)
 }
+
+// maxModelServerEndpointLabelValues caps the model_server_endpoint label of metrics
+// that attribute an observation to a single inference endpoint. Endpoint names
+// normally come from the datastore and are therefore bounded by the pool's
+// endpoint count; the cap is a backstop for discovery sources that can emit an
+// unbounded number of identities (per-rank endpoints, restarted pods with fresh
+// names), because Prometheus *Vec types never evict label combinations.
+const maxModelServerEndpointLabelValues = 1000
+
+var modelServerEndpointLabelLimiter = metricsutil.NewBoundedLabel(maxModelServerEndpointLabelValues)
+
+// boundModelServerEndpoint caps a model_server_endpoint label value.
+func boundModelServerEndpoint(endpointName string) string {
+	return modelServerEndpointLabelLimiter.Bound(endpointName)
+}

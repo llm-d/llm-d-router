@@ -572,6 +572,116 @@ var (
 	)
 )
 
+// --- llm-d Cache Locality Accuracy Metrics ---
+
+// CacheLocalityOutcome classifies one comparison of the prompt-cached fraction
+// the router predicted for the endpoint it selected against the fraction the
+// model server reported for the completed request. Exactly one outcome is
+// counted per request, and the four fraction histograms are observed only under
+// CacheLocalityObserved so that they all share the observations counter's
+// "observed" denominator.
+type CacheLocalityOutcome string
+
+const (
+	// CacheLocalityObserved: prediction and usage are both present and
+	// consistent. The only outcome under which the fraction histograms are
+	// observed.
+	CacheLocalityObserved CacheLocalityOutcome = "observed"
+	// CacheLocalityMissingUsage: the response carried no cached-token detail, so
+	// the actual fraction is unknown. Kept distinct from an actual fraction of 0
+	// so an engine that never reports reuse cannot be read as a 0% cache hit.
+	CacheLocalityMissingUsage CacheLocalityOutcome = "missing_usage"
+	// CacheLocalityMissingPrediction: the selected endpoint carried no
+	// prefix-cache match info when the routing decision was captured.
+	CacheLocalityMissingPrediction CacheLocalityOutcome = "missing_prediction"
+	// CacheLocalityInvalidUsage: a value was present but could not be turned into
+	// a ratio — non-positive prompt tokens, cached tokens outside
+	// [0, prompt tokens], or a predicted fraction outside [0,1].
+	CacheLocalityInvalidUsage CacheLocalityOutcome = "invalid_usage"
+)
+
+// cacheLocalityLabels identify the selected endpoint and the target model an
+// observation is attributed to. model_server_endpoint reuses the name and value
+// space of llm_d_epp_per_endpoint_queue_size, so locality joins the per-endpoint
+// queue and KV-utilization panels. namespace, pod and endpoint are deliberately
+// not emitted: the scraper injects labels under those names.
+var cacheLocalityLabels = []string{"model_server_endpoint", "target_model_name"}
+
+// localityFractionBuckets span a ratio over [0,1] at 5% resolution. The explicit
+// le=0 bucket keeps a genuine zero fraction countable rather than leaving it
+// only in the +Inf bucket.
+var localityFractionBuckets = []float64{
+	0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
+	0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1,
+}
+
+var (
+	llmdCacheLocalityPredictedFraction = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_locality_predicted_fraction",
+			Help: metricsutil.HelpMsgWithStability(
+				"Prompt-cached fraction the router predicted for the endpoint it selected, observed once per "+
+					"request whose locality outcome is observed. Shares its denominator with "+
+					"cache_locality_actual_fraction and the observations counter's outcome=observed series.", compbasemetrics.ALPHA),
+			Buckets: localityFractionBuckets,
+		},
+		cacheLocalityLabels,
+	)
+
+	llmdCacheLocalityActualFraction = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_locality_actual_fraction",
+			Help: metricsutil.HelpMsgWithStability(
+				"Prompt-cached fraction the model server reported in the final usage block of the request to the "+
+					"selected endpoint, observed once per request whose locality outcome is observed. A request whose "+
+					"response carried no cached-token detail is counted as missing_usage, never as a zero here.", compbasemetrics.ALPHA),
+			Buckets: localityFractionBuckets,
+		},
+		cacheLocalityLabels,
+	)
+
+	llmdCacheLocalityUnderpredictionFraction = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_locality_underprediction_fraction",
+			Help: metricsutil.HelpMsgWithStability(
+				"Non-negative magnitude of cache_locality_predicted_fraction below "+
+					"cache_locality_actual_fraction (actual minus predicted), observed on exactly the same requests as "+
+					"the predicted and actual histograms. Zero when the prediction was at or above the actual fraction.", compbasemetrics.ALPHA),
+			Buckets: localityFractionBuckets,
+		},
+		cacheLocalityLabels,
+	)
+
+	llmdCacheLocalityOverpredictionFraction = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_locality_overprediction_fraction",
+			Help: metricsutil.HelpMsgWithStability(
+				"Non-negative magnitude of cache_locality_predicted_fraction above "+
+					"cache_locality_actual_fraction (predicted minus actual), observed on exactly the same requests as "+
+					"the predicted and actual histograms. Zero when the prediction was at or below the actual fraction.", compbasemetrics.ALPHA),
+			Buckets: localityFractionBuckets,
+		},
+		cacheLocalityLabels,
+	)
+
+	llmdCacheLocalityObservationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_locality_observations_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Per-request outcome of comparing the predicted and actual prompt-cached fractions for the selected "+
+					"endpoint, by outcome (observed, missing_usage, missing_prediction, invalid_usage). Exactly one "+
+					"outcome is counted per request, so sum by (outcome) gives the denominator the fraction histograms "+
+					"are sampled from and a rising non-observed count names why locality stopped being reported.", compbasemetrics.ALPHA),
+		},
+		append(append([]string{}, cacheLocalityLabels...), "outcome"),
+	)
+)
+
 var (
 	// DescInferencePoolPerEndpointQueueSize is the standardized exported prometheus descriptor.
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(
