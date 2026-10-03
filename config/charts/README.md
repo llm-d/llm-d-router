@@ -513,7 +513,7 @@ Enables latency predictor containers inside the EPP deployment to feed metrics t
 | `router.latencyPredictor.trainingServer.command` | Training server container command. Empty uses the image default. | `[]` |
 | `router.latencyPredictor.trainingServer.args` | Training server container arguments. Empty uses the image default. | `[]` |
 | `router.latencyPredictor.predictionServers.command` | Prediction server container command. | `["uvicorn"]` |
-| `router.latencyPredictor.predictionServers.args` | Prediction server container arguments. `$(PREDICT_PORT)` expands to the port of each replica. | `["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]` |
+| `router.latencyPredictor.predictionServers.args` | Prediction server container arguments. `$(PREDICT_PORT)` expands to the port of each replica. | `["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]` |
 | `router.latencyPredictor.eppEnv` | EPP tuning variables for Latency Predictor. | |
 
 #### Complete Latency Predictor Example
@@ -544,7 +544,7 @@ Images with a different uvicorn module path need `args`. For the Gateway API Inf
 router:
   latencyPredictor:
     predictionServers:
-      args: ["prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]
+      args: ["prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]
 ```
 
 ---

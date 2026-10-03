@@ -208,7 +208,7 @@ latencyPredictor:
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server
-      tag: latest
+      tag: "0.9.0"
       pullPolicy: Always
     command: []
     args: []
@@ -252,10 +252,10 @@ latencyPredictor:
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server
-      tag: latest
+      tag: "0.9.0"
       pullPolicy: Always
     command: ["uvicorn"]
-    args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)"]
+    args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]
     resources:
       requests:
         cpu: "8000m"
