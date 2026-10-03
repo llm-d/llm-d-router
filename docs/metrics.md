@@ -198,8 +198,13 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
-| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens the prediction was measured against. |
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the prediction was measured against. |
+
+For a request disaggregated into prefill and decode stages, the prediction is recorded for the
+`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
+KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
 by `llm_d_epp_prefix_prompt_tokens_sum`. Both are observed in one call, so the ratio divides counts
@@ -213,9 +218,10 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-Under disaggregated prefill/decode the ratios describe different pods. The prediction follows the
-primary profile's endpoint, while `llm_d_epp_request_cached_tokens` carries the count the sidecar
-takes from the prefiller. The gap between the ratios is not index accuracy in that topology.
+The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
+`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
+request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
+describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
 
 Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
 server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
