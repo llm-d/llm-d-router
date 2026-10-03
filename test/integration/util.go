@@ -49,6 +49,7 @@ import (
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -369,6 +370,12 @@ func NewRequestBufferedResponse(
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
 						SetHeaders: setHeaders,
+						RemoveHeaders: []string{
+							routing.PrefillEndpointHeader,
+							routing.EncoderEndpointsHeader,
+							routing.DataParallelEndpointHeader,
+							routing.KVCacheSourceHeader,
+						},
 					},
 				},
 			},
