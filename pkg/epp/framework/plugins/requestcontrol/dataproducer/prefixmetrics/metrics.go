@@ -82,10 +82,11 @@ func RecordPrediction(pluginName, pluginType, role string, predictedCached, prom
 	promptTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(prompt))
 }
 
-// PredictionTarget returns the endpoint whose cached-token count the model
-// server reports for the request, and the endpoint_role to record it under.
-// Under disaggregated prefill/decode the sidecar reports the prefiller's count,
-// so a request with a target in prefillProfile is attributed to that endpoint.
+// PredictionTarget returns the endpoint to record the request's prefix-cache
+// prediction for, and the endpoint_role to record it under. A request with a
+// target in prefillProfile is attributed to that endpoint, because the
+// sidecar's nixlv2 KV connector reports the prefiller's cached-token count. The
+// other KV connectors report the decoder's count, which this does not match.
 // It returns a nil endpoint when the primary profile selected none.
 func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) (fwksched.Endpoint, string) {
 	if result == nil {
