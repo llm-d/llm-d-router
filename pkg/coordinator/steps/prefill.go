@@ -58,19 +58,11 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvName, err := paramString(params, ParamKVConnector)
+	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvConn, err := kv.Build(kvName)
-	if err != nil {
-		return nil, fmt.Errorf("prefill: %w", err)
-	}
-	ecName, err := paramString(params, ParamECConnector)
-	if err != nil {
-		return nil, fmt.Errorf("prefill: %w", err)
-	}
-	ecConn, err := ec.Build(ecName)
+	ecConn, err := buildECConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
