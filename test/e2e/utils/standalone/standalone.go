@@ -40,7 +40,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/lifecycle"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/manifest"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -87,9 +89,9 @@ func Create(cfg Config, plugins string, replicas int, targetPorts ...int32) *Rou
 	access, err := runtime.DefaultUnstructuredConverter.ToUnstructured(router.accessService(cfg.Namespace, cfg.HTTPPort, cfg.MetricsPort))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	router.objects = append(router.objects, &unstructured.Unstructured{Object: access})
-	resources := &utils.CaseResources{Client: cfg.TestConfig.K8sClient}
+	resources := &lifecycle.CaseResources{Client: cfg.TestConfig.K8sClient}
 	var stopForward func()
-	utils.DeferCaseCleanup(cfg.TestConfig, cfg.KeepOnFailure, resources, cfg.Namespace, func() {
+	lifecycle.DeferCaseCleanup(cfg.TestConfig, cfg.KeepOnFailure, resources, cfg.Namespace, func() {
 		if stopForward != nil {
 			stopForward()
 		}
@@ -119,7 +121,7 @@ func (r *Router) WaitForRouting() {
 		body, err := io.ReadAll(resp.Body)
 		return err == nil && (resp.StatusCode == http.StatusOK || len(body) > 0)
 	}, r.cfg.TestConfig.ReadyTimeout, time.Second).Should(gomega.BeTrue())
-	utils.WaitForEPPToDiscoverPods(r.cfg.TestConfig, r.cfg.MetricsPort, r.PoolName)
+	metrics.WaitForEPPToDiscoverPods(r.cfg.TestConfig, r.cfg.MetricsPort, r.PoolName)
 }
 
 func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int, targetPorts []int32) (*Router, error) {
@@ -153,7 +155,7 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 	if err != nil {
 		return nil, fmt.Errorf("render standalone chart: %w: %s", err, stderr.String())
 	}
-	objects, err := utils.DecodeCaseObjects(output, cfg.Namespace)
+	objects, err := manifest.DecodeCaseObjects(output, cfg.Namespace)
 	if err != nil {
 		return nil, err
 	}
