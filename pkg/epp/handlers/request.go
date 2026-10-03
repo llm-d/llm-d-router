@@ -30,7 +30,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -52,7 +51,7 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
 		key := strings.ToLower(header.Key)
-		if request.RoutingHeaders.Has(key) {
+		if request.InternalRoutingHeaders.Has(key) {
 			continue
 		}
 		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
@@ -164,7 +163,7 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 // any client-supplied value before forwarding.
 func unsetRoutingHeaders(reqCtx *RequestContext) []string {
 	var remove []string
-	for _, key := range sets.List(request.RoutingHeaders) {
+	for key := range request.InternalRoutingHeaders {
 		if _, ok := reqCtx.Request.Headers[key]; !ok {
 			remove = append(remove, key)
 		}
