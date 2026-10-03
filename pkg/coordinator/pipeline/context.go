@@ -121,10 +121,13 @@ type RequestContext struct {
 	RevisionDecisionID string
 	OriginalPath       string
 	OriginalHeaders    http.Header
-	OriginalBody       []byte
-	Body               map[string]any
-	Model              string
-	Stream             bool
+	// OriginalBody is the request body exactly as the client sent it. Body is
+	// the same payload parsed, and the steps mutate it as the request moves
+	// through the pipeline, so the two diverge once any step edits a field.
+	OriginalBody []byte
+	Body         map[string]any
+	Model        string
+	Stream       bool
 
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first

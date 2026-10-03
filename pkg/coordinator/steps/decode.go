@@ -103,7 +103,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeVLLMGenerate:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeVLLMGenerate:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
@@ -118,33 +118,55 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	return nil
 }
 
+// injectUUIDs stamps image parts with their multimodal hash, walking the body
+// field reqcommon.DetectAPIType's result implies. Path selection is deliberate:
+// a field belonging to the other API shape is left alone rather than also
+// walked, so a chat-completions request that carries "input" keeps that array
+// unstamped.
+//
+// The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
+// reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
+// the client sent. resolveFormat's answer instead reflects the encode/prefill
+// wire-format setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return
+	switch detected := reqcommon.DetectAPIType(reqCtx.OriginalPath); detected {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
+			injectImagePartUUIDs(messages, detected, reqCtx.MultimodalEntries)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
+			injectImagePartUUIDs(input, detected, reqCtx.MultimodalEntries)
+		}
 	}
+}
 
+// injectImagePartUUIDs walks items (chat-completions messages or a Responses
+// input array) for image content parts and stamps each with the hash of its
+// corresponding multimodal entry, in order. The arrays walked and the parts
+// counted come from itemPartArrays and imagePartType, matching the walk that
+// built entries.
+func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipeline.MultimodalEntry) {
+	partType := imagePartType(apiType)
 	hashIdx := 0
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] != "image_url" {
-				continue
-			}
-			if hashIdx < len(reqCtx.MultimodalEntries) {
-				partMap["uuid"] = reqCtx.MultimodalEntries[hashIdx].Hash
-				hashIdx++
+		for _, array := range itemPartArrays(itemMap, apiType) {
+			for _, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != partType {
+					continue
+				}
+				if hashIdx < len(entries) {
+					partMap["uuid"] = entries[hashIdx].Hash
+					hashIdx++
+				}
 			}
 		}
 	}

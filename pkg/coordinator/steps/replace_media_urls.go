@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -43,8 +44,6 @@ import (
 )
 
 const ReplaceMediaURLsStepName = "replace-media-urls"
-
-const imageURLPartType = "image_url"
 
 const defaultContentType = "application/octet-stream"
 
@@ -135,43 +134,26 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return nil
-	}
-
+	// Which body field to walk is decided by the request's own path, so a
+	// field belonging to the other API shape is ignored rather than merged:
+	// a chat-completions request carrying "input" keeps it untouched.
 	var imageURLs []imageRef
-	for msgIdx, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
+			var err error
+			imageURLs, err = collectChatCompletionsImageRefs(messages)
+			if err != nil {
+				return err
+			}
 		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for partIdx, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
+			var err error
+			imageURLs, err = collectResponsesImageRefs(input)
+			if err != nil {
+				return err
 			}
-			if partMap["type"] != imageURLPartType {
-				continue
-			}
-			imageURL, ok := partMap[imageURLPartType].(map[string]any)
-			if !ok {
-				continue
-			}
-			url, ok := imageURL["url"].(string)
-			if !ok {
-				continue
-			}
-			imageURLs = append(imageURLs, imageRef{
-				msgIdx:   msgIdx,
-				partIdx:  partIdx,
-				url:      url,
-				imageURL: imageURL,
-			})
 		}
 	}
 
@@ -199,10 +181,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		if strings.HasPrefix(ref.url, "data:") {
 			contentType, b64, err := parseDataURI(ref.url)
 			if err != nil {
-				return fmt.Errorf("parsing data URI at message %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
+				return fmt.Errorf("parsing data URI at %s: %w: %w", ref.location, err, pipeline.ErrBadRequest)
 			}
 			if !allowedImageContentType(contentType) {
-				return fmt.Errorf("data URI content type %q not allowed at message %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
+				return fmt.Errorf("data URI content type %q not allowed at %s: %w", contentType, ref.location, pipeline.ErrBadRequest)
 			}
 			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
 			continue
@@ -234,13 +216,95 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	for _, r := range results {
 		if !strings.HasPrefix(r.ref.url, "data:") {
-			r.ref.imageURL["url"] = fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)
+			r.ref.setURL(fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data))
 		}
 
 		appendMultimodalEntry(reqCtx, r.contentType, r.base64Data)
 	}
 
 	return nil
+}
+
+// collectChatCompletionsImageRefs walks a chat-completions messages array for
+// image_url parts, whose url lives nested at part["image_url"]["url"]. An
+// image_url part with no nested object or no string url is rejected rather
+// than skipped: encode's collectImageParts counts every image_url part
+// regardless of shape, so skipping one here would desync the two functions'
+// positional indexing and misassign hashes to the wrong image.
+func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
+	var refs []imageRef
+	for msgIdx, msg := range messages {
+		msgMap, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, array := range itemPartArrays(msgMap, reqcommon.APITypeChatCompletions) {
+			for partIdx, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != reqcommon.PartTypeImageURL {
+					continue
+				}
+				location := fmt.Sprintf("message %d %s part %d", msgIdx, array.field, partIdx)
+				imageURL, ok := partMap[reqcommon.FieldImageURL].(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("%s: image_url is not an object: %w", location, pipeline.ErrBadRequest)
+				}
+				url, ok := imageURL[reqcommon.FieldURL].(string)
+				if !ok {
+					return nil, fmt.Errorf("%s: image_url.url is not a string: %w", location, pipeline.ErrBadRequest)
+				}
+				refs = append(refs, imageRef{
+					location: location,
+					url:      url,
+					setURL:   func(v string) { imageURL[reqcommon.FieldURL] = v },
+				})
+			}
+		}
+	}
+	return refs, nil
+}
+
+// collectResponsesImageRefs walks a Responses-API input array for input_image
+// parts, under both arrays itemPartArrays yields. Unlike chat-completions'
+// image_url part, the URL here is a bare string field on the part itself
+// (part["image_url"]), not a nested object.
+//
+// An input_image part with no string image_url is rejected for the same reason
+// collectChatCompletionsImageRefs rejects its equivalent malformed shape: see
+// that function's doc comment.
+func collectResponsesImageRefs(input []any) ([]imageRef, error) {
+	var refs []imageRef
+	for itemIdx, item := range input {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, array := range itemPartArrays(itemMap, reqcommon.APITypeResponses) {
+			for partIdx, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] != reqcommon.PartTypeInputImage {
+					continue
+				}
+				location := fmt.Sprintf("input item %d %s part %d", itemIdx, array.field, partIdx)
+				url, ok := partMap[reqcommon.FieldImageURL].(string)
+				if !ok {
+					return nil, fmt.Errorf("%s: input_image with no image_url string is not supported: %w", location, pipeline.ErrBadRequest)
+				}
+				refs = append(refs, imageRef{
+					location: location,
+					url:      url,
+					setURL:   func(v string) { partMap[reqcommon.FieldImageURL] = v },
+				})
+			}
+		}
+	}
+	return refs, nil
 }
 
 func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 string) {
@@ -306,10 +370,17 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 }
 
 type imageRef struct {
-	msgIdx   int
-	partIdx  int
+	// location names where this ref's part sits in the client body, for error
+	// messages: "message 0 content part 2", "input item 1 output part 0". The
+	// array name is part of it because a Responses item can carry parts under
+	// both content and output, so a part index alone is ambiguous.
+	location string
 	url      string
-	imageURL map[string]any
+	// setURL writes the rewritten data URI back to wherever this ref's URL
+	// lives in reqCtx.Body, since that location's shape differs by API
+	// format (chat-completions nests it at image_url.url; Responses stores
+	// it as a bare string field on the part itself).
+	setURL func(string)
 }
 
 type downloadResult struct {

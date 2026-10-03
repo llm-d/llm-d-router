@@ -106,8 +106,15 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var imageParts []map[string]any
-	if format == reqcommon.APITypeChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+	switch format {
+	case reqcommon.APITypeChatCompletions:
+		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
+			imageParts = collectImageParts(messages, format)
+		}
+	case reqcommon.APITypeResponses:
+		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
+			imageParts = collectImageParts(input, format)
+		}
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -217,20 +224,28 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 
 func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
-		body := map[string]any{
-			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		if entry.Index < 0 || entry.Index >= len(imageParts) {
+			return nil, fmt.Errorf("no image part at index %d of %d: %w", entry.Index, len(imageParts), pipeline.ErrBadRequest)
 		}
-		reqcommon.CapSingleToken(body, format)
-		return body, nil
+		part := imageParts[entry.Index]
+		// A part whose URL is absent or not a string would prime the encoder
+		// with a blank image, under a hash the prefiller later looks up.
+		// replace-media-urls rejects the same shape before building the entry
+		// this index came from, so reaching here means that step is not in the
+		// pipeline.
+		if reqcommon.MediaPartURL(part) == "" {
+			return nil, fmt.Errorf("image part %d carries no fetchable URL: %w", entry.Index, pipeline.ErrBadRequest)
+		}
+		// The part goes out unreshaped, so the options each API keeps beside
+		// the URL (Responses' detail sibling, chat's nested image_url fields)
+		// come along without per-format copying.
+		return reqcommon.NewEncoderPrimingBody(reqCtx.Body, part, format), nil
 	case reqcommon.APITypeVLLMGenerate:
+		// Unlike the OpenAI formats, this body carries no image: the encoder
+		// preprocesses nothing, so the client's mm_processor_kwargs and
+		// media_io_kwargs have no effect here. Render already applied them and
+		// returned the result as entry.Hash and entry.KwargsData.
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
@@ -253,45 +268,33 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 	}
 }
 
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
+// collectImageParts walks a chat-completions messages array or a Responses
+// input array once and returns the image content parts in order, so the
+// fan-out loop can index by position instead of re-walking all parts per image
+// (O(N*M) -> O(N+M)). The arrays walked and the parts counted come from
+// itemPartArrays and imagePartType, so this walk sees the same set
+// replace-media-urls built reqCtx.MultimodalEntries from.
+func collectImageParts(items []any, apiType reqcommon.APIType) []map[string]any {
+	partType := imagePartType(apiType)
 	var parts []map[string]any
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
+	for _, item := range items {
+		itemMap, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] == imageURLPartType {
-				parts = append(parts, partMap)
+		for _, array := range itemPartArrays(itemMap, apiType) {
+			for _, part := range array.parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if partMap[reqcommon.FieldType] == partType {
+					parts = append(parts, partMap)
+				}
 			}
 		}
 	}
 	return parts
-}
-
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
-	if index >= 0 && index < len(imageParts) {
-		return map[string]any{
-			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLPartType],
-		}
-	}
-	return map[string]any{
-		"type":      imageURLPartType,
-		"image_url": map[string]any{"url": ""},
-	}
 }
 
 type encodeResponse struct {

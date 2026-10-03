@@ -78,20 +78,64 @@ func unreachableFormatError(format reqcommon.APIType) error {
 }
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeVLLMGenerate; Chat Completions additionally requires
-// useOpenAIFormat. Generate is the fallback because its body carries the prompt
-// as reqCtx.TokenIDs and does not depend on the client's request shape.
+// build only Completions, Chat Completions, Responses, and generate bodies, so
+// any other API collapses to APITypeVLLMGenerate; Chat Completions and
+// Responses additionally require useOpenAIFormat. Generate is the fallback
+// because its body carries the prompt as reqCtx.TokenIDs and does not depend
+// on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		if useOpenAIFormat {
 			return detected
 		}
 	}
 	return reqcommon.APITypeVLLMGenerate
+}
+
+// imagePartType is the content part type an API names an image part with.
+// The image walks take it from here so encode, decode and replace-media-urls
+// cannot disagree about which parts are images.
+func imagePartType(apiType reqcommon.APIType) string {
+	if apiType == reqcommon.APITypeResponses {
+		return reqcommon.PartTypeInputImage
+	}
+	return reqcommon.PartTypeImageURL
+}
+
+// itemParts is one content part array of a message or input item, named by the
+// body field it came from so an error can say which array it walked.
+type itemParts struct {
+	field string
+	parts []any
+}
+
+// itemPartArrays returns the content part arrays an item carries, in the order
+// a walk visits them.
+//
+// Every API holds its parts under content. A Responses function_call_output
+// instead holds them under output, and vLLM forwards that array as a tool
+// message's content, so media in it reaches the model like any other part. A
+// computer_call_output's output is an object rather than an array and names no
+// part type these walks collect. A chat-completions message defines no output,
+// so walking one there would collect a part the client never sent.
+//
+// Three walks index images by position and have to agree on the set they see:
+// replace-media-urls' ref collection, encode's collectImageParts and decode's
+// injectImagePartUUIDs. Each takes its arrays from here.
+func itemPartArrays(item map[string]any, apiType reqcommon.APIType) []itemParts {
+	var arrays []itemParts
+	if content, ok := item[reqcommon.FieldContent].([]any); ok {
+		arrays = append(arrays, itemParts{field: reqcommon.FieldContent, parts: content})
+	}
+	if apiType == reqcommon.APITypeResponses {
+		if output, ok := item[reqcommon.FieldOutput].([]any); ok {
+			arrays = append(arrays, itemParts{field: reqcommon.FieldOutput, parts: output})
+		}
+	}
+	return arrays
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
