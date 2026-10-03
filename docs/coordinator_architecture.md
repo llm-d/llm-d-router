@@ -615,7 +615,7 @@ edit: registration is the only wiring step.
   step can read them without the operator repeating them per step. The constants are
   `steps.ParamKVConnector` and `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildMMFeatures`, `copyBody`,
+  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection

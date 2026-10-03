@@ -312,13 +312,6 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 		return nil, fmt.Errorf("features length mismatch: mm_hashes has %d, kwargs_data has %d: %w",
 			n, len(rawKwargs), pipeline.ErrBadRequest)
 	}
-	// mm_metadata on the inbound generate leg has no consumer: this parser
-	// runs exactly when EncodeStep is skipped (both switch on the same
-	// DetectAPIType of the request path), so ECTransferParams stays empty and
-	// prefill's per-entry choice falls back to kwargs_data for every entry.
-	// On the inbound chat leg the optimization is driven by the render
-	// response's features, not by the client's, so the field is left unread
-	// and intentionally not rejected here.
 
 	entries := make([]pipeline.MultimodalEntry, n)
 	for i := range entries {
