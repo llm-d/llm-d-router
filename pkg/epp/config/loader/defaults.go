@@ -18,6 +18,7 @@ limitations under the License.
 package loader
 
 import (
+	"errors"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -150,6 +151,15 @@ func ensureSchedulingLayer(
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
+	return ensureSchedulingLayerWithRegistration(cfg, handle, allPlugins, true)
+}
+
+func ensureSchedulingLayerWithRegistration(
+	cfg *configapiv1.EndpointPickerConfig,
+	handle fwkplugin.Handle,
+	allPlugins map[string]fwkplugin.Plugin,
+	allowRegistration bool,
+) error {
 	if len(cfg.SchedulingProfiles) == 0 {
 		defaultProfile := configapiv1.SchedulingProfile{Name: "default"}
 		// Auto-populate the default profile with all Filter, Scorer, and Picker plugins found.
@@ -172,6 +182,9 @@ func ensureSchedulingLayer(
 			}
 		}
 		if !hasHandler {
+			if !allowRegistration {
+				return errors.New("no startup profile handler is available")
+			}
 			if err := registerDefaultPlugin(cfg, handle, single.SingleProfileHandlerType); err != nil {
 				return err
 			}
@@ -188,6 +201,9 @@ func ensureSchedulingLayer(
 	}
 
 	if maxScorePickerName == "" {
+		if !allowRegistration {
+			return errors.New("no startup picker is available")
+		}
 		if err := registerDefaultPlugin(cfg, handle, maxscore.MaxScorePickerType); err != nil {
 			return err
 		}
@@ -278,6 +294,15 @@ func ensureSaturationDetector(
 	handle fwkplugin.Handle,
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
+	return ensureSaturationDetectorWithRegistration(cfg, handle, allPlugins, true)
+}
+
+func ensureSaturationDetectorWithRegistration(
+	cfg *configapiv1.EndpointPickerConfig,
+	handle fwkplugin.Handle,
+	allPlugins map[string]fwkplugin.Plugin,
+	allowRegistration bool,
+) error {
 	if cfg.FlowControl == nil {
 		cfg.FlowControl = &configapiv1.FlowControlConfig{}
 	}
@@ -292,7 +317,7 @@ func ensureSaturationDetector(
 		sdConfig.PluginRef = utilization.UtilizationDetectorType
 	}
 
-	if sdConfig.PluginRef == utilization.UtilizationDetectorType {
+	if allowRegistration && sdConfig.PluginRef == utilization.UtilizationDetectorType {
 		if _, ok := allPlugins[sdConfig.PluginRef]; !ok {
 			if err := registerDefaultPlugin(cfg, handle, utilization.UtilizationDetectorType); err != nil {
 				return err

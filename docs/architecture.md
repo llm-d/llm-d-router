@@ -236,6 +236,11 @@ If the configuration is in a file, the EPP command line argument `--config-file`
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--config-text` should be used.
 
+Hot reload is disabled by default. Set `--watch-config-file` with `--config-file` to apply
+supported changes to existing `schedulingProfiles` without restarting the EPP. Profile names
+and all fields outside `schedulingProfiles` are set at startup; changes to them are rejected
+and the last valid configuration remains active. `--config-text` cannot be watched.
+
 Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
  comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
  entries are applied after the configuration's own `featureGates` list, so they override it.

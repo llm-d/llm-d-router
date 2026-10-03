@@ -457,6 +457,36 @@ func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestValidateWatchConfigFile(t *testing.T) {
+	tests := []struct {
+		name       string
+		configFile string
+		configText string
+		wantErr    bool
+	}{
+		{name: "config file", configFile: testConfigFile},
+		{name: "missing config file", wantErr: true},
+		{name: "config text", configText: "fake: config", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.AddFlags(pflag.NewFlagSet(tt.name, pflag.ContinueOnError))
+			opts.PoolName = testPoolName
+			opts.ConfigFile = tt.configFile
+			opts.ConfigText = tt.configText
+			opts.WatchConfigFile = true
+			err := opts.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "watch-config-file")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestMetricsMTLSFlags(t *testing.T) {
 	fs := pflag.NewFlagSet("metrics-mtls", pflag.ContinueOnError)
 	opts := NewOptions()

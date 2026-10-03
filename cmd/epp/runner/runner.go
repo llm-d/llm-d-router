@@ -189,7 +189,10 @@ type Runner struct {
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
-	rawConfig *configapiv1.EndpointPickerConfig
+	rawConfig           *configapiv1.EndpointPickerConfig
+	startupSourceConfig *configapiv1.EndpointPickerConfig
+	startupConfigBytes  []byte
+	reloadableScheduler *scheduling.ReloadableScheduler
 
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
@@ -283,6 +286,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	dlCfg := rawConfig.DataLayer
 	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
+	}
+	if opts.WatchConfigFile {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
 	}
 
 	// --- Get Kubernetes Config ---
@@ -466,7 +474,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := r.newRuntimeScheduler(opts, scheduling.NewSchedulerWithConfig(r.schedulerConfig))
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
 		setupLog.Error(err, "Plugin stability validation failed")
@@ -522,6 +530,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
+	if err := r.startConfigWatcher(ctx, opts); err != nil {
+		return nil, nil, err
+	}
 	return mgr, ds, nil
 }
 
@@ -819,6 +830,9 @@ func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver
 	setupLog.Info("Data layer: ENABLED")
 
 	r.rawConfig = rawConfig
+	// Reload comparisons need a copy without the system defaults added during plugin setup.
+	r.startupSourceConfig = rawConfig.DeepCopy()
+	r.startupConfigBytes = append([]byte(nil), configBytes...)
 	return rawConfig, nil
 }
 
@@ -1132,6 +1146,12 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	if opts.WatchConfigFile {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+
 	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
@@ -1197,7 +1217,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := r.newRuntimeScheduler(opts, scheduling.NewSchedulerWithConfig(r.schedulerConfig))
 
 	// Outside Kubernetes there is no InferenceObjective CRD, so per-request
 	// priority falls back to Director.defaultPriority (see
@@ -1255,6 +1275,9 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	})
 
 	g := newRunnableGroup()
+	if err := r.startConfigWatcher(ctx, opts); err != nil {
+		return err
+	}
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
