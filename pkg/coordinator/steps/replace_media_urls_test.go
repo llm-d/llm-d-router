@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"math"
 	"net"
@@ -113,6 +114,34 @@ func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 	}
 	if len(reqCtx.MultimodalEntries) != 0 {
 		t.Fatalf("expected 0 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestReplaceMediaURLsStep_RawMessages(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{})
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": json.RawMessage(`[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`),
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs, ok := reqCtx.Body["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages is %T, want the edited array stored back", reqCtx.Body["messages"])
+	}
+	content := msgs[0].(map[string]any)["content"].([]any)
+	url := content[0].(map[string]any)["image_url"].(map[string]any)["url"].(string)
+	if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
+		t.Fatalf("expected data URI, got %s", url)
 	}
 }
 

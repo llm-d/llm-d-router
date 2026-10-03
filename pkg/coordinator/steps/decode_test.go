@@ -154,6 +154,25 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestDecodeStep_InjectUUIDsIntoRawMessages(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0, Hash: "hash-raw"}},
+		Body: map[string]any{
+			"messages": json.RawMessage(`[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]`),
+		},
+	}
+	(&DecodeStep{}).injectUUIDs(reqCtx)
+
+	msgs, ok := reqCtx.Body["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages is %T, want the edited array stored back", reqCtx.Body["messages"])
+	}
+	part := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["uuid"] != "hash-raw" {
+		t.Fatalf("expected uuid=hash-raw in image_url part, got %v", part["uuid"])
+	}
+}
+
 func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	var parsed map[string]any
 

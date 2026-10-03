@@ -201,6 +201,24 @@ func anyToNonNegativeInt(v any) (int, error) {
 	}
 }
 
+// requestMessages returns body["messages"] as a JSON-unmarshalled array. The
+// server keeps messages as raw bytes so their key order survives re-marshaling;
+// a step that edits the returned values stores the slice back into body so the
+// edit is forwarded. ok is false when messages is absent or not an array.
+func requestMessages(body map[string]any) (messages []any, ok bool) {
+	switch v := body["messages"].(type) {
+	case []any:
+		return v, true
+	case json.RawMessage:
+		if err := json.Unmarshal(v, &messages); err != nil {
+			return nil, false
+		}
+		return messages, messages != nil
+	default:
+		return nil, false
+	}
+}
+
 // extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to []int.
 // Returns ErrBadRequest when the field is absent, not an array, empty, or contains
 // non-integer or negative values.
