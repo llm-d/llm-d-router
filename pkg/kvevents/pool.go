@@ -129,6 +129,10 @@ type PodDiscoveryConfig struct {
 	// ReplaySocketPort is the port where vLLM pods expose their ZMQ ROUTER
 	// socket for replay requests. Disabled when not set (0 or negative).
 	ReplaySocketPort int `json:"replaySocketPort,omitempty"`
+	// SnapshotSocketPort is the port where vLLM pods serve KV cache snapshots,
+	// offset by rank like SocketPort. A subscriber loads the snapshot in place
+	// of a full replay. Disabled when not set (0 or negative).
+	SnapshotSocketPort int `json:"snapshotSocketPort,omitempty"`
 }
 
 // EffectiveReplayPort returns the replay socket port.
