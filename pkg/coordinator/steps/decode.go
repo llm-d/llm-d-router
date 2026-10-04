@@ -118,13 +118,9 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	return nil
 }
 
-// injectUUIDs stamps image parts with their multimodal hash, walking the body
-// field reqcommon.DetectAPIType's result implies. Path selection is deliberate:
-// a field belonging to the other API shape is left alone rather than also
-// walked, so a chat-completions request that carries "input" keeps that array
-// unstamped.
+// injectUUIDs stamps image parts with their multimodal hash.
 //
-// The switch below keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
+// The switch keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
 // reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
 // the client sent. resolveFormat's answer instead reflects the encode/prefill
 // wire-format setting, which can differ from the client's own shape.
@@ -143,9 +139,8 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 
 // injectImagePartUUIDs walks items (chat-completions messages or a Responses
 // input array) for image content parts and stamps each with the hash of its
-// corresponding multimodal entry, in order. The arrays walked and the parts
-// counted come from reqcommon.ItemPartArrays and imagePartType, matching the
-// walk that built entries.
+// corresponding multimodal entry, in order, matching the walk that built
+// entries.
 func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipeline.MultimodalEntry) {
 	partType := imagePartType(apiType)
 	hashIdx := 0

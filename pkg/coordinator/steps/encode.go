@@ -271,9 +271,8 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 // collectImageParts walks a chat-completions messages array or a Responses
 // input array once and returns the image content parts in order, so the
 // fan-out loop can index by position instead of re-walking all parts per image
-// (O(N*M) -> O(N+M)). The arrays walked and the parts counted come from
-// reqcommon.ItemPartArrays and imagePartType, so this walk sees the same set
-// replace-media-urls built reqCtx.MultimodalEntries from.
+// (O(N*M) -> O(N+M)). Indexing by position holds because this walk and the one
+// that built reqCtx.MultimodalEntries see the same parts.
 func collectImageParts(items []any, apiType reqcommon.APIType) []map[string]any {
 	partType := imagePartType(apiType)
 	var parts []map[string]any

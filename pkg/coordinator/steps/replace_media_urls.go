@@ -134,9 +134,6 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	// Which body field to walk is decided by the request's own path, so a
-	// field belonging to the other API shape is ignored rather than merged:
-	// a chat-completions request carrying "input" keeps it untouched.
 	var imageURLs []imageRef
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeChatCompletions:
@@ -268,9 +265,8 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 }
 
 // collectResponsesImageRefs walks a Responses-API input array for input_image
-// parts, under both arrays reqcommon.ItemPartArrays yields. Unlike
-// chat-completions' image_url part, the URL here is a bare string field on the
-// part itself (part["image_url"]), not a nested object.
+// parts. Unlike chat-completions' image_url part, the URL here is a bare
+// string field on the part itself (part["image_url"]), not a nested object.
 //
 // An input_image part with no string image_url is rejected for the same reason
 // collectChatCompletionsImageRefs rejects its equivalent malformed shape: see
@@ -371,9 +367,7 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 
 type imageRef struct {
 	// location names where this ref's part sits in the client body, for error
-	// messages: "message 0 content part 2", "input item 1 output part 0". The
-	// array name is part of it because a Responses item can carry parts under
-	// both content and output, so a part index alone is ambiguous.
+	// messages: "message 0 content part 2", "input item 1 output part 0".
 	location string
 	url      string
 	// setURL writes the rewritten data URI back to wherever this ref's URL

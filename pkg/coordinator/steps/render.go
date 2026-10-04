@@ -271,9 +271,8 @@ func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipelin
 }
 
 // executeResponses handles the /v1/responses path. The render service
-// tokenizes whatever shape reqCtx.Body["input"] is (string or message-item
-// array) itself, so this step does not need to distinguish those shapes -
-// applying the response is identical to executeChatCompletions.
+// tokenizes whatever shape reqCtx.Body["input"] holds, so this step does not
+// inspect it.
 func (s *RenderStep) executeResponses(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	var renderResp renderResponse
 	if err := s.postRender(ctx, reqCtx, reqcommon.PathResponses, &renderResp); err != nil {
