@@ -375,6 +375,7 @@ func NewRequestBufferedResponse(
 							routing.EncoderEndpointsHeader,
 							routing.DataParallelEndpointHeader,
 							routing.KVCacheSourceHeader,
+							routing.EndpointPinHeader,
 						},
 					},
 				},

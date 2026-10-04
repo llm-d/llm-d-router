@@ -24,6 +24,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -47,6 +48,7 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
+		routing.EndpointPinHeader,
 		metadata.DestinationEndpointKey,
 		metadata.DestinationEndpointServedKey,
 		metadata.FlowQueueDurationHeaderKey,

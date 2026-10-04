@@ -159,10 +159,14 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 	return headers
 }
 
-// unsetRoutingHeaders lists the routing headers no plugin set, so Envoy removes
-// any client-supplied value before forwarding.
+// unsetRoutingHeaders lists the headers Envoy removes before forwarding: the
+// screening headers, and the routing headers no plugin set, so no
+// client-supplied value reaches the model server.
 func unsetRoutingHeaders(reqCtx *RequestContext) []string {
-	var remove []string
+	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders))
+	for key := range request.ScreeningHeaders {
+		remove = append(remove, key)
+	}
 	for key := range request.InternalRoutingHeaders {
 		if _, ok := reqCtx.Request.Headers[key]; !ok {
 			remove = append(remove, key)

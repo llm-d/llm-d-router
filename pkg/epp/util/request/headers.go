@@ -66,6 +66,14 @@ var (
 		routing.KVCacheSourceHeader,
 	)
 
+	// ScreeningHeaders are client headers that screener plugins read. They stay
+	// on the request on ingress, unlike InternalRoutingHeaders. EPP does not
+	// re-set them and removes them from the forwarded request, so the model
+	// server does not see them.
+	ScreeningHeaders = sets.New(
+		routing.EndpointPinHeader,
+	)
+
 	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
 	// W3C trace context headers are re-injected from the active span in
 	// generateHeaders and must not be forwarded from the client.
@@ -79,7 +87,7 @@ var (
 
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
-	return InputControlHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
+	return InputControlHeaders.Has(k) || ScreeningHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
 }
 
 func lowerHeaderNames(keys ...string) sets.Set[string] {
