@@ -289,6 +289,10 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
 - Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
 
+The `models-responder` uses the per-endpoint model attributes for its pool-wide
+OpenAI-compatible `GET /v1/models` response. The public response does not expose endpoint
+identity.
+
 Polling sources share one Collector goroutine per endpoint. The base tick is
 `--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
 `interval` parameter (e.g. `"1s"`) that is rounded to the nearest multiple of the base tick;

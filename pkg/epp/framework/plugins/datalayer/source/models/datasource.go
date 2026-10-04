@@ -56,11 +56,16 @@ type modelsDatasourceParams struct {
 }
 
 // NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
-// InsecureSkipVerify defaults to true (matching the factory default).
-// Use this function directly in tests to bypass JSON parameter marshaling.
+// InsecureSkipVerify defaults to true, matching the factory default.
 func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
-	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
+	return http.NewHTTPDataSource(scheme, path,
+		http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
 		ModelsDataSourceType, name, parseModels)
+}
+
+// NewDefaultHTTPModelsDataSource constructs the default source used by models-responder.
+func NewDefaultHTTPModelsDataSource(name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
+	return NewHTTPModelsDataSource(defaultModelsScheme, defaultModelsPath, name)
 }
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
