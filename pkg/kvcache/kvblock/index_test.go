@@ -54,6 +54,16 @@ func testCommonIndexBehavior(t *testing.T, indexFactory func(t *testing.T) Index
 		testFilteredLookup(t, ctx, index)
 	})
 
+	t.Run("EarlyStopOnMiss", func(t *testing.T) {
+		index := indexFactory(t)
+		testEarlyStopOnMiss(t, ctx, index)
+	})
+
+	t.Run("EarlyStopOnFilteredEmpty", func(t *testing.T) {
+		index := indexFactory(t)
+		testEarlyStopOnFilteredEmpty(t, ctx, index)
+	})
+
 	t.Run("EvictBasic", func(t *testing.T) {
 		index := indexFactory(t)
 		testEvictBasic(t, ctx, index)
@@ -343,6 +353,58 @@ func testFilteredLookup(t *testing.T, ctx context.Context, index Index) {
 	podsPerKey, err = index.Lookup(ctx, []BlockHash{requestKey}, filterSet)
 	require.NoError(t, err)
 	assert.Len(t, podsPerKey, 0) // No matching pods found
+}
+
+// testEarlyStopOnMiss verifies that Lookup stops traversing keys at the first miss
+// in requestKeys and does not return subsequent matching keys.
+func testEarlyStopOnMiss(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	k0 := BlockHash(8001)
+	k1 := BlockHash(8002)
+	k2 := BlockHash(8003)
+	pod := []PodEntry{{PodIdentifier: "pod-early-stop", DeviceTier: "gpu"}}
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k0, k2}, pod))
+
+	// k1 is missing; lookup along [k0, k1, k2] must stop at k1 and not return k2.
+	result, err := index.Lookup(ctx, []BlockHash{k0, k1, k2}, nil)
+	require.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Contains(t, result, k0)
+	assert.NotContains(t, result, k2)
+
+	// First key is missing; lookup must return empty map.
+	result, err = index.Lookup(ctx, []BlockHash{k1, k0}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, result)
+}
+
+// testEarlyStopOnFilteredEmpty verifies that Lookup stops traversing keys when
+// a key has no pods matching the podIdentifierSet filter, even if subsequent
+// keys have matches.
+func testEarlyStopOnFilteredEmpty(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	k0 := BlockHash(8101)
+	k1 := BlockHash(8102)
+	k2 := BlockHash(8103)
+	podA := []PodEntry{{PodIdentifier: "pod-A", DeviceTier: "gpu"}}
+	podB := []PodEntry{{PodIdentifier: "pod-B", DeviceTier: "gpu"}}
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k0, k2}, podA))
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{k1}, podB))
+
+	// Filter for pod-A only: k0 matches, k1 has only pod-B (0 matches), so lookup stops.
+	filter := sets.New("pod-A")
+	result, err := index.Lookup(ctx, []BlockHash{k0, k1, k2}, filter)
+	require.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Contains(t, result, k0)
+	assert.NotContains(t, result, k2)
+
+	// First key has no matching pods for filter; lookup must return empty map.
+	result, err = index.Lookup(ctx, []BlockHash{k1, k0}, filter)
+	require.NoError(t, err)
+	assert.Empty(t, result)
 }
 
 // testEvictBasic tests basic eviction functionality.
