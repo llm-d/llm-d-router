@@ -23,10 +23,14 @@ import (
 	"slices"
 	"strings"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
@@ -39,6 +43,7 @@ const openAIModelsPath = "/v1/models"
 
 var (
 	_ fwkrc.Responder          = &Responder{}
+	_ fwkrc.Screener           = &Responder{}
 	_ fwkplugin.ConsumerPlugin = &Responder{}
 	_ fwkdl.Registrant         = &Responder{}
 )
@@ -94,6 +99,62 @@ func (p *Responder) RegisterDependencies(r fwkdl.Registrar) error {
 		Extractor:     extmodels.NewModelExtractor(),
 		DefaultSource: source,
 	})
+}
+
+// Screen keeps the endpoints whose collected /v1/models list contains the target model.
+// For a base model it also keeps endpoints that have not reported a list yet. For a LoRA
+// adapter it does not, because an unreported endpoint is unlikely to have the adapter.
+// When no endpoint lists the target, it keeps the unreported endpoints, or all endpoints
+// if every endpoint has reported.
+func (p *Responder) Screen(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+	if request == nil || request.TargetModel == "" {
+		return endpoints
+	}
+
+	serving := make([]fwksched.Endpoint, 0, len(endpoints))
+	unlisted := make([]fwksched.Endpoint, 0, len(endpoints))
+	adapterListed := false
+	for _, endpoint := range endpoints {
+		models, ok := fwkdl.ReadAttribute[attrmodels.ModelDataCollection](endpoint, attrmodels.ModelsAttributeKey)
+		if !ok {
+			unlisted = append(unlisted, endpoint)
+			continue
+		}
+		for _, model := range models {
+			if model.ID != request.TargetModel {
+				continue
+			}
+			serving = append(serving, endpoint)
+			adapterListed = adapterListed || model.Parent != ""
+			break
+		}
+	}
+
+	logger := log.FromContext(ctx).V(logutil.DEBUG).WithValues(
+		"plugin", p.typedName, "model", request.TargetModel)
+	switch {
+	case len(serving) > 0 && adapterListed:
+		if len(unlisted) > 0 {
+			logger.Info("Returning LoRA adapter request candidates only from endpoints that list the adapter. "+
+				"Endpoints whose model list is not collected yet are skipped.",
+				"endpointsWithAdapter", len(serving),
+				"endpointsSkipped", len(unlisted))
+		}
+		return serving
+	case len(serving) > 0:
+		return append(serving, unlisted...)
+	case len(unlisted) > 0:
+		logger.Info("No endpoint lists the requested model. "+
+			"Returning only endpoints whose model list is not collected yet.",
+			"endpointsUsed", len(unlisted),
+			"endpointsTotal", len(endpoints))
+		return unlisted
+	default:
+		logger.Info("No endpoint lists the requested model. "+
+			"Returning all endpoints because the model lists may be incomplete.",
+			"endpointsTotal", len(endpoints))
+		return endpoints
+	}
 }
 
 // Respond answers GET /v1/models and declines everything else.

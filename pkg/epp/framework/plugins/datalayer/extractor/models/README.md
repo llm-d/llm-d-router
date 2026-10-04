@@ -2,7 +2,7 @@
 
 **Type:** `models-data-extractor`
 
-The Models Data Extractor converts the response from a `models-data-source` into endpoint attributes consumed by `models-responder` for model discovery.
+The Models Data Extractor converts the response from a `models-data-source` into endpoint attributes consumed by `models-responder` for model discovery and inference screening.
 
 ## What it does
 

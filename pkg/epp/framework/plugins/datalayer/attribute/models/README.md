@@ -21,4 +21,4 @@ The following plugins produce this attribute:
 - **`models-data-extractor`** (Data Layer): Extracts the list of served models from the endpoint's `/v1/models` API response.
 
 The `models-responder` consumes the per-endpoint collection for the pool-wide `GET /v1/models`
-response.
+response and inference screening.

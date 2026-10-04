@@ -29,6 +29,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
@@ -62,6 +63,14 @@ func unmarshalModelResponse(t *testing.T, body json.RawMessage) extmodels.ModelR
 	var resp extmodels.ModelResponse
 	require.NoError(t, json.Unmarshal(body, &resp))
 	return resp
+}
+
+func scheduledEndpoint(name string, models ...attrmodels.ModelData) fwksched.Endpoint {
+	attributes := fwkdl.NewAttributes()
+	if models != nil {
+		attributes.Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection(models))
+	}
+	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: name}}, nil, attributes)
 }
 
 func TestAggregate_DuplicateModelFromMultipleEndpoints(t *testing.T) {
@@ -255,6 +264,45 @@ func TestRespond_UnavailableBeforeFirstScrape(t *testing.T) {
 	assert.Nil(t, resp)
 	require.Error(t, err)
 	assert.Equal(t, errcommon.ServiceUnavailable, errcommon.CanonicalCode(err))
+}
+
+func TestScreenUsesPerEndpointModelData(t *testing.T) {
+	t.Parallel()
+
+	servingBase := scheduledEndpoint("pod-a", attrmodels.ModelData{ID: "base"})
+	servingAdapter := scheduledEndpoint("pod-b", attrmodels.ModelData{ID: "base"}, attrmodels.ModelData{ID: "adapter", Parent: "base"})
+	otherModel := scheduledEndpoint("pod-c", attrmodels.ModelData{ID: "base2"})
+	unlisted := scheduledEndpoint("pod-d")
+
+	tests := []struct {
+		name      string
+		target    string
+		endpoints []fwksched.Endpoint
+		want      []fwksched.Endpoint
+	}{
+		{name: "base model on both endpoints", target: "base", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingBase, servingAdapter}},
+		{name: "adapter on one endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter}, want: []fwksched.Endpoint{servingAdapter}},
+		{name: "adapter with unscraped endpoint", target: "adapter", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, unlisted}, want: []fwksched.Endpoint{servingAdapter}},
+		{name: "base model on one endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, otherModel}, want: []fwksched.Endpoint{servingBase}},
+		{name: "base model with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{servingBase, unlisted}, want: []fwksched.Endpoint{servingBase, unlisted}},
+		{name: "no model data", target: "anything", endpoints: []fwksched.Endpoint{unlisted}, want: []fwksched.Endpoint{unlisted}},
+		{name: "different base model on one endpoint", target: "base2", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{otherModel, unlisted}},
+		{name: "no match with unscraped endpoint", target: "base", endpoints: []fwksched.Endpoint{otherModel, unlisted}, want: []fwksched.Endpoint{unlisted}},
+		{name: "unknown target with collected data", target: "missing", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel}},
+		{name: "empty target keeps all endpoints", target: "", endpoints: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}, want: []fwksched.Endpoint{servingBase, servingAdapter, otherModel, unlisted}},
+		{name: "empty endpoint pool", target: "anything", endpoints: nil, want: nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := &fwksched.InferenceRequest{TargetModel: test.target}
+			got := New().Screen(context.Background(), request, test.endpoints)
+			require.Len(t, got, len(test.want))
+			for i := range test.want {
+				assert.Same(t, test.want[i], got[i])
+			}
+		})
+	}
 }
 
 func TestConsumesModelAttributeOptionally(t *testing.T) {

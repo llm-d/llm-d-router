@@ -1,7 +1,7 @@
 # Models Responder
 
 **Type:** `models-responder`
-**Interfaces:** `requestcontrol.Responder`, `plugin.ConsumerPlugin`, `datalayer.Registrant`
+**Interfaces:** `requestcontrol.Responder`, `requestcontrol.Screener`, `plugin.ConsumerPlugin`, `datalayer.Registrant`
 
 Answers `GET /v1/models` from EPP, aggregating the model lists collected from every endpoint
 in the pool. A model server only knows its own models, so routing the request to one of them
@@ -33,6 +33,16 @@ See [Alpha Plugin CLI Flag](../../../README.md#alpha-plugin-cli-flag---allow-exp
 Endpoints not yet scraped are skipped. If none have been scraped, the plugin returns HTTP 503
 rather than an empty list, so a client retries instead of caching it. The 503 continues for as
 long as scraping fails, for example when the source uses the wrong scheme.
+
+For inference requests, the plugin checks each endpoint's collected `/v1/models` result:
+- If the request does not contain any target model, all endpoints are candidates.
+- If one or more endpoints list the requested base model, those endpoints and endpoints without
+  collected model data remain candidates.
+- If one or more endpoints list the requested LoRA adapter, only those endpoints remain
+  candidates. An endpoint without collected model data may not have the adapter.
+- If no endpoint lists the requested model, endpoints without collected model data remain
+  candidates. If every endpoint has collected model data, all endpoints remain candidates
+  because the model data may be incomplete.
 
 ## Inputs consumed
 
