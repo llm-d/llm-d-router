@@ -274,7 +274,7 @@ func TestHandleInference_ResponsesRejectionScopedToPath(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	body := `{"model":"m","previous_response_id":"resp-123","store":true,"background":true}`
+	body := `{"model":"m","previous_response_id":"resp-123","conversation":"conv-1","store":true,"background":true}`
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.handleInference(rec, req)
@@ -282,7 +282,7 @@ func TestHandleInference_ResponsesRejectionScopedToPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	for _, field := range []string{"previous_response_id", "store", "background"} {
+	for _, field := range []string{"previous_response_id", "conversation", "store", "background"} {
 		if _, ok := seenBody[field]; !ok {
 			t.Errorf("expected %q to survive on a non-responses path", field)
 		}
@@ -874,38 +874,5 @@ func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET on POST-only %s, got %d", reqcommon.PathChatCompletions, rec.Code)
-	}
-}
-
-// TestHandleInference_ResponsesRejectionUsesDetectAPIType pins the gate form.
-// Every pipeline step classifies the request with reqcommon.DetectAPIType, so
-// the handler does too: a registered path that DetectAPIType reads as Responses
-// is checked, and a chat-completions path carrying the same stateful fields is
-// not.
-func TestHandleInference_ResponsesRejectionUsesDetectAPIType(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		path       string
-		wantStatus int
-	}{
-		{name: "responses is checked", path: reqcommon.PathResponses, wantStatus: http.StatusBadRequest},
-		{name: "chat completions is not", path: reqcommon.PathChatCompletions, wantStatus: http.StatusOK},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
-			if err != nil {
-				t.Fatalf("New: %v", err)
-			}
-
-			body := `{"model":"m","input":"hi","conversation":"conv-1"}`
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
-			rec := httptest.NewRecorder()
-			srv.handleInference(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected %d, got %d (%s)", tc.wantStatus, rec.Code, rec.Body.String())
-			}
-		})
 	}
 }

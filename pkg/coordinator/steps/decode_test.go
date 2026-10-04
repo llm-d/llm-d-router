@@ -77,13 +77,19 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 			t.Fatal("decode request should not have a tokens field")
 		}
 
-		// Verify uuid was injected into the image_url content part
+		// The uuid lands on the image part only: hashIdx must not advance over
+		// the text parts, or every image would carry another image's hash.
 		messages := parsed["messages"].([]any)
 		msg := messages[0].(map[string]any)
 		content := msg["content"].([]any)
-		imgPart := content[0].(map[string]any)
+		imgPart := content[1].(map[string]any)
 		if imgPart["uuid"] != testImageHash {
-			t.Fatalf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
+			t.Errorf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
+		}
+		for _, idx := range []int{0, 2} {
+			if uuid, ok := content[idx].(map[string]any)["uuid"]; ok {
+				t.Errorf("text part %d must carry no uuid, got %v", idx, uuid)
+			}
 		}
 		// Verify image_url is preserved alongside the injected uuid
 		imgURL, ok := imgPart["image_url"].(map[string]any)
@@ -127,10 +133,12 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 				map[string]any{
 					"role": "user",
 					"content": []any{
+						map[string]any{"type": "text", "text": "describe this"},
 						map[string]any{
 							"type":      "image_url",
 							"image_url": map[string]any{"url": "https://example.com/cat.jpg"},
 						},
+						map[string]any{"type": "text", "text": "in one word"},
 					},
 				},
 			},
@@ -177,15 +185,22 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 			t.Fatal("decode request should not have a tokens field")
 		}
 
+		// The uuid lands on the image part only: hashIdx must not advance over
+		// the input_text parts, or every image would carry another image's hash.
 		input := parsed["input"].([]any)
 		item := input[0].(map[string]any)
 		content := item["content"].([]any)
-		imgPart := content[0].(map[string]any)
+		imgPart := content[1].(map[string]any)
 		if imgPart["uuid"] != testImageHash {
-			t.Fatalf("expected uuid=hash-a in input_image part, got %v", imgPart["uuid"])
+			t.Errorf("expected uuid=hash-a in input_image part, got %v", imgPart["uuid"])
 		}
 		if imgPart["image_url"] != "https://example.com/cat.jpg" {
-			t.Fatalf("expected image_url preserved, got %v", imgPart["image_url"])
+			t.Errorf("expected image_url preserved, got %v", imgPart["image_url"])
+		}
+		for _, idx := range []int{0, 2} {
+			if uuid, ok := content[idx].(map[string]any)["uuid"]; ok {
+				t.Errorf("input_text part %d must carry no uuid, got %v", idx, uuid)
+			}
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
@@ -216,10 +231,12 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 				map[string]any{
 					"role": "user",
 					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
 						map[string]any{
 							"type":      "input_image",
 							"image_url": "https://example.com/cat.jpg",
 						},
+						map[string]any{"type": "input_text", "text": "in one word"},
 					},
 				},
 			},
@@ -733,5 +750,56 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 
 	if err := step.Execute(context.Background(), reqCtx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// A parts/entries count mismatch stamps the pairs it can and leaves the rest
+// untouched. Both walks read the same body, so neither direction is reachable
+// through a configured pipeline; the behavior is pinned because the two
+// directions fail differently. Surplus parts reach the worker with no uuid, so
+// it hashes the image itself and never reads the entry primed into the encoder
+// cache. Surplus entries leave mm_hashes naming an image the decode body does
+// not identify.
+func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
+	newInput := func(parts int) []any {
+		content := make([]any, 0, parts)
+		for i := 0; i < parts; i++ {
+			content = append(content, map[string]any{
+				"type":      reqcommon.PartTypeInputImage,
+				"image_url": fmt.Sprintf("data:image/jpeg;base64,img-%d", i),
+			})
+		}
+		return []any{map[string]any{"role": "user", "content": content}}
+	}
+	newEntries := func(n int) []pipeline.MultimodalEntry {
+		entries := make([]pipeline.MultimodalEntry, 0, n)
+		for i := 0; i < n; i++ {
+			entries = append(entries, pipeline.MultimodalEntry{Index: i, Hash: fmt.Sprintf("hash-%d", i)})
+		}
+		return entries
+	}
+
+	for _, tc := range []struct {
+		name    string
+		parts   int
+		entries int
+		// want is the expected uuid per part, nil where none must be stamped.
+		want []any
+	}{
+		{name: "counts agree", parts: 2, entries: 2, want: []any{"hash-0", "hash-1"}},
+		{name: "more parts than entries", parts: 3, entries: 2, want: []any{"hash-0", "hash-1", nil}},
+		{name: "more entries than parts", parts: 1, entries: 3, want: []any{"hash-0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := newInput(tc.parts)
+			injectImagePartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries))
+
+			content := input[0].(map[string]any)["content"].([]any)
+			for i, want := range tc.want {
+				if got := content[i].(map[string]any)["uuid"]; got != want {
+					t.Errorf("part %d uuid = %v, want %v", i, got, want)
+				}
+			}
+		})
 	}
 }

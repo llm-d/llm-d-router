@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1121,5 +1122,117 @@ func TestEncodeStep_ForwardsPreprocessingKwargs(t *testing.T) {
 				t.Fatal("a client field outside the allowlist reached the encoder")
 			}
 		})
+	}
+}
+
+// An entry whose Index falls outside the image-part walk fails the request.
+// The shared walk keeps the two counts equal, so this guards a future step
+// that appends an entry the walk cannot match, not a client shape: without it
+// the fan-out would prime the encoder from whatever part sat at that index.
+func TestEncodeStep_ResponsesFormat_RejectsEntryIndexBeyondImageParts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("encode worker must not be called when an entry has no image part")
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-index-gap",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,aGk="},
+					},
+				},
+			},
+		},
+		// Index 1 with a single image part in the body.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 1, Hash: "hash-gap", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for an entry index past the end of the image parts")
+	}
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	// The message is asserted because the sibling no-fetchable-URL guard wraps
+	// the same sentinel, so ErrBadRequest alone would not pin this branch.
+	if !strings.Contains(err.Error(), "no image part at index") {
+		t.Fatalf("expected the index guard to reject, got %v", err)
+	}
+}
+
+// With use_openai_format false a Responses request collapses to the tokens-in
+// generate format, the same as chat completions: the sub-request carries
+// token_ids and no input array, and goes to the generate path rather than the
+// client's own /v1/responses.
+func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-tok": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, "use_openai_format": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-tokens-in",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,aGk="},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: "hash-tok", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedPath != reqcommon.PathVLLMGenerate {
+		t.Errorf("expected the sub-request on %s, got %s", reqcommon.PathVLLMGenerate, receivedPath)
+	}
+	if _, ok := receivedBody["token_ids"]; !ok {
+		t.Error("expected token_ids in the generate sub-request")
+	}
+	if _, ok := receivedBody["input"]; ok {
+		t.Error("generate sub-request must not carry the client's input array")
 	}
 }

@@ -747,3 +747,57 @@ func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 		t.Errorf("expected ErrBadRequest, got %v", err)
 	}
 }
+
+// A render response whose per-image feature arrays disagree with the entry
+// count fails the request. applyRenderResponse copies them onto entries by
+// index, so a short array would leave an entry carrying another image's hash
+// and kwargs. Each case shortens one array and leaves its siblings correct, so
+// all three guards are reached independently. Run on the Responses path
+// because applyRenderResponse is shared with chat completions.
+func TestRenderStep_RejectsFeatureCountMismatch(t *testing.T) {
+	const entries = 2
+	fullHashes := []string{"vllm-hash-a", "vllm-hash-b"}
+	fullPlaceholders := []any{map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}
+	fullKwargs := []string{"dGVuc29yLWE=", "dGVuc29yLWI="}
+
+	for _, tc := range []struct {
+		name         string
+		hashes       []string
+		placeholders []any
+		kwargs       []string
+	}{
+		{name: "mm_hashes short", hashes: fullHashes[:1], placeholders: fullPlaceholders, kwargs: fullKwargs},
+		{name: "mm_placeholders short", hashes: fullHashes, placeholders: fullPlaceholders[:1], kwargs: fullKwargs},
+		{name: "kwargs_data short", hashes: fullHashes, placeholders: fullPlaceholders, kwargs: fullKwargs[:1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+					"features": map[string]any{
+						"mm_hashes":       map[string][]string{ModalityImage: tc.hashes},
+						"mm_placeholders": map[string][]any{ModalityImage: tc.placeholders},
+						"kwargs_data":     map[string][]string{ModalityImage: tc.kwargs},
+					},
+				})
+			}))
+			defer server.Close()
+
+			step, err := NewRenderStep(nil, map[string]any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step.(*RenderStep).SetServiceAddress(server.URL)
+
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      reqcommon.PathResponses,
+				Body:              map[string]any{"model": "test", "input": "describe these"},
+				MultimodalEntries: make([]pipeline.MultimodalEntry, entries),
+			}
+
+			if err := step.Execute(context.Background(), reqCtx); err == nil {
+				t.Fatal("expected an error for a feature array shorter than the entry count")
+			}
+		})
+	}
+}
