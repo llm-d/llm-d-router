@@ -431,8 +431,8 @@ func TestPrefillStep_ResponsesFormat(t *testing.T) {
 	if prefillBody["max_output_tokens"] != float64(1) {
 		t.Fatalf("expected max_output_tokens=1, got %v", prefillBody["max_output_tokens"])
 	}
-	// vLLM defaults store to true, so a prefill leg that forwarded it would
-	// leave behind a stored response object nothing reaps.
+	// store defaults to true in the Responses schema, so a prefill step that
+	// forwarded it would ask a store-enabled worker to retain its output.
 	if prefillBody["store"] != false {
 		t.Fatalf("expected store=false, got %v", prefillBody["store"])
 	}

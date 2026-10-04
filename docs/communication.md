@@ -1253,8 +1253,15 @@ Requests that depend on state the router does not keep are rejected with 400
 before the pipeline runs, naming the offending field: `previous_response_id` and
 `conversation` reference a prior turn, `background` asks for an async job the
 router cannot poll, and a `file_id` content reference names a file the router
-never stored. `store` is not rejected: it is stripped upstream of the router, and
-forwarding it is harmless since it defaults to `true`.
+never stored.
+
+`store` is accepted rather than rejected, since it asks the worker to retain a
+response object rather than to resolve one the router never kept. The synthetic
+encode and prefill legs pin it to `false`; the decode leg forwards the client's
+value. A worker retains a response only where response storage is enabled on it,
+and otherwise clears the field, so a default deployment retains nothing. Where
+it is enabled, the retained object is unreachable, since `previous_response_id`
+and `conversation` are rejected.
 
 When `use_openai_format` is `false`, the encode and prefill steps collapse to the
 internal `/inference/v1/generate` tokens-in format the same way chat completions
