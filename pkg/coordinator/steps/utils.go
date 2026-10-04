@@ -97,7 +97,7 @@ func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Cl
 		return nil, fmt.Errorf("%s: request: %w", req.step, err)
 	}
 	if err := checkStatus(req.step, resp); err != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, err
 	}
 	return resp, nil
