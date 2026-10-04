@@ -229,11 +229,10 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 			return nil, fmt.Errorf("no image part at index %d of %d: %w", entry.Index, len(imageParts), pipeline.ErrBadRequest)
 		}
 		part := imageParts[entry.Index]
-		// A part whose URL is absent or not a string would prime the encoder
-		// with a blank image, under a hash the prefiller later looks up.
-		// replace-media-urls rejects the same shape before building the entry
-		// this index came from, so reaching here means that step is not in the
-		// pipeline.
+		// Without a URL the sub-request primes the encoder against a part it
+		// cannot fetch, under a hash the prefiller later looks up.
+		// replace-media-urls rejects this shape as it builds the entry this
+		// index came from, so the guard is defensive.
 		if reqcommon.MediaPartURL(part) == "" {
 			return nil, fmt.Errorf("image part %d carries no fetchable URL: %w", entry.Index, pipeline.ErrBadRequest)
 		}

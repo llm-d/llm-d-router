@@ -96,8 +96,6 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 }
 
 // imagePartType is the content part type an API names an image part with.
-// The image walks take it from here so encode, decode and replace-media-urls
-// cannot disagree about which parts are images.
 func imagePartType(apiType reqcommon.APIType) string {
 	if apiType == reqcommon.APITypeResponses {
 		return reqcommon.PartTypeInputImage

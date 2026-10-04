@@ -237,10 +237,8 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	}
 }
 
-// See gateway.DetectFormat's doc comment for why injectUUIDs gates on path
-// rather than field presence. A chat-completions request carrying a stray
-// top-level "input" array must not have that array's image part stamped
-// with a uuid.
+// A chat-completions request carrying a stray top-level "input" array must not
+// have that array's image part stamped with a uuid.
 func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

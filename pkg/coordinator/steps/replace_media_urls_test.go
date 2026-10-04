@@ -178,9 +178,8 @@ func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
 	}
 }
 
-// See gateway.DetectFormat's doc comment for why this step gates on path
-// rather than field presence. A chat-completions request carrying a stray
-// top-level "input" array must not have that field's image processed.
+// A chat-completions request carrying a stray top-level "input" array must not
+// have that field's image processed.
 func TestReplaceMediaURLsStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 	var hits atomic.Int32
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

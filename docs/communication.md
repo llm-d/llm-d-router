@@ -665,9 +665,9 @@ X-Request-ID: <request_id>
 EPP-Profile: encode
 ```
 
-Same single-image fan-out as Option B, rebuilt in the Responses shape. An
-`input_image` part carries the data URI as a bare string, and the optional
-`detail` field is copied across from the client's part when present:
+Same single-image fan-out as Option B, in the Responses shape. The client's
+`input_image` part is forwarded unchanged, so the data URI it carries as a bare
+string and any sibling fields such as `detail` come along with it:
 
 For image 0:
 
