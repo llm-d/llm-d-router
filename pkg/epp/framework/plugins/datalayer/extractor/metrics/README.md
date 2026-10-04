@@ -32,7 +32,7 @@ The plugin populates several standard keys on the endpoint:
 -   `WaitingModels` (int)
 -   `UpdateTime` (time.Time)
 
-The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that does not report them carries none of these attributes.
+The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 
 | Attribute | vLLM metric | Counted on |
 |---|---|---|
