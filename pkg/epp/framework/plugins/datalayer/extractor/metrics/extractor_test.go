@@ -808,19 +808,10 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 			want:     "vllm",
 		},
 		{
-			name:     "legacy GAIE label key fallback",
-			labels:   map[string]string{legacyGAIEEngineTypeLabelKey: "sglang"},
+			name:     "legacy GAIE label key is ignored",
+			labels:   map[string]string{"inference.networking.k8s.io/engine-type": "sglang"},
 			labelKey: DefaultEngineTypeLabelKey,
-			want:     "sglang",
-		},
-		{
-			name: "new label key takes precedence over legacy GAIE key",
-			labels: map[string]string{
-				DefaultEngineTypeLabelKey:    "vllm",
-				legacyGAIEEngineTypeLabelKey: "sglang",
-			},
-			labelKey: DefaultEngineTypeLabelKey,
-			want:     "vllm",
+			want:     DefaultEngineType,
 		},
 		{
 			name:     "no labels returns default",
