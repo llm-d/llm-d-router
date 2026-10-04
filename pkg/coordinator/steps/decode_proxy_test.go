@@ -263,31 +263,55 @@ func TestDecodeOutcome_StreamedError(t *testing.T) {
 	tests := []struct {
 		name       string
 		outcome    decodeOutcome
+		step       string
 		wantStatus int
 		wantCause  error
 	}{
-		{name: "no response and no error", outcome: decodeOutcome{}},
-		{name: "200", outcome: decodeOutcome{Status: http.StatusOK}},
-		{name: "399, the last status below the error range", outcome: decodeOutcome{Status: 399}},
-		{name: "400, the first error status", outcome: decodeOutcome{Status: http.StatusBadRequest}, wantStatus: http.StatusBadRequest},
-		{name: "500", outcome: decodeOutcome{Status: http.StatusInternalServerError}, wantStatus: http.StatusInternalServerError},
-		{name: "transport failure", outcome: decodeOutcome{TransportErr: transportErr}, wantCause: transportErr},
+		{name: "no response and no error", outcome: decodeOutcome{}, step: DecodeStepName},
+		{name: "200", outcome: decodeOutcome{Status: http.StatusOK}, step: DecodeStepName},
+		{name: "399, the last status below the error range", outcome: decodeOutcome{Status: 399}, step: DecodeStepName},
+		{
+			name:       "400, the first error status",
+			outcome:    decodeOutcome{Status: http.StatusBadRequest},
+			step:       DecodeStepName,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "500",
+			outcome:    decodeOutcome{Status: http.StatusInternalServerError},
+			step:       DecodeStepName,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "500 from the conditional decode step carries that step's name",
+			outcome:    decodeOutcome{Status: http.StatusInternalServerError},
+			step:       ConditionalDecodeStepName,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{name: "transport failure", outcome: decodeOutcome{TransportErr: transportErr}, step: DecodeStepName, wantCause: transportErr},
+		{
+			name:      "transport failure from the conditional decode step carries that step's name",
+			outcome:   decodeOutcome{TransportErr: transportErr},
+			step:      ConditionalDecodeStepName,
+			wantCause: transportErr,
+		},
 		{
 			name:      "transport failure after an error status reports the transport failure",
 			outcome:   decodeOutcome{Status: http.StatusBadGateway, TransportErr: transportErr},
+			step:      DecodeStepName,
 			wantCause: transportErr,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.outcome.streamedError(DecodeStepName)
+			err := tt.outcome.streamedError(tt.step)
 			if tt.wantStatus == 0 && tt.wantCause == nil {
 				require.NoError(t, err)
 				return
 			}
 			var streamed *pipeline.UpstreamStreamedError
 			require.ErrorAs(t, err, &streamed)
-			require.Equal(t, DecodeStepName, streamed.Step)
+			require.Equal(t, tt.step, streamed.Step)
 			require.Equal(t, tt.wantStatus, streamed.StatusCode)
 			require.ErrorIs(t, streamed.Cause, tt.wantCause)
 		})
