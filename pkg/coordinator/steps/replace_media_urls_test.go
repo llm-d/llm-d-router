@@ -1449,7 +1449,7 @@ func TestReplaceMediaURLsStep_IgnoresOutputOnChatCompletions(t *testing.T) {
 // rewritten data URI goes back in that shape.
 func TestReplaceMediaURLsStep_ChatCompletionsInputImage(t *testing.T) {
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Type", testImageJPEGContentType)
 		_, _ = w.Write([]byte("jpeg-bytes"))
 	}))
 	defer imageServer.Close()
@@ -1481,7 +1481,7 @@ func TestReplaceMediaURLsStep_ChatCompletionsInputImage(t *testing.T) {
 	if len(reqCtx.MultimodalEntries) != 1 {
 		t.Fatalf("expected the input_image part to produce 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
 	}
-	if got := reqCtx.MultimodalEntries[0].ContentType; got != "image/jpeg" {
+	if got := reqCtx.MultimodalEntries[0].ContentType; got != testImageJPEGContentType {
 		t.Errorf("entry content type = %q, want image/jpeg", got)
 	}
 
@@ -1506,7 +1506,7 @@ func TestReplaceMediaURLsStep_ResponsesIgnoresChatImagePart(t *testing.T) {
 	var hits atomic.Int32
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Type", testImageJPEGContentType)
 		_, _ = w.Write([]byte("jpeg-bytes"))
 	}))
 	defer imageServer.Close()
