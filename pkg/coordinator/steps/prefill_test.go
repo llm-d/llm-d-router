@@ -400,8 +400,10 @@ func TestPrefillStep_ResponsesFormat(t *testing.T) {
 		Model:        "test-model",
 		TokenIDs:     []int{1, 2345},
 		Body: map[string]any{
-			"model": "test-model",
-			"input": "hello",
+			"model":             "test-model",
+			"input":             "hello",
+			"max_output_tokens": 800,
+			"store":             true,
 		},
 		KVTransferParams: make(map[string]any),
 	}
@@ -423,6 +425,24 @@ func TestPrefillStep_ResponsesFormat(t *testing.T) {
 	}
 	if _, ok := prefillBody["kv_transfer_params"]; !ok {
 		t.Fatal("expected kv_transfer_params in responses format")
+	}
+	// The Responses API caps output on max_output_tokens, so the client value
+	// is rewritten rather than left to run the prefiller to completion.
+	if prefillBody["max_output_tokens"] != float64(1) {
+		t.Fatalf("expected max_output_tokens=1, got %v", prefillBody["max_output_tokens"])
+	}
+	// vLLM defaults store to true, so a prefill leg that forwarded it would
+	// leave behind a stored response object nothing reaps.
+	if prefillBody["store"] != false {
+		t.Fatalf("expected store=false, got %v", prefillBody["store"])
+	}
+	// The Responses API defines neither field, so capping them would put an
+	// unknown field on the wire.
+	if _, ok := prefillBody["max_tokens"]; ok {
+		t.Fatalf("responses request carries max_tokens=%v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("responses request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
 }
 
