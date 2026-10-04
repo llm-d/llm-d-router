@@ -795,7 +795,7 @@ The multimodal data each stage sends:
 Encode              = kwargs_data
 Prefill (optimized) = mm_metadata[i] (covered entries) + ec_transfer_params
                    + kwargs_data[i] (uncovered entries), both arrays present
-Prefill (fallback)  = kwargs_data
+Prefill (fallback)  = kwargs_data + mm_metadata (all null)
 ```
 
 **Coordinator behavior:**
