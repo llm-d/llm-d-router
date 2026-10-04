@@ -34,8 +34,6 @@ const (
 
 const ModalityImage = "image"
 
-// buildKVConnector builds the KV connector named by the kv_connector step
-// parameter; an absent parameter selects the default connector.
 func buildKVConnector(params map[string]any) (kv.Connector, error) {
 	name, err := paramString(params, ParamKVConnector)
 	if err != nil {
@@ -44,8 +42,6 @@ func buildKVConnector(params map[string]any) (kv.Connector, error) {
 	return kv.Build(name)
 }
 
-// buildECConnector builds the EC connector named by the ec_connector step
-// parameter; an absent parameter selects the default connector.
 func buildECConnector(params map[string]any) (ec.Connector, error) {
 	name, err := paramString(params, ParamECConnector)
 	if err != nil {

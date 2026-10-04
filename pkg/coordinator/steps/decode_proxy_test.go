@@ -296,7 +296,7 @@ func TestDecodeOutcome_StreamedError(t *testing.T) {
 			wantCause: transportErr,
 		},
 		{
-			name:      "transport failure after an error status reports the transport failure",
+			name:      "transport failure takes precedence over an error status",
 			outcome:   decodeOutcome{Status: http.StatusBadGateway, TransportErr: transportErr},
 			step:      DecodeStepName,
 			wantCause: transportErr,
@@ -313,7 +313,11 @@ func TestDecodeOutcome_StreamedError(t *testing.T) {
 			require.ErrorAs(t, err, &streamed)
 			require.Equal(t, tt.step, streamed.Step)
 			require.Equal(t, tt.wantStatus, streamed.StatusCode)
-			require.ErrorIs(t, streamed.Cause, tt.wantCause)
+			if tt.wantCause == nil {
+				require.NoError(t, streamed.Cause)
+			} else {
+				require.ErrorIs(t, streamed.Cause, tt.wantCause)
+			}
 		})
 	}
 }

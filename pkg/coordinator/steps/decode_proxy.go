@@ -151,8 +151,9 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 	return proxy, out
 }
 
-// serveDecode proxies proxyReq over transport, streams the response to w, and
-// returns the outcome. upstream labels the call's metrics.
+// serveDecode wraps transport with instrumentedTransport itself, so callers
+// pass the raw transport. Passing an already instrumented one counts the call
+// twice in upstream_request_total.
 func serveDecode(logger logr.Logger, transport http.RoundTripper, w http.ResponseWriter, proxyReq *http.Request,
 	upstream string, modifyResponse func(*http.Response) error) *decodeOutcome {
 	proxy, out := newDecodeProxy(logger, instrumentedTransport(transport, upstream), modifyResponse)
@@ -160,8 +161,8 @@ func serveDecode(logger logr.Logger, transport http.RoundTripper, w http.Respons
 	return out
 }
 
-// streamedError converts a decode outcome to the error its step returns: a
-// transport failure or an upstream 4xx/5xx, both already answered to the client.
+// streamedError converts a decode outcome to the error its step returns. A
+// TransportErr takes precedence over a recorded Status.
 func (o *decodeOutcome) streamedError(step string) error {
 	if o.TransportErr != nil {
 		return &pipeline.UpstreamStreamedError{Step: step, Cause: o.TransportErr}
