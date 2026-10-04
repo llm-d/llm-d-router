@@ -239,3 +239,78 @@ func TestNewEncoderPrimingBody(t *testing.T) {
 		}
 	})
 }
+
+func TestItemPartArrays(t *testing.T) {
+	tests := []struct {
+		name    string
+		item    map[string]any
+		apiType APIType
+		want    []PartArray
+	}{
+		{
+			name:    "chat message content",
+			item:    map[string]any{"role": "user", "content": []any{"a"}},
+			apiType: APITypeChatCompletions,
+			want:    []PartArray{{Field: FieldContent, Parts: []any{"a"}}},
+		},
+		{
+			name:    "responses input item content",
+			item:    map[string]any{"role": "user", "content": []any{"a"}},
+			apiType: APITypeResponses,
+			want:    []PartArray{{Field: FieldContent, Parts: []any{"a"}}},
+		},
+		{
+			// vLLM forwards a function_call_output's output as a tool message's
+			// content, so media in it reaches the model and has to be walked.
+			name:    "responses function_call_output output",
+			item:    map[string]any{"type": "function_call_output", "output": []any{"a"}},
+			apiType: APITypeResponses,
+			want:    []PartArray{{Field: FieldOutput, Parts: []any{"a"}}},
+		},
+		{
+			name:    "content precedes output",
+			item:    map[string]any{"content": []any{"a"}, "output": []any{"b"}},
+			apiType: APITypeResponses,
+			want: []PartArray{
+				{Field: FieldContent, Parts: []any{"a"}},
+				{Field: FieldOutput, Parts: []any{"b"}},
+			},
+		},
+		{
+			// Chat completions defines no output, so walking one would collect a
+			// part the client never sent.
+			name:    "chat output is not walked",
+			item:    map[string]any{"content": []any{"a"}, "output": []any{"b"}},
+			apiType: APITypeChatCompletions,
+			want:    []PartArray{{Field: FieldContent, Parts: []any{"a"}}},
+		},
+		{
+			// A computer_call_output's output is an object, not an array.
+			name:    "non-array output is skipped",
+			item:    map[string]any{"type": "computer_call_output", "output": map[string]any{"type": "computer_screenshot"}},
+			apiType: APITypeResponses,
+			want:    nil,
+		},
+		{
+			name:    "non-array content is skipped",
+			item:    map[string]any{"role": "user", "content": "plain text"},
+			apiType: APITypeChatCompletions,
+			want:    nil,
+		},
+		{
+			name:    "item with neither field",
+			item:    map[string]any{"role": "user"},
+			apiType: APITypeResponses,
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ItemPartArrays(tt.item, tt.apiType)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ItemPartArrays() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}

@@ -238,8 +238,8 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		for _, array := range itemPartArrays(msgMap, reqcommon.APITypeChatCompletions) {
-			for partIdx, part := range array.parts {
+		for _, array := range reqcommon.ItemPartArrays(msgMap, reqcommon.APITypeChatCompletions) {
+			for partIdx, part := range array.Parts {
 				partMap, ok := part.(map[string]any)
 				if !ok {
 					continue
@@ -247,7 +247,7 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 				if partMap[reqcommon.FieldType] != reqcommon.PartTypeImageURL {
 					continue
 				}
-				location := fmt.Sprintf("message %d %s part %d", msgIdx, array.field, partIdx)
+				location := fmt.Sprintf("message %d %s part %d", msgIdx, array.Field, partIdx)
 				imageURL, ok := partMap[reqcommon.FieldImageURL].(map[string]any)
 				if !ok {
 					return nil, fmt.Errorf("%s: image_url is not an object: %w", location, pipeline.ErrBadRequest)
@@ -268,9 +268,9 @@ func collectChatCompletionsImageRefs(messages []any) ([]imageRef, error) {
 }
 
 // collectResponsesImageRefs walks a Responses-API input array for input_image
-// parts, under both arrays itemPartArrays yields. Unlike chat-completions'
-// image_url part, the URL here is a bare string field on the part itself
-// (part["image_url"]), not a nested object.
+// parts, under both arrays reqcommon.ItemPartArrays yields. Unlike
+// chat-completions' image_url part, the URL here is a bare string field on the
+// part itself (part["image_url"]), not a nested object.
 //
 // An input_image part with no string image_url is rejected for the same reason
 // collectChatCompletionsImageRefs rejects its equivalent malformed shape: see
@@ -282,8 +282,8 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 		if !ok {
 			continue
 		}
-		for _, array := range itemPartArrays(itemMap, reqcommon.APITypeResponses) {
-			for partIdx, part := range array.parts {
+		for _, array := range reqcommon.ItemPartArrays(itemMap, reqcommon.APITypeResponses) {
+			for partIdx, part := range array.Parts {
 				partMap, ok := part.(map[string]any)
 				if !ok {
 					continue
@@ -291,7 +291,7 @@ func collectResponsesImageRefs(input []any) ([]imageRef, error) {
 				if partMap[reqcommon.FieldType] != reqcommon.PartTypeInputImage {
 					continue
 				}
-				location := fmt.Sprintf("input item %d %s part %d", itemIdx, array.field, partIdx)
+				location := fmt.Sprintf("input item %d %s part %d", itemIdx, array.Field, partIdx)
 				url, ok := partMap[reqcommon.FieldImageURL].(string)
 				if !ok {
 					return nil, fmt.Errorf("%s: input_image with no image_url string is not supported: %w", location, pipeline.ErrBadRequest)

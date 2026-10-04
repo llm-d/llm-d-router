@@ -35,6 +35,39 @@ func MediaPartURL(part map[string]any) string {
 	return ""
 }
 
+// PartArray is one content part array of a message or input item, named by the
+// body field it came from so a caller can report which array it walked.
+type PartArray struct {
+	Field string
+	Parts []any
+}
+
+// ItemPartArrays returns the content part arrays an item carries, in the order
+// a walk visits them.
+//
+// Every API holds its parts under content. A Responses function_call_output
+// instead holds them under output, and vLLM forwards that array as a tool
+// message's content, so media in it reaches the model like any other part. A
+// computer_call_output's output is an object rather than an array and names no
+// part type a media walk collects. A chat-completions message defines no
+// output, so walking one there would collect a part the client never sent.
+//
+// Every walk over a request's media parts takes its arrays from here: the
+// coordinator steps that index multimodal entries by position and the sidecar's
+// encoder fan-out all have to agree on the set of parts a request carries.
+func ItemPartArrays(item map[string]any, apiType APIType) []PartArray {
+	var arrays []PartArray
+	if content, ok := item[FieldContent].([]any); ok {
+		arrays = append(arrays, PartArray{Field: FieldContent, Parts: content})
+	}
+	if apiType == APITypeResponses {
+		if output, ok := item[FieldOutput].([]any); ok {
+			arrays = append(arrays, PartArray{Field: FieldOutput, Parts: output})
+		}
+	}
+	return arrays
+}
+
 // encoderPassthroughFields are the client fields NewEncoderPrimingBody
 // forwards: both kwargs fields change preprocessing and feed vLLM's multimodal
 // hash, so an encoder primed at the deployment default stores its entry under a

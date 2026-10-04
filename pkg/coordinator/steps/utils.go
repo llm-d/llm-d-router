@@ -105,39 +105,6 @@ func imagePartType(apiType reqcommon.APIType) string {
 	return reqcommon.PartTypeImageURL
 }
 
-// itemParts is one content part array of a message or input item, named by the
-// body field it came from so an error can say which array it walked.
-type itemParts struct {
-	field string
-	parts []any
-}
-
-// itemPartArrays returns the content part arrays an item carries, in the order
-// a walk visits them.
-//
-// Every API holds its parts under content. A Responses function_call_output
-// instead holds them under output, and vLLM forwards that array as a tool
-// message's content, so media in it reaches the model like any other part. A
-// computer_call_output's output is an object rather than an array and names no
-// part type these walks collect. A chat-completions message defines no output,
-// so walking one there would collect a part the client never sent.
-//
-// Three walks index images by position and have to agree on the set they see:
-// replace-media-urls' ref collection, encode's collectImageParts and decode's
-// injectImagePartUUIDs. Each takes its arrays from here.
-func itemPartArrays(item map[string]any, apiType reqcommon.APIType) []itemParts {
-	var arrays []itemParts
-	if content, ok := item[reqcommon.FieldContent].([]any); ok {
-		arrays = append(arrays, itemParts{field: reqcommon.FieldContent, parts: content})
-	}
-	if apiType == reqcommon.APITypeResponses {
-		if output, ok := item[reqcommon.FieldOutput].([]any); ok {
-			arrays = append(arrays, itemParts{field: reqcommon.FieldOutput, parts: output})
-		}
-	}
-	return arrays
-}
-
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
 // and optionally kwargs_data) from the request's multimodal entries. It returns
 // nil when there are no entries.

@@ -144,8 +144,8 @@ func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
 // injectImagePartUUIDs walks items (chat-completions messages or a Responses
 // input array) for image content parts and stamps each with the hash of its
 // corresponding multimodal entry, in order. The arrays walked and the parts
-// counted come from itemPartArrays and imagePartType, matching the walk that
-// built entries.
+// counted come from reqcommon.ItemPartArrays and imagePartType, matching the
+// walk that built entries.
 func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipeline.MultimodalEntry) {
 	partType := imagePartType(apiType)
 	hashIdx := 0
@@ -154,8 +154,8 @@ func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipe
 		if !ok {
 			continue
 		}
-		for _, array := range itemPartArrays(itemMap, apiType) {
-			for _, part := range array.parts {
+		for _, array := range reqcommon.ItemPartArrays(itemMap, apiType) {
+			for _, part := range array.Parts {
 				partMap, ok := part.(map[string]any)
 				if !ok {
 					continue
