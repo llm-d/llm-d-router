@@ -120,49 +120,26 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 // injectUUIDs stamps image parts with their multimodal hash.
 //
-// The switch keys on DetectAPIType(reqCtx.OriginalPath): decode proxies
-// reqCtx.Body to reqCtx.OriginalPath, so the wire shape to walk is whatever
-// the client sent. resolveFormat's answer instead reflects the encode/prefill
-// wire-format setting, which can differ from the client's own shape.
+// It keys on DetectAPIType(reqCtx.OriginalPath): decode proxies reqCtx.Body to
+// reqCtx.OriginalPath, so the wire shape to walk is whatever the client sent.
+// resolveFormat's answer instead reflects the encode/prefill wire-format
+// setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
-	switch detected := reqcommon.DetectAPIType(reqCtx.OriginalPath); detected {
-	case reqcommon.APITypeChatCompletions:
-		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
-			injectImagePartUUIDs(messages, detected, reqCtx.MultimodalEntries)
-		}
-	case reqcommon.APITypeResponses:
-		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
-			injectImagePartUUIDs(input, detected, reqCtx.MultimodalEntries)
-		}
+	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+	if items, ok := promptItems(reqCtx.Body, apiType); ok {
+		injectImagePartUUIDs(items, apiType, reqCtx.MultimodalEntries)
 	}
 }
 
-// injectImagePartUUIDs walks items (chat-completions messages or a Responses
-// input array) for image content parts and stamps each with the hash of its
-// corresponding multimodal entry, in order, matching the walk that built
-// entries.
+// injectImagePartUUIDs stamps each image content part with the hash of its
+// corresponding multimodal entry, pairing the two by position. Surplus parts
+// are left unstamped: the worker then hashes the image itself rather than
+// reading an entry primed under a hash that belongs to another part.
 func injectImagePartUUIDs(items []any, apiType reqcommon.APIType, entries []pipeline.MultimodalEntry) {
-	partType := imagePartType(apiType)
-	hashIdx := 0
-	for _, item := range items {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			continue
+	for i, image := range collectImageParts(items, apiType) {
+		if i >= len(entries) {
+			return
 		}
-		for _, array := range reqcommon.ItemPartArrays(itemMap, apiType) {
-			for _, part := range array.Parts {
-				partMap, ok := part.(map[string]any)
-				if !ok {
-					continue
-				}
-				if partMap[reqcommon.FieldType] != partType {
-					continue
-				}
-				if hashIdx < len(entries) {
-					partMap["uuid"] = entries[hashIdx].Hash
-					hashIdx++
-				}
-			}
-		}
+		image.part["uuid"] = entries[i].Hash
 	}
 }

@@ -16,23 +16,43 @@ limitations under the License.
 
 package request
 
-// MediaPartURL returns the URL a media content part references, or "" when
-// there is none to fetch: an inline input_audio part, or a part whose URL field
-// is absent or not a string.
-func MediaPartURL(part map[string]any) string {
+// MediaPartURLRef returns the URL a media content part references, a setter
+// that writes a replacement back to the field it came from, and whether the
+// part carries a readable URL at all. ok is false for a part type that holds no
+// URL, such as an inline input_audio part, and for one whose URL field is
+// absent or not a string; set is nil in that case.
+//
+// Where the URL lives differs by part type, and this is the only place that
+// knows: chat-completions nests it at part[type]["url"], a Responses
+// input_image holds it as a bare string at part["image_url"]. A caller that
+// rewrites a URL in place goes through set so it cannot write the wrong shape.
+func MediaPartURLRef(part map[string]any) (url string, set func(string), ok bool) {
 	switch partType, _ := part[FieldType].(string); partType {
 	case PartTypeImageURL, PartTypeAudioURL, PartTypeVideoURL:
-		nested, ok := part[partType].(map[string]any)
-		if !ok {
-			return ""
+		nested, isMap := part[partType].(map[string]any)
+		if !isMap {
+			return "", nil, false
 		}
-		url, _ := nested[FieldURL].(string)
-		return url
+		url, ok = nested[FieldURL].(string)
+		if !ok {
+			return "", nil, false
+		}
+		return url, func(v string) { nested[FieldURL] = v }, true
 	case PartTypeInputImage:
-		url, _ := part[FieldImageURL].(string)
-		return url
+		url, ok = part[FieldImageURL].(string)
+		if !ok {
+			return "", nil, false
+		}
+		return url, func(v string) { part[FieldImageURL] = v }, true
 	}
-	return ""
+	return "", nil, false
+}
+
+// MediaPartURL returns the URL a media content part references, or "" when
+// there is none to fetch.
+func MediaPartURL(part map[string]any) string {
+	url, _, _ := MediaPartURLRef(part)
+	return url
 }
 
 // PartArray is one content part array of a message or input item, named by the
@@ -52,9 +72,16 @@ type PartArray struct {
 // part type a media walk collects. A chat-completions message defines no
 // output, so walking one there would collect a part the client never sent.
 //
-// Every walk over a request's media parts takes its arrays from here: the
-// coordinator steps that index multimodal entries by position and the sidecar's
-// encoder fan-out all have to agree on the set of parts a request carries.
+// What callers share is this array-selection rule, not the parts they keep from
+// it: the sidecar's encoder fan-out primes every modality and drops a part with
+// no fetchable URL, while the coordinator steps keep one image type and drop
+// nothing, since they pair parts with multimodal entries by position. A caller
+// that selected arrays for itself could disagree about which parts exist at
+// all, which is the one thing none of them may do.
+//
+// Parts aliases the item it came from. A coordinator step writes a uuid or a
+// rewritten URL through it; the sidecar decodes its own copy, where a write
+// would reach nothing.
 func ItemPartArrays(item map[string]any, apiType APIType) []PartArray {
 	var arrays []PartArray
 	if content, ok := item[FieldContent].([]any); ok {

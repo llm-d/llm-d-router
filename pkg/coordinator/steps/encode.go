@@ -105,16 +105,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	var imageParts []map[string]any
-	switch format {
-	case reqcommon.APITypeChatCompletions:
-		if messages, ok := reqCtx.Body[reqcommon.FieldMessages].([]any); ok {
-			imageParts = collectImageParts(messages, format)
-		}
-	case reqcommon.APITypeResponses:
-		if input, ok := reqCtx.Body[reqcommon.FieldInput].([]any); ok {
-			imageParts = collectImageParts(input, format)
-		}
+	var imageParts []imagePart
+	if items, ok := promptItems(reqCtx.Body, format); ok {
+		imageParts = collectImageParts(items, format)
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -150,7 +143,7 @@ func (s *EncodeStep) executeOne(
 	index int,
 	entry pipeline.MultimodalEntry,
 	format reqcommon.APIType,
-	imageParts []map[string]any,
+	imageParts []imagePart,
 ) (map[string]any, http.Header, error) {
 	body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
 	if err != nil {
@@ -222,13 +215,13 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []imagePart) (map[string]any, error) {
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		if entry.Index < 0 || entry.Index >= len(imageParts) {
 			return nil, fmt.Errorf("no image part at index %d of %d: %w", entry.Index, len(imageParts), pipeline.ErrBadRequest)
 		}
-		part := imageParts[entry.Index]
+		part := imageParts[entry.Index].part
 		// Without a URL the sub-request primes the encoder against a part it
 		// cannot fetch, under a hash the prefiller later looks up.
 		// replace-media-urls rejects this shape as it builds the entry this
@@ -265,34 +258,6 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// silently sending a generate-shaped body to the wrong endpoint.
 		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
-}
-
-// collectImageParts walks a chat-completions messages array or a Responses
-// input array once and returns the image content parts in order, so the
-// fan-out loop can index by position instead of re-walking all parts per image
-// (O(N*M) -> O(N+M)). Indexing by position holds because this walk and the one
-// that built reqCtx.MultimodalEntries see the same parts.
-func collectImageParts(items []any, apiType reqcommon.APIType) []map[string]any {
-	partType := imagePartType(apiType)
-	var parts []map[string]any
-	for _, item := range items {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		for _, array := range reqcommon.ItemPartArrays(itemMap, apiType) {
-			for _, part := range array.Parts {
-				partMap, ok := part.(map[string]any)
-				if !ok {
-					continue
-				}
-				if partMap[reqcommon.FieldType] == partType {
-					parts = append(parts, partMap)
-				}
-			}
-		}
-	}
-	return parts
 }
 
 type encodeResponse struct {

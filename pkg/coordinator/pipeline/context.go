@@ -116,18 +116,18 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 }
 
 // RequestContext carries all state for a single request through the pipeline.
+//
+// OriginalBody is never re-marshalled from Body, so a step reading it after
+// another step has mutated Body sees the payload as the client sent it.
 type RequestContext struct {
 	RequestID          string
 	RevisionDecisionID string
 	OriginalPath       string
 	OriginalHeaders    http.Header
-	// OriginalBody is the request body exactly as the client sent it. Body is
-	// the same payload parsed, and the steps mutate it as the request moves
-	// through the pipeline, so the two diverge once any step edits a field.
-	OriginalBody []byte
-	Body         map[string]any
-	Model        string
-	Stream       bool
+	OriginalBody       []byte
+	Body               map[string]any
+	Model              string
+	Stream             bool
 
 	// ParseDuration is the time the server spent reading and JSON-parsing the
 	// request body before the pipeline ran. Execute reports it as the first

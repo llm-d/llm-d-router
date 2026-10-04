@@ -1436,3 +1436,109 @@ func TestReplaceMediaURLsStep_IgnoresOutputOnChatCompletions(t *testing.T) {
 		t.Fatalf("expected no multimodal entries, got %d", len(reqCtx.MultimodalEntries))
 	}
 }
+
+// TestReplaceMediaURLsStep_ChatCompletionsInputImage covers an input_image part
+// sent on a chat-completions request. vLLM's chat parser primes input_image and
+// image_url through the same content part map, so such a part reaches the model
+// and has to be fetched under this step's address guard and size limit rather
+// than left for the model server to fetch itself. The sidecar's encoder fan-out
+// collects it for the same reason.
+//
+// The URL sits where a Responses input_image keeps it, a bare string on the
+// part, even though the request is chat completions, so this also pins that the
+// rewritten data URI goes back in that shape.
+func TestReplaceMediaURLsStep_ChatCompletionsInputImage(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "describe this"},
+						map[string]any{
+							"type":      reqcommon.PartTypeInputImage,
+							"image_url": imageServer.URL + "/photo.jpg",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected the input_image part to produce 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if got := reqCtx.MultimodalEntries[0].ContentType; got != "image/jpeg" {
+		t.Errorf("entry content type = %q, want image/jpeg", got)
+	}
+
+	msgs := reqCtx.Body["messages"].([]any)
+	content := msgs[0].(map[string]any)["content"].([]any)
+	url, ok := content[1].(map[string]any)[reqcommon.FieldImageURL].(string)
+	if !ok {
+		t.Fatalf("expected image_url to stay a bare string, got %T", content[1].(map[string]any)[reqcommon.FieldImageURL])
+	}
+	if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
+		t.Errorf("expected the URL rewritten as a data URI, got %q", url)
+	}
+}
+
+// TestReplaceMediaURLsStep_ResponsesIgnoresChatImagePart is the other half of
+// isImagePart's rule. The Responses input union does not define image_url, so a
+// request carrying one fails the model server's input validation and no worker
+// sees it. Collecting it here would download an image the request never uses
+// and leave an entry the render service reports no hash for, failing the
+// request on the feature count instead.
+func TestReplaceMediaURLsStep_ResponsesIgnoresChatImagePart(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
+		Body: map[string]any{
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{
+							"type":      reqcommon.PartTypeImageURL,
+							"image_url": map[string]any{"url": imageServer.URL + "/photo.jpg"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Errorf("expected no multimodal entry for a chat image part on a Responses request, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("expected no download, got %d", n)
+	}
+}

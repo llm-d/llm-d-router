@@ -95,12 +95,93 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	return reqcommon.APITypeVLLMGenerate
 }
 
-// imagePartType is the content part type an API names an image part with.
-func imagePartType(apiType reqcommon.APIType) string {
-	if apiType == reqcommon.APITypeResponses {
-		return reqcommon.PartTypeInputImage
+// promptItems returns the array an API carries its prompt items in: a
+// chat-completions messages array, or a Responses input array. ok is false for
+// an API that carries no item array, and for a body whose field is absent or
+// holds something other than an array.
+func promptItems(body map[string]any, apiType reqcommon.APIType) ([]any, bool) {
+	var field string
+	switch apiType {
+	case reqcommon.APITypeChatCompletions:
+		field = reqcommon.FieldMessages
+	case reqcommon.APITypeResponses:
+		field = reqcommon.FieldInput
+	default:
+		return nil, false
 	}
-	return reqcommon.PartTypeImageURL
+	items, ok := body[field].([]any)
+	return items, ok
+}
+
+// isImagePart reports whether a content part of type partType names an image on
+// a request to apiType.
+//
+// A chat-completions request may name one either way: vLLM's chat parser primes
+// input_image and image_url through the same content part map, so an
+// input_image on a chat request reaches the model and has to be walked. A
+// Responses request names it input_image only, since the Responses input union
+// does not define image_url and a request carrying one fails the model server's
+// input validation before any worker sees it. The sidecar's encoder fan-out
+// applies the same rule.
+func isImagePart(partType string, apiType reqcommon.APIType) bool {
+	switch partType {
+	case reqcommon.PartTypeInputImage:
+		return true
+	case reqcommon.PartTypeImageURL:
+		return apiType != reqcommon.APITypeResponses
+	}
+	return false
+}
+
+// imagePart is an image content part together with the body position it was
+// found at, named for error messages: "message 0 content part 2", "input item 1
+// output part 0".
+type imagePart struct {
+	part     map[string]any
+	location string
+}
+
+// collectImageParts walks a chat-completions messages array or a Responses
+// input array and returns the image content parts in order.
+//
+// Every step that indexes reqCtx.MultimodalEntries by position walks from here:
+// replace-media-urls builds the entries, encode picks the part to prime, and
+// decode stamps the hash. They agree because they see the same parts in the
+// same order, so a second walk elsewhere would reintroduce the chance to
+// disagree. Walking once also lets the encode fan-out index by position instead
+// of re-walking per image (O(N*M) -> O(N+M)).
+//
+// Which part types count as an image is isImagePart's rule.
+func collectImageParts(items []any, apiType reqcommon.APIType) []imagePart {
+	itemLabel := "message"
+	if apiType == reqcommon.APITypeResponses {
+		itemLabel = "input item"
+	}
+
+	var parts []imagePart
+	for itemIdx, item := range items {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, array := range reqcommon.ItemPartArrays(itemMap, apiType) {
+			for partIdx, part := range array.Parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				partType, _ := partMap[reqcommon.FieldType].(string)
+				if !isImagePart(partType, apiType) {
+					continue
+				}
+				parts = append(parts, imagePart{
+					part:     partMap,
+					location: fmt.Sprintf("%s %d %s part %d", itemLabel, itemIdx, array.Field, partIdx),
+				})
+			}
+		}
+	}
+	return parts
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
