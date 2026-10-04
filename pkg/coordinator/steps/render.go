@@ -130,9 +130,9 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	case reqcommon.APITypeCompletions:
 		return s.executeCompletions(ctx, reqCtx)
 	case reqcommon.APITypeChatCompletions:
-		return s.executeChatCompletions(ctx, reqCtx)
+		return s.executeRender(ctx, reqCtx, reqcommon.PathChatCompletions)
 	case reqcommon.APITypeResponses:
-		return s.executeResponses(ctx, reqCtx)
+		return s.executeRender(ctx, reqCtx, reqcommon.PathResponses)
 	default:
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
@@ -262,28 +262,25 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 	}
 }
 
-func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, reqcommon.PathChatCompletions, &renderResp); err != nil {
-		return err
-	}
-	return s.applyRenderResponse(ctx, reqCtx, renderResp)
-}
-
-// executeResponses handles the /v1/responses path. The render service
-// tokenizes whatever shape reqCtx.Body["input"] holds, so this step does not
+// executeRender posts the client body to the render service under path and
+// applies the token_ids and per-image features it returns. The render service
+// tokenizes whatever shape the prompt field holds, so this step does not
 // inspect it.
-func (s *RenderStep) executeResponses(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+//
+// Chat completions and responses share this path because vLLM's renderer
+// declares the same response model for both. /v1/completions/render returns
+// one object per prompt instead, so executeCompletions decodes and applies its
+// own shape.
+func (s *RenderStep) executeRender(ctx context.Context, reqCtx *pipeline.RequestContext, path string) error {
 	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, reqcommon.PathResponses, &renderResp); err != nil {
+	if err := s.postRender(ctx, reqCtx, path, &renderResp); err != nil {
 		return err
 	}
 	return s.applyRenderResponse(ctx, reqCtx, renderResp)
 }
 
 // applyRenderResponse stores a renderResponse's token_ids and reconciles its
-// per-image features onto reqCtx.MultimodalEntries. Shared by every format
-// whose render call returns this response shape (chat-completions, responses).
+// per-image features onto reqCtx.MultimodalEntries.
 func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
