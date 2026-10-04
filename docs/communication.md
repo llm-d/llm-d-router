@@ -683,6 +683,7 @@ For image 0:
     }
   ],
   "max_output_tokens": 1,
+  "stream": false,
   "store": false
 }
 ```
@@ -896,8 +897,8 @@ No `features` or `ec_transfer_params` (no images); `prompt` contains the token a
 
 ### /v1/responses format
 
-The Responses body is cloned and enriched exactly as in Option B, differing only
-in the request shape and the output cap:
+The Responses body is cloned and enriched as in Option B, in the Responses
+request shape, with the Responses output cap and `store` pinned to `false`:
 
 #### Request
 
@@ -1218,11 +1219,10 @@ Requests to `/v1/completions` follow a simplified pipeline:
 
 ## Responses Requests (/v1/responses)
 
-A `/v1/responses` request uses the same pipeline and the same wire mechanics as
-`/v1/chat/completions`; only the body shape differs. Every stage decides which
-field to walk from the request path, not from which fields are present, so a
-chat-completions request carrying a stray `input` array is still treated as chat
-completions, and the reverse holds too.
+A `/v1/responses` request runs the same pipeline and the same step sequence as
+`/v1/chat/completions`. Every stage picks the field to walk from the request
+path, so a chat-completions request carrying a stray `input` array is still
+treated as chat completions. The differences:
 
 | Concern | `/v1/chat/completions` | `/v1/responses` |
 | :---- | :---- | :---- |
@@ -1230,9 +1230,15 @@ completions, and the reverse holds too.
 | Text part | `{"type": "text", "text": ...}` | `{"type": "input_text", "text": ...}` |
 | Image part | `{"type": "image_url", "image_url": {"url": ...}}` | `{"type": "input_image", "image_url": "..."}` |
 | Image detail | nested in `image_url` | `detail`, a sibling of `image_url` |
+| Part arrays walked | `content` | `content`, and `output` on a `function_call_output` |
 | Output cap | `max_tokens`, `max_completion_tokens` | `max_output_tokens` |
 | Render endpoint | `/v1/chat/completions/render` | `/v1/responses/render` |
 | Capped sub-requests | `stream: false` | `stream: false`, `store: false` |
+
+An `input` item holds its parts under `content`, except a `function_call_output`,
+which holds them under `output`. Every stage walks both arrays, since vLLM
+forwards the `output` array as a tool message's content, so an image in it
+reaches the model like any other part.
 
 Per stage:
 
