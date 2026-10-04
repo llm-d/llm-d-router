@@ -35,8 +35,11 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -728,6 +731,43 @@ func TestMetricsExtractionNixlFailureCounters(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMetricsExtractionNixlCounterStopsBeingReported verifies what an
+// endpoint keeps when the NIXL counters disappear from its scrape while the
+// endpoint object stays registered: the attribute keeps its last value, and a
+// later scrape reporting the counter overwrites it.
+func TestMetricsExtractionNixlCounterStopsBeingReported(t *testing.T) {
+	var exposition atomic.Pointer[string]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(*exposition.Load()))
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := buildPipeline(t, srv.URL, nil)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	scrape := func(text string) float64 {
+		t.Helper()
+		exposition.Store(&text)
+		data, err := p.source.Poll(ctx, ep)
+		require.NoError(t, err)
+		require.NoError(t, p.ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}))
+		got, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.NixlFailedTransfersDataKey)
+		require.True(t, ok, "NixlFailedTransfers attribute should be present")
+		return float64(got)
+	}
+
+	assert.InDelta(t, 44.0, scrape(vllmSchedulingExposition+vllmNixlFailureExposition), 0.001, "reported value")
+	assert.InDelta(t, 44.0, scrape(vllmSchedulingExposition), 0.001, "value after the counter stops being reported")
+	restarted := strings.ReplaceAll(vllmNixlFailureExposition, " 44.0", " 0.0")
+	assert.InDelta(t, 0.0, scrape(vllmSchedulingExposition+restarted), 0.001, "value once the counter is reported again")
 }
 
 // TestMetricsExtractionOptionalCustomMetric verifies that a custom metric

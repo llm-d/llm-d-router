@@ -22,7 +22,7 @@ package metrics
 const (
 	// NixlFailedTransfersKey holds the failed KV cache transfers.
 	NixlFailedTransfersKey = "NixlFailedTransfers"
-	// NixlFailedNotificationsKey holds the failed KV cache transfer notifications.
+	// NixlFailedNotificationsKey holds the failed KV cache notifications.
 	NixlFailedNotificationsKey = "NixlFailedNotifications"
 	// NixlKVExpiredRequestsKey holds the requests whose KV cache expired before it was read.
 	NixlKVExpiredRequestsKey = "NixlKVExpiredRequests"

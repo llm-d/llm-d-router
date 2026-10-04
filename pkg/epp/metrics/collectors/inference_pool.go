@@ -80,7 +80,7 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			pool.Name,
 			pod.GetMetadata().ID.Name,
 		)
-		// An endpoint carries these attributes only if its model server reports the counters.
+		// An endpoint carries these attributes once its model server has reported the counters.
 		for _, counter := range nixlFailureCounters {
 			value, ok := attrmetrics.ReadScalarMetricValue(pod.GetAttributes(), counter.key)
 			if !ok {
