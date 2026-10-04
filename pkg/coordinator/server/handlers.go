@@ -120,7 +120,15 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		inflightModel = model
 	}
 
-	if r.URL.Path == reqcommon.PathResponses {
+	// DetectAPIType gates this rather than an exact path match, so the check
+	// follows the same classification every pipeline step uses. It is wider
+	// than the route that reaches here: POST PathResponses is the only
+	// registered Responses route, and any other path DetectAPIType reads as
+	// Responses is served by the passthrough catch-all, which never parses a
+	// body. Which paths and methods each API serves, passes through, or
+	// rejects is settled in
+	// https://github.com/llm-d/llm-d-router/issues/3091.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		// Stateful Responses fields are unsupported regardless of deployment
 		// topology: the router handles only stateless Responses requests,
 		// disaggregated or not. They are expected to be resolved upstream of
