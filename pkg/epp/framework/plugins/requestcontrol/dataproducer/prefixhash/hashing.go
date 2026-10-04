@@ -104,7 +104,8 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 
 // computeBlockHashes calculates the hash for content blocks.
 func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
+	// maxPrefixBlocks may represent an unlimited cap and exceed a safe allocation size.
+	var blockHashes []BlockHash //nolint:prealloc
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.
