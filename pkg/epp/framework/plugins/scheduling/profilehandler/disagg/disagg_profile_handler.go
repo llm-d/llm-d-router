@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -91,12 +92,19 @@ var PeerEndpointAttributeKey = plugin.NewDataKey("peer-endpoint", DisaggProfileH
 // only the former is safe to complete decode-only. The value is a bool.
 var prefillDeclinedAttributeKey = plugin.NewDataKey("prefill-declined", DisaggProfileHandlerType)
 
+var (
+	fallbackErrorAttributeKey      = plugin.NewDataKey("fallback-error", DisaggProfileHandlerType)
+	profileUnavailableAttributeKey = plugin.NewDataKey("profile-unavailable", DisaggProfileHandlerType)
+	fallbackAttemptedAttributeKey  = plugin.NewDataKey("aggregated-fallback-attempted", DisaggProfileHandlerType)
+)
+
 // ── Factory & constructor ────────────────────────────────────────────────────
 
 type disaggProfilesParameters struct {
-	Decode  string `json:"decode,omitempty"`
-	Prefill string `json:"prefill,omitempty"`
-	Encode  string `json:"encode,omitempty"`
+	Decode   string `json:"decode,omitempty"`
+	Prefill  string `json:"prefill,omitempty"`
+	Encode   string `json:"encode,omitempty"`
+	Fallback string `json:"fallback,omitempty"`
 }
 
 type disaggDecidersParameters struct {
@@ -164,7 +172,8 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	handler := NewDisaggProfileHandler(
 		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
 		pdDecider, encodeDecider,
-	).WithStageOrder(parameters.StageOrder)
+	).WithStageOrder(parameters.StageOrder).
+		WithFallbackProfile(parameters.Profiles.Fallback)
 	return handler.WithName(name), nil
 }
 
@@ -197,6 +206,23 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 	if parameters.Profiles.Encode == "" {
 		parameters.Profiles.Encode = defaultEncodeProfile
 	}
+	if parameters.Profiles.Fallback != "" {
+		if parameters.StageOrder != StageOrderDecodeFirst {
+			return nil, fmt.Errorf("aggregated fallback is only supported in %s stage order", StageOrderDecodeFirst)
+		}
+		for _, profile := range []struct {
+			stage string
+			name  string
+		}{
+			{stage: "decode", name: parameters.Profiles.Decode},
+			{stage: "prefill", name: parameters.Profiles.Prefill},
+			{stage: "encode", name: parameters.Profiles.Encode},
+		} {
+			if parameters.Profiles.Fallback == profile.name {
+				return nil, fmt.Errorf("profiles.fallback must differ from profiles.%s", profile.stage)
+			}
+		}
+	}
 
 	return parameters, nil
 }
@@ -215,8 +241,9 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 
 // compile-time assertions
 var (
-	_ scheduling.ProfileHandler = &Handler{}
-	_ requestcontrol.PreRequest = &Handler{}
+	_ scheduling.ProfileHandler     = &Handler{}
+	_ scheduling.ProfileRunObserver = &Handler{}
+	_ requestcontrol.PreRequest     = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -232,13 +259,14 @@ var (
 // All four handler types (D, P/D, E/PD, E/P/D) share this single implementation;
 // active stages are selected by setting encodeProfile / prefillProfile.
 type Handler struct {
-	typedName      plugin.TypedName
-	stageOrder     StageOrder
-	decodeProfile  string
-	prefillProfile string
-	encodeProfile  string
-	pdDecider      deciderPlugin
-	encodeDecider  deciderPlugin
+	typedName       plugin.TypedName
+	stageOrder      StageOrder
+	decodeProfile   string
+	prefillProfile  string
+	encodeProfile   string
+	fallbackProfile string
+	pdDecider       deciderPlugin
+	encodeDecider   deciderPlugin
 }
 
 // TypedName returns the typed name of the plugin.
@@ -254,6 +282,38 @@ func (h *Handler) WithName(name string) *Handler {
 func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	h.stageOrder = stageOrder
 	return h
+}
+
+// WithFallbackProfile enables experimental fallback when required Prefill or Decode scheduling has no endpoints.
+// The fallback profile is only used with decode-first stage order.
+func (h *Handler) WithFallbackProfile(profile string) *Handler {
+	h.fallbackProfile = profile
+	return h
+}
+
+// ObserveProfileRun retains the failure needed to select or report the fallback profile.
+func (h *Handler) ObserveProfileRun(request *scheduling.InferenceRequest, profileName string,
+	_ *scheduling.ProfileRunResult, err error,
+) {
+	if request == nil || h.fallbackProfile == "" || h.stageOrder != StageOrderDecodeFirst {
+		return
+	}
+
+	if profileName == h.fallbackProfile {
+		request.PutAttribute(fallbackErrorAttributeKey, err)
+		return
+	}
+	if profileName != h.decodeProfile && profileName != h.prefillProfile {
+		return
+	}
+
+	unavailable := false
+	var typedErr errcommon.Error
+	if errors.As(err, &typedErr) {
+		unavailable = typedErr.Code == errcommon.ServiceUnavailable &&
+			typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey] == string(errcommon.RequestDroppedReasonNoEndpoints)
+	}
+	request.PutAttribute(profileUnavailableAttributeKey, unavailable)
 }
 
 // Consumes defines data types consumed by this plugin (through the PD decider).
@@ -316,6 +376,28 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request *scheduling.InferenceRequest,
 	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult,
 ) map[string]scheduling.SchedulerProfile {
+	if attempted, _ := scheduling.ReadRequestAttribute[bool](request, fallbackAttemptedAttributeKey); attempted {
+		return map[string]scheduling.SchedulerProfile{}
+	}
+	if unavailable, _ := scheduling.ReadRequestAttribute[bool](request, profileUnavailableAttributeKey); h.fallbackProfile != "" && unavailable {
+		if ctx.Err() != nil {
+			return map[string]scheduling.SchedulerProfile{}
+		}
+		request.PutAttribute(fallbackAttemptedAttributeKey, true)
+		if _, executed := profileResults[h.fallbackProfile]; executed {
+			return map[string]scheduling.SchedulerProfile{}
+		}
+		fallbackProfile, ok := profiles[h.fallbackProfile]
+		if !ok {
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("error_missing_fallback_profile"))
+			return map[string]scheduling.SchedulerProfile{}
+		}
+		// The aggregated target must not inherit affinity to an abandoned stage.
+		request.PutAttribute(PeerEndpointAttributeKey, nil)
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_aggregated_fallback"))
+		return map[string]scheduling.SchedulerProfile{h.fallbackProfile: fallbackProfile}
+	}
+
 	// ── Stage 1: Decode ────────────────────────────────────────────────────
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
@@ -443,12 +525,31 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 // ProcessResults implements scheduling.ProfileHandler.
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
-	_ context.Context,
+	ctx context.Context,
 	request *scheduling.InferenceRequest,
 	profileResults map[string]*scheduling.ProfileRunResult,
 ) (*scheduling.SchedulingResult, error) {
 	if request == nil {
 		return nil, errors.New("request is nil")
+	}
+
+	fallbackAttempted, _ := scheduling.ReadRequestAttribute[bool](request, fallbackAttemptedAttributeKey)
+	if h.fallbackProfile != "" && fallbackAttempted {
+		if fallbackErr, ok := scheduling.ReadRequestAttribute[error](request, fallbackErrorAttributeKey); ok && fallbackErr != nil {
+			return nil, fmt.Errorf("fallback profile %q: %w", h.fallbackProfile, fallbackErr)
+		}
+		fallbackRunResults := profileResults[h.fallbackProfile]
+		if fallbackRunResults == nil || len(fallbackRunResults.TargetEndpoints) == 0 {
+			return nil, fmt.Errorf("fallback profile %q produced no target", h.fallbackProfile)
+		}
+		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, DecisionTypeAggregatedFallback)
+		log.FromContext(ctx).Info("Routing request to aggregated fallback", "profile", h.fallbackProfile, "model", request.TargetModel, "request", request.RequestID)
+		return &scheduling.SchedulingResult{
+			PrimaryProfileName: h.fallbackProfile,
+			ProfileResults: map[string]*scheduling.ProfileRunResult{
+				h.fallbackProfile: fallbackRunResults,
+			},
+		}, nil
 	}
 
 	decodeRunResults := profileResults[h.decodeProfile]
