@@ -19,6 +19,7 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 
@@ -29,7 +30,6 @@ import (
 const LocalSyncerType = "local-syncer"
 
 var _ fwkdl.CrossReplicaSyncer = (*LocalSyncer)(nil)
-var _ fwkdl.BoundCrossReplicaState = (*boundState)(nil)
 
 // LocalSyncer is an in-memory CrossReplicaSyncer for single-replica
 // deployments and testing. No cross-replica synchronization is performed.
@@ -37,9 +37,10 @@ type LocalSyncer struct {
 	typedName fwkplugin.TypedName
 	replicaID string
 	data      sync.Map
+	states    map[fwkdl.StateKey]stateDefinition
 }
 
-type boundState struct {
+type stateDefinition struct {
 	read      func(string) fwkdl.Cloneable
 	aggregate func([]any) any
 }
@@ -48,6 +49,7 @@ func NewLocalSyncer(name, replicaID string) *LocalSyncer {
 	return &LocalSyncer{
 		typedName: fwkplugin.TypedName{Type: LocalSyncerType, Name: name},
 		replicaID: replicaID,
+		states:    make(map[fwkdl.StateKey]stateDefinition),
 	}
 }
 
@@ -63,21 +65,42 @@ func (s *LocalSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *LocalSyncer) Bind(_ fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &boundState{read: read, aggregate: aggregate}
+func (s *LocalSyncer) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) {
+	if s.states == nil {
+		s.states = make(map[fwkdl.StateKey]stateDefinition)
+	}
+	s.states[key] = stateDefinition{read: read, aggregate: aggregate}
 }
 
 func (s *LocalSyncer) syncKey(key fwkdl.StateKey, id string) string {
 	return s.replicaID + ":" + string(key) + ":" + id
 }
 
-func (s *boundState) Set(context.Context, string) error { return nil }
-
-func (s *boundState) Get(_ context.Context, endpointID string) (any, error) {
-	return s.aggregate([]any{s.read(endpointID)}), nil
+func (s *LocalSyncer) state(key fwkdl.StateKey) (stateDefinition, error) {
+	state, ok := s.states[key]
+	if !ok {
+		return stateDefinition{}, fmt.Errorf("local-syncer: state key %q is not bound", key)
+	}
+	return state, nil
 }
 
-func (s *boundState) Delete(context.Context, string) error { return nil }
+func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, _ string) error {
+	_, err := s.state(key)
+	return err
+}
+
+func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
+	state, err := s.state(key)
+	if err != nil {
+		return nil, false, err
+	}
+	return state.aggregate([]any{state.read(endpointID)}), true, nil
+}
+
+func (s *LocalSyncer) Delete(_ context.Context, key fwkdl.StateKey, _ string) error {
+	_, err := s.state(key)
+	return err
+}
 
 func (s *LocalSyncer) GetOrSet(_ context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
 	actual, loaded := s.data.LoadOrStore(s.syncKey(key, id), candidate)

@@ -44,7 +44,6 @@ const (
 type crossReplicaPublisher struct {
 	syncer         fwkdl.CrossReplicaSyncer
 	contributors   []fwkdl.CrossReplicaContributor
-	states         map[fwkdl.StateKey]fwkdl.BoundCrossReplicaState
 	interval       time.Duration
 	publishTimeout time.Duration
 
@@ -61,13 +60,12 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 		return nil
 	}
 	var contributors []fwkdl.CrossReplicaContributor
-	states := make(map[fwkdl.StateKey]fwkdl.BoundCrossReplicaState)
 	extractors.Range(func(_ string, exts []fwkplugin.Plugin) bool {
 		for _, ext := range exts {
 			if c, ok := ext.(fwkdl.CrossReplicaContributor); ok && !c.CrossReplicaState().SyncDisabled {
 				spec := c.CrossReplicaState()
 				contributors = append(contributors, c)
-				states[spec.StateKey] = syncer.Bind(spec.StateKey, spec.Read, spec.Aggregate)
+				syncer.Bind(spec.StateKey, spec.Read, spec.Aggregate)
 			}
 		}
 		return true
@@ -84,7 +82,6 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	return &crossReplicaPublisher{
 		syncer:         syncer,
 		contributors:   contributors,
-		states:         states,
 		interval:       interval,
 		publishTimeout: publishTimeout,
 	}
@@ -147,11 +144,10 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 		return
 	}
 	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
-	state := p.state(spec)
 	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
 		Get: func() fwkdl.Cloneable {
-			value, err := p.get(ctx, state, endpointID)
-			if err != nil {
+			value, ok, err := p.get(ctx, spec.StateKey, endpointID)
+			if err != nil || !ok {
 				return spec.Read(endpointID)
 			}
 			if cloneable, ok := value.(fwkdl.Cloneable); ok {
@@ -162,27 +158,20 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	})
 }
 
-func (p *crossReplicaPublisher) state(spec fwkdl.CrossReplicaSpec) fwkdl.BoundCrossReplicaState {
-	if state, ok := p.states[spec.StateKey]; ok {
-		return state
-	}
-	return p.syncer.Bind(spec.StateKey, spec.Read, spec.Aggregate)
-}
-
-func (p *crossReplicaPublisher) set(ctx context.Context, state fwkdl.BoundCrossReplicaState, key types.NamespacedName) error {
+func (p *crossReplicaPublisher) set(ctx context.Context, stateKey fwkdl.StateKey, key types.NamespacedName) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	// The endpoint may have been deleted after publishAll took its snapshot.
 	if !p.endpoints.Has(key) {
 		return nil
 	}
-	return state.Set(ctx, key.String())
+	return p.syncer.Set(ctx, stateKey, key.String())
 }
 
-func (p *crossReplicaPublisher) get(ctx context.Context, state fwkdl.BoundCrossReplicaState, endpointID string) (any, error) {
+func (p *crossReplicaPublisher) get(ctx context.Context, stateKey fwkdl.StateKey, endpointID string) (any, bool, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return state.Get(ctx, endpointID)
+	return p.syncer.Get(ctx, stateKey, endpointID)
 }
 
 func (p *crossReplicaPublisher) delete(ctx context.Context, key types.NamespacedName) (bool, error) {
@@ -197,7 +186,7 @@ func (p *crossReplicaPublisher) delete(ctx context.Context, key types.Namespaced
 	var errs []error
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
-		if err := p.state(spec).Delete(ctx, endpointID); err != nil {
+		if err := p.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
 			errs = append(errs, fmt.Errorf("delete shared state for key %s: %w", spec.StateKey, err))
 		}
 	}
@@ -210,9 +199,8 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 	var wg sync.WaitGroup
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
-		state := p.state(spec)
 		wg.Go(func() {
-			if err := p.set(ctx, state, key); err != nil {
+			if err := p.set(ctx, spec.StateKey, key); err != nil {
 				logger.V(logging.DEBUG).Info("cross-replica publish failed", "key", spec.StateKey, "err", err)
 			}
 		})

@@ -36,22 +36,34 @@ func TestLocalSyncerAggregatesLiveLocalValue(t *testing.T) {
 		return values[0].(cloneableInt) * 2
 	}
 	local := 21
-	state := syncer.Bind(
+	syncer.Bind(
 		"load",
 		func(string) fwkdl.Cloneable { return cloneableInt(local) },
 		aggregate,
 	)
 
-	require.NoError(t, state.Set(context.Background(), "default/backend-0"))
-	value, err := state.Get(context.Background(), "default/backend-0")
+	require.NoError(t, syncer.Set(context.Background(), "load", "default/backend-0"))
+	value, ok, err := syncer.Get(context.Background(), "load", "default/backend-0")
 
 	require.NoError(t, err)
+	require.True(t, ok)
 	assert.Equal(t, cloneableInt(42), value)
 
 	local = 22
-	value, err = state.Get(context.Background(), "default/backend-0")
+	value, ok, err = syncer.Get(context.Background(), "load", "default/backend-0")
 	require.NoError(t, err)
+	require.True(t, ok)
 	assert.Equal(t, cloneableInt(44), value)
+}
+
+func TestLocalSyncerRequiresBinding(t *testing.T) {
+	syncer := NewLocalSyncer("test", "replica-a")
+
+	assert.Error(t, syncer.Set(context.Background(), "missing", "default/backend-0"))
+	_, ok, err := syncer.Get(context.Background(), "missing", "default/backend-0")
+	assert.False(t, ok)
+	assert.Error(t, err)
+	assert.Error(t, syncer.Delete(context.Background(), "missing", "default/backend-0"))
 }
 
 func TestLocalSyncerGetOrSet(t *testing.T) {

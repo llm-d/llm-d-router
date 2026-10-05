@@ -169,26 +169,28 @@ func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 		aggregateCalls.Add(1)
 		return sumCloneableInts(values)
 	}
-	state := store.Bind(
+	store.Bind(
 		testStateKey,
 		func(string) fwkdl.Cloneable { return local },
 		aggregate,
 	)
 
-	require.NoError(t, state.Set(context.Background(), testEndpointID))
+	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID))
 	require.Equal(t, int64(1), counter.count.Load())
 	require.Equal(t, int64(1), aggregateCalls.Load())
 	cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(7), cached.(*aggregateCacheEntry).value)
 
-	value, err := state.Get(context.Background(), testEndpointID)
+	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
 	require.NoError(t, err)
+	require.True(t, ok)
 	require.Equal(t, cloneableInt(11), value)
 
 	local = 5
-	value, err = state.Get(context.Background(), testEndpointID)
+	value, ok, err = store.Get(context.Background(), testStateKey, testEndpointID)
 	require.NoError(t, err)
+	require.True(t, ok)
 	require.Equal(t, cloneableInt(12), value)
 
 	require.Equal(t, int64(1), counter.count.Load(), "Get must not read Redis")
@@ -206,6 +208,17 @@ func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	require.False(t, cached)
 	total := getSum(t, store, testStateKey, testEndpointID, 5)
 	require.Equal(t, 5, total)
+}
+
+func TestStateOperationsRequireBinding(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := newTestStore(t, server, testReplicaID)
+
+	assert.Error(t, store.Set(context.Background(), "missing", testEndpointID))
+	_, ok, err := store.Get(context.Background(), "missing", testEndpointID)
+	assert.False(t, ok)
+	assert.Error(t, err)
+	assert.Error(t, store.Delete(context.Background(), "missing", testEndpointID))
 }
 
 func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
