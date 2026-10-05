@@ -49,6 +49,7 @@ import (
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -246,7 +247,7 @@ func CreateGrpcPayload(msg proto.Message) ([]byte, error) {
 
 	payload := make([]byte, 5+len(b))
 	payload[0] = 0                                           // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) // #nosec G115 -- bounds-checked above
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //#nosec G115 -- bounds-checked above
 	copy(payload[5:], b)
 	return payload, nil
 }
@@ -369,6 +370,12 @@ func NewRequestBufferedResponse(
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
 						SetHeaders: setHeaders,
+						RemoveHeaders: []string{
+							routing.PrefillEndpointHeader,
+							routing.EncoderEndpointsHeader,
+							routing.DataParallelEndpointHeader,
+							routing.KVCacheSourceHeader,
+						},
 					},
 				},
 			},

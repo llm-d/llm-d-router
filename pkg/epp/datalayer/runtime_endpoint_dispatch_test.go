@@ -165,3 +165,40 @@ func TestUpdateEndpointRecordsExtractErrorMetric(t *testing.T) {
 		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(epSrc.TypedName().Type, extractor.TypedName().Type)),
 		"failing endpoint extractor should record one extract error")
 }
+
+// TestUpdateEndpointRecoversPanickingExtractor verifies that a panicking
+// endpoint extractor is recovered, recorded in datalayer_extract_errors_total,
+// and neither stops the dispatch loop nor escapes the process.
+func TestUpdateEndpointRecoversPanickingExtractor(t *testing.T) {
+	metrics.Reset()
+	panicking := extmocks.NewEndpointExtractor("panicking").WithExtractPanic("boom")
+	working := extmocks.NewEndpointExtractor("working").WithType("mock-endpoint-extractor-working")
+	epSrc := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "ep-source")
+
+	r := NewRuntime(1)
+	logger := newTestLogger(t)
+	cfg := &Config{
+		Sources: []DataSourceConfig{
+			{
+				Plugin:     epSrc,
+				Extractors: []fwkplugin.Plugin{panicking, working},
+			},
+		},
+	}
+	require.NoError(t, r.Configure(cfg, logger))
+
+	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+		Address: "1.2.3.4",
+	}, nil)
+
+	assert.NotPanics(t, func() { r.UpdateEndpoint(context.Background(), endpoint) },
+		"a panicking extractor must not escape the dispatch loop")
+
+	assert.Equal(t, 1.0, promtestutil.ToFloat64(
+		metrics.LlmdDataLayerExtractErrorsTotal.WithLabelValues(epSrc.TypedName().Type, panicking.TypedName().Type)),
+		"the panic should be recorded as an extract error")
+
+	events := working.GetEvents()
+	require.Len(t, events, 1, "the dispatch loop must continue to the next extractor after the panic")
+}

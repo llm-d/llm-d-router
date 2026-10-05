@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges
@@ -40,8 +42,9 @@ func (s *Server) fanoutEncoderCollect(
 	originalRequest map[string]any,
 	encoderHostPorts []string,
 	requestID string,
+	apiType reqcommon.APIType,
 ) (map[string]any, int, int, error) {
-	items := s.mmItemsForFanout(originalRequest, requestID)
+	items := s.mmItemsForFanout(originalRequest, requestID, apiType)
 	if len(items) == 0 {
 		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, 0, 0, nil
@@ -52,7 +55,7 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
@@ -61,9 +64,9 @@ func (s *Server) fanoutEncoderCollect(
 			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
-				requestFieldECTransferParams, truncateLongStrings(encoderResponse[requestFieldECTransferParams], 64))
+				reqcommon.FieldECTransferParams, truncateLongStrings(encoderResponse[reqcommon.FieldECTransferParams], 64))
 		}
-		ec, ok := encoderResponse[requestFieldECTransferParams]
+		ec, ok := encoderResponse[reqcommon.FieldECTransferParams]
 		if !ok || ec == nil {
 			s.logger.V(logging.DEBUG).Info("missing ec_transfer_params field in encoder response",
 				"item", idx, "requestID", requestID)
@@ -120,22 +123,27 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 
 	// Step 1: fan out to encoders, collect per-image ec_transfer_params.
 	if len(encodeEndPoints) > 0 {
-		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID)
+		encodeStart := time.Now()
+		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
+			metrics.RecordError(metrics.StageEncode)
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
+		// total == 0 means there was no multimodal input to encode, so no
+		// encoder was invoked and the duration is not sampled.
 		if total > 0 {
+			metrics.RecordEncodeDuration(time.Since(encodeStart))
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.
 			if contributed == 0 {
 				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
 			} else {
-				body[requestFieldECTransferParams] = params
+				body[reqcommon.FieldECTransferParams] = params
 				if contributed < total {
 					s.logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
 						"requestID", requestID, "contributed", contributed, "items", total)
