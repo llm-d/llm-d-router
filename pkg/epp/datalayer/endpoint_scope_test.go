@@ -260,6 +260,23 @@ func TestUnscope_LeavesUnwrappedEndpointsAlone(t *testing.T) {
 	assert.Equal(t, endpoints, Unscope(endpoints))
 }
 
+// A picker returns candidates as ScoredEndpoints, including copies of the ones
+// it was given, so a scoped endpoint can reach a result inside one.
+func TestUnscope_RestoresEndpointInsideScoredEndpoint(t *testing.T) {
+	endpoint := newEndpoint(t)
+	plug := &producerPlugin{}
+	plug.produces = map[fwkplugin.DataKey]any{producedKey: nil}
+	scoped, _ := Scope(testLogger(), "test-extension-point", plug, []fwksched.Endpoint{endpoint})
+
+	unscoped := Unscope([]fwksched.Endpoint{&fwksched.ScoredEndpoint{Endpoint: scoped[0], Score: 0.5}})
+
+	require.Len(t, unscoped, 1)
+	scored, ok := unscoped[0].(*fwksched.ScoredEndpoint)
+	require.True(t, ok, "the result keeps its ScoredEndpoint form")
+	assert.Same(t, endpoint, scored.Endpoint)
+	assert.Equal(t, 0.5, scored.Score)
+}
+
 // A plugin that startup registration missed is still confined to its own
 // declarations rather than to nothing: the spec is derived from the plugin on
 // first use. Missing the registration is a wiring bug, not grounds for cutting
