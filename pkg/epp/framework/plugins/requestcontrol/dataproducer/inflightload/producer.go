@@ -318,12 +318,10 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		StateKey:     datalayer.StateKey("inflight:" + p.typedName.Name),
 		AttributeKey: p.dk,
 		SyncDisabled: !p.syncCrossReplicaState,
-		Supply: func(endpointID string) func() datalayer.Cloneable {
-			return func() datalayer.Cloneable {
-				return &attrconcurrency.InFlightLoad{
-					Requests: p.requestTracker.get(endpointID),
-					Tokens:   p.tokenTracker.get(endpointID),
-				}
+		Read: func(endpointID string) datalayer.Cloneable {
+			return &attrconcurrency.InFlightLoad{
+				Requests: p.requestTracker.get(endpointID),
+				Tokens:   p.tokenTracker.get(endpointID),
 			}
 		},
 		Aggregate: func(values []any) any {

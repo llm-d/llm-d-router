@@ -59,6 +59,7 @@ type fakeSyncer struct {
 type fakeBoundState struct {
 	syncer    *fakeSyncer
 	key       fwkdl.StateKey
+	read      func(string) fwkdl.Cloneable
 	aggregate func([]any) any
 }
 
@@ -66,29 +67,29 @@ func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "fake-syncer", Name: "fake-syncer"}
 }
 
-func (s *fakeSyncer) Bind(key fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &fakeBoundState{syncer: s, key: key, aggregate: aggregate}
+func (s *fakeSyncer) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+	return &fakeBoundState{syncer: s, key: key, read: read, aggregate: aggregate}
 }
 
-func (s *fakeBoundState) Set(_ context.Context, endpointID string, value any) error {
+func (s *fakeBoundState) Set(_ context.Context, endpointID string) error {
 	s.syncer.mu.Lock()
 	defer s.syncer.mu.Unlock()
 	s.syncer.sets = append(s.syncer.sets, setCall{
 		key:        s.key,
 		endpointID: endpointID,
-		value:      value,
+		value:      s.read(endpointID),
 		aggregate:  s.aggregate,
 	})
 	return nil
 }
 
-func (s *fakeBoundState) Get(_ context.Context, _ string, local func() fwkdl.Cloneable) (any, error) {
+func (s *fakeBoundState) Get(_ context.Context, endpointID string) (any, error) {
 	s.syncer.mu.Lock()
 	defer s.syncer.mu.Unlock()
 	if s.syncer.getErr != nil {
 		return nil, s.syncer.getErr
 	}
-	values := []any{local()}
+	values := []any{s.read(endpointID)}
 	if s.syncer.getOK {
 		values = append(values, s.syncer.getValue)
 	}
@@ -125,9 +126,7 @@ func (c liveLoadContributor) CrossReplicaState() fwkdl.CrossReplicaSpec {
 	return fwkdl.CrossReplicaSpec{
 		StateKey:     "live-load",
 		AttributeKey: fwkplugin.NewDataKey("live-load", "live-load"),
-		Supply: func(string) func() fwkdl.Cloneable {
-			return func() fwkdl.Cloneable { return fakeLoad(c.local.Load()) }
-		},
+		Read:         func(string) fwkdl.Cloneable { return fakeLoad(c.local.Load()) },
 		Aggregate: func(values []any) any {
 			var total fakeLoad
 			for _, value := range values {
@@ -169,6 +168,7 @@ type blockingSyncer struct {
 
 type blockingBoundState struct {
 	syncer    *blockingSyncer
+	read      func(string) fwkdl.Cloneable
 	aggregate func([]any) any
 }
 
@@ -195,40 +195,40 @@ type parallelBoundState struct {
 	key     fwkdl.StateKey
 }
 
-func (s *deadlineSyncer) Bind(key fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+func (s *deadlineSyncer) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
 	return &deadlineBoundState{
-		state:            s.fakeSyncer.Bind(key, aggregate),
+		state:            s.fakeSyncer.Bind(key, read, aggregate),
 		deadlineObserved: s.deadlineObserved,
 	}
 }
 
-func (s *deadlineBoundState) Set(ctx context.Context, endpointID string, value any) error {
+func (s *deadlineBoundState) Set(ctx context.Context, endpointID string) error {
 	deadline, _ := ctx.Deadline()
 	select {
 	case s.deadlineObserved <- deadline:
 	default:
 	}
-	return s.state.Set(ctx, endpointID, value)
+	return s.state.Set(ctx, endpointID)
 }
 
-func (s *deadlineBoundState) Get(ctx context.Context, endpointID string, local func() fwkdl.Cloneable) (any, error) {
-	return s.state.Get(ctx, endpointID, local)
+func (s *deadlineBoundState) Get(ctx context.Context, endpointID string) (any, error) {
+	return s.state.Get(ctx, endpointID)
 }
 
 func (s *deadlineBoundState) Delete(ctx context.Context, endpointID string) error {
 	return s.state.Delete(ctx, endpointID)
 }
 
-func (s *parallelSyncer) Bind(key fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+func (s *parallelSyncer) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
 	return &parallelBoundState{
-		state:   s.fakeSyncer.Bind(key, aggregate),
+		state:   s.fakeSyncer.Bind(key, read, aggregate),
 		started: s.started,
 		release: s.release,
 		key:     key,
 	}
 }
 
-func (s *parallelBoundState) Set(ctx context.Context, endpointID string, value any) error {
+func (s *parallelBoundState) Set(ctx context.Context, endpointID string) error {
 	select {
 	case s.started <- setCall{key: s.key, endpointID: endpointID}:
 	case <-ctx.Done():
@@ -239,11 +239,11 @@ func (s *parallelBoundState) Set(ctx context.Context, endpointID string, value a
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.state.Set(ctx, endpointID, value)
+	return s.state.Set(ctx, endpointID)
 }
 
-func (s *parallelBoundState) Get(ctx context.Context, endpointID string, local func() fwkdl.Cloneable) (any, error) {
-	return s.state.Get(ctx, endpointID, local)
+func (s *parallelBoundState) Get(ctx context.Context, endpointID string) (any, error) {
+	return s.state.Get(ctx, endpointID)
 }
 
 func (s *parallelBoundState) Delete(ctx context.Context, endpointID string) error {
@@ -262,24 +262,24 @@ func (s *blockingSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "blocking-syncer", Name: "blocking-syncer"}
 }
 
-func (s *blockingSyncer) Bind(_ fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &blockingBoundState{syncer: s, aggregate: aggregate}
+func (s *blockingSyncer) Bind(_ fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+	return &blockingBoundState{syncer: s, read: read, aggregate: aggregate}
 }
 
-func (s *blockingBoundState) Set(_ context.Context, endpointID string, value any) error {
+func (s *blockingBoundState) Set(_ context.Context, endpointID string) error {
 	s.syncer.startOnce.Do(func() { close(s.syncer.setStarted) })
 	<-s.syncer.allowSet
 	s.syncer.mu.Lock()
 	defer s.syncer.mu.Unlock()
-	s.syncer.state[endpointID] = value
+	s.syncer.state[endpointID] = s.read(endpointID)
 	s.syncer.events = append(s.syncer.events, "set")
 	return nil
 }
 
-func (s *blockingBoundState) Get(_ context.Context, endpointID string, local func() fwkdl.Cloneable) (any, error) {
+func (s *blockingBoundState) Get(_ context.Context, endpointID string) (any, error) {
 	s.syncer.mu.Lock()
 	defer s.syncer.mu.Unlock()
-	values := []any{local()}
+	values := []any{s.read(endpointID)}
 	if value, ok := s.syncer.state[endpointID]; ok {
 		values = append(values, value)
 	}
@@ -306,10 +306,8 @@ func (c fakeContributor) CrossReplicaState() fwkdl.CrossReplicaSpec {
 	return fwkdl.CrossReplicaSpec{
 		StateKey:     c.key,
 		SyncDisabled: c.syncDisabled,
-		Supply: func(id string) func() fwkdl.Cloneable {
-			return func() fwkdl.Cloneable { return fakeCloneable{id: id} }
-		},
-		Aggregate: func(values []any) any { return len(values) },
+		Read:         func(id string) fwkdl.Cloneable { return fakeCloneable{id: id} },
+		Aggregate:    func(values []any) any { return len(values) },
 	}
 }
 

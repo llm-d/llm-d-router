@@ -40,6 +40,7 @@ type LocalSyncer struct {
 }
 
 type boundState struct {
+	read      func(string) fwkdl.Cloneable
 	aggregate func([]any) any
 }
 
@@ -62,18 +63,18 @@ func (s *LocalSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *LocalSyncer) Bind(_ fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &boundState{aggregate: aggregate}
+func (s *LocalSyncer) Bind(_ fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+	return &boundState{read: read, aggregate: aggregate}
 }
 
 func (s *LocalSyncer) syncKey(key fwkdl.StateKey, id string) string {
 	return s.replicaID + ":" + string(key) + ":" + id
 }
 
-func (s *boundState) Set(context.Context, string, any) error { return nil }
+func (s *boundState) Set(context.Context, string) error { return nil }
 
-func (s *boundState) Get(_ context.Context, _ string, local func() fwkdl.Cloneable) (any, error) {
-	return s.aggregate([]any{local()}), nil
+func (s *boundState) Get(_ context.Context, endpointID string) (any, error) {
+	return s.aggregate([]any{s.read(endpointID)}), nil
 }
 
 func (s *boundState) Delete(context.Context, string) error { return nil }

@@ -38,17 +38,18 @@ func TestLocalSyncerAggregatesLiveLocalValue(t *testing.T) {
 	local := 21
 	state := syncer.Bind(
 		"load",
+		func(string) fwkdl.Cloneable { return cloneableInt(local) },
 		aggregate,
 	)
 
-	require.NoError(t, state.Set(context.Background(), "default/backend-0", cloneableInt(local)))
-	value, err := state.Get(context.Background(), "default/backend-0", func() fwkdl.Cloneable { return cloneableInt(local) })
+	require.NoError(t, state.Set(context.Background(), "default/backend-0"))
+	value, err := state.Get(context.Background(), "default/backend-0")
 
 	require.NoError(t, err)
 	assert.Equal(t, cloneableInt(42), value)
 
 	local = 22
-	value, err = state.Get(context.Background(), "default/backend-0", func() fwkdl.Cloneable { return cloneableInt(local) })
+	value, err = state.Get(context.Background(), "default/backend-0")
 	require.NoError(t, err)
 	assert.Equal(t, cloneableInt(44), value)
 }

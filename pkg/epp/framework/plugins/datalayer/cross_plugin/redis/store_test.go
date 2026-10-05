@@ -171,22 +171,23 @@ func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 	}
 	state := store.Bind(
 		testStateKey,
+		func(string) fwkdl.Cloneable { return local },
 		aggregate,
 	)
 
-	require.NoError(t, state.Set(context.Background(), testEndpointID, local))
+	require.NoError(t, state.Set(context.Background(), testEndpointID))
 	require.Equal(t, int64(1), counter.count.Load())
 	require.Equal(t, int64(1), aggregateCalls.Load())
 	cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(7), cached.(*aggregateCacheEntry).value)
 
-	value, err := state.Get(context.Background(), testEndpointID, func() fwkdl.Cloneable { return local })
+	value, err := state.Get(context.Background(), testEndpointID)
 	require.NoError(t, err)
 	require.Equal(t, cloneableInt(11), value)
 
 	local = 5
-	value, err = state.Get(context.Background(), testEndpointID, func() fwkdl.Cloneable { return local })
+	value, err = state.Get(context.Background(), testEndpointID)
 	require.NoError(t, err)
 	require.Equal(t, cloneableInt(12), value)
 

@@ -9,8 +9,8 @@ prepares a peer aggregate in its in-process cache. `Get` reads the contributor's
 live local value and combines it with the cached peer aggregate.
 
 The runtime binds one state handle per contributor. The handle retains the state
-key and aggregation function. Each operation receives its endpoint and local
-value or reader.
+key, live local value reader, and aggregation function. Each operation receives
+only its endpoint.
 
 ## Configuration
 
