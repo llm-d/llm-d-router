@@ -17,3 +17,14 @@ Holds the session identifier extracted from a request. Stored on the
 
 - **`session-id-producer`** (Request Control): extracts the session
   identifier from a configured request header or named cookie.
+
+## `SessionCacheRequest`
+
+Holds a session producer's cache lookup for a request: the identity the engine
+reports the request's blocks under and the candidate engine-block prefixes to
+resolve. Stored on the `InferenceRequest` attribute store.
+
+- **Key**: `SessionCacheRequestDataKey` (no default producer; the
+  `session-prefix-cache-producer` names the producer it consumes)
+- **Type**: `SessionCacheRequest`
+- **Consumer**: [`session-prefix-cache-producer`](../../../requestcontrol/dataproducer/sessionprefixcache/README.md)

@@ -145,7 +145,6 @@ func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer) *Producer {
 	return &Producer{
 		typedName:       plugin.TypedName{Type: PluginType, Name: "test"},
 		kvCacheIndexer:  idx,
-		kvEventsConfig:  &kvevents.Config{},
 		dk:              attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"),
 		pluginState:     plugin.NewPluginState(ctx),
 		blockSizeTokens: testBlockSize,
@@ -734,7 +733,7 @@ func TestPluginFactory_NullKVEventsConfigUsesDefaults(t *testing.T) {
 	p := result.(*Producer)
 	defer p.subscribersManager.Shutdown(ctx)
 
-	require.Equal(t, kvevents.DefaultConfig(), p.kvEventsConfig)
+	require.True(t, p.subscriptions.Enabled())
 }
 
 // A non-positive kvEventsConfig.concurrency fails plugin creation with a
