@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,10 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -34,6 +38,16 @@ import (
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 )
+
+type responderEndpointFactory struct{}
+
+func (responderEndpointFactory) NewEndpoint(_ context.Context, metadata *fwkdl.EndpointMetadata) fwkdl.Endpoint {
+	return fwkdl.NewEndpoint(metadata, fwkdl.NewMetrics())
+}
+
+func (responderEndpointFactory) UpdateEndpoint(_ context.Context, _ fwkdl.Endpoint) {}
+
+func (responderEndpointFactory) ReleaseEndpoint(_ fwkdl.Endpoint) {}
 
 // endpointWithModels builds a scraped endpoint carrying the given models as its collected attribute.
 func endpointWithModels(models ...attrmodels.ModelData) fwkdl.Endpoint {
@@ -48,6 +62,90 @@ func endpointWithIDAndModels(id string, models ...attrmodels.ModelData) fwkdl.En
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: id}}, nil)
 	ep.GetAttributes().Put(attrmodels.ModelsAttributeKey, attrmodels.ModelDataCollection(models))
 	return ep
+}
+
+func TestModelsResponderConcurrentWithPodChurn(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	ds := datastore.NewDatastore(ctx, responderEndpointFactory{})
+	stableID := types.NamespacedName{Namespace: "default", Name: "stable"}
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: stableID, Address: "10.0.0.1", Port: "8000"})
+	stableEndpoints := ds.PodList(datastore.AllPodsPredicate)
+	require.Len(t, stableEndpoints, 1)
+	stableEndpoints[0].GetAttributes().Put(
+		attrmodels.ModelsAttributeKey,
+		attrmodels.ModelDataCollection{{ID: "stable-model"}},
+	)
+
+	const writers = 4
+	const readers = 4
+	const iterations = 200
+
+	responder := New()
+	errs := make(chan error, readers*iterations)
+	var successes atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(writers + readers)
+
+	for worker := 0; worker < writers+readers; worker++ {
+		go func(worker int) {
+			defer wg.Done()
+			if worker < writers {
+				for iteration := 0; iteration < iterations; iteration++ {
+					id := types.NamespacedName{
+						Namespace: "default",
+						Name:      fmt.Sprintf("pod-%d-%d", worker, iteration),
+					}
+					ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{
+						ID:      id,
+						Address: fmt.Sprintf("10.0.%d.%d", worker+1, iteration%250+1),
+						Port:    "8000",
+					})
+					for _, endpoint := range ds.PodList(func(endpoint fwkdl.Endpoint) bool {
+						return endpoint.GetMetadata().ID == id
+					}) {
+						endpoint.GetAttributes().Put(
+							attrmodels.ModelsAttributeKey,
+							attrmodels.ModelDataCollection{{ID: "model-" + id.Name}},
+						)
+					}
+					ds.EndpointDelete(id)
+				}
+				return
+			}
+
+			request := &fwkrc.RequestLine{Method: http.MethodGet, Path: "/v1/models"}
+			for iteration := 0; iteration < iterations; iteration++ {
+				response, err := responder.Respond(ctx, request, ds.PodList(datastore.AllPodsPredicate))
+				if err != nil {
+					errs <- fmt.Errorf("worker %d iteration %d: respond: %w", worker, iteration, err)
+					continue
+				}
+				if response == nil {
+					errs <- fmt.Errorf("worker %d iteration %d: responder declined", worker, iteration)
+					continue
+				}
+				var decoded extmodels.ModelResponse
+				if err := json.Unmarshal(response.Body, &decoded); err != nil {
+					errs <- fmt.Errorf("worker %d iteration %d: decode response: %w", worker, iteration, err)
+					continue
+				}
+				if decoded.Object != "list" || len(decoded.Data) == 0 {
+					errs <- fmt.Errorf("worker %d iteration %d: invalid model list response", worker, iteration)
+					continue
+				}
+				successes.Add(1)
+			}
+		}(worker)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		assert.NoError(t, err)
+	}
+	assert.Equal(t, int64(readers*iterations), successes.Load())
 }
 
 func modelIDs(data []attrmodels.ModelData) []string {

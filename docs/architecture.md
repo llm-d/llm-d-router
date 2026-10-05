@@ -63,6 +63,10 @@ See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/do
 
 #### Request Control
 
+A configured `Responder` may answer a `GET` request locally before this flow starts. A local
+response skips flow-control, endpoint selection, screening, data production, admission
+plugins, and scheduling.
+
 Request control runs once per request before any scheduling profiles:
 
 1. Request headers are processed and flow-control admission completes

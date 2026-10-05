@@ -24,11 +24,14 @@ See [Alpha Plugin CLI Flag](../../../README.md#alpha-plugin-cli-flag---allow-exp
 {
   "object": "list",
   "data": [
-    { "id": "llama-3-8b" },
-    { "id": "legal", "parent": "llama-3-8b" }
+    { "id": "legal" },
+    { "id": "llama-3-8b" }
   ]
 }
 ```
+
+Each item returns only the model `id`, `object`, `created`, `owned_by`, and optional `shutdown_date`
+fields reported by the model server.
 
 Endpoints not yet scraped are skipped. If none have been scraped, the plugin returns HTTP 503
 rather than an empty list, so a client retries instead of caching it. The 503 continues for as
@@ -78,4 +81,5 @@ plugins:
 ## Model data refresh
 
 The model data source polls each endpoint at its configured interval. Requests that arrive after
-the next collection use the updated model or LoRA adapter data.
+the next collection use the updated model or LoRA adapter data. A hot-loaded adapter may remain
+absent from inference candidates until the next successful collection from that endpoint.

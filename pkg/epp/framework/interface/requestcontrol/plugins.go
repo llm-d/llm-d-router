@@ -149,9 +149,9 @@ type LocalResponse struct {
 }
 
 // Responder answers a request before it is matched to a model server. The first non-nil
-// response wins. The order responders are asked in is unspecified, so two responders that
-// claim the same request produce an arbitrary winner. The handler offers only GET requests
-// to responders.
+// response wins. Responders are asked in the order of the slice supplied to the handler.
+// The order in which plugins are discovered is not guaranteed. The handler offers only GET
+// requests to responders.
 type Responder interface {
 	plugin.Plugin
 	// Respond returns a non-nil LocalResponse to answer the request directly; the request
