@@ -16,42 +16,41 @@ limitations under the License.
 
 package request
 
-// MediaPartURLRef returns the URL a media content part references, a setter
-// that writes a replacement back to the field it came from, and whether the
-// part carries a readable URL at all. ok is false for a part type that holds no
-// URL, such as an inline input_audio part, and for one whose URL field is
-// absent or not a string; set is nil in that case.
+// MediaPartURLRef returns the URL a media content part references and a setter
+// that writes a replacement back to the field it came from. set is nil when
+// there is no readable URL: a part type that holds none, such as an inline
+// input_audio part, or one whose URL field is absent or not a string.
 //
 // Where the URL lives differs by part type, and this is the only place that
 // knows: chat-completions nests it at part[type]["url"], a Responses
 // input_image holds it as a bare string at part["image_url"]. A caller that
 // rewrites a URL in place goes through set so it cannot write the wrong shape.
-func MediaPartURLRef(part map[string]any) (url string, set func(string), ok bool) {
+func MediaPartURLRef(part map[string]any) (url string, set func(string)) {
 	switch partType, _ := part[FieldType].(string); partType {
 	case PartTypeImageURL, PartTypeAudioURL, PartTypeVideoURL:
 		nested, isMap := part[partType].(map[string]any)
 		if !isMap {
-			return "", nil, false
+			return "", nil
 		}
-		url, ok = nested[FieldURL].(string)
-		if !ok {
-			return "", nil, false
+		url, isString := nested[FieldURL].(string)
+		if !isString {
+			return "", nil
 		}
-		return url, func(v string) { nested[FieldURL] = v }, true
+		return url, func(v string) { nested[FieldURL] = v }
 	case PartTypeInputImage:
-		url, ok = part[FieldImageURL].(string)
-		if !ok {
-			return "", nil, false
+		url, isString := part[FieldImageURL].(string)
+		if !isString {
+			return "", nil
 		}
-		return url, func(v string) { part[FieldImageURL] = v }, true
+		return url, func(v string) { part[FieldImageURL] = v }
 	}
-	return "", nil, false
+	return "", nil
 }
 
 // MediaPartURL returns the URL a media content part references, or "" when
 // there is none to fetch.
 func MediaPartURL(part map[string]any) string {
-	url, _, _ := MediaPartURLRef(part)
+	url, _ := MediaPartURLRef(part)
 	return url
 }
 

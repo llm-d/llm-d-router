@@ -146,8 +146,8 @@ func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
 	}
 }
 
-// See collectResponsesImageRefs' doc comment for why a file_id-referenced
-// image is rejected rather than skipped.
+// See collectImageRefs' doc comment for why a file_id-referenced image is
+// rejected rather than skipped.
 func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
 	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
 
@@ -673,8 +673,8 @@ func TestReplaceMediaURLsStep_MalformedBody(t *testing.T) {
 }
 
 // TestReplaceMediaURLsStep_RejectsMalformedImageURLPart locks in that
-// collectChatCompletionsImageRefs rejects a malformed image_url part rather
-// than silently skipping it; see its doc comment for why.
+// collectImageRefs rejects a malformed image_url part rather than silently
+// skipping it; see its doc comment for why.
 func TestReplaceMediaURLsStep_RejectsMalformedImageURLPart(t *testing.T) {
 	tests := []struct {
 		name string
@@ -720,7 +720,7 @@ func TestReplaceMediaURLsStep_RejectsMalformedImageURLPart(t *testing.T) {
 }
 
 // TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts covers the
-// concrete failure collectChatCompletionsImageRefs's doc comment describes:
+// concrete failure collectImageRefs's doc comment describes:
 // skipping the malformed part instead of rejecting it would leave the valid
 // image's hash misassigned to the malformed part.
 func TestReplaceMediaURLsStep_RejectsMixedMalformedAndValidImageParts(t *testing.T) {

@@ -223,8 +223,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 func collectImageRefs(items []any, apiType reqcommon.APIType) ([]imageRef, error) {
 	var refs []imageRef
 	for _, image := range collectImageParts(items, apiType) {
-		url, setURL, ok := reqcommon.MediaPartURLRef(image.part)
-		if !ok || url == "" {
+		url, setURL := reqcommon.MediaPartURLRef(image.part)
+		if setURL == nil || url == "" {
 			return nil, fmt.Errorf("%s: image part carries no fetchable URL: %w", image.location, pipeline.ErrBadRequest)
 		}
 		refs = append(refs, imageRef{location: image.location, url: url, setURL: setURL})
