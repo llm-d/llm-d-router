@@ -144,6 +144,31 @@ func TestServeWithDrainManagerFailsBeforeElection(t *testing.T) {
 	}
 }
 
+// With leader election disabled there is no lease to lose, so a manager failure
+// stops both servers at once and the error is returned.
+func TestServeWithDrainManagerFailsWithoutLeaderElection(t *testing.T) {
+	errMgr := errors.New("controller failed")
+	extProc, health := newFakeServer(), newFakeServer()
+	close(extProc.release)
+	close(health.release)
+	draining := &atomic.Bool{}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- serveWithDrain(context.Background(), func(context.Context) error { return errMgr },
+			extProc.run, health.run, draining, nil, time.Minute)
+	}()
+	if err := waitErr(t, done); !errors.Is(err, errMgr) {
+		t.Fatalf("serveWithDrain returned %v, want %v", err, errMgr)
+	}
+	if !isClosed(extProc.stopped) || !isClosed(health.stopped) {
+		t.Fatal("servers still running after serveWithDrain returned")
+	}
+	if draining.Load() {
+		t.Fatal("draining set by a manager failure without leader election")
+	}
+}
+
 // On SIGTERM the manager returns nil; the servers drain the same way.
 func TestServeWithDrainOnSIGTERM(t *testing.T) {
 	const drain = 300 * time.Millisecond

@@ -298,19 +298,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	return r.runWithGracefulShutdown(ctx, mgr, opts.DrainTimeout)
+	return r.runWithGracefulShutdown(ctx, mgr, opts.EnableLeaderElection, opts.DrainTimeout)
 }
 
 // runWithGracefulShutdown runs the ext_proc and health servers on a context that
 // outlives the manager; see serveWithDrain. setup() has stashed the servers on r.
-func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, drainTimeout time.Duration) error {
+func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, leaderElection bool, drainTimeout time.Duration) error {
 	extProc := func(c context.Context) error {
 		return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
 	}
 	health := func(c context.Context) error {
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
 	}
-	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, r.isLeader, drainTimeout)
+	// Without leader election setup() sets isLeader for readiness alone, so it
+	// says nothing about a lease.
+	var elected *atomic.Bool
+	if leaderElection {
+		elected = r.isLeader
+	}
+	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
 }
 
 // serveWithDrain runs extProc and health on a context that outlives the manager.
@@ -322,7 +328,8 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 // are served rather than rejected. ext_proc then stops gracefully, finishing its
 // streams, and the health server stops after it so liveness holds meanwhile. A
 // drainTimeout of 0 stops ext_proc as soon as the manager terminates. A manager
-// that fails before election stops both servers at once.
+// that fails before election, or with leader election disabled (elected is nil),
+// stops both servers at once.
 func serveWithDrain(ctx context.Context, startManager func(context.Context) error, extProc, health func(context.Context) error,
 	draining, elected *atomic.Bool, drainTimeout time.Duration) error {
 	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
