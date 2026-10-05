@@ -22,12 +22,15 @@ limitations under the License.
 // contract statically, over the declarations alone.
 //
 // The scope covers endpoint attributes reached through the extension points
-// that receive a []scheduling.Endpoint: filters, scorers, and DataProducers.
-// Through request_scope.go it also covers the per-request store at those points,
-// at PreRequest, and in the profile handler.
+// that receive endpoints: Screeners, DataProducers, Admitters, filters,
+// scorers, and pickers. Through request_scope.go it also covers the
+// per-request store at those points, at RequestHeader, PreRequest,
+// ResponseReceived, and ResponseStreaming, and in the profile handler.
 //
 // Datalayer extractors stay outside it: they write through
 // Endpoint.GetAttributes() directly rather than through a scoped endpoint.
+// Fairness policies do too: they reach the request through queue items rather
+// than a parameter.
 
 package datalayer
 
@@ -345,8 +348,14 @@ func Unscope(endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 // entries. Unwrapping each key as it is summed avoids building a rekeyed copy of
 // every scorer's result.
 func UnscopeEndpoint(endpoint fwksched.Endpoint) fwksched.Endpoint {
-	if scoped, ok := endpoint.(*ScopedEndpoint); ok {
-		return scoped.inner
+	switch e := endpoint.(type) {
+	case *ScopedEndpoint:
+		return e.inner
+	case *fwksched.ScoredEndpoint:
+		// A picker can return a copy of a candidate it was given.
+		if scoped, ok := e.Endpoint.(*ScopedEndpoint); ok {
+			return &fwksched.ScoredEndpoint{Endpoint: scoped.inner, Score: e.Score}
+		}
 	}
 	return endpoint
 }
