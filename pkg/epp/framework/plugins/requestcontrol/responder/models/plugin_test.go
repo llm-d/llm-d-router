@@ -88,7 +88,8 @@ func TestAggregate_DuplicateModelFromMultipleEndpoints(t *testing.T) {
 		fwkdl.NewEndpoint(nil, nil), // registered but not yet scraped
 	}
 
-	body, gotCollected := aggregate(endpoints)
+	body, gotCollected, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	// Two of the three endpoints have been scraped; the unscraped one does not count.
 	assert.Equal(t, 2, gotCollected)
@@ -98,9 +99,26 @@ func TestAggregate_DuplicateModelFromMultipleEndpoints(t *testing.T) {
 	assert.Equal(t, []string{"base", "finance", "legal"}, modelIDs(resp.Data))
 	for _, m := range resp.Data {
 		if m.ID == "legal" || m.ID == "finance" {
-			assert.Equal(t, "base", m.Parent, "adapter %q should carry its parent", m.ID)
+			assert.Empty(t, m.Parent, "adapter %q parent must remain internal", m.ID)
 		}
 	}
+}
+
+func TestAggregateOmitsInternalAndUnsetFields(t *testing.T) {
+	t.Parallel()
+
+	body, _, err := aggregate([]fwkdl.Endpoint{
+		endpointWithModels(attrmodels.ModelData{ID: "legal", Parent: "llama-3-8b"}),
+	})
+	require.NoError(t, err)
+
+	var response struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &response))
+	require.Len(t, response.Data, 1)
+	assert.NotContains(t, response.Data[0], "parent")
+	assert.NotContains(t, response.Data[0], "shutdown_date")
 }
 
 func TestAggregate_DuplicateModelOnSameEndpoint(t *testing.T) {
@@ -115,7 +133,8 @@ func TestAggregate_DuplicateModelOnSameEndpoint(t *testing.T) {
 		),
 	}
 
-	body, gotCollected := aggregate(endpoints)
+	body, gotCollected, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	assert.Equal(t, 1, gotCollected)
 	resp := unmarshalModelResponse(t, body)
@@ -128,22 +147,25 @@ func TestAggregate_PreservesOpenAIFields(t *testing.T) {
 
 	endpoints := []fwkdl.Endpoint{
 		endpointWithModels(attrmodels.ModelData{
-			ID:      "base",
-			Object:  "model",
-			Created: 1699999999,
-			OwnedBy: "vllm",
+			ID:           "base",
+			Object:       "model",
+			Created:      1699999999,
+			OwnedBy:      "vllm",
+			ShutdownDate: "2026-10-23",
 		}),
 	}
 
-	body, _ := aggregate(endpoints)
+	body, _, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	resp := unmarshalModelResponse(t, body)
 	require.Len(t, resp.Data, 1)
 	assert.Equal(t, attrmodels.ModelData{
-		ID:      "base",
-		Object:  "model",
-		Created: 1699999999,
-		OwnedBy: "vllm",
+		ID:           "base",
+		Object:       "model",
+		Created:      1699999999,
+		OwnedBy:      "vllm",
+		ShutdownDate: "2026-10-23",
 	}, resp.Data[0])
 }
 
@@ -158,7 +180,8 @@ func TestAggregate_DeterministicDedupWinner(t *testing.T) {
 		endpointWithIDAndModels("ep-a", attrmodels.ModelData{ID: "shared", OwnedBy: "from-a", Created: 100}),
 	}
 
-	body, _ := aggregate(endpoints)
+	body, _, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	resp := unmarshalModelResponse(t, body)
 	require.Len(t, resp.Data, 1)
@@ -172,7 +195,8 @@ func TestAggregate_DoesNotReorderCallerSlice(t *testing.T) {
 	first := endpointWithIDAndModels("ep-b", attrmodels.ModelData{ID: "b"})
 	endpoints := []fwkdl.Endpoint{first, endpointWithIDAndModels("ep-a", attrmodels.ModelData{ID: "a"})}
 
-	aggregate(endpoints)
+	_, _, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	assert.Same(t, first, endpoints[0])
 }
@@ -180,7 +204,8 @@ func TestAggregate_DoesNotReorderCallerSlice(t *testing.T) {
 func TestAggregate_NoEndpoints(t *testing.T) {
 	t.Parallel()
 
-	body, gotCollected := aggregate(nil)
+	body, gotCollected, err := aggregate(nil)
+	require.NoError(t, err)
 
 	assert.Equal(t, 0, gotCollected)
 	assert.Nil(t, body)
@@ -195,7 +220,8 @@ func TestAggregate_NotScrapedYet(t *testing.T) {
 		fwkdl.NewEndpoint(nil, nil),
 	}
 
-	_, gotCollected := aggregate(endpoints)
+	_, gotCollected, err := aggregate(endpoints)
+	require.NoError(t, err)
 
 	assert.Equal(t, 0, gotCollected)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -40,6 +41,21 @@ const ModelsResponderType = "models-responder"
 
 // openAIModelsPath is the route this plugin answers.
 const openAIModelsPath = "/v1/models"
+
+// openAIModel is a public model item returned by the /v1/models API.
+type openAIModel struct {
+	ID           string `json:"id"`
+	Object       string `json:"object,omitempty"`
+	Created      int64  `json:"created,omitempty"`
+	OwnedBy      string `json:"owned_by,omitempty"`
+	ShutdownDate string `json:"shutdown_date,omitempty"`
+}
+
+// openAIModelListResponse is the public response returned by /v1/models.
+type openAIModelListResponse struct {
+	Object string        `json:"object"`
+	Data   []openAIModel `json:"data"`
+}
 
 var (
 	_ fwkrc.Responder          = &Responder{}
@@ -158,7 +174,7 @@ func (p *Responder) Screen(ctx context.Context, request *fwksched.InferenceReque
 }
 
 // Respond answers GET /v1/models and declines everything else.
-func (p *Responder) Respond(_ context.Context, request *fwkrc.RequestLine, endpoints []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+func (p *Responder) Respond(ctx context.Context, request *fwkrc.RequestLine, endpoints []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
 	if request == nil || request.Method != http.MethodGet {
 		return nil, nil //nolint:nilnil
 	}
@@ -166,7 +182,14 @@ func (p *Responder) Respond(_ context.Context, request *fwkrc.RequestLine, endpo
 		return nil, nil //nolint:nilnil
 	}
 
-	body, collected := aggregate(endpoints)
+	body, collected, err := aggregate(endpoints)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to encode /v1/models response")
+		return nil, errcommon.Error{
+			Code: errcommon.Internal,
+			Msg:  "failed to encode model response",
+		}
+	}
 	if collected == 0 {
 		// No endpoint has reported its model list: either the pool is empty, or the endpoints
 		// are still being scraped after a cold start or scale-up. Fail so the client retries
@@ -179,7 +202,7 @@ func (p *Responder) Respond(_ context.Context, request *fwkrc.RequestLine, endpo
 
 	return &fwkrc.LocalResponse{
 		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"content-type": "application/json"},
+		Headers:    map[string]string{fwkrequest.HeaderContentType: "application/json"},
 		Body:       body,
 	}, nil
 }
@@ -188,7 +211,7 @@ func (p *Responder) Respond(_ context.Context, request *fwkrc.RequestLine, endpo
 // ID, sorted alphabetically so the response is the same every time. The second return value
 // is how many endpoints have reported a model list, letting the caller distinguish "nothing
 // collected yet" from a genuinely empty result.
-func aggregate(endpoints []fwkdl.Endpoint) (json.RawMessage, int) {
+func aggregate(endpoints []fwkdl.Endpoint) (json.RawMessage, int, error) {
 	// Sort endpoints first so the same endpoint's copy of a duplicated model ID always wins.
 	ordered := slices.Clone(endpoints)
 	slices.SortFunc(ordered, func(a, b fwkdl.Endpoint) int {
@@ -196,7 +219,7 @@ func aggregate(endpoints []fwkdl.Endpoint) (json.RawMessage, int) {
 	})
 
 	seen := make(map[string]struct{})
-	data := make([]attrmodels.ModelData, 0)
+	data := make([]openAIModel, 0)
 	collected := 0 // endpoints that have reported their model list at least once
 
 	for _, ep := range ordered {
@@ -210,17 +233,23 @@ func aggregate(endpoints []fwkdl.Endpoint) (json.RawMessage, int) {
 				continue
 			}
 			seen[model.ID] = struct{}{}
-			data = append(data, model)
+			data = append(data, openAIModel{
+				ID:           model.ID,
+				Object:       model.Object,
+				Created:      model.Created,
+				OwnedBy:      model.OwnedBy,
+				ShutdownDate: model.ShutdownDate,
+			})
 		}
 	}
 	if collected == 0 {
-		return nil, 0
+		return nil, 0, nil
 	}
-	slices.SortFunc(data, func(a, b attrmodels.ModelData) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(data, func(a, b openAIModel) int { return strings.Compare(a.ID, b.ID) })
 
-	body, err := json.Marshal(extmodels.ModelResponse{Object: "list", Data: data})
+	body, err := json.Marshal(openAIModelListResponse{Object: "list", Data: data})
 	if err != nil {
-		return nil, 0
+		return nil, 0, err
 	}
-	return body, collected
+	return body, collected, nil
 }
