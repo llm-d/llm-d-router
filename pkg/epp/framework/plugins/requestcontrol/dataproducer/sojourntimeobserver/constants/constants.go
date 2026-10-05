@@ -17,7 +17,7 @@ limitations under the License.
 package constants
 
 // SojournTimeObserverProducerType is the plugin type of the producer that
-// observes per-endpoint sojourn samples, split into TTFT (dispatchedAt to
+// observes per-endpoint sojourn samples, split into TTFT+queue (dispatchedAt to
 // firstChunkAt) and decode (firstChunkAt to endOfStreamAt), and publishes
 // the paired t-digest snapshot the mrl-scorer-hub reads.
 const SojournTimeObserverProducerType = "sojourn-time-observer-hub"

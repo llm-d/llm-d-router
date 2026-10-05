@@ -30,7 +30,9 @@ import (
 )
 
 // Interval is the cadence at which the datalayer calls Dispatch.
-func (p *Observer) Interval() time.Duration { return p.cfg.interval }
+func (p *Observer) Interval() time.Duration {
+	return p.cfg.interval
+}
 
 // AppendExtractor rejects extractors: this dispatcher publishes its own state
 // rather than sourcing data for others.
@@ -38,17 +40,39 @@ func (p *Observer) AppendExtractor(fwkplugin.Plugin) error {
 	return errors.New("sojourn time observer does not accept extractors")
 }
 
-// Dispatch recomputes and publishes one endpoint's snapshot; the datalayer's
-// collector calls it once per Interval. When either digest is below
-// minSamples, the snapshot pointer is left as-is (nil until the first warm
-// flush) so the scorer sees the endpoint as cold.
+// Dispatch recomputes and publishes one endpoint's two attributes.
+// The datalayer's collector calls it once per Interval. The digest snapshot is
+// left as-is when either digest is below minSamples (so the scorer sees the
+// endpoint as cold); the in-flight snapshot is refreshed unconditionally so
+// consumers always see the newest in-flight list, capped in staleness by
+// Interval.
 func (p *Observer) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	if ep == nil || ep.GetMetadata() == nil {
 		return nil
 	}
 	id := ep.GetMetadata().ID.String()
-	p.publish(ctx, id, p.stateForOrCreate(id))
+	state := p.stateForOrCreate(id)
+	p.publish(ctx, id, state)
+	p.publishInFlight(id, state)
 	return nil
+}
+
+// publishInFlight snapshots the endpoint's in-flight index and swaps the
+// pointer behind InFlightRequestsDataKey. Nil snapshot when the endpoint has
+// no in-flight entries, so the DynamicAttribute closure returns nil and the
+// endpoint reads as having no in-flight requests.
+func (p *Observer) publishInFlight(id string, state *endpointState) {
+	if state == nil {
+		return
+	}
+	p.mu.RLock()
+	entries := p.snapshotInFlightLocked(id)
+	p.mu.RUnlock()
+	if entries == nil {
+		state.publishedInFlight.Store(nil)
+		return
+	}
+	state.publishedInFlight.Store(&attrsojourn.InFlightRequestsSnapshot{Requests: entries})
 }
 
 // publish serializes both digests and swaps the snapshot pointer when both

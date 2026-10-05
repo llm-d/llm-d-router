@@ -23,15 +23,17 @@ package mrlscorer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrsojourn "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/sojourntime"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sojourntimeobserver"
 )
 
 // ScorerType is the plugin type of the mrl scorer.
@@ -44,13 +46,20 @@ var (
 
 // Config holds the scorer's tunables.
 type Config struct {
-	// Producer instance to read the SojournEstimatorSnapshot from. Empty
-	// uses the default producer (the type-named instance).
+	// ExplorationRate is the probability that a cold endpoint (no
+	// published snapshot yet) is probed on a scoring call. Range [0, 1].
+	// On a probe the endpoint's final score is overridden to 1.0 so it
+	// can win a scheduling decision.
+	ExplorationRate float64 `json:"explorationRate,omitempty"`
+	// Producer instance to read from. Empty uses the default producer (the
+	// type-named instance).
 	SojournTimeObserverProducerName string `json:"sojournTimeObserverProducerName,omitempty"`
 }
 
 // DefaultConfig is decoded over by the factory.
-var DefaultConfig = Config{}
+var DefaultConfig = Config{
+	ExplorationRate: 0.1,
+}
 
 // Scorer ranks candidate endpoints by expected remaining in-flight work under
 // a two-term MRL residual: for each dispatched-not-completed request on the
@@ -60,49 +69,37 @@ var DefaultConfig = Config{}
 type Scorer struct {
 	typedName fwkplugin.TypedName
 
-	snapshotDataKey fwkplugin.DataKey
-	observer        *sojourntimeobserver.Observer
+	snapshotDataKey         fwkplugin.DataKey
+	inFlightRequestsDataKey fwkplugin.DataKey
+
+	// explorationRate is the resolved probability that a cold endpoint is
+	// probed on a scoring call. Range [0, 1]; 0 disables the coin.
+	explorationRate float64
 }
 
-// ScorerFactory builds a Scorer from its plugin configuration.
-//
-// The observer handle is resolved at factory time so a misconfigured
-// deployment fails at plugin-load rather than silently returning neutral
-// scores at request time. The scorer's Consumes declaration also requires
-// the snapshot DataKey, so the framework's DAG will already refuse to load
-// this scorer without a producer providing that key.
-func ScorerFactory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	if handle == nil {
-		return nil, errors.New("plugin handle is required")
-	}
-
+// ScorerFactory builds a Scorer from its plugin configuration. It reads only
+// its parameters; every runtime input arrives through the endpoint's
+// AttributeMap under the DataKeys declared by Consumes.
+func ScorerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := DefaultConfig
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters for plugin %q: %w", name, err)
 		}
 	}
-
-	producerName := cfg.SojournTimeObserverProducerName
-	if producerName == "" {
-		producerName = sojourntimeobserver.SojournTimeObserverProducerType
+	if cfg.ExplorationRate < 0 || cfg.ExplorationRate > 1 {
+		return nil, fmt.Errorf("plugin %q: explorationRate must be in [0, 1], got %v", name, cfg.ExplorationRate)
 	}
-	observer, err := fwkplugin.PluginByType[*sojourntimeobserver.Observer](handle, producerName)
-	if err != nil {
-		return nil, fmt.Errorf("mrl-scorer-hub %q: cannot resolve sojourn-time-observer-hub %q: %w",
-			name, producerName, err)
-	}
-
-	scorer := NewScorer(observer, cfg).WithName(name)
-	return scorer, nil
+	return NewScorer(cfg).WithName(name), nil
 }
 
-// NewScorer initializes a Scorer bound to the given observer.
-func NewScorer(observer *sojourntimeobserver.Observer, cfg Config) *Scorer {
+// NewScorer initializes a Scorer from cfg.
+func NewScorer(cfg Config) *Scorer {
 	return &Scorer{
-		typedName:       fwkplugin.TypedName{Type: ScorerType, Name: ScorerType},
-		snapshotDataKey: attrsojourn.SojournEstimatorSnapshotDataKey.WithNonEmptyProducerName(cfg.SojournTimeObserverProducerName),
-		observer:        observer,
+		typedName:               fwkplugin.TypedName{Type: ScorerType, Name: ScorerType},
+		snapshotDataKey:         attrsojourn.SojournEstimatorSnapshotDataKey.WithNonEmptyProducerName(cfg.SojournTimeObserverProducerName),
+		inFlightRequestsDataKey: attrsojourn.InFlightRequestsDataKey.WithNonEmptyProducerName(cfg.SojournTimeObserverProducerName),
+		explorationRate:         cfg.ExplorationRate,
 	}
 }
 
@@ -119,63 +116,155 @@ func (s *Scorer) WithName(name string) *Scorer {
 // affinity.
 func (s *Scorer) Category() fwksched.ScorerCategory { return fwksched.Distribution }
 
-// Consumes declares the snapshot DataKey as Required so the DAG orders the
-// producer's construction ahead of the scorer's and auto-creates it when the
-// config omits it.
+// Consumes declares both inputs Required so the DAG orders the producer's
+// construction ahead of the scorer's and auto-creates it when the config
+// omits it.
 func (s *Scorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			s.snapshotDataKey: attrsojourn.SojournEstimatorSnapshot{},
+			s.snapshotDataKey:         attrsojourn.SojournEstimatorSnapshot{},
+			s.inFlightRequestsDataKey: attrsojourn.InFlightRequestsSnapshot{},
 		},
 	}
 }
 
-// Score ranks endpoints by their two-term MRL residual, normalized argmin.
+// Score ranks endpoints by their two-term MRL residual, normalized argmin,
+// with cold-endpoint seeding and an exploration coin so a cold endpoint does
+// not deterministically capture traffic.
 //
 // Per candidate:
 //   - Read the SojournEstimatorSnapshot from the endpoint's AttributeMap.
-//     A nil snapshot means the endpoint is cold (neither digest warm), and
-//     that candidate is assigned a residual of 0, so it participates in the
-//     normalization on equal footing with a fully drained warm endpoint.
-//   - Read live in-flight requests from the observer.
-//   - Sum the two-term residual across in-flight requests.
-//
-// Min-max normalize across candidates so the lowest residual scores 1.0.
-// Ties (all residuals equal) yield 1.0 for every endpoint; the max-score
-// picker then falls through to its random-shuffle tiebreak.
-func (s *Scorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
-	now := time.Now()
-	residuals := make([]float64, len(endpoints))
-	minR, maxR := math.MaxFloat64, -math.MaxFloat64
-
-	for i, endpoint := range endpoints {
-		r := s.residualFor(endpoint, now)
-		residuals[i] = r
-		if r < minR {
-			minR = r
+//     A nil snapshot means the endpoint is cold (observer has not yet
+//     flushed a warm snapshot).
+//   - Read the InFlightRequestsSnapshot from the endpoint's AttributeMap.
+//   - Sum the two-term residual across in-flight requests (warm only).
+func (s *Scorer) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores, residuals, inflightCounts, colds := s.scoreAt(time.Now(), endpoints)
+	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
+		for i, endpoint := range endpoints {
+			if endpoint == nil || endpoint.GetMetadata() == nil {
+				continue
+			}
+			debugLogger.Info("mrl-scorer score",
+				"endpoint", endpoint.GetMetadata().ID.String(),
+				"residual", residuals[i],
+				"score", scores[endpoint],
+				"inflightCount", inflightCounts[i],
+				"cold", colds[i])
 		}
-		if r > maxR {
-			maxR = r
-		}
-	}
-
-	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	span := maxR - minR
-	for i, endpoint := range endpoints {
-		if span <= 0 {
-			// Every endpoint at the same residual, or a single candidate.
-			// Neutral score lets the picker random-shuffle.
-			scores[endpoint] = 1.0
-			continue
-		}
-		scores[endpoint] = (maxR - residuals[i]) / span
 	}
 	return scores
 }
 
+// eval holds pass-1 per-endpoint state. snap is nil for a cold endpoint;
+// residual is 0 in that case and pass 2 overwrites it with minR before
+// normalization so a cold endpoint cannot beat a warm one on normalization
+// alone.
+type eval struct {
+	snap          *attrsojourn.SojournEstimatorSnapshot
+	residual      float64
+	inflightCount int
+}
+
+// scoreAt is the clock-injected core of Score. Separating "read the clock"
+// from "score at a given instant" lets tests drive age-dependent paths with
+// a fixed now, matching the clock-threading idiom used elsewhere in the tree.
+// Returns the score map plus three per-endpoint slices aligned with the
+// endpoints slice — Score consumes them to emit a per-candidate DEBUG trace.
+func (s *Scorer) scoreAt(now time.Time, endpoints []fwksched.Endpoint) (map[fwksched.Endpoint]float64, []float64, []int, []bool) {
+	evals := make([]eval, len(endpoints))
+	minR, maxR := math.MaxFloat64, 0.0
+	anyWarm := false
+
+	// Pass 1: classify every candidate warm or cold, record per-endpoint
+	// state, and track the min/max residual over WARM endpoints only so
+	// cold endpoints cannot widen or narrow the normalization span.
+	for i, endpoint := range endpoints {
+		var snap *attrsojourn.SojournEstimatorSnapshot
+		if endpoint != nil {
+			snap = s.readSnapshot(endpoint)
+		}
+		r := s.residualFor(endpoint, now)
+		inflight := 0
+		if endpoint != nil {
+			inflight = len(s.readInFlight(endpoint))
+		}
+		evals[i] = eval{snap: snap, residual: r, inflightCount: inflight}
+		if snap != nil {
+			anyWarm = true
+			minR = min(minR, r)
+			maxR = max(maxR, r)
+		}
+	}
+
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	residuals := make([]float64, len(endpoints))
+	inflightCounts := make([]int, len(endpoints))
+	colds := make([]bool, len(endpoints))
+
+	// All candidates cold: nothing to rank. Every endpoint ties at 1.0 and
+	// the max-score picker's tie-break spreads traffic.
+	if !anyWarm {
+		for i, endpoint := range endpoints {
+			if endpoint != nil {
+				scores[endpoint] = 1.0
+			}
+			residuals[i] = evals[i].residual
+			inflightCounts[i] = evals[i].inflightCount
+			colds[i] = evals[i].snap == nil
+		}
+		return scores, residuals, inflightCounts, colds
+	}
+
+	// Pass 2: seed cold endpoints at minR, normalize across all candidates
+	// (cold ones now share minR with the least-loaded warm), then apply the
+	// per-cold exploration coin on top of the normalized score.
+	for i, endpoint := range endpoints {
+		e := &evals[i]
+		cold := e.snap == nil
+		if cold {
+			e.residual = minR
+		}
+		var score float64
+		if maxR == minR {
+			// All warm residuals equal and all cold seeded to the same
+			// value — everyone ties.
+			score = 1.0
+		} else {
+			score = (maxR - e.residual) / (maxR - minR)
+		}
+
+		// Independent coin per cold endpoint. Runs AFTER normalization so
+		// a probe never shifts the ratio between warm endpoints. The
+		// no-probe arm drops cold to 0 only when the warm residuals span
+		// a real range: with maxR == minR every warm scored 1.0 via the
+		// tie branch, so there is no warm-side ranking the cold would be
+		// dropped out of; the seeded score stays.
+		if s.explorationRate > 0 && cold {
+			if rand.Float64() < s.explorationRate {
+				score = 1.0 // probe: cold wins this decision
+			} else if maxR > minR {
+				score = 0 // no probe: cold loses to the warm ranking
+			}
+		}
+
+		// Guard the map write so a nil endpoint in the slice does not
+		// become a result-map key. The parallel index slices still
+		// record data at this slot for the DEBUG log (which itself
+		// skips nil endpoints when iterating).
+		if endpoint != nil {
+			scores[endpoint] = score
+		}
+		residuals[i] = e.residual
+		inflightCounts[i] = e.inflightCount
+		colds[i] = cold
+	}
+	return scores, residuals, inflightCounts, colds
+}
+
 // residualFor computes the two-term MRL residual for one endpoint.
 func (s *Scorer) residualFor(endpoint fwksched.Endpoint, now time.Time) float64 {
-	if endpoint == nil || endpoint.GetMetadata() == nil {
+	if endpoint == nil {
 		return 0
 	}
 	snap := s.readSnapshot(endpoint)
@@ -187,7 +276,7 @@ func (s *Scorer) residualFor(endpoint fwksched.Endpoint, now time.Time) float64 
 		return 0
 	}
 
-	inflight := s.observer.InFlightRequestsFor(endpoint.GetMetadata().ID.String())
+	inflight := s.readInFlight(endpoint)
 	if len(inflight) == 0 {
 		return 0
 	}
@@ -224,4 +313,19 @@ func (s *Scorer) readSnapshot(endpoint fwksched.Endpoint) *attrsojourn.SojournEs
 		return nil
 	}
 	return snap
+}
+
+// readInFlight returns the endpoint's in-flight request list, or nil when
+// the endpoint has no entry under the in-flight DataKey or the entry is not
+// an *InFlightRequestsSnapshot.
+func (s *Scorer) readInFlight(endpoint fwksched.Endpoint) []attrsojourn.InFlightRequest {
+	raw, ok := endpoint.Get(s.inFlightRequestsDataKey)
+	if !ok || raw == nil {
+		return nil
+	}
+	snap, ok := raw.(*attrsojourn.InFlightRequestsSnapshot)
+	if !ok || snap == nil {
+		return nil
+	}
+	return snap.Requests
 }

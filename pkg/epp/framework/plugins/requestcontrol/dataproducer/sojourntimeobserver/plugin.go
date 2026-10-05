@@ -46,18 +46,8 @@ import (
 )
 
 const (
-	// SojournTimeObserverProducerType is the plugin type of this producer.
 	SojournTimeObserverProducerType = observerconstants.SojournTimeObserverProducerType
 )
-
-// InFlightRequest is one dispatched-not-completed request on an endpoint, as
-// the mrl-scorer-hub reads it via InFlightRequestsFor. Wall-clock timestamps.
-// FirstChunkAt is the zero Time when no chunk has arrived yet — the caller
-// checks IsZero() to decide which term of the two-term MRL residual applies.
-type InFlightRequest struct {
-	DispatchedAt time.Time
-	FirstChunkAt time.Time
-}
 
 // Config holds the observer's parameters. Durations are time.ParseDuration
 // strings.
@@ -120,11 +110,11 @@ var (
 	_ fwkdl.PollingDispatcher  = &Observer{}
 )
 
-// Observer records per-endpoint TTFT and decode samples into per-endpoint
-// t-digests and publishes serialized snapshots. It also maintains a
-// fleet-wide in-flight index (dispatchedAt/firstChunkAt per request per
-// endpoint) that the mrl-scorer-hub reads at scoring time via
-// InFlightRequestsFor.
+// Observer records per-endpoint TTFT and decode latency samples into per-endpoint
+// t-digests and publishes two per-endpoint attributes: a serialized digest
+// snapshot under SojournEstimatorSnapshotDataKey, and the endpoint's in-flight
+// request list under InFlightRequestsDataKey. Both are refreshed on the flush
+// tick and read lock-free through DynamicAttribute closures.
 //
 // Process-lifetime singleton serving every request, so all shared state is
 // guarded.
@@ -132,23 +122,32 @@ type Observer struct {
 	typedName fwkplugin.TypedName
 	cfg       resolvedConfig
 
-	snapshotDataKey fwkplugin.DataKey // what this producer publishes
+	snapshotDataKey         fwkplugin.DataKey // paired-digest snapshot
+	inFlightRequestsDataKey fwkplugin.DataKey // per-endpoint in-flight list
 
-	// mu guards the two maps below. Per-endpoint digest mutation takes
+	// mu guards the three maps below. Per-endpoint digest mutation takes
 	// endpointState.mu; the two locks are never held simultaneously in the
-	// same direction, so lock order is: mu (for state or inflight) then
-	// endpointState.mu.
+	// same direction, so lock order is: mu (for state, inflight, or
+	// requestToEndpoint) then endpointState.mu.
 	mu sync.RWMutex
 
-	// state carries the paired digests plus published snapshot pointer per
-	// endpoint.
+	// state carries the paired digests plus the two published attribute
+	// pointers per endpoint.
 	state map[string]*endpointState
 
 	// inflight is the fleet-wide in-flight index: for each endpoint, one
 	// entry per dispatched-not-completed request on that endpoint. Written
-	// on PreRequest, first-chunk, and end-of-stream. Read by the scorer via
-	// InFlightRequestsFor.
+	// on PreRequest, first-chunk, and end-of-stream; snapshotted into
+	// state.publishedInFlight on the flush tick.
 	inflight map[string]map[string]*inflightEntry
+
+	// requestToEndpoint maps a dispatched-not-completed request ID to the
+	// endpoint it was dispatched on. Kept in lock-step with inflight so
+	// noteFirstChunk and noteEndOfStream resolve the owning endpoint in
+	// O(1) instead of scanning every endpoint's inner map. The invariant:
+	// a requestID is present in exactly one inflight[*] inner map iff it
+	// is present here with that endpoint as the value.
+	requestToEndpoint map[string]string
 }
 
 // inflightEntry is one dispatched-not-completed request's timestamps.
@@ -158,16 +157,22 @@ type inflightEntry struct {
 	firstChunkAt time.Time
 }
 
-// endpointState carries one endpoint's TTFT and decode digests plus its
-// currently-published snapshot pointer.
+// endpointState carries one endpoint's TTFT and decode digests plus the two
+// pointers the DynamicAttribute closures load.
 type endpointState struct {
 	mu     sync.Mutex
 	ttft   *tdigest.TDigest
 	decode *tdigest.TDigest
 
-	// published is read lock-free by the DynamicAttribute closure the scorer
-	// reads through. It is set to non-nil only when both digests are warm.
+	// published is read lock-free by the SojournEstimatorSnapshotDataKey
+	// closure. Set to non-nil only when both digests are warm.
 	published atomic.Pointer[attrsojourn.SojournEstimatorSnapshot]
+
+	// publishedInFlight is read lock-free by the InFlightRequestsDataKey
+	// closure. Refreshed on the flush tick with a copy of the endpoint's
+	// current in-flight index, so its freshness is bounded by
+	// intervalDuration. Nil until the first flush.
+	publishedInFlight atomic.Pointer[attrsojourn.InFlightRequestsSnapshot]
 }
 
 // SojournTimeObserverFactory builds an Observer. The recompute is driven by the
@@ -191,32 +196,36 @@ func SojournTimeObserverFactory(name string, rawParameters *json.Decoder, handle
 	return observer, nil
 }
 
-// NewObserver initializes an Observer.
-//
-// The observer keeps its own fleet-wide in-flight index rather than routing
-// per-request timestamps through PluginState, because the mrl-scorer-hub
-// needs to enumerate live in-flight requests per endpoint at scoring time
-// and PluginState is keyed by request ID.
+// NewObserver initializes an Observer. See README.md "Fleet-wide in-flight
+// index" for why the in-flight index is kept outside PluginState.
 func NewObserver(name string, cfg Config) (*Observer, error) {
 	resolved, err := cfg.resolve()
 	if err != nil {
 		return nil, err
 	}
 	return &Observer{
-		typedName:       fwkplugin.TypedName{Type: SojournTimeObserverProducerType, Name: name},
-		cfg:             resolved,
-		snapshotDataKey: attrsojourn.SojournEstimatorSnapshotDataKey.WithNonEmptyProducerName(name),
-		state:           map[string]*endpointState{},
-		inflight:        map[string]map[string]*inflightEntry{},
+		typedName:               fwkplugin.TypedName{Type: SojournTimeObserverProducerType, Name: name},
+		cfg:                     resolved,
+		snapshotDataKey:         attrsojourn.SojournEstimatorSnapshotDataKey.WithNonEmptyProducerName(name),
+		inFlightRequestsDataKey: attrsojourn.InFlightRequestsDataKey.WithNonEmptyProducerName(name),
+		state:                   map[string]*endpointState{},
+		inflight:                map[string]map[string]*inflightEntry{},
+		requestToEndpoint:       map[string]string{},
 	}, nil
 }
 
 // TypedName implements fwkplugin.Plugin.
-func (p *Observer) TypedName() fwkplugin.TypedName { return p.typedName }
+func (p *Observer) TypedName() fwkplugin.TypedName {
+	return p.typedName
+}
 
-// Produces declares the snapshot this producer publishes.
+// Produces declares the two attributes this producer publishes on each
+// endpoint.
 func (p *Observer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{p.snapshotDataKey: attrsojourn.SojournEstimatorSnapshot{}}
+	return map[fwkplugin.DataKey]any{
+		p.snapshotDataKey:         attrsojourn.SojournEstimatorSnapshot{},
+		p.inFlightRequestsDataKey: attrsojourn.InFlightRequestsSnapshot{},
+	}
 }
 
 // RegisterDependencies subscribes to endpoint lifecycle events, so the observer
@@ -248,6 +257,12 @@ func (p *Observer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 	case fwkdl.EventDelete:
 		p.mu.Lock()
 		delete(p.state, id)
+		// Purge the reverse-index entries for every request that was on
+		// this endpoint before removing the inner map, so the
+		// requestToEndpoint invariant holds across the delete.
+		for reqID := range p.inflight[id] {
+			delete(p.requestToEndpoint, reqID)
+		}
 		delete(p.inflight, id)
 		p.mu.Unlock()
 		logger.Info("Dropped sojourn digests for deleted endpoint", "endpoint", id)
@@ -266,7 +281,19 @@ func (p *Observer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 				return snapshot
 			},
 		})
-		logger.Info("Attached sojourn snapshot attribute", "key", p.snapshotDataKey.String(), "endpoint", id)
+		event.Endpoint.GetAttributes().Put(p.inFlightRequestsDataKey, &fwkdl.DynamicAttribute{
+			Get: func() fwkdl.Cloneable {
+				snapshot := state.publishedInFlight.Load()
+				if snapshot == nil {
+					return nil
+				}
+				return snapshot
+			},
+		})
+		logger.Info("Attached sojourn attributes",
+			"snapshotKey", p.snapshotDataKey.String(),
+			"inFlightKey", p.inFlightRequestsDataKey.String(),
+			"endpoint", id)
 	}
 	return nil
 }
@@ -330,7 +357,8 @@ func (p *Observer) addDecode(endpointID string, decodeSeconds float64) {
 }
 
 // noteDispatch records the dispatch of a request to an endpoint. Called from
-// PreRequest.
+// PreRequest. Writes both inflight and requestToEndpoint under p.mu so the
+// invariant on requestToEndpoint holds.
 func (p *Observer) noteDispatch(endpointID, requestID string, dispatchedAt time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -340,58 +368,87 @@ func (p *Observer) noteDispatch(endpointID, requestID string, dispatchedAt time.
 		p.inflight[endpointID] = byReq
 	}
 	byReq[requestID] = &inflightEntry{dispatchedAt: dispatchedAt}
+	p.requestToEndpoint[requestID] = endpointID
 }
 
 // noteFirstChunk records the first-chunk timestamp on the in-flight entry.
 // Returns the entry's dispatched timestamp and the endpoint ID it belonged to,
 // so the caller can emit a TTFT sample; returns zero Time / empty endpointID
-// when no in-flight entry exists for the request.
+// when no in-flight entry exists for the request. O(1) lookup via
+// requestToEndpoint; the request stays dispatched-not-completed, so the
+// reverse index is not mutated.
 func (p *Observer) noteFirstChunk(requestID string, firstChunkAt time.Time) (dispatchedAt time.Time, endpointID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for epID, byReq := range p.inflight {
-		if entry, ok := byReq[requestID]; ok {
-			entry.firstChunkAt = firstChunkAt
-			return entry.dispatchedAt, epID
-		}
+	epID, ok := p.requestToEndpoint[requestID]
+	if !ok {
+		return time.Time{}, ""
 	}
-	return time.Time{}, ""
+	entry, ok := p.inflight[epID][requestID]
+	if !ok {
+		return time.Time{}, ""
+	}
+	entry.firstChunkAt = firstChunkAt
+	return entry.dispatchedAt, epID
 }
 
 // noteEndOfStream removes the in-flight entry for the request. Returns the
 // entry's firstChunkAt and endpointID so the caller can emit a decode sample.
-// Returns zero Time / empty endpointID when no entry exists.
+// Returns zero Time / empty endpointID when no entry exists. O(1) lookup
+// via requestToEndpoint; both inflight and requestToEndpoint are purged.
 func (p *Observer) noteEndOfStream(requestID string) (firstChunkAt time.Time, endpointID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for epID, byReq := range p.inflight {
-		if entry, ok := byReq[requestID]; ok {
-			firstChunkAt = entry.firstChunkAt
-			endpointID = epID
-			delete(byReq, requestID)
-			if len(byReq) == 0 {
-				delete(p.inflight, epID)
-			}
-			return firstChunkAt, endpointID
-		}
+	epID, ok := p.requestToEndpoint[requestID]
+	if !ok {
+		return time.Time{}, ""
 	}
-	return time.Time{}, ""
+	byReq, ok := p.inflight[epID]
+	if !ok {
+		// Reverse-index points at an endpoint whose inner map was already
+		// reaped (e.g. EventDelete); drop the stale index entry and treat
+		// as "no entry."
+		delete(p.requestToEndpoint, requestID)
+		return time.Time{}, ""
+	}
+	entry, ok := byReq[requestID]
+	if !ok {
+		delete(p.requestToEndpoint, requestID)
+		return time.Time{}, ""
+	}
+	firstChunkAt = entry.firstChunkAt
+	endpointID = epID
+	delete(byReq, requestID)
+	if len(byReq) == 0 {
+		delete(p.inflight, epID)
+	}
+	delete(p.requestToEndpoint, requestID)
+	return firstChunkAt, endpointID
 }
 
 // InFlightRequestsFor returns one entry per dispatched-not-completed request
-// on the endpoint. Called by the mrl-scorer-hub at scoring time. The returned
-// slice is a fresh allocation; the caller may sort or modify it. Order is
-// unspecified — the residual formula is a sum and does not depend on order.
-func (p *Observer) InFlightRequestsFor(endpointID string) []InFlightRequest {
+// on the endpoint. Package tests use it to inspect the in-flight index without
+// reaching into unexported fields; the scorer reads the same data through the
+// InFlightRequestsDataKey attribute the producer publishes. Order is
+// unspecified.
+func (p *Observer) InFlightRequestsFor(endpointID string) []attrsojourn.InFlightRequest {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.snapshotInFlightLocked(endpointID)
+}
+
+// snapshotInFlightLocked returns a fresh slice of the endpoint's in-flight
+// entries. Caller holds p.mu at least for reading. The returned slice is
+// independent of p.inflight so callers may sort or modify it, and a
+// subsequent write to p.inflight does not race with reads of the slice.
+func (p *Observer) snapshotInFlightLocked(endpointID string) []attrsojourn.InFlightRequest {
 	byReq, ok := p.inflight[endpointID]
 	if !ok {
 		return nil
 	}
-	out := make([]InFlightRequest, 0, len(byReq))
+	out := make([]attrsojourn.InFlightRequest, 0, len(byReq))
 	for _, entry := range byReq {
-		out = append(out, InFlightRequest{
+		out = append(out, attrsojourn.InFlightRequest{
 			DispatchedAt: entry.dispatchedAt,
 			FirstChunkAt: entry.firstChunkAt,
 		})
