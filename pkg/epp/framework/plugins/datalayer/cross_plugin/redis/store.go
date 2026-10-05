@@ -69,11 +69,9 @@ type aggregateCacheEntry struct {
 }
 
 type boundState struct {
-	store      *RedisStateStore
-	key        fwkdl.StateKey
-	endpointID string
-	local      func() fwkdl.Cloneable
-	aggregate  func([]any) any
+	store     *RedisStateStore
+	key       fwkdl.StateKey
+	aggregate func([]any) any
 }
 
 func RedisStateStoreFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -122,20 +120,20 @@ func (s *RedisStateStore) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *RedisStateStore) Bind(key fwkdl.StateKey, endpointID string, local func() fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &boundState{store: s, key: key, endpointID: endpointID, local: local, aggregate: aggregate}
+func (s *RedisStateStore) Bind(key fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+	return &boundState{store: s, key: key, aggregate: aggregate}
 }
 
-func (s *boundState) Set(ctx context.Context) error {
-	return s.store.set(ctx, s.key, s.endpointID, s.local(), s.aggregate)
+func (s *boundState) Set(ctx context.Context, endpointID string, value any) error {
+	return s.store.set(ctx, s.key, endpointID, value, s.aggregate)
 }
 
-func (s *boundState) Get(ctx context.Context) (any, error) {
-	return s.store.get(ctx, s.key, s.endpointID, s.local(), s.aggregate)
+func (s *boundState) Get(ctx context.Context, endpointID string, local func() fwkdl.Cloneable) (any, error) {
+	return s.store.get(ctx, s.key, endpointID, local(), s.aggregate)
 }
 
-func (s *boundState) Delete(ctx context.Context) error {
-	return s.store.delete(ctx, s.key, s.endpointID)
+func (s *boundState) Delete(ctx context.Context, endpointID string) error {
+	return s.store.delete(ctx, s.key, endpointID)
 }
 
 func (s *RedisStateStore) hashKey(key fwkdl.StateKey, endpointID string) string {

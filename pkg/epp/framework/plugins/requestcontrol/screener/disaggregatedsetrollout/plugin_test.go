@@ -494,7 +494,7 @@ func (s *decisionSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "decision-syncer", Name: "decision-syncer"}
 }
 
-func (s *decisionSyncer) Bind(fwkdl.StateKey, string, func() fwkdl.Cloneable, func([]any) any) fwkdl.BoundCrossReplicaState {
+func (s *decisionSyncer) Bind(fwkdl.StateKey, func([]any) any) fwkdl.BoundCrossReplicaState {
 	return nil
 }
 

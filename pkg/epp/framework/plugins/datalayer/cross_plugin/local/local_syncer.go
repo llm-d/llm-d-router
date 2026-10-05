@@ -40,7 +40,6 @@ type LocalSyncer struct {
 }
 
 type boundState struct {
-	local     func() fwkdl.Cloneable
 	aggregate func([]any) any
 }
 
@@ -63,21 +62,21 @@ func (s *LocalSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *LocalSyncer) Bind(_ fwkdl.StateKey, _ string, local func() fwkdl.Cloneable, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
-	return &boundState{local: local, aggregate: aggregate}
+func (s *LocalSyncer) Bind(_ fwkdl.StateKey, aggregate func([]any) any) fwkdl.BoundCrossReplicaState {
+	return &boundState{aggregate: aggregate}
 }
 
 func (s *LocalSyncer) syncKey(key fwkdl.StateKey, id string) string {
 	return s.replicaID + ":" + string(key) + ":" + id
 }
 
-func (s *boundState) Set(context.Context) error { return nil }
+func (s *boundState) Set(context.Context, string, any) error { return nil }
 
-func (s *boundState) Get(context.Context) (any, error) {
-	return s.aggregate([]any{s.local()}), nil
+func (s *boundState) Get(_ context.Context, _ string, local func() fwkdl.Cloneable) (any, error) {
+	return s.aggregate([]any{local()}), nil
 }
 
-func (s *boundState) Delete(context.Context) error { return nil }
+func (s *boundState) Delete(context.Context, string) error { return nil }
 
 func (s *LocalSyncer) GetOrSet(_ context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
 	actual, loaded := s.data.LoadOrStore(s.syncKey(key, id), candidate)

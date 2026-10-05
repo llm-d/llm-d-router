@@ -8,9 +8,9 @@ Redis. Each EPP publishes its local endpoint value. During `Set`, the plugin
 prepares a peer aggregate in its in-process cache. `Get` reads the contributor's
 live local value and combines it with the cached peer aggregate.
 
-The runtime binds one state handle per contributor and endpoint. The handle
-retains the endpoint key, live local value reader, and aggregation function used
-by `Set`, `Get`, and `Delete`.
+The runtime binds one state handle per contributor. The handle retains the state
+key and aggregation function. Each operation receives its endpoint and local
+value or reader.
 
 ## Configuration
 
