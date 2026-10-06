@@ -99,8 +99,8 @@ func truncateLongStrings(v any, maxLen int) any {
 // extractMMItems extracts all multimodal content parts from the request:
 // chat-completions' messages array, or a Responses input array. Which field to
 // walk is gated on apiType rather than presence, since a client could send a
-// stray field the other format does not use. Within a turn the parts sit under
-// content, and for Responses under an input item's output as well.
+// stray field the other format does not use. The part arrays within a turn come
+// from reqcommon.ItemPartArrays.
 //
 // One item is returned per content part, repeats included. A part's modality and
 // its client-supplied uuid both move the serving engine's multimodal hash, so
@@ -182,18 +182,8 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			droppedTurns++
 			continue
 		}
-		if content, ok := turn[reqcommon.FieldContent].([]any); ok {
-			collect(content)
-		}
-		// A Responses function_call_output carries its parts under output rather
-		// than content, and vLLM forwards that array as a tool message's content,
-		// so media in it reaches the model like any other part and has to be
-		// primed. A computer_call_output's output is an object rather than an
-		// array and names no part type the encoder primes.
-		if apiType == reqcommon.APITypeResponses {
-			if output, ok := turn[reqcommon.FieldOutput].([]any); ok {
-				collect(output)
-			}
+		for _, array := range reqcommon.ItemPartArrays(turn, apiType) {
+			collect(array.Parts)
 		}
 	}
 
@@ -272,7 +262,7 @@ func (s *Server) fanoutEncoder(
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(requestHeaderRequestID, fmt.Sprintf("%s-enc-%d", requestID, idx))
+			req.Header.Set(reqcommon.RequestIDHeaderKey, fmt.Sprintf("%s-enc-%d", requestID, idx))
 
 			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
 
@@ -315,7 +305,7 @@ func (s *Server) runPDPipeline(
 	apiType reqcommon.APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
@@ -327,7 +317,7 @@ func (s *Server) runPDPipeline(
 	}
 
 	pdRequest := cloneRequestWithBody(r.Context(), r, modifiedBody)
-	pdRequest.Header.Add(requestHeaderRequestID, requestID)
+	pdRequest.Header.Add(reqcommon.RequestIDHeaderKey, requestID)
 
 	destination := "decoder"
 	if len(prefillEndPoint) > 0 {
@@ -342,8 +332,8 @@ func (s *Server) runPDPipeline(
 			"prefiller", prefillEndPoint,
 			"bodyBytes", len(modifiedBody),
 		}
-		if ec, ok := body[requestFieldECTransferParams]; ok {
-			kv = append(kv, requestFieldECTransferParams, truncateLongStrings(ec, 64))
+		if ec, ok := body[reqcommon.FieldECTransferParams]; ok {
+			kv = append(kv, reqcommon.FieldECTransferParams, truncateLongStrings(ec, 64))
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}

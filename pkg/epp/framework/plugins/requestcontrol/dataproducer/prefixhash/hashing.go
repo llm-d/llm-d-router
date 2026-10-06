@@ -49,7 +49,7 @@ func (b HashBlock) Hash() uint64 {
 		// because the length check above guarantees a valid backing array, and
 		// the byte length (len(Tokens) * 4) matches uint32's size exactly, so
 		// the resulting slice stays within the array's bounds.
-		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //nolint:gosec // G103: see comment above
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //#nosec G103 -- see comment above
 		return xxhash.Sum64(byteSlice)
 	}
 
@@ -104,7 +104,8 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 
 // computeBlockHashes calculates the hash for content blocks.
 func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
+	// maxPrefixBlocks may represent an unlimited cap and exceed a safe allocation size.
+	var blockHashes []BlockHash //nolint:prealloc
 
 	h := xxhash.New()
 	// Different models should have different hashes even with the same body.

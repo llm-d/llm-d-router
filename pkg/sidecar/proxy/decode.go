@@ -39,16 +39,9 @@ const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
 
-	sseDataPrefix = "data: "
-	sseDone       = "data: [DONE]"
-
-	responseFieldUsage            = "usage"
-	responseFieldCompletionTokens = "completion_tokens"
-	responseFieldPromptTokens     = "prompt_tokens"
-	responseFieldTotalTokens      = "total_tokens"
-	responseFieldMessage          = "message"
-	responseFieldIndex            = "index"
-	responseFieldDelta            = "delta"
+	responseFieldMessage = "message"
+	responseFieldIndex   = "index"
+	responseFieldDelta   = "delta"
 
 	roleAssistant = "assistant"
 )
@@ -88,7 +81,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	)
 	defer span.End()
 
-	streamingEnabled, _ := body[requestFieldStream].(bool)
+	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
 
 	span.SetAttributes(
@@ -124,7 +117,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	for {
 		if ctx.Err() != nil {
 			if streamingEnabled && chunkIndex > 0 {
-				fmt.Fprintf(w, "%s\n\n", sseDone)
+				fmt.Fprintf(w, "%s\n\n", reqcommon.SSEDone)
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
@@ -144,17 +137,17 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		}
 
 		chunkReq := maps.Clone(body)
-		chunkReq[requestFieldMaxTokens] = chunkBudget
-		chunkReq[requestFieldMaxCompletionTokens] = chunkBudget
-		chunkReq[requestFieldStream] = false
-		delete(chunkReq, requestFieldStreamOptions)
+		chunkReq[reqcommon.FieldMaxTokens] = chunkBudget
+		chunkReq[reqcommon.FieldMaxCompletionTokens] = chunkBudget
+		chunkReq[reqcommon.FieldStream] = false
+		delete(chunkReq, reqcommon.FieldStreamOptions)
 
 		// From the second chunk onward: remove KV transfer params and instruct
 		// to continue the last assistant message rather than start a new one.
 		if chunkIndex > 0 {
-			delete(chunkReq, requestFieldKVTransferParams)
-			chunkReq[requestFieldContinueFinalMessage] = true
-			chunkReq[requestFieldAddGenerationPrompt] = false
+			delete(chunkReq, reqcommon.FieldKVTransferParams)
+			chunkReq[reqcommon.FieldContinueFinalMessage] = true
+			chunkReq[reqcommon.FieldAddGenerationPrompt] = false
 		}
 
 		chunkBody, err := json.Marshal(chunkReq)
@@ -243,9 +236,9 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	// Corrected cumulative usage: prompt_tokens from first chunk, completion_tokens summed.
 	cumulativeUsage := map[string]any{
-		responseFieldPromptTokens:     originalPromptTokens,
-		responseFieldCompletionTokens: totalTokens,
-		responseFieldTotalTokens:      originalPromptTokens + totalTokens,
+		reqcommon.FieldPromptTokens:     originalPromptTokens,
+		reqcommon.FieldCompletionTokens: totalTokens,
+		reqcommon.FieldTotalTokens:      originalPromptTokens + totalTokens,
 	}
 
 	if streamingEnabled {
@@ -253,14 +246,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Individual chunk events have usage stripped by emitSSEChunk.
 		if lastResponse != nil {
 			usageEvent := map[string]any{
-				responseFieldUsage:   cumulativeUsage,
+				reqcommon.FieldUsage: cumulativeUsage,
 				responseFieldChoices: []any{},
 			}
 			if data, err := json.Marshal(usageEvent); err == nil {
-				fmt.Fprintf(w, "%s%s\n\n", sseDataPrefix, data)
+				fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
 			}
 		}
-		fmt.Fprintf(w, "%s\n\n", sseDone)
+		fmt.Fprintf(w, "%s\n\n", reqcommon.SSEDone)
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -276,7 +269,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	lastResponse[responseFieldUsage] = cumulativeUsage
+	lastResponse[reqcommon.FieldUsage] = cumulativeUsage
 
 	if choices, ok := lastResponse[responseFieldChoices].([]any); ok && len(choices) > 0 {
 		choice := maps.Clone(choices[0].(map[string]any))
@@ -306,7 +299,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 // Prefers max_completion_tokens (OpenAI v1) over max_tokens (legacy).
 // Returns -1 when neither field is set (no explicit limit).
 func resolveMaxTokens(req map[string]any) int {
-	for _, field := range []string{requestFieldMaxCompletionTokens, requestFieldMaxTokens} {
+	for _, field := range []string{reqcommon.FieldMaxCompletionTokens, reqcommon.FieldMaxTokens} {
 		if v, ok := req[field]; ok {
 			if n, ok := toInt(v); ok && n > 0 {
 				return n
@@ -330,8 +323,8 @@ func remainingTokens(budget, used int) int {
 
 // countTokensInResponse returns completion_tokens from the usage field, or 0.
 func countTokensInResponse(response map[string]any) int {
-	if usage, ok := response[responseFieldUsage].(map[string]any); ok {
-		if n, ok := toInt(usage[responseFieldCompletionTokens]); ok {
+	if usage, ok := response[reqcommon.FieldUsage].(map[string]any); ok {
+		if n, ok := toInt(usage[reqcommon.FieldCompletionTokens]); ok {
 			return n
 		}
 	}
@@ -340,8 +333,8 @@ func countTokensInResponse(response map[string]any) int {
 
 // extractPromptTokens returns prompt_tokens from the usage field, or 0.
 func extractPromptTokens(response map[string]any) int {
-	if usage, ok := response[responseFieldUsage].(map[string]any); ok {
-		if n, ok := toInt(usage[responseFieldPromptTokens]); ok {
+	if usage, ok := response[reqcommon.FieldUsage].(map[string]any); ok {
+		if n, ok := toInt(usage[reqcommon.FieldPromptTokens]); ok {
 			return n
 		}
 	}
@@ -385,13 +378,13 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 		streamChunk[responseFieldChoices] = streamChoices
 	}
 
-	delete(streamChunk, responseFieldUsage)
+	delete(streamChunk, reqcommon.FieldUsage)
 
 	data, err := json.Marshal(streamChunk)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s%s\n\n", sseDataPrefix, data)
+	_, err = fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
 	return err
 }
 

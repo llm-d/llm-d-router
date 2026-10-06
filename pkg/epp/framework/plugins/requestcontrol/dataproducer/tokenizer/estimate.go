@@ -179,6 +179,11 @@ func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
 			meta.duration = v
 		}
 	}
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioBytesPerSecondHeaderKey); ok {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			meta.bytesPerSecond = v
+		}
+	}
 	return meta
 }
 
@@ -324,10 +329,11 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 		case "video_url":
 			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
 		case "audio_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount(false, meta.audio))
+			// A clip carried by URL has no payload to read a duration from.
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount("", meta.audio))
 		case "input_audio":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(true, meta.audio))
+			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(block.InputAudio.Data, meta.audio))
 		}
 	}
 	return out, features
@@ -390,7 +396,7 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 
 	sum := xxhash.Sum64String(content)
 	token := make([]byte, bytesPerToken)
-	binary.LittleEndian.PutUint32(token, uint32(sum)) //nolint:gosec // G115: intentional hash truncation to build a placeholder token, not an overflow
+	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {
 		out = append(out, token...)
 	}

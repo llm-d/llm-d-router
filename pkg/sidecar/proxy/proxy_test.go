@@ -21,18 +21,26 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
 
@@ -90,7 +98,7 @@ var _ = Describe("Reverse Proxy", func() {
 				// CertPath is unset, so the client has no CA to verify against.
 				tr := &http.Transport{
 					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, //nolint:gosec // proxy's self-signed cert is not exposed to the test for trust
+						InsecureSkipVerify: true, //#nosec -- proxy's self-signed cert is not exposed to the test for trust
 					},
 				}
 				client := &http.Client{
@@ -166,11 +174,11 @@ var _ = Describe("Reverse Proxy", func() {
 			var proxy *Server
 
 			BeforeEach(func() {
-				cfg := Config{Port: "0", DecoderURL: decodeURL, KVConnector: KVConnectorNIXLV2}
+				cfg := Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorNIXLV2}
 				proxy = NewProxy(cfg)
 
-				decodeHandler.Connector = KVConnectorNIXLV2
-				prefillHandler.Connector = KVConnectorNIXLV2
+				decodeHandler.Connector = constants.KVConnectorNIXLV2
+				prefillHandler.Connector = constants.KVConnectorNIXLV2
 			})
 
 			It("should successfully send request to 1. prefill 2. decode with the right fields (backward compatible behavior)", func() {
@@ -211,36 +219,36 @@ var _ = Describe("Reverse Proxy", func() {
 				Expect(prefillHandler.CompletionRequests).To(HaveLen(1))
 				prq1 := prefillHandler.CompletionRequests[0]
 
-				Expect(prq1).ToNot(HaveKey(requestFieldDoRemoteDecode))
-				Expect(prq1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(prq1).ToNot(HaveKey(reqcommon.FieldDoRemoteDecode))
+				Expect(prq1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				prq1kv, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+				prq1kv, ok := prq1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
-				Expect(prq1kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+				Expect(prq1kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
 
 				Expect(prq1).To(HaveKeyWithValue("stream", false))
 				Expect(prq1).ToNot(HaveKey("stream_options"))
 
 				Expect(prefillHandler.CompletionResponses).To(HaveLen(1))
 				prp1 := prefillHandler.CompletionResponses[0]
-				Expect(prp1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(prp1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				prp1kv, ok := prp1[requestFieldKVTransferParams].(map[string]any)
+				prp1kv, ok := prp1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
 
-				Expect(prp1kv).To(HaveKey(requestFieldRemoteBlockIDs))
-				Expect(prp1kv).To(HaveKey(requestFieldRemoteEngineID))
+				Expect(prp1kv).To(HaveKey(reqcommon.FieldRemoteBlockIDs))
+				Expect(prp1kv).To(HaveKey(reqcommon.FieldRemoteEngineID))
 
 				Expect(decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 				Expect(decodeHandler.CompletionRequests).To(HaveLen(1))
 				drq1 := decodeHandler.CompletionRequests[0]
-				Expect(drq1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(drq1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				drq1kv, ok := drq1[requestFieldKVTransferParams].(map[string]any)
+				drq1kv, ok := drq1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
 
-				Expect(drq1kv).To(HaveKey(requestFieldRemoteBlockIDs))
-				Expect(drq1kv).To(HaveKey(requestFieldRemoteEngineID))
+				Expect(drq1kv).To(HaveKey(reqcommon.FieldRemoteBlockIDs))
+				Expect(drq1kv).To(HaveKey(reqcommon.FieldRemoteEngineID))
 
 				cancelFn()
 				<-stoppedCh
@@ -284,40 +292,96 @@ var _ = Describe("Reverse Proxy", func() {
 				Expect(prefillHandler.CompletionRequests).To(HaveLen(1))
 				prq1 := prefillHandler.CompletionRequests[0]
 
-				Expect(prq1).ToNot(HaveKey(requestFieldDoRemoteDecode))
-				Expect(prq1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(prq1).ToNot(HaveKey(reqcommon.FieldDoRemoteDecode))
+				Expect(prq1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				prq1kv, ok := prq1[requestFieldKVTransferParams].(map[string]any)
+				prq1kv, ok := prq1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
-				Expect(prq1kv).To(HaveKeyWithValue(requestFieldDoRemoteDecode, true))
+				Expect(prq1kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
 
 				Expect(prq1).To(HaveKeyWithValue("stream", false))
 				Expect(prq1).ToNot(HaveKey("stream_options"))
 
 				Expect(prefillHandler.CompletionResponses).To(HaveLen(1))
 				prp1 := prefillHandler.CompletionResponses[0]
-				Expect(prp1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(prp1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				prp1kv, ok := prp1[requestFieldKVTransferParams].(map[string]any)
+				prp1kv, ok := prp1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
 
-				Expect(prp1kv).To(HaveKey(requestFieldRemoteBlockIDs))
-				Expect(prp1kv).To(HaveKey(requestFieldRemoteEngineID))
+				Expect(prp1kv).To(HaveKey(reqcommon.FieldRemoteBlockIDs))
+				Expect(prp1kv).To(HaveKey(reqcommon.FieldRemoteEngineID))
 
 				Expect(decodeHandler.RequestCount.Load()).To(BeNumerically("==", 1))
 				Expect(decodeHandler.CompletionRequests).To(HaveLen(1))
 				drq1 := decodeHandler.CompletionRequests[0]
-				Expect(drq1).To(HaveKey(requestFieldKVTransferParams))
+				Expect(drq1).To(HaveKey(reqcommon.FieldKVTransferParams))
 
-				drq1kv, ok := drq1[requestFieldKVTransferParams].(map[string]any)
+				drq1kv, ok := drq1[reqcommon.FieldKVTransferParams].(map[string]any)
 				Expect(ok).To(BeTrue())
 
-				Expect(drq1kv).To(HaveKey(requestFieldRemoteBlockIDs))
-				Expect(drq1kv).To(HaveKey(requestFieldRemoteEngineID))
+				Expect(drq1kv).To(HaveKey(reqcommon.FieldRemoteBlockIDs))
+				Expect(drq1kv).To(HaveKey(reqcommon.FieldRemoteEngineID))
 
 				cancelFn()
 				<-stoppedCh
 			})
 		})
+	})
+})
+
+var _ = Describe("SSRF protection startup warning", func() {
+	It("is logged once per process when protection is disabled", func() {
+		var mu sync.Mutex
+		var logged []string
+		logger := funcr.New(func(prefix, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, prefix+" "+args)
+		}, funcr.Options{Verbosity: logging.DEFAULT})
+		ctx, cancelFn := context.WithCancel(log.IntoContext(context.Background(), logger))
+		defer cancelFn()
+
+		// Two data parallel ranks, so two servers share the validator.
+		httpLn, err := fwknet.ReserveListener()
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { _ = httpLn.Close() })
+		rankLn, err := fwknet.ReserveListener()
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { _ = rankLn.Close() })
+
+		decoderURL, err := url.Parse("http://localhost:8001")
+		Expect(err).ToNot(HaveOccurred())
+
+		proxy := NewProxy(Config{
+			Port:             strconv.Itoa(httpLn.Addr().(*net.TCPAddr).Port),
+			DecoderURL:       decoderURL,
+			DataParallelSize: 2,
+		})
+		proxy.HTTPListener = httpLn
+		proxy.DataParallelListeners = []net.Listener{rankLn}
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- proxy.Start(ctx) }()
+
+		Eventually(proxy.readyCh, "5s").Should(BeClosed())
+		cancelFn()
+		Eventually(errCh, "5s").Should(Receive(BeNil()))
+
+		mu.Lock()
+		defer mu.Unlock()
+		var warnings []string
+		for _, line := range logged {
+			if strings.Contains(line, "SSRF protection is disabled") {
+				warnings = append(warnings, line)
+			}
+		}
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0]).To(And(
+			ContainSubstring("--"+enableSSRFProtection),
+			ContainSubstring(routing.PrefillEndpointHeader),
+			ContainSubstring(routing.EncoderEndpointsHeader),
+			ContainSubstring(routing.KVCacheSourceHeader),
+		))
 	})
 })

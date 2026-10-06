@@ -30,6 +30,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // parallelCommitEnv is a minimal proxy harness for the MoRI-IO parallel WRITE
@@ -58,7 +59,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 	cfg := Config{
 		Port:                       "0",
 		DecoderURL:                 decodeURL,
-		KVConnector:                KVConnectorNIXLV2,
+		KVConnector:                constants.KVConnectorNIXLV2,
 		MoRIIOWriteMode:            true,
 		MoRIIOParallelDispatch:     true,
 		MoRIIODecodePodIP:          decodeURL.Hostname(),

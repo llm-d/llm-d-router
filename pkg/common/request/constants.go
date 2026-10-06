@@ -62,6 +62,37 @@ const (
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+
+	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
+	// The prefill pod echoes them back so the decode pod can open the bootstrap
+	// channel to it.
+	FieldBootstrapHost = "bootstrap_host"
+	FieldBootstrapPort = "bootstrap_port"
+	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Usage fields in a response body. Chat Completions and Completions report
+// prompt_tokens and completion_tokens with details under prompt_tokens_details;
+// Responses and Conversations report input_tokens and output_tokens with details
+// under input_tokens_details. total_tokens is named the same in every API.
+const (
+	FieldUsage               = "usage"
+	FieldPromptTokens        = "prompt_tokens"
+	FieldCompletionTokens    = "completion_tokens"
+	FieldInputTokens         = "input_tokens"
+	FieldOutputTokens        = "output_tokens"
+	FieldTotalTokens         = "total_tokens"
+	FieldPromptTokensDetails = "prompt_tokens_details" //#nosec G101 -- JSON field name, not a credential
+	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
+	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
+)
+
+// Server-sent event framing for streamed responses. SGLang sends the bare
+// marker as an event payload, the OpenAI APIs send the framed line.
+const (
+	SSEDataPrefix = "data: "
+	SSEDoneMarker = "[DONE]"
+	SSEDone       = SSEDataPrefix + SSEDoneMarker
 )
 
 // Content part types, the values a content part's FieldType takes. A

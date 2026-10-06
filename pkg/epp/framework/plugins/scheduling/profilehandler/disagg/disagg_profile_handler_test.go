@@ -23,12 +23,14 @@ import (
 	"net"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -183,6 +185,22 @@ func (m *mockPDDecider) TypedName() plugin.TypedName { return plugin.TypedName{}
 
 func (m *mockPDDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
 	return m.allow
+}
+
+// consumingDecider declares its own data dependencies and disaggregates when
+// the request attribute under read is true.
+type consumingDecider struct {
+	deps plugin.DataDependencies
+	read plugin.DataKey
+}
+
+func (d *consumingDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (d *consumingDecider) Consumes() plugin.DataDependencies { return d.deps }
+
+func (d *consumingDecider) disaggregate(_ context.Context, request *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	allow, _ := scheduling.ReadRequestAttribute[bool](request, d.read)
+	return allow
 }
 
 // ── Helper function tests ────────────────────────────────────────────────────
@@ -355,6 +373,71 @@ func TestHandler_Consumes_PrefixMatchInfoProducerName(t *testing.T) {
 			if tt.expectedKey != attrprefix.PrefixCacheMatchInfoDataKey {
 				assert.NotContains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey)
 			}
+		})
+	}
+}
+
+func TestHandler_Consumes_MergesDeciderDeclarations(t *testing.T) {
+	pdRequired := plugin.NewDataKey("pd-required", "")
+	pdOptional := plugin.NewDataKey("pd-optional", "")
+	encodeRequired := plugin.NewDataKey("encode-required", "")
+	encodeOptional := plugin.NewDataKey("encode-optional", "")
+	// Optional for the prefill decider, required by the encode decider.
+	shared := plugin.NewDataKey("shared", "")
+
+	handler := NewDisaggProfileHandler(
+		defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+		&consumingDecider{deps: plugin.DataDependencies{
+			Required: map[plugin.DataKey]any{pdRequired: false},
+			Optional: map[plugin.DataKey]any{pdOptional: false, shared: false},
+		}},
+		&consumingDecider{deps: plugin.DataDependencies{
+			Required: map[plugin.DataKey]any{encodeRequired: false, shared: false},
+			Optional: map[plugin.DataKey]any{encodeOptional: false},
+		}},
+	)
+
+	consumed := handler.Consumes()
+	for _, key := range []plugin.DataKey{pdRequired, encodeRequired, shared} {
+		assert.Contains(t, consumed.Required, key)
+	}
+	for _, key := range []plugin.DataKey{pdOptional, encodeOptional} {
+		assert.Contains(t, consumed.Optional, key)
+	}
+	assert.NotContains(t, consumed.Optional, shared, "a key one decider requires is required")
+}
+
+// The scheduler hands Pick a request confined to the handler's declarations,
+// so an attribute a decider declares must be readable through it.
+func TestHandler_Pick_DeciderReadsDeclaredAttributeThroughScope(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	gate := plugin.NewDataKey("prefill-gate", "")
+
+	for _, tt := range []struct {
+		name string
+		deps plugin.DataDependencies
+	}{
+		{name: "required", deps: plugin.DataDependencies{Required: map[plugin.DataKey]any{gate: false}}},
+		{name: "optional", deps: plugin.DataDependencies{Optional: map[plugin.DataKey]any{gate: false}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+				&consumingDecider{deps: tt.deps, read: gate}, nil).WithName("scoped-handler-" + tt.name)
+			datalayer.RegisterScopeSpecs([]plugin.Plugin{h})
+
+			req := completionsRequest(testLongPrompt)
+			req.PutAttribute(gate, true)
+			scoped, violations := datalayer.ScopeRequest(logr.Discard(), "ProfilePicker", h, req)
+
+			got := h.Pick(ctx, scoped,
+				map[string]scheduling.SchedulerProfile{
+					defaultDecodeProfile:  &mockProfile{},
+					defaultPrefillProfile: &mockProfile{},
+				},
+				map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: makeProfileRunResult("pod1")})
+
+			assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got))
+			require.NoError(t, violations.Write())
 		})
 	}
 }

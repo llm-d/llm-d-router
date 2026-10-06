@@ -30,6 +30,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var _ = Describe("SGLang Connector", func() {
@@ -38,7 +39,7 @@ var _ = Describe("SGLang Connector", func() {
 
 	BeforeEach(func() {
 		// Mock testing setup using the SGLang connector mode
-		testInfo = sidecarConnectionTestSetup(KVConnectorSGLang)
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorSGLang)
 	})
 
 	It("should successfully send concurrent requests to prefill and decode with bootstrap info", func() {
@@ -98,23 +99,23 @@ var _ = Describe("SGLang Connector", func() {
 		drq1 := decodeReqs[0]
 
 		// Bootstrap validations for prefill
-		Expect(prq1).To(HaveKey(requestFieldBootstrapHost))
-		Expect(prq1).To(HaveKey(requestFieldBootstrapPort))
-		Expect(prq1).To(HaveKey(requestFieldBootstrapRoom))
+		Expect(prq1).To(HaveKey(reqcommon.FieldBootstrapHost))
+		Expect(prq1).To(HaveKey(reqcommon.FieldBootstrapPort))
+		Expect(prq1).To(HaveKey(reqcommon.FieldBootstrapRoom))
 
 		expectedHost := extractHost(prefillHostPort)
-		Expect(prq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
-		Expect(prq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
-		Expect(prq1[requestFieldBootstrapRoom]).ToNot(BeNil())
+		Expect(prq1[reqcommon.FieldBootstrapHost]).To(Equal(expectedHost))
+		Expect(prq1[reqcommon.FieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
+		Expect(prq1[reqcommon.FieldBootstrapRoom]).ToNot(BeNil())
 
 		// Bootstrap validations for decode
-		Expect(drq1).To(HaveKey(requestFieldBootstrapHost))
-		Expect(drq1).To(HaveKey(requestFieldBootstrapPort))
-		Expect(drq1).To(HaveKey(requestFieldBootstrapRoom))
+		Expect(drq1).To(HaveKey(reqcommon.FieldBootstrapHost))
+		Expect(drq1).To(HaveKey(reqcommon.FieldBootstrapPort))
+		Expect(drq1).To(HaveKey(reqcommon.FieldBootstrapRoom))
 
-		Expect(drq1[requestFieldBootstrapHost]).To(Equal(expectedHost))
-		Expect(drq1[requestFieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
-		Expect(drq1[requestFieldBootstrapRoom]).To(Equal(prq1[requestFieldBootstrapRoom])) // Room ID must match
+		Expect(drq1[reqcommon.FieldBootstrapHost]).To(Equal(expectedHost))
+		Expect(drq1[reqcommon.FieldBootstrapPort]).To(Equal(float64(sglangBootstrapPort)))
+		Expect(drq1[reqcommon.FieldBootstrapRoom]).To(Equal(prq1[reqcommon.FieldBootstrapRoom])) // Room ID must match
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
@@ -144,7 +145,7 @@ var _ = Describe("SGLang Connector", func() {
 		cfg := Config{
 			Port:        "0",
 			DecoderURL:  testInfo.decodeURL,
-			KVConnector: KVConnectorSGLang,
+			KVConnector: constants.KVConnectorSGLang,
 		}
 		testInfo.proxy = NewProxy(cfg)
 

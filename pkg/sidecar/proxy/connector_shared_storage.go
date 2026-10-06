@@ -28,6 +28,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+const finishReasonCacheThreshold = "cache_threshold"
+
 func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
@@ -40,8 +42,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := body[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
+	if cacheHitThreshold, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
 		needsPrefill, err := s.tryDecode(w, decodeReq, body)
 		if err != nil {
@@ -51,7 +53,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 			s.logger.V(logging.DEBUG).Info("decode succeeded without prefill")
 			return
 		}
-		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 	}
 
 	// we clone the completion request to avoid modifying the original request
@@ -62,7 +64,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
@@ -77,7 +79,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 
 // tryDecode attempts to decode and returns whether prefill is needed.
 func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, body map[string]any) (bool, error) {
-	if isStreaming, _ := body[requestFieldStream].(bool); isStreaming {
+	if isStreaming, _ := body[reqcommon.FieldStream].(bool); isStreaming {
 		if flusher, ok := w.(flushableResponseWriter); ok {
 			bw := newResponseWriterWithBuffer(flusher)
 			return s.tryDecodeStreaming(bw, r)
@@ -134,8 +136,19 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request) (bool, error) {
 	// Run ServeHTTP in a goroutine so we can inspect the initial choice to determine if we need to prefill.
 	done := make(chan struct{})
+	// Written by the decode goroutine, read after done is closed.
+	var aborted bool
 	go func() {
 		defer close(done)
+		// net/http only recovers http.ErrAbortHandler on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
 		s.decoderProxy.ServeHTTP(w, r)
 	}()
 
@@ -150,9 +163,25 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 	statusCode := w.getStatusCode()
 	if isHTTPError(statusCode) {
-		if err := w.flushBufferAndGoDirect(); err != nil {
-			s.logger.Error(err, "failed to flush buffer to client")
-			return false, err
+		// A status of 0 means the decoder never called WriteHeader or Write.
+		// Flushing that would commit an empty 200. Leave it unwritten so the
+		// abort below drops the connection instead.
+		var flushErr error
+		if statusCode != 0 {
+			flushErr = w.flushBufferAndGoDirect()
+			if flushErr != nil {
+				s.logger.Error(flushErr, "failed to flush buffer to client")
+			}
+		}
+		// The decode goroutine may still be writing. Wait for it, then replay
+		// the abort here. net/http only recovers http.ErrAbortHandler on the
+		// request goroutine.
+		<-done
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
+		if flushErr != nil {
+			return false, flushErr
 		}
 		return false, fmt.Errorf("decode request failed with status code: %d", statusCode)
 	}
@@ -171,6 +200,11 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 		return false, err
 	}
 	<-done
+	if aborted {
+		// Replay the abort on the request goroutine, where net/http recovers it
+		// and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
 	return false, nil
 }
 
@@ -196,11 +230,11 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 	// Parse SSE format: "data: {...json...}\n\ndata: {...json...}\n\n"
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == "data: [DONE]" || !strings.HasPrefix(line, "data: ") {
+		if line == "" || line == reqcommon.SSEDone || !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
 			continue
 		}
 
-		jsonData := strings.TrimPrefix(line, "data: ")
+		jsonData := strings.TrimPrefix(line, reqcommon.SSEDataPrefix)
 		var response map[string]any
 		if err := json.Unmarshal([]byte(jsonData), &response); err != nil {
 			s.logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", jsonData)
@@ -218,7 +252,7 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType) error {
 	// Prepare prefill request
 	reqcommon.CapSingleToken(body, apiType)
-	body[requestFieldCacheHitThreshold] = 0
+	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	pbody, err := json.Marshal(body)
 	if err != nil {

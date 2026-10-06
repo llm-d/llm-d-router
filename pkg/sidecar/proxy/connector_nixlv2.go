@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -37,8 +38,28 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
+
+// MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
+// so the prefill engine can push KV to decode via RDMA Write.
+const (
+	requestFieldRemoteNotifyPort = "remote_notify_port"
+	requestFieldRemoteDPRank     = "remote_dp_rank"
+	// requestFieldRemoteDPRankOverride tells the decode-side connector to use
+	// the sidecar's remote_dp_rank verbatim rather than recomputing its own hash.
+	requestFieldRemoteDPRankOverride = "remote_dp_rank_override"
+	requestFieldRemoteHandshakePort  = "remote_handshake_port"
+)
+
+func newNIXLV2RequestID() (string, error) {
+	id, err := uuid.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
 
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
@@ -49,14 +70,13 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Generate unique request UUID
-	uuid, err := uuid.NewUUID()
+	uuidStr, err := s.nixlRequestIDFn()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	uuidStr := uuid.String()
 
 	// Parallel-dispatch path synthesises decode's kv_transfer_params from config
 	// instead of the prefill response. The serial path below is unchanged when off.
@@ -77,19 +97,23 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyRequestID(uuidStr),
 		semconv.LLMDPDProxyPrefillTarget(prefillPodHostPort),
-		semconv.LLMDPDProxyConnector(KVConnectorNIXLV2),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorNIXLV2),
 	)
 	prefillStart := time.Now()
 
 	// 1. Prepare prefill request
 	preq := r.Clone(ctx)
 
-	preq.Header.Add(requestHeaderRequestID, uuidStr)
+	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
-	// Pin both requests to the same DP rank; the header is skipped for single-DP.
-	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize)
+	// KV metadata uses global ranks; HTTP dispatch uses pod-local ranks.
+	globalDPRank, localDPRank := pickDPRanks(
+		uuidStr,
+		s.config.MoRIIODPSize,
+		s.config.MoRIIODPSizeLocal,
+	)
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(localDPRank))
 	}
 
 	// Keeps the client's body intact for the decode request below.
@@ -100,15 +124,15 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
-		prefillRequest[requestFieldKVTransferParams] = map[string]any{
-			requestFieldDoRemoteDecode:       true,
-			requestFieldDoRemotePrefill:      false,
-			requestFieldRemoteEngineID:       nil,
-			requestFieldRemoteBlockIDs:       nil,
-			requestFieldRemoteHost:           s.currentDecodePodIP(ctx),
-			requestFieldRemotePort:           nil,
+		prefillRequest[reqcommon.FieldKVTransferParams] = map[string]any{
+			reqcommon.FieldDoRemoteDecode:    true,
+			reqcommon.FieldDoRemotePrefill:   false,
+			reqcommon.FieldRemoteEngineID:    nil,
+			reqcommon.FieldRemoteBlockIDs:    nil,
+			reqcommon.FieldRemoteHost:        s.currentDecodePodIP(ctx),
+			reqcommon.FieldRemotePort:        nil,
 			requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
-			requestFieldRemoteDPRank:         dpRank,
+			requestFieldRemoteDPRank:         globalDPRank,
 			requestFieldRemoteDPRankOverride: true,
 			requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 			requestFieldTransferID:           transferID,
@@ -119,7 +143,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		// DECODE-side pod IPs so prefill handshakes the right pods. Re-resolved
 		// per request so peer restarts (new IP) are picked up within the TTL.
 		if decodeHosts := s.currentDecodeHosts(ctx); len(decodeHosts) > 0 {
-			pkv := prefillRequest[requestFieldKVTransferParams].(map[string]any)
+			pkv := prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any)
 			hosts := make([]any, len(decodeHosts))
 			for i, h := range decodeHosts {
 				hosts[i] = h
@@ -130,18 +154,18 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			}
 		}
 	} else {
-		prefillRequest[requestFieldKVTransferParams] = map[string]any{
-			requestFieldDoRemoteDecode:  true,
-			requestFieldDoRemotePrefill: false,
-			requestFieldRemoteEngineID:  nil,
-			requestFieldRemoteBlockIDs:  nil,
-			requestFieldRemoteHost:      nil,
-			requestFieldRemotePort:      nil,
+		prefillRequest[reqcommon.FieldKVTransferParams] = map[string]any{
+			reqcommon.FieldDoRemoteDecode:  true,
+			reqcommon.FieldDoRemotePrefill: false,
+			reqcommon.FieldRemoteEngineID:  nil,
+			reqcommon.FieldRemoteBlockIDs:  nil,
+			reqcommon.FieldRemoteHost:      nil,
+			reqcommon.FieldRemotePort:      nil,
 		}
 	}
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -245,7 +269,7 @@ retryLoop:
 
 	// 3. Verify response
 
-	pKVTransferParams, ok := prefillerResponse[requestFieldKVTransferParams]
+	pKVTransferParams, ok := prefillerResponse[reqcommon.FieldKVTransferParams]
 	if !ok {
 		s.logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
 	}
@@ -257,7 +281,7 @@ retryLoop:
 	}
 
 	s.logger.V(logging.TRACE).Info("received prefiller response",
-		requestFieldKVTransferParams, pKVTransferParams,
+		reqcommon.FieldKVTransferParams, pKVTransferParams,
 		"cachedTokens", pCachedTokens,
 		"hasCachedTokens", hasPCachedTokens)
 
@@ -270,46 +294,56 @@ retryLoop:
 
 	decodeSpan.SetAttributes(
 		semconv.LLMDPDProxyRequestID(uuidStr),
-		semconv.LLMDPDProxyConnector(KVConnectorNIXLV2),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorNIXLV2),
 	)
 	decodeStart := time.Now()
 
 	// 1. Prepare decode request
 	dreq := r.Clone(ctx)
 
-	dreq.Header.Add(requestHeaderRequestID, uuidStr)
+	dreq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
-	// Decode's DP rank is propagated from kv_transfer_params in the prefill
-	// response (remote_dp_rank = the rank prefill actually ran on),
-	// not independently re-derived here. This is the router-applies-the-
-	// connector-returned-rank model (PR #45043 review, njhill): the prefill
-	// connector returns the rank, the router pins the decode request to it, so both
-	// requests agree without each hashing the request id. The returned remote_dp_rank is
-	// validated to be in [0, dp_size); an omitted, non-numeric, or out-of-range
-	// value falls back to the deterministic hash. The header AND the decode
-	// body's remote_dp_rank are then pinned to the SAME validated value so they
-	// cannot target different ranks and hang the transfer.
-	// DP-rank propagation is a MoRI-IO WRITE-mode concern only. In standard
-	// NIXLv2 READ mode the decode body's remote_dp_rank / remote_dp_rank_override
-	// and the x-data-parallel-rank header are left untouched, matching the legacy
-	// wire shape.
+	// Preserve prefill's global rank for notify routing and dispatch decode to
+	// its pod-local equivalent. Fallback ranks use the selected prefill pod.
 	if s.config.MoRIIOWriteMode {
 		decodeDPRank, usedReturned := resolveDecodeDPRank(pKVTransferParams, uuidStr, s.config.MoRIIODPSize)
 		if pkv, ok := pKVTransferParams.(map[string]any); ok {
+			if !usedReturned && s.config.MoRIIODPSizeLocal > 0 && s.config.MoRIIODPSize > s.config.MoRIIODPSizeLocal {
+				prefillHost := s.resolver().resolveOne(ctx, extractHost(prefillPodHostPort))
+				podIndex := slices.Index(s.currentRemoteHosts(ctx), prefillHost)
+				if podIndex < 0 {
+					err := fmt.Errorf("cannot determine prefill pod index for %q", prefillHost)
+					s.logger.Error(err, "failed to route MoRI-IO decode notify", "request_id", uuidStr)
+					if err := errorBadGateway(err, w); err != nil {
+						s.logger.Error(err, "failed to send error response to client")
+					}
+					return
+				}
+				decodeDPRank = podIndex*s.config.MoRIIODPSizeLocal + localDPRank
+			}
 			if rv, present := pkv[requestFieldRemoteDPRank]; present && !usedReturned && s.config.MoRIIODPSize > 1 {
-				s.logger.V(1).Info("prefill returned invalid/out-of-range remote_dp_rank; using hash fallback",
+				s.logger.Info("prefill returned invalid/out-of-range remote_dp_rank; using fallback DP rank",
 					"request_id", uuidStr, "returned", rv,
 					"dp_size", s.config.MoRIIODPSize, "rank", decodeDPRank)
 			}
 			pkv[requestFieldRemoteDPRank] = decodeDPRank
 			pkv[requestFieldRemoteDPRankOverride] = true
+			if s.config.MoRIIODPSize > 1 {
+				// Decode can execute at a different global rank from prefill.
+				pkv["is_request_leader"] = true
+			}
 		}
 		if s.config.MoRIIODPSize > 1 {
-			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeDPRank))
+			decodeLocalDPRank := foldDPRankToLocal(
+				decodeDPRank,
+				s.config.MoRIIODPSize,
+				s.config.MoRIIODPSizeLocal,
+			)
+			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeLocalDPRank))
 		}
 	}
 
-	streamingEnabled, _ := body[requestFieldStream].(bool)
+	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeStreaming(streamingEnabled))
 
 	// WRITE mode: backfill the decode-side kv_transfer_params fields that
@@ -354,7 +388,7 @@ retryLoop:
 			}
 		}
 	}
-	body[requestFieldKVTransferParams] = pKVTransferParams
+	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 
 	dbody, err := json.Marshal(body)
 	if err != nil {
@@ -454,7 +488,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	if dpLocal <= 0 {
 		dpLocal = 1
 	}
-	dpRank := pickDPRank(uuidStr, s.config.MoRIIODPSize) % dpLocal
+	_, dpRank := pickDPRanks(
+		uuidStr,
+		s.config.MoRIIODPSize,
+		s.config.MoRIIODPSizeLocal,
+	)
 
 	decodePodIP := s.currentDecodePodIP(parentCtx)
 	decodeHosts := s.currentDecodeHosts(parentCtx)
@@ -462,13 +500,13 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Build prefill body. remote_host points at the decode pod so prefill can
 	// RDMA-Write KV there; remote_dp_size stays global, gating the decode-side
 	// per-DP-rank handshake loop for Wide-EP.
-	prefillRequest[requestFieldKVTransferParams] = map[string]any{
-		requestFieldDoRemoteDecode:       true,
-		requestFieldDoRemotePrefill:      false,
-		requestFieldRemoteEngineID:       nil,
-		requestFieldRemoteBlockIDs:       nil,
-		requestFieldRemoteHost:           decodePodIP,
-		requestFieldRemotePort:           nil,
+	prefillRequest[reqcommon.FieldKVTransferParams] = map[string]any{
+		reqcommon.FieldDoRemoteDecode:    true,
+		reqcommon.FieldDoRemotePrefill:   false,
+		reqcommon.FieldRemoteEngineID:    nil,
+		reqcommon.FieldRemoteBlockIDs:    nil,
+		reqcommon.FieldRemoteHost:        decodePodIP,
+		reqcommon.FieldRemotePort:        nil,
 		requestFieldRemoteNotifyPort:     s.config.MoRIIODecodeNotifyPort,
 		requestFieldRemoteDPRank:         dpRank,
 		requestFieldRemoteDPRankOverride: true,
@@ -482,7 +520,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// to the single-host remote_host path. Re-resolved per request so peer
 	// restarts (new IP) are picked up within the TTL.
 	if len(decodeHosts) > 0 {
-		pkv := prefillRequest[requestFieldKVTransferParams].(map[string]any)
+		pkv := prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any)
 		hosts := make([]any, len(decodeHosts))
 		for i, h := range decodeHosts {
 			hosts[i] = h
@@ -493,7 +531,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}
 	}
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[requestFieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -516,14 +554,14 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	remoteHosts := s.currentRemoteHosts(parentCtx)
 
 	// Decode: one prefill host; leader bit for follower global ranks.
-	body[requestFieldKVTransferParams] = map[string]any{
-		requestFieldDoRemotePrefill: true,
-		requestFieldDoRemoteDecode:  false,
-		requestFieldRemoteEngineID:  net.JoinHostPort(prefillHost, strconv.Itoa(s.config.MoRIIOPrefillHandshakePort)),
+	body[reqcommon.FieldKVTransferParams] = map[string]any{
+		reqcommon.FieldDoRemotePrefill: true,
+		reqcommon.FieldDoRemoteDecode:  false,
+		reqcommon.FieldRemoteEngineID:  net.JoinHostPort(prefillHost, strconv.Itoa(s.config.MoRIIOPrefillHandshakePort)),
 		// Empty (not nil) since decode allocates its own blocks in WRITE mode.
-		requestFieldRemoteBlockIDs:       []any{},
-		requestFieldRemoteHost:           prefillHost,
-		requestFieldRemotePort:           s.config.MoRIIOPrefillHandshakePort,
+		reqcommon.FieldRemoteBlockIDs:    []any{},
+		reqcommon.FieldRemoteHost:        prefillHost,
+		reqcommon.FieldRemotePort:        s.config.MoRIIOPrefillHandshakePort,
 		requestFieldRemoteNotifyPort:     s.config.MoRIIOPrefillNotifyPort,
 		requestFieldRemoteDPRank:         dpRank,
 		requestFieldRemoteDPRankOverride: true,
@@ -537,7 +575,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
 	// request so peer restarts (new IP) are picked up within the TTL.
 	if len(remoteHosts) > 0 {
-		dkv := body[requestFieldKVTransferParams].(map[string]any)
+		dkv := body[reqcommon.FieldKVTransferParams].(map[string]any)
 		dkv["remote_hosts"] = []any{prefillHost}
 		if s.config.MoRIIODPSizeLocal > 0 {
 			dkv["remote_dp_size_local"] = s.config.MoRIIODPSizeLocal
@@ -580,7 +618,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	preq := r.Clone(pCtx)
-	preq.Header.Set(requestHeaderRequestID, uuidStr)
+	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
 		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
 	}
@@ -597,7 +635,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	dreq := r.Clone(dCtx)
-	dreq.Header.Set(requestHeaderRequestID, uuidStr)
+	dreq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
 		dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
 	}

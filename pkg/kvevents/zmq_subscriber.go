@@ -182,6 +182,18 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" {
+			// A per-endpoint subscriber reads a single publisher, so a backwards
+			// sequence means the engine restarted with an empty cache. The bound
+			// global socket interleaves many publishers, so its sequences move
+			// backwards without a restart.
+			if z.sourceEndpoint != "" && z.hasLastLiveSeq && seq < z.lastLiveSeq {
+				logger.Info("Detected event sequence reset, clearing pod state",
+					"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
+					"endpoint", z.endpoint)
+				z.resetForSource(topic)
+			}
+			z.lastLiveSeq = seq
+			z.hasLastLiveSeq = true
 			z.addTask(ctx, topic, seq, payload)
 			continue
 		}
@@ -261,7 +273,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 	_, span := z.pool.startSpan(ctx, "events_receive", consumerSpanOptions)
 	defer span.End()
 	if span.IsRecording() {
-		//nolint:gosec // seq is vLLM's per-pod event counter; see parseEventFrame doc
+		//#nosec -- seq is vLLM's per-pod event counter; see parseEventFrame doc
 		seqAttr := int64(seq)
 		attrs := []attribute.KeyValue{
 			semconv.LLMDKVCacheEventsTopic(topic),
@@ -313,7 +325,12 @@ func (z *zmqSubscriber) retire(resetSource bool) {
 	defer z.queueMu.Unlock()
 	z.retired = true
 	if resetSource && z.sourceEndpoint != "" {
-		z.pool.resetForSource(z.topicFilter, z.sourceEndpoint)
+		z.pool.AddTask(&RawMessage{
+			Topic:          z.topicFilter,
+			SourceEndpoint: z.sourceEndpoint,
+			reset:          true,
+			retire:         true,
+		})
 	}
 }
 

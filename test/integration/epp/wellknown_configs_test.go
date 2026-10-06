@@ -344,7 +344,6 @@ plugins:
 schedulingProfiles:
 - name: default
   plugins:
-  - pluginRef: predicted-latency-producer
   - pluginRef: strict-affinity-filter
   - pluginRef: slo-headroom-tier-filter
   - pluginRef: loose-affinity-filter

@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 )
 
@@ -429,9 +430,9 @@ func TestExecute_ExecutionPathTable(t *testing.T) {
 		stepNames []string
 		wantPath  string
 	}{
-		{"decode-only via cache hit", []string{"conditional-decode"}, coordmetrics.PathDecodeOnly},
-		{"prefill-decode without encode", []string{"prefill", "decode"}, coordmetrics.PathPrefillDecode},
-		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, coordmetrics.PathEncodePrefillDecode},
+		{"decode-only via cache hit", []string{"conditional-decode"}, metricsutil.DisaggPathDecodeOnly},
+		{"prefill-decode without encode", []string{"prefill", "decode"}, metricsutil.DisaggPathPrefillDecode},
+		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, metricsutil.DisaggPathEncodePrefillDecode},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,7 +469,7 @@ func TestExecute_ExecutionPathRecordedOnDecodeFailure(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
 		t.Fatal("expected error")
 	}
-	require.InDelta(t, 1.0, pathCount(t, reg, coordmetrics.PathPrefillDecode), 1e-9)
+	require.InDelta(t, 1.0, pathCount(t, reg, metricsutil.DisaggPathPrefillDecode), 1e-9)
 }
 
 func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
@@ -483,7 +484,7 @@ func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
 		t.Fatal("expected error")
 	}
-	require.InDelta(t, 1.0, pathCount(t, reg, coordmetrics.PathDecodeOnly), 1e-9)
+	require.InDelta(t, 1.0, pathCount(t, reg, metricsutil.DisaggPathDecodeOnly), 1e-9)
 }
 
 func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
@@ -497,7 +498,7 @@ func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
 	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
 		t.Fatal("expected error")
 	}
-	for _, p := range []string{coordmetrics.PathDecodeOnly, coordmetrics.PathPrefillDecode, coordmetrics.PathEncodePrefillDecode} {
+	for _, p := range []string{metricsutil.DisaggPathDecodeOnly, metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode} {
 		require.Zero(t, pathCount(t, reg, p))
 	}
 }

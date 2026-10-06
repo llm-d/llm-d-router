@@ -80,7 +80,7 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 		return nil, err
 	}
 
-	var pipelineSteps []pipeline.Step
+	pipelineSteps := make([]pipeline.Step, 0, len(cfg.Pipeline.Steps))
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergePipelineDefaults(stepCfg.Params, cfg.Pipeline)
 		if usesOpenAIFormatParam(stepCfg.Type) {

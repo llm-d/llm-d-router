@@ -34,7 +34,7 @@ func (cc *GenericHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body
-		w.Write([]byte(err.Error()))         //nolint:errcheck
+		w.Write([]byte(err.Error()))         //nolint:errcheck,gosec // G104: error not actionable on test handler response
 		return
 	}
 

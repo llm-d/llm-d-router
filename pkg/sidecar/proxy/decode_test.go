@@ -32,6 +32,7 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // chunkedTestInfo holds a running proxy backed by a controlled decode backend.
@@ -68,7 +69,7 @@ func newChunkedTestSetupWithHandler(chunkSize int, handler http.Handler) *chunke
 	cfg := Config{
 		Port:            "0",
 		DecoderURL:      decoderURL,
-		KVConnector:     KVConnectorNIXLV2,
+		KVConnector:     constants.KVConnectorNIXLV2,
 		DecodeChunkSize: chunkSize,
 	}
 	proxy := NewProxy(cfg)
@@ -264,16 +265,16 @@ var _ = Describe("Chunked Decode", func() {
 
 			// Two chunk data events + usage event + [DONE]
 			Expect(events).To(HaveLen(4))
-			Expect(events[3]).To(Equal(sseDone))
+			Expect(events[3]).To(Equal(reqcommon.SSEDone))
 
 			var first map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], sseDataPrefix)), &first)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
 			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
 			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
 
 			// Verify cumulative usage in the final usage event.
 			var usageEvent map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], sseDataPrefix)), &usageEvent)).To(Succeed())
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], reqcommon.SSEDataPrefix)), &usageEvent)).To(Succeed())
 			usage := usageEvent["usage"].(map[string]any)
 			promptTokens, _ := toInt(usage["prompt_tokens"])
 			completionTokens, _ := toInt(usage["completion_tokens"])
@@ -287,7 +288,7 @@ var _ = Describe("Chunked Decode", func() {
 	Describe("helper functions", func() {
 
 		It("resolveMaxTokens prefers max_completion_tokens over max_tokens", func() {
-			req := map[string]any{requestFieldMaxTokens: float64(50), requestFieldMaxCompletionTokens: float64(100)}
+			req := map[string]any{reqcommon.FieldMaxTokens: float64(50), reqcommon.FieldMaxCompletionTokens: float64(100)}
 			Expect(resolveMaxTokens(req)).To(Equal(100))
 		})
 

@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	sidecarmock "github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
@@ -40,6 +41,20 @@ const (
 )
 
 var _ = Describe("Data Parallel support", func() {
+	It("should preserve the NIXLv2 request ID generator when cloning", func() {
+		const requestID = "fixed-request-id"
+		proxy := NewProxy(Config{})
+		proxy.nixlRequestIDFn = func() (string, error) {
+			return requestID, nil
+		}
+
+		clone := proxy.Clone()
+		got, err := clone.nixlRequestIDFn()
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(got).To(Equal(requestID))
+	})
+
 	When("configured with --data-parallel-size > 1", func() {
 		It("should create an extra proxy", func() {
 			ctx := newTestContext()
@@ -74,7 +89,7 @@ var _ = Describe("Data Parallel support", func() {
 			cfg := Config{
 				Port:             strconv.Itoa(fakeProxyPort),
 				DecoderURL:       decodeURL,
-				KVConnector:      KVConnectorNIXLV2,
+				KVConnector:      constants.KVConnectorNIXLV2,
 				DataParallelSize: testDataParallelSize,
 			}
 			theProxy := NewProxy(cfg)

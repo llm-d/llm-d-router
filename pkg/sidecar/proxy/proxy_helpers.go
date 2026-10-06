@@ -208,18 +208,18 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	requestFieldKVTransferParams:     {},
-	requestFieldECTransferParams:     {},
-	requestFieldMaxTokens:            {},
-	requestFieldMaxCompletionTokens:  {},
-	requestFieldMaxOutputTokens:      {},
-	requestFieldMinTokens:            {},
-	requestFieldSamplingParams:       {},
-	requestFieldStream:               {},
-	requestFieldStreamOptions:        {},
-	requestFieldCacheHitThreshold:    {},
-	requestFieldContinueFinalMessage: {},
-	requestFieldAddGenerationPrompt:  {},
+	reqcommon.FieldKVTransferParams:     {},
+	reqcommon.FieldECTransferParams:     {},
+	reqcommon.FieldMaxTokens:            {},
+	reqcommon.FieldMaxCompletionTokens:  {},
+	reqcommon.FieldMaxOutputTokens:      {},
+	reqcommon.FieldMinTokens:            {},
+	reqcommon.FieldSamplingParams:       {},
+	reqcommon.FieldStream:               {},
+	reqcommon.FieldStreamOptions:        {},
+	reqcommon.FieldCacheHitThreshold:    {},
+	reqcommon.FieldContinueFinalMessage: {},
+	reqcommon.FieldAddGenerationPrompt:  {},
 }
 
 // requestMessages returns the request's messages, decoding the array on first
