@@ -128,6 +128,88 @@ func TestPrompt_UnmarshalJSON(t *testing.T) {
 	}
 }
 
+func TestContent_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    Content
+		wantErr bool
+	}{
+		{
+			name:  "string content",
+			input: `"hello world"`,
+			want:  Content{Raw: "hello world"},
+		},
+		{
+			name:  "string content with escapes",
+			input: `"line one\n\"quoted\"\u0041"`,
+			want:  Content{Raw: "line one\n\"quoted\"A"},
+		},
+		{
+			name:  "empty string content",
+			input: `""`,
+			want:  Content{},
+		},
+		{
+			name:  "null content",
+			input: `null`,
+			want:  Content{},
+		},
+		{
+			name:  "content blocks",
+			input: `[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]`,
+			want: Content{Structured: []ContentBlock{
+				{Type: "text", Text: "describe"},
+				{Type: "image_url", ImageURL: ImageBlock{URL: "data:image/png;base64,AAAA"}},
+			}},
+		},
+		{
+			name:  "empty content blocks",
+			input: `[]`,
+			want:  Content{Structured: []ContentBlock{}},
+		},
+		{
+			name:    "content block with mistyped field is rejected",
+			input:   `[{"type":1}]`,
+			wantErr: true,
+		},
+		{
+			name:    "array of strings is rejected",
+			input:   `["hello"]`,
+			wantErr: true,
+		},
+		{
+			name:    "object content is rejected",
+			input:   `{"type":"text"}`,
+			wantErr: true,
+		},
+		{
+			name:    "number content is rejected",
+			input:   `123`,
+			wantErr: true,
+		},
+		{
+			name:    "boolean content is rejected",
+			input:   `true`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c Content
+			err := c.UnmarshalJSON([]byte(tt.input))
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Equal(t, Content{}, c)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, c)
+			}
+		})
+	}
+}
+
 func TestPrompt_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
 	stale := Prompt{
 		Raw:      "stale",
