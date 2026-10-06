@@ -743,6 +743,21 @@ func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys
 // attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
 // matching a deployment where the outlen-bucket plugin is not enabled, hence the
 // UnknownOutputTokens output the counter-tracking tests expect.
+// TestInFlightLoadProducer_EndOfStreamObservesOutput verifies that the completion tokens
+// reported at EndOfStream feed the UNKNOWN output estimate.
+func TestInFlightLoadProducer_EndOfStreamObservesOutput(t *testing.T) {
+	producer := newTestProducer(t)
+	req := makeTokenRequest("req-observe", 4)
+	req.SchedulingResult = &fwksched.SchedulingResult{}
+
+	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{
+		EndOfStream: true,
+		Usage:       fwkrh.Usage{CompletionTokens: 300},
+	}, nil)
+
+	require.Equal(t, int64(300), producer.tokenEstimator.EstimateOutputFromRequest(req))
+}
+
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,

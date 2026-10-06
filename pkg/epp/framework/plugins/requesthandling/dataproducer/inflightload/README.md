@@ -31,17 +31,18 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 | `prefixMatchInfoProducerName` | `string` | No | _(none)_ | Optional `prefix-cache producer` name to read to find cached prefix discount. Unset defaults to approximate-prefix producer. |
 
-When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
-value determined by the output-length bucket published by the `outlen-bucket` plugin:
+When `addEstimatedOutputTokens` is true, the estimated output per request is determined
+by the output-length bucket published by the `outlen-bucket` plugin:
 
 | Output-Length Bucket | Estimated output tokens |
 |------------|------------------------|
 | `LONG` (reasoning chains) | 4 096 |
 | `SHORT` (tool-call JSON) | 100 |
-| `UNKNOWN` (no reliable signal) | 1 000 |
+| `UNKNOWN` (no reliable signal) | running average of the completion tokens of finished UNKNOWN requests, weighted toward roughly the last 100 (1 000 until the first one) |
 
 The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
-and `maxEstimatedOutputTokens`. Ranking invariant: SHORT (100) < UNKNOWN (1 000) < LONG (4 096).
+and `maxEstimatedOutputTokens`. The UNKNOWN average is kept within [100, 4 096], so
+SHORT <= UNKNOWN <= LONG.
 When the `outlen-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
 logs a one-time warning.
 
