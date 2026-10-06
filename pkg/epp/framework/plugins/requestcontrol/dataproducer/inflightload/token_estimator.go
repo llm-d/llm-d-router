@@ -18,6 +18,9 @@ limitations under the License.
 package inflightload
 
 import (
+	"sync"
+	"sync/atomic"
+
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
@@ -30,6 +33,8 @@ type TokenEstimator interface {
 	// request from the output-length bucket published by the outlen-bucket plugin, bounded by
 	// the client-requested cap and the estimator's operator cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
+	// ObserveOutput records the completion tokens a finished request produced.
+	ObserveOutput(request *fwksched.InferenceRequest, completionTokens int64)
 }
 
 const (
@@ -38,24 +43,33 @@ const (
 	// thinking_budget: the estimate exists to rank requests by load, where the
 	// LONG-vs-SHORT separation dominates, not to predict exact length.
 	LongOutputTokens int64 = 4096
-	// UnknownOutputTokens is the flat output-token estimate for an UNKNOWN
-	// request (no output-length signal), preserving the ranking invariant
-	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
-	// TODO(outlen): replace with a dynamic estimate (e.g. per-pool running average
-	// of observed CompletionTokens) in a follow-up PR.
+	// UnknownOutputTokens is the output-token estimate for an UNKNOWN request
+	// (no output-length signal) until the first UNKNOWN completion is observed.
 	UnknownOutputTokens int64 = 1000
 	// ShortOutputTokens is the flat output-token estimate for a SHORT
 	// (tool-call) request.
 	ShortOutputTokens int64 = 100
+
+	// unknownOutputWindow bounds the running average's divisor, so each UNKNOWN
+	// observation weighs at least 1/unknownOutputWindow and the estimate follows
+	// workload shifts.
+	unknownOutputWindow = 100
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
-// output-length bucket published by the outlen-bucket plugin to a flat output-token estimate,
+// output-length bucket published by the outlen-bucket plugin to an output-token estimate,
 // bounded by the client-requested cap and an optional operator cap.
 type SimpleTokenEstimator struct {
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
 	// regardless of the client-requested cap. nil means no cap.
 	MaxEstimatedOutputTokens *int64
+
+	mu         sync.Mutex // guards unknownAvg and unknownN
+	unknownAvg float64
+	unknownN   int
+	// unknownEst is the published UNKNOWN estimate, read lock-free on the
+	// scheduling path. 0 means no UNKNOWN completion observed yet.
+	unknownEst atomic.Int64
 }
 
 // NewSimpleTokenEstimator returns a SimpleTokenEstimator with an optional operator
@@ -75,8 +89,9 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 
 // EstimateOutputFromRequest returns the estimated output token count for a request
 // from the output-length bucket published by the outlen-bucket plugin: LONG (reasoning) maps to
-// a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to 1000 --
-// preserving the ranking invariant SHORT < UNKNOWN < LONG. The estimate is bounded
+// a flat 4096-token estimate, SHORT (tool-call) to 100, and UNKNOWN to the running average
+// of observed UNKNOWN completion tokens (1000 before the first one), kept within
+// [SHORT, LONG] to preserve the ranking SHORT <= UNKNOWN <= LONG. The estimate is bounded
 // by the client-requested cap and the estimator's operator cap.
 //
 // Ordering dependency: the bucket comes from an attribute that the outlen-bucket
@@ -103,9 +118,29 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 	case outlenbucket.Short:
 		est = ShortOutputTokens
 	default:
-		est = UnknownOutputTokens
+		est = e.unknownEst.Load()
+		if est == 0 {
+			est = UnknownOutputTokens
+		}
 	}
 	return e.clampOutput(est, request.Body.MaxOutputTokens)
+}
+
+// ObserveOutput folds the completion tokens of a finished UNKNOWN request into the
+// UNKNOWN estimate. SHORT and LONG keep their flat estimates and are not observed.
+func (e *SimpleTokenEstimator) ObserveOutput(request *fwksched.InferenceRequest, completionTokens int64) {
+	if request == nil || completionTokens <= 0 {
+		return
+	}
+	if bucket, _ := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); bucket != outlenbucket.Unknown {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.unknownN = min(e.unknownN+1, unknownOutputWindow)
+	e.unknownAvg += (float64(completionTokens) - e.unknownAvg) / float64(e.unknownN)
+	e.unknownEst.Store(min(max(int64(e.unknownAvg), ShortOutputTokens), LongOutputTokens))
 }
 
 // clampOutput bounds est by the client-requested cap and the operator cap.
