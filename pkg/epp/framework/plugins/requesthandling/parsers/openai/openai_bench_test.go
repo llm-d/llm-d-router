@@ -176,7 +176,7 @@ func benchChatBody(b *testing.B, messages []any, extra map[string]any) []byte {
 //
 // Run:
 //
-//	GOTOOLCHAIN=go1.26.8 go test -run='^$' -bench=BenchmarkOpenAIParser_ChatCompletions \
+//	go test -run='^$' -bench=BenchmarkOpenAIParser_ChatCompletions \
 //	    -benchmem -count=10 ./pkg/epp/framework/plugins/requesthandling/parsers/openai/ | tee bench.out
 //	benchstat bench.out
 func BenchmarkOpenAIParser_ChatCompletions(b *testing.B) {
