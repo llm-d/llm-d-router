@@ -19,9 +19,12 @@ package toolcalling
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"go.opentelemetry.io/otel/attribute"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const (
@@ -54,7 +57,7 @@ func (summary ResponseSummary) SpanAttributes() []attribute.KeyValue {
 // arbitrarily chunked input and keeps only the incomplete current line between
 // calls; completed lines are parsed immediately and cleared.
 type ResponseDetector struct {
-	surface         APISurface
+	surface         reqcommon.APIType
 	eventStream     bool
 	toolCallPresent bool
 	line            []byte
@@ -62,9 +65,9 @@ type ResponseDetector struct {
 }
 
 // NewResponseDetector creates a detector for a supported response API surface.
-func NewResponseDetector(surface APISurface, eventStream bool) (*ResponseDetector, error) {
-	if _, err := fieldsForSurface(surface); err != nil {
-		return nil, err
+func NewResponseDetector(surface reqcommon.APIType, eventStream bool) (*ResponseDetector, error) {
+	if surface != reqcommon.APITypeChatCompletions && surface != reqcommon.APITypeMessages {
+		return nil, fmt.Errorf("unsupported response API type: %s", surface)
 	}
 	return &ResponseDetector{surface: surface, eventStream: eventStream}, nil
 }
@@ -136,7 +139,7 @@ const (
 	responseJSONContentBlock
 )
 
-func detectToolCallJSON(surface APISurface, body []byte) bool {
+func detectToolCallJSON(surface reqcommon.APIType, body []byte) bool {
 	if !json.Valid(body) {
 		return false
 	}
@@ -152,7 +155,7 @@ func detectToolCallJSON(surface APISurface, body []byte) bool {
 	return found
 }
 
-func scanResponseJSONValue(decoder *json.Decoder, context responseJSONContext, surface APISurface) (bool, error) {
+func scanResponseJSONValue(decoder *json.Decoder, context responseJSONContext, surface reqcommon.APIType) (bool, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return false, err
@@ -182,7 +185,7 @@ func scanResponseJSONValue(decoder *json.Decoder, context responseJSONContext, s
 	}
 }
 
-func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, surface APISurface) (bool, error) {
+func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, surface reqcommon.APIType) (bool, error) {
 	found := false
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -194,7 +197,7 @@ func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, 
 			return false, nil
 		}
 
-		if context == responseJSONMessage && key == "tool_calls" && surface == APISurfaceChatCompletions {
+		if context == responseJSONMessage && key == "tool_calls" && surface == reqcommon.APITypeChatCompletions {
 			present, err := scanNonEmptyJSONArray(decoder)
 			if err != nil {
 				return false, err
@@ -202,7 +205,7 @@ func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, 
 			found = found || present
 			continue
 		}
-		if context == responseJSONMessage && key == "function_call" && surface == APISurfaceChatCompletions {
+		if context == responseJSONMessage && key == "function_call" && surface == reqcommon.APITypeChatCompletions {
 			present, err := scanNonEmptyJSONObject(decoder)
 			if err != nil {
 				return false, err
@@ -215,7 +218,7 @@ func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, 
 			if err != nil {
 				return false, err
 			}
-			if surface == APISurfaceMessages && value == "tool_use" {
+			if surface == reqcommon.APITypeMessages && value == "tool_use" {
 				found = true
 			}
 			continue
@@ -276,7 +279,7 @@ func scanNonEmptyJSONArray(decoder *json.Decoder) (bool, error) {
 	}
 	nonEmpty := decoder.More()
 	for decoder.More() {
-		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, APISurfaceChatCompletions); err != nil {
+		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, reqcommon.APITypeChatCompletions); err != nil {
 			return false, err
 		}
 	}
@@ -297,7 +300,7 @@ func scanNonEmptyJSONObject(decoder *json.Decoder) (bool, error) {
 		if _, err := decoder.Token(); err != nil { // object key
 			return false, err
 		}
-		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, APISurfaceChatCompletions); err != nil {
+		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, reqcommon.APITypeChatCompletions); err != nil {
 			return false, err
 		}
 	}

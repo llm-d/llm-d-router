@@ -162,6 +162,15 @@ type RequestContext struct {
 	responseStatusCode         string
 	requestRunning             bool
 
+	toolCallingSurface             reqcommon.APIType
+	toolCallingRequest             bool
+	toolCallingResponseEventStream bool
+	toolCallingUpstreamDetector    *toolcalling.ResponseDetector
+	toolCallingForwardedDetector   *toolcalling.ResponseDetector
+	toolCallingUpstreamPresent     bool
+	toolCallingForwardedPresent    bool
+	toolCallingResponseRecorded    bool
+
 	// responseProcessingDuration is the EPP cost of handling the response. For a
 	// streamed response it is the sum of the per-chunk handler slices, since the
 	// gaps between chunks are model server generation time. For a non-streaming
@@ -600,6 +609,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				if hasToolCallingAPI && hasInboundToolSnapshot {
+					reqCtx.toolCallingSurface = apiType
+					reqCtx.toolCallingRequest = inboundToolSnapshot.Summary().ToolCallingPresent &&
+						(apiType == reqcommon.APITypeChatCompletions || apiType == reqcommon.APITypeMessages)
 					statuses, compareErr := compareEPPToolCallingSnapshotToBody(apiType, inboundToolSnapshot, inboundBody, reqCtx.Request.RawBody)
 					if compareErr != nil {
 						logger.Error(compareErr, "Error comparing tool-calling request fields")
@@ -655,6 +667,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType && strings.Contains(string(header.RawValue), fwkrequest.MediaTypeEventStream) {
 					reqCtx.modelServerStreaming = true
+					reqCtx.toolCallingResponseEventStream = true
 					if traceEnabled {
 						loggerTrace.Info("model server is streaming response")
 					}
@@ -671,6 +684,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			chunk := v.ResponseBody.Body
 
 			if reqCtx.modelServerStreaming {
+				upstreamChunk := chunk
 				respBodyStart := time.Now()
 				if endOfStream {
 					reqCtx.responseComplete = true
@@ -678,14 +692,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				reqCtx.observeToolCallingResponse(upstreamChunk, chunk, endOfStream, span)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
-					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
+					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true, span)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
@@ -696,7 +711,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
 				reqCtx.TerminationCause = cause
 			}
-			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
+			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
@@ -736,7 +751,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 // finishResponse ensures all post-response logic, such as metric recording
 // and state updates, is executed exactly once for the request lifecycle.
-func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool) {
+func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool, span trace.Span) {
 	// Return early if the response has already been finished to prevent
 	// duplicate execution of side effects and metrics.
 	if reqCtx.responseComplete {
@@ -746,6 +761,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	start := time.Now()
 	reqCtx.responseComplete = true
 	reqCtx.responseCompleteTimestamp = time.Now()
+	upstreamBody := body
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
@@ -753,12 +769,45 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
+	reqCtx.observeToolCallingResponse(upstreamBody, body, true, span)
 	if modelStreaming || reqCtx.responseHeadersReceivedAt.IsZero() {
 		reqCtx.responseProcessingDuration += time.Since(start)
 	} else {
 		// Supersedes the header slice already accumulated: the interval since the
 		// response headers arrived covers it and the body wait in between.
 		reqCtx.responseProcessingDuration = time.Since(reqCtx.responseHeadersReceivedAt)
+	}
+}
+
+func (reqCtx *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
+	if reqCtx == nil || !reqCtx.toolCallingRequest || reqCtx.toolCallingResponseRecorded {
+		return
+	}
+	if reqCtx.toolCallingUpstreamDetector == nil || reqCtx.toolCallingForwardedDetector == nil {
+		upstreamDetector, err := toolcalling.NewResponseDetector(reqCtx.toolCallingSurface, reqCtx.toolCallingResponseEventStream)
+		if err != nil {
+			return
+		}
+		forwardedDetector, err := toolcalling.NewResponseDetector(reqCtx.toolCallingSurface, reqCtx.toolCallingResponseEventStream)
+		if err != nil {
+			return
+		}
+		reqCtx.toolCallingUpstreamDetector = upstreamDetector
+		reqCtx.toolCallingForwardedDetector = forwardedDetector
+	}
+
+	reqCtx.toolCallingUpstreamPresent = reqCtx.toolCallingUpstreamDetector.Observe(upstream, endOfStream)
+	reqCtx.toolCallingForwardedPresent = reqCtx.toolCallingForwardedDetector.Observe(forwarded, endOfStream)
+	if !endOfStream {
+		return
+	}
+	reqCtx.toolCallingResponseRecorded = true
+	if span != nil {
+		span.SetAttributes((toolcalling.ResponseSummary{
+			ToolCallingRequested:     true,
+			UpstreamToolCallPresent:  reqCtx.toolCallingUpstreamPresent,
+			ForwardedToolCallPresent: reqCtx.toolCallingForwardedPresent,
+		}).SpanAttributes()...)
 	}
 }
 

@@ -26,11 +26,14 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -215,6 +218,57 @@ func TestHandleResponseBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestObserveToolCallingResponseRecordsUpstreamAndForwardedPresence(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+
+	reqCtx := &RequestContext{
+		toolCallingSurface: reqcommon.APITypeChatCompletions,
+		toolCallingRequest: true,
+	}
+	upstream := []byte(`{"model":"internal","choices":[{"message":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`)
+	forwarded := []byte(`{"model":"public","choices":[{"message":{"content":"no tool call"}}]}`)
+	reqCtx.observeToolCallingResponse(upstream, forwarded, true, span)
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attributes := make(map[string]bool, len(ended[0].Attributes()))
+	for _, attribute := range ended[0].Attributes() {
+		attributes[string(attribute.Key)] = attribute.Value.AsBool()
+		assert.NotContains(t, attribute.Value.String(), "sentinel_")
+	}
+	assert.True(t, attributes[toolcalling.ResponseAttributeUpstreamToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedToolCallPresent])
+}
+
+func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
+	reqCtx := &RequestContext{
+		toolCallingSurface:             reqcommon.APITypeMessages,
+		toolCallingRequest:             true,
+		toolCallingResponseEventStream: true,
+	}
+	first := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",")
+	second := []byte("\"content_block\":{\"type\":\"tool_use\"}}\n")
+	reqCtx.observeToolCallingResponse(first, first, false, nil)
+	reqCtx.observeToolCallingResponse(second, second, true, nil)
+
+	require.True(t, reqCtx.toolCallingResponseRecorded)
+	require.True(t, reqCtx.toolCallingUpstreamPresent)
+	require.True(t, reqCtx.toolCallingForwardedPresent)
+}
+
+func TestObserveToolCallingResponseSkipsNonToolRequest(t *testing.T) {
+	reqCtx := &RequestContext{toolCallingSurface: reqcommon.APITypeChatCompletions}
+	reqCtx.observeToolCallingResponse([]byte(`{"choices":[]}`), []byte(`{"choices":[]}`), true, nil)
+
+	assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+	assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+	assert.False(t, reqCtx.toolCallingResponseRecorded)
 }
 
 func TestHandleStreamedResponseBody(t *testing.T) {
