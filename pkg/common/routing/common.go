@@ -52,6 +52,22 @@ const (
 	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
+
+	// PreferReserveEndpoint is the preference token the coordinator sets to ask
+	// which endpoint EPP would pick for a request without sending the request
+	// there. EPP answers 204 with the picked <ip:port> on ReservedEndpointHeader
+	// and forwards nothing.
+	PreferReserveEndpoint = "reserve-endpoint"
+
+	// PreferenceAppliedHeader is the standard RFC 7240 response header that names
+	// the Prefer tokens the server applied.
+	PreferenceAppliedHeader = "preference-applied"
+
+	// ReservedEndpointHeader is the response header that carries the <ip:port>
+	// EPP picked on a "Prefer: reserve-endpoint" request. The name is fixed, not
+	// derived from the scheduling profile, because a per-phase EPP runs its only
+	// profile under another name.
+	ReservedEndpointHeader = "x-llm-d-reserved-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

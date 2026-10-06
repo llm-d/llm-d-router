@@ -203,11 +203,32 @@ func (e customError) Error() string {
 	return e.msg
 }
 
+func TestIsAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "NoContent is an answer", err: Error{Code: NoContent, Msg: "answered"}, want: true},
+		{name: "Internal is not an answer", err: Error{Code: Internal, Msg: "failed"}, want: false},
+		{name: "plain error is not an answer", err: errors.New("plain"), want: false},
+		{name: "nil is not an answer", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsAnswer(tt.err); got != tt.want {
+				t.Errorf("IsAnswer() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestErrorConstants(t *testing.T) {
 	// Verify that error constants match their expected string values
 	tests := map[string]string{
 		Unknown:            "Unknown",
 		BadRequest:         "BadRequest",
+		NoContent:          "NoContent",
 		Internal:           "Internal",
 		ServiceUnavailable: "ServiceUnavailable",
 		ModelServerError:   "ModelServerError",
@@ -230,6 +251,12 @@ func TestBuildErrResponse(t *testing.T) {
 		wantGRPCErr      bool
 		wantHeaders      map[string]string
 	}{
+		{
+			name:           "NoContent returns 204 with headers and no body",
+			err:            Error{Code: NoContent, Msg: "answered", Headers: map[string]string{"x-answer": "yes"}},
+			wantHTTPStatus: envoyTypePb.StatusCode_NoContent,
+			wantHeaders:    map[string]string{"x-answer": "yes"},
+		},
 		{
 			name:             "BadRequest returns 400",
 			err:              Error{Code: BadRequest, Msg: "invalid model name"},
@@ -320,7 +347,11 @@ func TestBuildErrResponse(t *testing.T) {
 			if ir.GetStatus().GetCode() != tt.wantHTTPStatus {
 				t.Errorf("HTTP status = %v, want %v", ir.GetStatus().GetCode(), tt.wantHTTPStatus)
 			}
-			if tt.wantBodyContains != "" && !strings.Contains(string(ir.GetBody()), tt.wantBodyContains) {
+			if tt.wantBodyContains == "" {
+				if len(ir.GetBody()) != 0 {
+					t.Errorf("body %q, want none", string(ir.GetBody()))
+				}
+			} else if !strings.Contains(string(ir.GetBody()), tt.wantBodyContains) {
 				t.Errorf("body %q should contain %q", string(ir.GetBody()), tt.wantBodyContains)
 			}
 			if len(tt.wantHeaders) > 0 {

@@ -192,7 +192,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	defer func() {
-		if err != nil {
+		if err != nil && !errcommon.IsAnswer(err) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -511,6 +511,16 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 				Code: errcommon.PreconditionFailed,
 				Msg:  "conditional-decode request received but no gate plugin is configured",
 			}
+		}
+	}
+
+	// Default-deny for "Prefer: reserve-endpoint" when no PreRequest plugin
+	// answered it, so an EPP without the plugin never sends the request to a
+	// model server.
+	if routing.HasPreference(reqCtx.SchedulingRequest.Headers, routing.PreferReserveEndpoint) {
+		return reqCtx, errcommon.Error{
+			Code: errcommon.Internal,
+			Msg:  "reserve-endpoint request received but no plugin answered it",
 		}
 	}
 

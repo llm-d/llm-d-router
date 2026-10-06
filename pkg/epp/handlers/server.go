@@ -398,13 +398,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			s.evictionLookup.Deregister(evictionRequestID)
 		}
 		fairnessID, priority := extractFairnessAndPriority(reqCtx)
+		failed := err != nil && !errcommon.IsAnswer(err)
 		if reqCtx.responseStatusCode != "" {
 			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.responseStatusCode)
-		} else if err != nil {
+		} else if failed {
 			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
 		if span != nil {
-			if err != nil {
+			if failed {
 				span.RecordError(err)
 				span.SetStatus(otelcodes.Error, err.Error())
 			} else if reqCtx.responseStatusCode != "" {
@@ -526,7 +527,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				if err != nil {
-					logger.Error(err, "Error handling request")
+					if !errcommon.IsAnswer(err) {
+						logger.Error(err, "Error handling request")
+					}
 					break
 				}
 
@@ -627,9 +630,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// Handle the err and fire an immediate response.
 		if err != nil {
 			recordRequestProcessing()
-			if logger.V(logutil.DEBUG).Enabled() {
+			switch {
+			case errcommon.IsAnswer(err):
+				answer, _ := err.(errcommon.Error)
+				logger.V(logutil.DEFAULT).Info("Answered request without forwarding", "reason", answer.Msg)
+			case logger.V(logutil.DEBUG).Enabled():
 				logger.V(logutil.DEBUG).Error(err, "Failed to process request", "request", req)
-			} else {
+			default:
 				logger.Error(err, "Failed to process request")
 			}
 			resp, err := errcommon.BuildErrResponse(err)
