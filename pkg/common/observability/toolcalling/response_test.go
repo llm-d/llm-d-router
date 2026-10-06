@@ -36,6 +36,122 @@ func TestResponseSummarySpanAttributes(t *testing.T) {
 	require.False(t, attributes[1].Value.AsBool())
 }
 
+func TestResponseDetectorJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		surface APISurface
+		body    string
+		want    bool
+	}{
+		{
+			name:    "chat completions tool calls",
+			surface: APISurfaceChatCompletions,
+			body:    `{"choices":[{"message":{"tool_calls":[{"type":"function","function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`,
+			want:    true,
+		},
+		{
+			name:    "empty chat tool calls",
+			surface: APISurfaceChatCompletions,
+			body:    `{"choices":[{"message":{"tool_calls":[]}}]}`,
+		},
+		{
+			name:    "legacy chat function call",
+			surface: APISurfaceChatCompletions,
+			body:    `{"choices":[{"message":{"function_call":{"name":"sentinel_name","arguments":"sentinel_arguments"}}}]}`,
+			want:    true,
+		},
+		{
+			name:    "messages tool use",
+			surface: APISurfaceMessages,
+			body:    `{"content":[{"type":"tool_use","name":"sentinel_name","input":{"secret":"sentinel_arguments"}}]}`,
+			want:    true,
+		},
+		{
+			name:    "text mentioning tool use is not a tool call",
+			surface: APISurfaceMessages,
+			body:    `{"content":[{"type":"text","text":"tool_use"}]}`,
+		},
+		{
+			name:    "malformed response",
+			surface: APISurfaceChatCompletions,
+			body:    `{"choices":[`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detector, err := NewResponseDetector(tt.surface, false)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, detector.Observe([]byte(tt.body), true))
+		})
+	}
+}
+
+func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		surface APISurface
+		chunks  []string
+	}{
+		{
+			name:    "chat completions delta",
+			surface: APISurfaceChatCompletions,
+			chunks: []string{
+				`data: {"choices":[{"delta":{"tool_`,
+				`calls":[{"index":0,"function":{"name":"sentinel_name",`,
+				`"arguments":"sentinel_arguments"}}]}}]}` + "\r\n",
+			},
+		},
+		{
+			name:    "messages content block start",
+			surface: APISurfaceMessages,
+			chunks: []string{
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",",
+				"\"content_block\":{\"type\":\"tool_use\",\"name\":\"sentinel_name\",\"input\":{\"secret\":\"sentinel_arguments\"}}}\n\n",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detector, err := NewResponseDetector(tt.surface, true)
+			require.NoError(t, err)
+			for i, chunk := range tt.chunks {
+				got := detector.Observe([]byte(chunk), i == len(tt.chunks)-1)
+				if i < len(tt.chunks)-1 {
+					require.False(t, got)
+				}
+			}
+			require.True(t, detector.toolCallPresent)
+			require.Empty(t, detector.line, "completed SSE payload should not remain buffered")
+		})
+	}
+}
+
+func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
+	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	for _, chunk := range []string{
+		`data: {"choices":[{"delta":{"content":"tool_calls"}}]}` + "\n",
+		"data: [DONE]\n",
+		"data: {invalid json}\n",
+	} {
+		require.False(t, detector.Observe([]byte(chunk), false))
+	}
+	require.False(t, detector.Observe(nil, true))
+}
+
+func TestResponseDetectorRejectsUnsupportedSurface(t *testing.T) {
+	_, err := NewResponseDetector(APISurface("unsupported"), false)
+	require.Error(t, err)
+}
+
+func TestResponseDetectorDoesNotRetainCompletedPayload(t *testing.T) {
+	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	payload := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n"
+	require.True(t, detector.Observe([]byte(payload), false))
+	require.Empty(t, detector.line)
+}
+
 func TestResponseSummaryOmitsAttributesForNonToolCallingRequest(t *testing.T) {
 	attributes := (ResponseSummary{}).SpanAttributes()
 	require.Empty(t, attributes)

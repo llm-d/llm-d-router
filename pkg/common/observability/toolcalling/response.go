@@ -16,7 +16,13 @@ limitations under the License.
 
 package toolcalling
 
-import "go.opentelemetry.io/otel/attribute"
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+
+	"go.opentelemetry.io/otel/attribute"
+)
 
 const (
 	ResponseAttributeUpstreamToolCallPresent  = "llm_d.tool_calling.response.upstream_present"
@@ -42,4 +48,259 @@ func (summary ResponseSummary) SpanAttributes() []attribute.KeyValue {
 		attribute.Bool(ResponseAttributeUpstreamToolCallPresent, summary.UpstreamToolCallPresent),
 		attribute.Bool(ResponseAttributeForwardedToolCallPresent, summary.ForwardedToolCallPresent),
 	}
+}
+
+// ResponseDetector observes one response body. For SSE responses it accepts
+// arbitrarily chunked input and keeps only the incomplete current line between
+// calls; completed lines are parsed immediately and cleared.
+type ResponseDetector struct {
+	surface         APISurface
+	eventStream     bool
+	toolCallPresent bool
+	line            []byte
+	finished        bool
+}
+
+// NewResponseDetector creates a detector for a supported response API surface.
+func NewResponseDetector(surface APISurface, eventStream bool) (*ResponseDetector, error) {
+	if _, err := fieldsForSurface(surface); err != nil {
+		return nil, err
+	}
+	return &ResponseDetector{surface: surface, eventStream: eventStream}, nil
+}
+
+// Observe adds a body chunk and returns whether a tool call has been observed.
+// Non-streaming responses are parsed once at endOfStream; streaming responses
+// are parsed one completed SSE data line at a time.
+func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
+	if detector == nil || detector.finished {
+		return detector != nil && detector.toolCallPresent
+	}
+
+	if detector.eventStream {
+		detector.observeSSE(chunk)
+		if endOfStream && !detector.toolCallPresent {
+			detector.processSSELine()
+		}
+	} else if endOfStream {
+		detector.toolCallPresent = detectToolCallJSON(detector.surface, chunk)
+	}
+
+	if endOfStream {
+		detector.clearLine()
+		detector.finished = true
+	}
+	return detector.toolCallPresent
+}
+
+func (detector *ResponseDetector) observeSSE(chunk []byte) {
+	for _, b := range chunk {
+		if b == '\n' {
+			detector.processSSELine()
+			if detector.toolCallPresent {
+				detector.clearLine()
+				return
+			}
+			continue
+		}
+		detector.line = append(detector.line, b)
+	}
+}
+
+func (detector *ResponseDetector) processSSELine() {
+	line := bytes.TrimSuffix(detector.line, []byte{'\r'})
+	if bytes.HasPrefix(line, []byte("data:")) {
+		payload := bytes.TrimPrefix(line, []byte("data:"))
+		payload = bytes.TrimPrefix(payload, []byte{' '})
+		if !bytes.Equal(payload, []byte("[DONE]")) {
+			detector.toolCallPresent = detectToolCallJSON(detector.surface, payload)
+		}
+	}
+	detector.clearLine()
+}
+
+func (detector *ResponseDetector) clearLine() {
+	for i := range detector.line {
+		detector.line[i] = 0
+	}
+	detector.line = detector.line[:0]
+}
+
+type responseJSONContext uint8
+
+const (
+	responseJSONIgnore responseJSONContext = iota
+	responseJSONRoot
+	responseJSONChoice
+	responseJSONMessage
+	responseJSONContentBlock
+)
+
+func detectToolCallJSON(surface APISurface, body []byte) bool {
+	if !json.Valid(body) {
+		return false
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	found, err := scanResponseJSONValue(decoder, responseJSONRoot, surface)
+	if err != nil {
+		return false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return false
+	}
+	return found
+}
+
+func scanResponseJSONValue(decoder *json.Decoder, context responseJSONContext, surface APISurface) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return false, nil
+	}
+	switch delim {
+	case '{':
+		return scanResponseJSONObject(decoder, context, surface)
+	case '[':
+		found := false
+		itemContext := responseArrayItemContext(context)
+		for decoder.More() {
+			itemFound, err := scanResponseJSONValue(decoder, itemContext, surface)
+			if err != nil {
+				return false, err
+			}
+			found = found || itemFound
+		}
+		_, err := decoder.Token()
+		return found, err
+	default:
+		return false, nil
+	}
+}
+
+func scanResponseJSONObject(decoder *json.Decoder, context responseJSONContext, surface APISurface) (bool, error) {
+	found := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return false, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return false, nil
+		}
+
+		if context == responseJSONMessage && key == "tool_calls" && surface == APISurfaceChatCompletions {
+			present, err := scanNonEmptyJSONArray(decoder)
+			if err != nil {
+				return false, err
+			}
+			found = found || present
+			continue
+		}
+		if context == responseJSONMessage && key == "function_call" && surface == APISurfaceChatCompletions {
+			present, err := scanNonEmptyJSONObject(decoder)
+			if err != nil {
+				return false, err
+			}
+			found = found || present
+			continue
+		}
+		if context == responseJSONContentBlock && key == "type" {
+			value, err := decoder.Token()
+			if err != nil {
+				return false, err
+			}
+			if surface == APISurfaceMessages && value == "tool_use" {
+				found = true
+			}
+			continue
+		}
+
+		childContext := responseObjectChildContext(context, key)
+		childFound, err := scanResponseJSONValue(decoder, childContext, surface)
+		if err != nil {
+			return false, err
+		}
+		found = found || childFound
+	}
+	_, err := decoder.Token()
+	return found, err
+}
+
+func responseArrayItemContext(context responseJSONContext) responseJSONContext {
+	switch context {
+	case responseJSONChoice, responseJSONContentBlock:
+		return context
+	default:
+		return responseJSONIgnore
+	}
+}
+
+func responseObjectChildContext(context responseJSONContext, key string) responseJSONContext {
+	switch context {
+	case responseJSONRoot:
+		switch key {
+		case "choices":
+			return responseJSONChoice
+		case "content", "content_block":
+			return responseJSONContentBlock
+		}
+	case responseJSONChoice:
+		if key == "message" || key == "delta" {
+			return responseJSONMessage
+		}
+	case responseJSONMessage:
+		if key == "content" {
+			return responseJSONContentBlock
+		}
+	case responseJSONContentBlock:
+		if key == "content_block" {
+			return responseJSONContentBlock
+		}
+	}
+	return responseJSONIgnore
+}
+
+func scanNonEmptyJSONArray(decoder *json.Decoder) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	if token != json.Delim('[') {
+		return false, nil
+	}
+	nonEmpty := decoder.More()
+	for decoder.More() {
+		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, APISurfaceChatCompletions); err != nil {
+			return false, err
+		}
+	}
+	_, err = decoder.Token()
+	return nonEmpty, err
+}
+
+func scanNonEmptyJSONObject(decoder *json.Decoder) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	if token != json.Delim('{') {
+		return false, nil
+	}
+	nonEmpty := decoder.More()
+	for decoder.More() {
+		if _, err := decoder.Token(); err != nil { // object key
+			return false, err
+		}
+		if _, err := scanResponseJSONValue(decoder, responseJSONIgnore, APISurfaceChatCompletions); err != nil {
+			return false, err
+		}
+	}
+	_, err = decoder.Token()
+	return nonEmpty, err
 }
