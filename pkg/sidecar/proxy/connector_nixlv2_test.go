@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,6 +39,7 @@ import (
 )
 
 const eventStreamContentType = "text/event-stream"
+const testMoRIRequestID = "00000000-0000-0000-0000-000000000002"
 
 var _ = Describe("NIXL Connector (v2)", func() {
 
@@ -1220,6 +1222,184 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		dkv := kvParams(env.decodeHandler, 0)
 		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
 		Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+		Expect(dkv).To(HaveKeyWithValue("is_request_leader", true))
+	})
+
+	DescribeTable("serial WRITE-mode 2P2D routes notify to the selected prefill pod",
+		func(prefillPod, decodePod int, returnedRank any) {
+			env := startMoRIProxy(func(c *Config) {
+				c.MoRIIODPSize = 16
+				c.MoRIIODPSizeLocal = 8
+				c.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
+				c.MoRIIODecodeHosts = []string{testDecodeHostIP, testDecodeHostIP2}
+				c.MoRIIORemoteHosts[prefillPod] = testLoopbackIP
+				c.MoRIIODecodeHosts[decodePod] = testLoopbackIP
+			})
+			env.proxy.nixlRequestIDFn = func() (string, error) {
+				return testMoRIRequestID, nil
+			}
+			responseKV := map[string]any{
+				reqcommon.FieldDoRemotePrefill:   true,
+				reqcommon.FieldDoRemoteDecode:    false,
+				reqcommon.FieldRemoteBlockIDs:    []int{1, 2, 3},
+				reqcommon.FieldRemoteEngineID:    "prefill-engine",
+				reqcommon.FieldRemoteHost:        testLoopbackIP,
+				requestFieldRemoteHandshakePort:  6302,
+				requestFieldRemoteNotifyPort:     61006,
+				requestFieldRemoteDPRankOverride: true,
+				requestFieldTransferID:           "tx" + testMoRIRequestID,
+				"remote_dp_size":                 16,
+				"remote_dp_size_local":           8,
+				"tp_size":                        1,
+			}
+			if returnedRank != nil {
+				responseKV[requestFieldRemoteDPRank] = returnedRank
+			}
+			response, err := json.Marshal(map[string]any{
+				reqcommon.FieldKVTransferParams: responseKV,
+				"usage":                         map[string]any{"prompt_tokens_details": nil},
+			})
+			Expect(err).ToNot(HaveOccurred())
+			env.prefillHandler.RawResponse = string(response)
+			env.send()
+
+			prefillRank, err := strconv.Atoi(dpRankHeader(env.prefillHandler, 0))
+			Expect(err).ToNot(HaveOccurred())
+			decodeRank, err := strconv.Atoi(dpRankHeader(env.decodeHandler, 0))
+			Expect(err).ToNot(HaveOccurred())
+
+			requestID := env.prefillHandler.GetCompletionHeaders()[0].Get(reqcommon.RequestIDHeaderKey)
+			expectedGlobalRank, expectedLocalRank := pickDPRanks(requestID, 16, 8)
+			Expect(expectedGlobalRank).To(Equal(15))
+			Expect(expectedLocalRank).To(Equal(7))
+			expectedDecodeRank := prefillPod*8 + expectedLocalRank
+			if rank, ok := returnedRank.(int); ok && rank >= 0 && rank < 16 {
+				expectedDecodeRank = rank
+			}
+			Expect(prefillRank).To(Equal(expectedLocalRank))
+			Expect(decodeRank).To(Equal(expectedDecodeRank % 8))
+
+			Expect(kvParams(env.prefillHandler, 0)).To(HaveKeyWithValue(
+				requestFieldRemoteDPRank, BeNumerically("==", expectedGlobalRank)))
+			dkv := kvParams(env.decodeHandler, 0)
+			decodeBodyRank, ok := dkv[requestFieldRemoteDPRank].(float64)
+			Expect(ok).To(BeTrue())
+			Expect(decodeBodyRank).To(BeNumerically("==", expectedDecodeRank))
+			Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+			Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteNotifyPort, BeNumerically("==", 61006)))
+			Expect(dkv).To(HaveKeyWithValue("remote_dp_size", BeNumerically("==", 16)))
+			Expect(dkv).To(HaveKeyWithValue("remote_dp_size_local", BeNumerically("==", 8)))
+
+			hosts, ok := dkv["remote_hosts"].([]any)
+			Expect(ok).To(BeTrue())
+			Expect(hosts).To(HaveLen(2))
+			Expect(hosts[int(decodeBodyRank)/8]).To(Equal(testLoopbackIP))
+
+			// vLLM gives the leader flag priority over its global-rank match.
+			shouldNotify := decodePod*8+decodeRank == int(decodeBodyRank)
+			if leader, present := dkv["is_request_leader"].(bool); present {
+				shouldNotify = leader
+			}
+			Expect(shouldNotify).To(BeTrue())
+			Expect(dkv).To(HaveKeyWithValue("is_request_leader", true))
+		},
+		Entry("P0/D0 with returned rank 7", 0, 0, 7),
+		Entry("P0/D1 with returned rank 7", 0, 1, 7),
+		Entry("P1/D0 with returned rank 15", 1, 0, 15),
+		Entry("P1/D1 with returned rank 15", 1, 1, 15),
+		Entry("P0/D1 with returned local rank 5", 0, 1, 5),
+		Entry("P1/D0 with returned local rank 5", 1, 0, 13),
+		Entry("P0/D0 with an omitted rank", 0, 0, nil),
+		Entry("P0/D1 with an omitted rank", 0, 1, nil),
+		Entry("P1/D0 with an omitted rank", 1, 0, nil),
+		Entry("P1/D1 with an omitted rank", 1, 1, nil),
+		Entry("P0/D1 with a non-numeric rank", 0, 1, "invalid"),
+		Entry("P0/D1 with an out-of-range rank", 0, 1, 16),
+		Entry("P0/D1 with a fractional rank", 0, 1, 7.5),
+	)
+
+	DescribeTable("serial WRITE-mode 2P2D maps a DNS prefill endpoint to its pod rank",
+		func(seedDNS bool) {
+			env := startMoRIProxy(func(c *Config) {
+				c.MoRIIODPSize = 16
+				c.MoRIIODPSizeLocal = 8
+				c.MoRIIORemoteHosts = []string{testLoopbackIP, testPrefillHostIP2}
+				if seedDNS {
+					c.MoRIIORemoteHostSpecs = []string{testLocalHostname, testPrefillHostIP2}
+				}
+			})
+			env.proxy.nixlRequestIDFn = func() (string, error) {
+				return testMoRIRequestID, nil
+			}
+			prefillURL, err := url.Parse(env.prefillBackend.URL)
+			Expect(err).ToNot(HaveOccurred())
+			req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions,
+				strings.NewReader(chatCompletionsRequestBody))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Set(routing.PrefillEndpointHeader, net.JoinHostPort(testLocalHostname, prefillURL.Port()))
+			client := &http.Client{Timeout: 5 * time.Second}
+			rp, err := client.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer rp.Body.Close()
+			response, err := io.ReadAll(rp.Body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rp.StatusCode).To(Equal(http.StatusOK), string(response))
+
+			requestID := env.prefillHandler.GetCompletionHeaders()[0].Get(reqcommon.RequestIDHeaderKey)
+			Expect(pickDPRank(requestID, 16)).To(Equal(15))
+			Expect(dpRankHeader(env.prefillHandler, 0)).To(Equal("7"))
+			Expect(dpRankHeader(env.decodeHandler, 0)).To(Equal("7"))
+			dkv := kvParams(env.decodeHandler, 0)
+			Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRank, BeNumerically("==", 7)))
+			Expect(dkv).To(HaveKeyWithValue(requestFieldRemoteDPRankOverride, true))
+			Expect(dkv).To(HaveKeyWithValue("is_request_leader", true))
+			Expect(dkv["remote_hosts"]).To(Equal([]any{testLoopbackIP, testPrefillHostIP2}))
+		},
+		Entry("with a cold DNS lookup", false),
+		Entry("with a startup DNS mapping", true),
+	)
+
+	It("serial WRITE-mode 2P2D rejects fallback routing to an unknown prefill pod", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIODPSize = 16
+			c.MoRIIODPSizeLocal = 8
+			c.MoRIIORemoteHosts = []string{testPrefillHostIP1, testPrefillHostIP2}
+		})
+		req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions,
+			strings.NewReader(chatCompletionsRequestBody))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Set(routing.PrefillEndpointHeader, env.prefillBackend.URL[len("http://"):])
+		client := &http.Client{Timeout: 5 * time.Second}
+		rp, err := client.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		response, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway), string(response))
+		Expect(string(response)).To(ContainSubstring("prefill pod"))
+		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
+	})
+
+	It("serial READ-mode 2P2D uses a pod-local prefill header without changing decode metadata", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOWriteMode = false
+			c.MoRIIODPSize = 16
+			c.MoRIIODPSizeLocal = 8
+		})
+		env.prefillHandler.MoRIIOWriteMode = false
+		env.proxy.nixlRequestIDFn = func() (string, error) {
+			return testMoRIRequestID, nil
+		}
+		env.send()
+
+		Expect(dpRankHeader(env.prefillHandler, 0)).To(Equal("7"))
+		Expect(dpRankHeader(env.decodeHandler, 0)).To(BeEmpty())
+		dkv := kvParams(env.decodeHandler, 0)
+		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRank))
+		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRankOverride))
+		Expect(dkv).ToNot(HaveKey("is_request_leader"))
+		Expect(dkv).To(HaveKeyWithValue(reqcommon.FieldRemoteHost, "ahost"))
+		Expect(dkv).To(HaveKeyWithValue(reqcommon.FieldRemotePort, BeNumerically("==", 4032)))
 	})
 
 	// Flags-off path: the sidecar must produce the legacy NIXLv2 wire shape

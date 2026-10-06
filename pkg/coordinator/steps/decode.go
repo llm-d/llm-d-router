@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -51,11 +50,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err := rejectUseOpenAIFormatOverride(DecodeStepName, params); err != nil {
 		return nil, err
 	}
-	kvName, err := paramString(params, ParamKVConnector)
-	if err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	kvConn, err := kv.Build(kvName)
+	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
@@ -78,16 +73,8 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamDecode)
-	proxy, out := newDecodeProxy(logger, transport, nil)
-	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
-	if out.TransportErr != nil {
-		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, Cause: out.TransportErr}
-	}
-	if out.Status >= http.StatusBadRequest {
-		return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: out.Status}
-	}
-	return nil
+	out := serveDecode(logger, s.gwClient.Transport(), reqCtx.ResponseWriter, proxyReq, coordmetrics.UpstreamDecode, nil)
+	return out.streamedError(DecodeStepName)
 }
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike

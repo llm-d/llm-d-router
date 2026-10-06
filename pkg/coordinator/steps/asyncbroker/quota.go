@@ -57,6 +57,7 @@ redis.call("EXPIRE", KEYS[1], ARGV[2])
 return 1
 `)
 
+//nolint:dupword // Each Lua "end" closes its own nested block.
 var quotaReleaseScript = redis.NewScript(`
 local current = redis.call("GET", KEYS[1])
 if current and tonumber(current) > 0 then

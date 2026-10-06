@@ -298,6 +298,8 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
+		renderer.pluginName = name
+		registerRenderMetrics()
 		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
 		if err != nil {
 			return nil, err

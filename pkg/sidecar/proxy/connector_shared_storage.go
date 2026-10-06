@@ -136,8 +136,19 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request) (bool, error) {
 	// Run ServeHTTP in a goroutine so we can inspect the initial choice to determine if we need to prefill.
 	done := make(chan struct{})
+	// Written by the decode goroutine, read after done is closed.
+	var aborted bool
 	go func() {
 		defer close(done)
+		// net/http only recovers http.ErrAbortHandler on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
 		s.decoderProxy.ServeHTTP(w, r)
 	}()
 
@@ -152,9 +163,25 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 	statusCode := w.getStatusCode()
 	if isHTTPError(statusCode) {
-		if err := w.flushBufferAndGoDirect(); err != nil {
-			s.logger.Error(err, "failed to flush buffer to client")
-			return false, err
+		// A status of 0 means the decoder never called WriteHeader or Write.
+		// Flushing that would commit an empty 200. Leave it unwritten so the
+		// abort below drops the connection instead.
+		var flushErr error
+		if statusCode != 0 {
+			flushErr = w.flushBufferAndGoDirect()
+			if flushErr != nil {
+				s.logger.Error(flushErr, "failed to flush buffer to client")
+			}
+		}
+		// The decode goroutine may still be writing. Wait for it, then replay
+		// the abort here. net/http only recovers http.ErrAbortHandler on the
+		// request goroutine.
+		<-done
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
+		if flushErr != nil {
+			return false, flushErr
 		}
 		return false, fmt.Errorf("decode request failed with status code: %d", statusCode)
 	}
@@ -173,6 +200,11 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 		return false, err
 	}
 	<-done
+	if aborted {
+		// Replay the abort on the request goroutine, where net/http recovers it
+		// and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
 	return false, nil
 }
 
