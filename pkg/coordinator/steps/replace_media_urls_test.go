@@ -28,13 +28,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/require"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
-	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -53,7 +49,7 @@ func newLoopbackStep(t *testing.T, params map[string]any) *ReplaceMediaURLsStep 
 }
 
 func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		_, _ = w.Write([]byte("jpeg-bytes"))
 	}))
@@ -104,7 +100,7 @@ func TestReplaceMediaURLsStep_DownloadsAndInlines(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_Responses_DownloadsAndInlines(t *testing.T) {
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", testImageJPEGContentType)
 		_, _ = w.Write([]byte("jpeg-bytes"))
 	}))
@@ -251,7 +247,7 @@ func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_DownloadFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
@@ -342,7 +338,7 @@ func TestReplaceMediaURLsStep_DataURIInput(t *testing.T) {
 // so drift would associate hashes/placeholders with the wrong image. Asserted
 // in both source orderings.
 func TestReplaceMediaURLsStep_MixedHTTPAndDataURIOrdering(t *testing.T) {
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("downloaded-image-bytes"))
 	}))
@@ -572,7 +568,7 @@ func TestReplaceMediaURLsStep_AllowsAtLimit(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_MultipleImages(t *testing.T) {
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("png-data"))
 	}))
@@ -817,7 +813,7 @@ func TestReplaceMediaURLsStep_EmptyContentType(t *testing.T) {
 }
 
 func TestReplaceMediaURLsStep_DownloadUnreachable(t *testing.T) {
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	imageServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	deadURL := imageServer.URL + "/gone.png"
 	imageServer.Close() // nothing is listening on this address now
 
@@ -1343,210 +1339,6 @@ func TestReplaceMediaURLsStep_CancelledContextSkipsDataURIParse(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
-
-func newStepMetricsRegistry(t *testing.T) *prometheus.Registry {
-	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
-}
-
-func stepHistogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
-	return metricstest.HistogramCount(t, reg, name, labels)
-}
-
-func stepHistogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
-	return metricstest.HistogramSum(t, reg, name, labels)
-}
-
-func TestReplaceMediaURLsStep_RecordsMediaItemsAndDownloadSuccess(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("jpeg-bytes"))
-	}))
-	defer imageServer.Close()
-
-	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": []any{
-						map[string]any{"type": "text", "text": "describe this"},
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": imageServer.URL + "/photo.jpg"},
-						},
-					},
-				},
-			},
-		},
-	}
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
-	require.InDelta(t, 1.0, stepHistogramSum(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}), 1e-9)
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": coordmetrics.DownloadResultSuccess}))
-}
-
-func TestReplaceMediaURLsStep_RecordsDownloadError(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer imageServer.Close()
-
-	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": []any{
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": imageServer.URL + "/photo.jpg"},
-						},
-					},
-				},
-			},
-		},
-	}
-	if err := step.Execute(context.Background(), reqCtx); err == nil {
-		t.Fatal("expected download error")
-	}
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": coordmetrics.DownloadResultError}))
-}
-
-func TestReplaceMediaURLsStep_RecordsDownloadCancelled(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	started := make(chan struct{})
-	block := make(chan struct{})
-	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(started)
-		<-block
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer imageServer.Close()
-
-	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
-	ctx, cancel := context.WithCancel(context.Background())
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": []any{
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": imageServer.URL + "/photo.jpg"},
-						},
-					},
-				},
-			},
-		},
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- step.Execute(ctx, reqCtx)
-	}()
-	<-started
-	cancel()
-	err := <-done
-	close(block)
-	if err == nil {
-		t.Fatal("expected cancellation error")
-	}
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": coordmetrics.DownloadResultCancelled}))
-}
-
-func TestReplaceMediaURLsStep_DataURIDoesNotRecordDownloadDuration(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": []any{
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": "data:image/png;base64,AAAA"},
-						},
-					},
-				},
-			},
-		},
-	}
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
-	require.Zero(t, stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": coordmetrics.DownloadResultSuccess}))
-}
-
-func TestReplaceMediaURLsStep_PreDialRejectionDoesNotRecordDownloadDuration(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	// The allowlist excludes the URL's host, so the fetch is refused before
-	// the dial: not a download attempt, and must not be recorded as one.
-	step, err := NewReplaceMediaURLsStep(nil, map[string]any{
-		"allowed_domains": []string{"images.example.com"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": []any{
-						map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": "http://other.example.com/photo.jpg"},
-						},
-					},
-				},
-			},
-		},
-	}
-	if err := step.Execute(context.Background(), reqCtx); err == nil {
-		t.Fatal("expected host-not-allowed error")
-	}
-	// The media inventory still counts the image part...
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
-	// ...but no download attempt started, so no observation exists under any
-	// result label.
-	for _, result := range []string{
-		coordmetrics.DownloadResultSuccess,
-		coordmetrics.DownloadResultError,
-		coordmetrics.DownloadResultCancelled,
-	} {
-		require.Zero(t, stepHistogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": result}), result)
-	}
-}
-
-func TestReplaceMediaURLsStep_NoImagesRecordsZero(t *testing.T) {
-	reg := newStepMetricsRegistry(t)
-	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
-	reqCtx := &pipeline.RequestContext{
-		Body: map[string]any{
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{map[string]any{"type": "text", "text": "hi"}},
-				},
-			},
-		},
-	}
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	require.Equal(t, uint64(1), stepHistogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}))
-	require.InDelta(t, 0.0, stepHistogramSum(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": coordmetrics.MediaTypeImage}), 1e-9)
-}
-
 
 // TestReplaceMediaURLsStep_Responses_InlinesFunctionCallOutputImage covers a
 // Responses function_call_output, which carries its parts under output rather

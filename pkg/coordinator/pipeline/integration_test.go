@@ -51,7 +51,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.kvConnector+"+"+tc.ecConnector, func(t *testing.T) {
-			renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 					"features": map[string]any{
@@ -191,7 +191,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 }
 
 func TestFullPipeline_Integration(t *testing.T) {
-	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{

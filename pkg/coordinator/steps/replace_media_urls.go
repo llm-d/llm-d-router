@@ -223,8 +223,9 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 // encoder primed from a part it cannot fetch, under a hash the prefiller then
 // looks up and misses.
 func collectImageRefs(items []any, apiType reqcommon.APIType) ([]imageRef, error) {
-	var refs []imageRef
-	for _, image := range collectImageParts(items, apiType) {
+	parts := collectImageParts(items, apiType)
+	refs := make([]imageRef, 0, len(parts))
+	for _, image := range parts {
 		url, setURL := reqcommon.MediaPartURLRef(image.part)
 		if setURL == nil || url == "" {
 			return nil, fmt.Errorf("%s: image part carries no fetchable URL: %w", image.location, pipeline.ErrBadRequest)

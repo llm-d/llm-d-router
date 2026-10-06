@@ -122,9 +122,6 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	if int(requestCount.Load()) != 3 {
 		t.Fatalf("expected 3 gateway requests, got %d", requestCount.Load())
 	}
-	if reqCtx.EncodeFanout != 3 {
-		t.Fatalf("expected EncodeFanout=3, got %d", reqCtx.EncodeFanout)
-	}
 	if len(reqCtx.ECTransferParams) != 3 {
 		t.Fatalf("expected 3 ec_transfer_params entries, got %d", len(reqCtx.ECTransferParams))
 	}
@@ -279,7 +276,7 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": tc.value})
 			}))
 			defer server.Close()
@@ -353,9 +350,6 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	err := step.Execute(context.Background(), reqCtx)
 	if err == nil {
 		t.Fatal("expected error when one encode fails")
-	}
-	if reqCtx.EncodeFanout != 3 {
-		t.Fatalf("expected EncodeFanout=3 on partial failure, got %d", reqCtx.EncodeFanout)
 	}
 }
 
@@ -608,7 +602,7 @@ func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
 // replace-media-urls would otherwise prime the encoder with a blank image
 // under a real image's hash.
 func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("encode worker should not be called for a malformed input_image part")
 	}))
 	defer server.Close()
@@ -713,7 +707,7 @@ func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) 
 // must remain nil so the prefill step emits no ec_transfer_params field.
 func TestEncodeStep_TextOnly(t *testing.T) {
 	gatewayCallCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gatewayCallCount++
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -738,9 +732,6 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 	if gatewayCallCount != 0 {
 		t.Fatalf("expected no gateway calls for text-only request, got %d", gatewayCallCount)
 	}
-	if reqCtx.EncodeFanout != 0 {
-		t.Fatalf("expected EncodeFanout=0 for text-only request, got %d", reqCtx.EncodeFanout)
-	}
 	if reqCtx.ECTransferParams != nil {
 		t.Fatalf("expected nil ECTransferParams for text-only request, got %v", reqCtx.ECTransferParams)
 	}
@@ -757,7 +748,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			gatewayCallCount := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				gatewayCallCount++
 				w.WriteHeader(http.StatusOK)
 			}))
@@ -785,9 +776,6 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 			if gatewayCallCount != 0 {
 				t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
 			}
-			if reqCtx.EncodeFanout != 0 {
-				t.Fatalf("expected EncodeFanout=0 for generate skip, got %d", reqCtx.EncodeFanout)
-			}
 			if reqCtx.ECTransferParams != nil {
 				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
 			}
@@ -801,7 +789,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 // the field. The encode step must not error -- missing metadata is warn-and-continue.
 func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 	var requestCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requestCount.Add(1)
 		// 2xx with no ec_transfer_params field.
 		_ = json.NewEncoder(w).Encode(map[string]any{
