@@ -496,7 +496,10 @@ func (h *Handler) prefillRequiredButFailed(request *scheduling.InferenceRequest,
 // Requests that ProcessResults rejects are not routed and are not counted.
 func (h *Handler) recordDecision(span trace.Span, request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) {
 	if h.prefillRequiredButFailed(request, profileResults) {
-		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_prefill_failed"))
+		span.SetAttributes(
+			semconv.LLMDEPPProfileHandlerDecision("complete"),
+			semconv.LLMDEPPProfileHandlerPrefillFailed(true),
+		)
 		return
 	}
 	encodeUsed := profileResults[h.encodeProfile] != nil

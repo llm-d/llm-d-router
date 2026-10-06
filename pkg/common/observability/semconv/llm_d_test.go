@@ -178,6 +178,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantKey:  "llm_d.epp.profile_handler.decode_failed",
 			wantType: attribute.BOOL,
 		},
+		{
+			name:     "LLMDEPPProfileHandlerPrefillFailed",
+			got:      LLMDEPPProfileHandlerPrefillFailed(true),
+			wantKey:  "llm_d.epp.profile_handler.prefill_failed",
+			wantType: attribute.BOOL,
+		},
 
 		// EPP Disagg
 		{
