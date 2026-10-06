@@ -74,3 +74,14 @@ func registerEncoderCacheMetrics() {
 		metrics.Registry.MustRegister(encoderCacheHitRatio)
 	})
 }
+
+// deletePodMetrics drops the per-pod series this producer instance emitted for
+// a removed pod. Callers must not hold p.mutex: DeletePartialMatch scans the
+// whole metric vector.
+func (p *Producer) deletePodMetrics(pod string) {
+	encoderCacheHitsTotal.DeletePartialMatch(prometheus.Labels{
+		"plugin_type": p.typedName.Type,
+		"plugin_name": p.typedName.Name,
+		"pod":         pod,
+	})
+}

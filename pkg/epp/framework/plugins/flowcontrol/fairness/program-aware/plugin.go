@@ -96,6 +96,7 @@ var (
 	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
 	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
+	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
 )
 
 //nolint:revive // factory name matches sibling fairness plugins.
@@ -142,6 +143,12 @@ type ProgramAwarePlugin struct {
 
 func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: ProgramAwarePluginType, Name: p.name}
+}
+
+// Produces declares the enqueue time Pick stashes on the request for this
+// plugin's own PreRequest to read back.
+func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs

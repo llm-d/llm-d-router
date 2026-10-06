@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
@@ -330,10 +331,11 @@ func newHarness(t *testing.T, opts harnessOpts) *integrationHarness {
 	}
 
 	fc := controller.NewFlowController(ctx, "integration-test", controllerCfg, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: opts.detector,
-		EndpointCandidates: endpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
+		Registry:            reg,
+		SaturationDetector:  opts.detector,
+		EndpointCandidates:  endpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	t.Cleanup(func() {

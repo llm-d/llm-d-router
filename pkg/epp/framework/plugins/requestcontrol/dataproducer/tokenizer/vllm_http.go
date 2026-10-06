@@ -36,6 +36,7 @@ import (
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/time/rate"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -95,6 +96,9 @@ func (e *renderStatusError) Error() string {
 	return fmt.Sprintf("vLLM render returned status %d: %s", e.StatusCode, e.Body)
 }
 
+// errRenderDecode marks a 2xx render response whose body could not be decoded.
+var errRenderDecode = errors.New("unmarshal response")
+
 // isRenderAuthError reports whether err carries a 401 or 403 render response.
 func isRenderAuthError(err error) bool {
 	var se *renderStatusError
@@ -149,6 +153,9 @@ type vllmHTTPRenderer struct {
 	mmTimeout      time.Duration
 	attemptTimeout time.Duration
 	prefillOnly    bool
+	// pluginName is the plugin_name label on the render metrics.
+	pluginName string
+	failureLog rate.Sometimes
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
@@ -203,6 +210,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		mmTimeout:      mmTimeout,
 		attemptTimeout: attemptTimeout,
 		prefillOnly:    cfg.PrefillOnly,
+		failureLog:     rate.Sometimes{Interval: renderFailureLogInterval},
 	}, nil
 }
 
@@ -348,13 +356,12 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 }
 
 // postJSON permits one retry on a different endpoint within the request budget.
-func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) error {
+func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) (err error) {
 	var payload []byte
 	switch body := body.(type) {
 	case fwkrh.RawPayload:
 		payload = body
 	case fwkrh.Marshaler:
-		var err error
 		payload, err = body.Marshal()
 		if err != nil {
 			return fmt.Errorf("marshal request: %w", err)
@@ -363,7 +370,6 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
 	if r.prefillOnly {
-		var err error
 		if payload, err = renderOnlyBudget(payload); err != nil {
 			return fmt.Errorf("apply render-only output budget: %w", err)
 		}
@@ -371,6 +377,8 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	start := time.Now()
+	defer func() { r.observeRender(ctx, path, timeout, time.Since(start), err) }()
 
 	baseURL, err := r.endpointPicker.Pick()
 	if err != nil {
@@ -446,7 +454,7 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		// Connection failures can surface after successful response headers.
 		var networkErr net.Error
 		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		return retryable, fmt.Errorf("unmarshal response: %w", err)
+		return retryable, fmt.Errorf("%w: %w", errRenderDecode, err)
 	}
 	return false, nil
 }

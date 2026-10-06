@@ -38,7 +38,7 @@ import (
 )
 
 // passthroughHandler is the chi NotFound catch-all: any path the coordinator
-// does not register (e.g. /v1/models, /v1/messages, /v1/responses, /v1/embeddings)
+// does not register (e.g. /v1/models, /v1/messages, /v1/embeddings)
 // is reverse-proxied to the gateway with EPP-Profile: decode, so EPP dispatches
 // it to a decode pod. Method, body, query, and forwarded headers are preserved;
 // X-Request-Id is validated and replaced with a UUID if malformed, matching
@@ -112,7 +112,7 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ErrorLog, so it is wired to the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
+		Director: func(r *http.Request) { //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
 			r.URL.Scheme = gatewayURL.Scheme
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host

@@ -226,9 +226,12 @@ func (r *RedisIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, 
 	switch keyType {
 	case EngineKey:
 		rks, err := r.getRequestKeys(ctx, key)
-		if err != nil || len(rks) == 0 {
+		if err != nil {
+			return fmt.Errorf("failed to get request keys for eviction: %w", err)
+		}
+		if len(rks) == 0 {
 			// Engine key not found in mapping — nothing to evict
-			return nil //nolint:nilerr // intentional: missing engine key means nothing to evict
+			return nil
 		}
 		for _, rk := range rks {
 			if err := r.evictPodsFromRequestKey(ctx, rk, entries); err != nil {

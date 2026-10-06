@@ -39,6 +39,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
@@ -70,6 +71,7 @@ var (
 	_ requestcontrol.DataProducer = &Producer{}
 	_ requestcontrol.PreRequest   = &Producer{}
 	_ fwkdl.EndpointExtractor     = &Producer{}
+	_ fwkdl.Registrant            = &Producer{}
 	_ plugin.ConsumerPlugin       = &Producer{}
 	_ plugin.StateDumper          = &Producer{}
 )
@@ -478,17 +480,37 @@ func (p *Producer) removeStalePods() {
 		validPods[pod.String()] = struct{}{}
 	}
 
+	var removed []string
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
 	for pod := range p.caches {
 		if _, ok := validPods[pod]; !ok {
 			delete(p.caches, pod)
+			removed = append(removed, pod)
 		}
+	}
+	p.mutex.Unlock()
+	for _, pod := range removed {
+		p.deletePodMetrics(pod)
 	}
 }
 
+// RegisterDependencies subscribes the producer to endpoint lifecycle events so
+// deleted endpoints are removed without waiting for the periodic sweep. The
+// source is auto-created when the config omits it.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType,
+			sourcenotifications.EndpointNotificationSourceType,
+		),
+	})
+}
+
 // Extract removes deleted endpoints from the best-effort multimodal
-// cache-affinity state when endpoint lifecycle events are wired through the data layer.
+// cache-affinity state.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if event.Type != fwkdl.EventDelete || event.Endpoint == nil {
 		return nil
@@ -505,6 +527,7 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 func (p *Producer) removePod(pod string) {
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
 	delete(p.caches, pod)
+	p.mutex.Unlock()
+	p.deletePodMetrics(pod)
 }

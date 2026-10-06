@@ -571,6 +571,108 @@ func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
 	assert.Equal(t, 1, info.MM().MatchBlocks, "must use cachedBlocks, not matchLen")
 }
 
+// MM matched blocks are attributed per prompt against that prompt's own
+// matched-block count, then summed across prompts. A text-only prompt
+// contributes to the aggregate match but not the MM sum; endpoints without a
+// match still get MM tracking with a zero count.
+func TestProduce_MultiPromptMMAttributionSumsPerPrompt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := make([]uint32, 4*testBlockSize)
+	promptB := make([]uint32, 4*testBlockSize)
+	promptC := make([]uint32, 2*testBlockSize)
+	for i := range promptA {
+		promptA[i] = uint32(i)
+	}
+	for i := range promptB {
+		promptB[i] = uint32(100 + i)
+	}
+	for i := range promptC {
+		promptC[i] = uint32(200 + i)
+	}
+	keysA := []kvblock.BlockHash{0xA1, 0xA2, 0xA3, 0xA4}
+	keysB := []kvblock.BlockHash{0xB1, 0xB2, 0xB3, 0xB4}
+	keysC := []kvblock.BlockHash{0xC1, 0xC2}
+	const addr = "10.0.0.1:8080"
+
+	// Keyed off the per-prompt MM hash in the extra features: prompt order
+	// does not matter, and each prompt's features must reach the block-hash
+	// input.
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			for _, f := range extra {
+				if f == nil {
+					continue
+				}
+				for _, h := range f.MMHashes {
+					switch h.Hash {
+					case "img-a":
+						return keysA, nil
+					case "img-b":
+						return keysB, nil
+					}
+				}
+			}
+			return keysC, nil
+		},
+		matchBlockKeys: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			switch keys[0] {
+			case keysA[0]:
+				// Prompt A: 2 of 4 blocks matched, so its MM block 0 is a hit.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				}, nil
+			case keysB[0]:
+				// Prompt B: 1 of 4 blocks matched, so its MM block 2 is a miss.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 1, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+				}, nil
+			default:
+				// Prompt C: text-only, both of its blocks matched.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				}, nil
+			}
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-multi",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: promptA, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 16}}},
+					{TokenIDs: promptB, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 16}}},
+					{TokenIDs: promptC},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	assert.Equal(t, 5, info.MatchBlocks())
+	assert.Equal(t, 5, info.CachedBlockCount())
+	assert.Equal(t, 10, info.TotalBlocks())
+	require.NotNil(t, info.MM(), "a request with MM content on a subset of prompts must be tracked")
+	assert.Equal(t, 1, info.MM().MatchBlocks, "prompt A's MM block matched, prompt B's MM block missed, the text prompt carries none")
+
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	require.NotNil(t, info.MM(), "MM tracking attaches present-but-zero on a miss")
+	assert.Equal(t, 0, info.MM().MatchBlocks)
+}
+
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
 func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	ctx := utils.NewTestContext(t)

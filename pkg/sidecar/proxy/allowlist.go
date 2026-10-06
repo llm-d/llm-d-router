@@ -314,7 +314,7 @@ func (av *AllowlistValidator) createPodInformer(poolName string, selector labels
 
 	// Create new pod informer
 	podLW := &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) { //nolint:staticcheck // SA1019
 			options.LabelSelector = selector.String()
 			return av.dynamicClient.Resource(schema.GroupVersionResource{
 				Group:    "",
@@ -322,7 +322,7 @@ func (av *AllowlistValidator) createPodInformer(poolName string, selector labels
 				Resource: "pods",
 			}).Namespace(av.namespace).List(context.TODO(), options)
 		},
-		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) { //nolint:staticcheck // SA1019
 			options.LabelSelector = selector.String()
 			return av.dynamicClient.Resource(schema.GroupVersionResource{
 				Group:    "",

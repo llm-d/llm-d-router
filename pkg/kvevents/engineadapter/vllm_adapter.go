@@ -72,7 +72,7 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 
 	genericEvents := make([]kvevents.GenericEvent, len(vllmBatch.Events))
 	for i, rawEventBytes := range vllmBatch.Events {
-		genericEvent, err := v.decodeVLLMEvent(rawEventBytes)
+		genericEvent, err := decodeEvent(rawEventBytes, mapEventToFields, v.eventConverters)
 		if err != nil {
 			return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event: %w", err)
 		}
@@ -86,45 +86,6 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 	}
 
 	return podID, modelName, batch, nil
-}
-
-// decodeVLLMEvent decodes a single vLLM event from msgpack bytes and dispatches
-// it to the matching converter. Map-encoded events are first normalized to the
-// positional []any layout the converters consume.
-func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
-	var decoded any
-	if err := msgpack.Unmarshal(rawEventBytes, &decoded); err != nil {
-		return nil, fmt.Errorf("unmarshal event payload: %w", err)
-	}
-
-	var fields []any
-	switch ev := decoded.(type) {
-	case []any:
-		fields = ev
-	case map[string]any:
-		var err error
-		if fields, err = mapEventToFields(ev); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("event is neither an array nor a map: %T", decoded)
-	}
-
-	if len(fields) < 1 {
-		return nil, fmt.Errorf("malformed tagged union: no tag")
-	}
-
-	tag, ok := fields[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("event tag is not a string: %T", fields[0])
-	}
-
-	converter, exists := v.eventConverters[tag]
-	if !exists {
-		return nil, fmt.Errorf("unknown vLLM event tag: %s", tag)
-	}
-
-	return converter(fields)
 }
 
 // Field-name order of map-encoded events, mirroring the converters' positional
@@ -182,7 +143,7 @@ func fieldAt(fields []any, i int) any {
 // convertBlockStoredEvent converts a decoded []any into a BlockStoredEvent.
 // vLLM field positions (array_like=True, tag=True):
 //
-//	[0]  tag                          string            (consumed by decodeVLLMEvent)
+//	[0]  tag                          string            (consumed by decodeEvent)
 //	[1]  block_hashes                 []hash
 //	[2]  parent_hash                  hash|nil
 //	[3]  token_ids                    []uint32

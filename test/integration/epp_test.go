@@ -1,5 +1,4 @@
 //go:build integration_tests
-// +build integration_tests
 
 /*
 Copyright 2025 The llm-d Authors.
