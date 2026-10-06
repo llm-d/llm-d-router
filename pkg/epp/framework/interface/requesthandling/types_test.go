@@ -351,7 +351,7 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 			name:        "invalid placeholder preserves error field",
 			input:       `{"token_ids":[1,2,3],"features":{"mm_placeholders":{"image":[{"offset":"x","length":1}]}}}`,
 			wantErr:     true,
-			errContains: "Go struct field wirePlaceholder.features.mm_placeholders.offset",
+			errContains: "Go struct field .features.mm_placeholders.image.0.offset",
 		},
 	}
 

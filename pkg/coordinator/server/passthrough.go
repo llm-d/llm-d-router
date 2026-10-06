@@ -112,7 +112,7 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ErrorLog, so it is wired to the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
+		Director: func(r *http.Request) { //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
 			r.URL.Scheme = gatewayURL.Scheme
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host

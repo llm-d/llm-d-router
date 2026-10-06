@@ -215,7 +215,7 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			Discovery: &configapiv1alpha1.DiscoveryConfig{
 				Endpoints: &configapiv1alpha1.EndpointDiscoveryConfig{PluginRef: "endpoints"},
 				Peers:     &configapiv1alpha1.PeerDiscoveryConfig{PluginRef: "peers"},
-				PluginRef: "bare-endpoints",
+				PluginRef: "bare-endpoints", //nolint:staticcheck // SA1019: exercising the deprecated field on purpose.
 			},
 			CrossReplicaSyncerPluginRef: "syncer",
 			CrossReplicaSyncInterval:    &metav1.Duration{Duration: 500 * time.Millisecond},
