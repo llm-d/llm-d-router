@@ -299,6 +299,8 @@ func (av *AllowlistValidator) poolTargetPorts(poolObj *unstructured.Unstructured
 	if err != nil || !found || len(targetPorts) == 0 {
 		return nil, fmt.Errorf("missing or invalid spec.targetPorts (found=%t): %w", found, err)
 	}
+	// One malformed entry skips the whole pool, as with an unreadable selector. The CRD schema
+	// requires every number in 1-65535, so this only fires against a CRD without that validation.
 	ports := make([]string, 0, len(targetPorts))
 	for i, tp := range targetPorts {
 		tpMap, ok := tp.(map[string]interface{})
