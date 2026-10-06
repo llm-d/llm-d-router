@@ -26,16 +26,22 @@ import (
 
 func TestResponseSummarySpanAttributes(t *testing.T) {
 	attributes := (ResponseSummary{
-		ToolCallingRequested:     true,
-		UpstreamToolCallPresent:  true,
-		ForwardedToolCallPresent: false,
+		ToolCallingRequested:         true,
+		UpstreamToolCallPresent:      true,
+		ForwardedToolCallPresent:     false,
+		UpstreamDetectionIncomplete:  true,
+		ForwardedDetectionIncomplete: false,
 	}).SpanAttributes()
 
-	require.Len(t, attributes, 2)
+	require.Len(t, attributes, 4)
 	require.Equal(t, ResponseAttributeUpstreamToolCallPresent, string(attributes[0].Key))
 	require.True(t, attributes[0].Value.AsBool())
 	require.Equal(t, ResponseAttributeForwardedToolCallPresent, string(attributes[1].Key))
 	require.False(t, attributes[1].Value.AsBool())
+	require.Equal(t, ResponseAttributeUpstreamDetectionIncomplete, string(attributes[2].Key))
+	require.True(t, attributes[2].Value.AsBool())
+	require.Equal(t, ResponseAttributeForwardedDetectionIncomplete, string(attributes[3].Key))
+	require.False(t, attributes[3].Value.AsBool())
 }
 
 func TestResponseDetectorJSON(t *testing.T) {
@@ -75,7 +81,7 @@ func TestResponseDetectorJSON(t *testing.T) {
 		},
 		{
 			name:    "chat content mentioning tool calls is not a tool call",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			body:    `{"choices":[{"message":{"content":"tool_calls"}}]}`,
 		},
 		{
@@ -147,7 +153,7 @@ func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
 }
 
 func TestResponseDetectorFlushesFinalSSELineAtEndOfStream(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`)
 	require.False(t, detector.Observe(payload, false), "an incomplete SSE line is not parsed before its boundary")
@@ -157,7 +163,7 @@ func TestResponseDetectorFlushesFinalSSELineAtEndOfStream(t *testing.T) {
 }
 
 func TestResponseDetectorMessagesSSEWithoutToolUse(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceMessages, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeMessages, true)
 	require.NoError(t, err)
 	for _, chunk := range []string{
 		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\"}}\n",
@@ -170,7 +176,7 @@ func TestResponseDetectorMessagesSSEWithoutToolUse(t *testing.T) {
 }
 
 func TestResponseDetectorTruncatedSSEDoesNotReportToolCall(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	require.False(t, detector.Observe([]byte(`data: {"choices":[{"delta":{"tool_calls":[`), false))
 	require.False(t, detector.Observe(nil, true))
@@ -191,10 +197,31 @@ func TestResponseDetectorDoesNotRetainCompletedPayload(t *testing.T) {
 	require.True(t, detector.Observe([]byte(payload), false))
 	require.Empty(t, detector.line)
 	require.NotContains(t, string(detector.line[:cap(detector.line)]), "sentinel_", "completed payload bytes must be cleared")
+	require.True(t, detector.Observe([]byte("data: more content"), false))
+	require.Empty(t, detector.line, "detector must stop buffering after finding a tool call")
+}
+
+func TestResponseDetectorBoundsOversizedSSELine(t *testing.T) {
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
+	require.NoError(t, err)
+
+	oversized := make([]byte, len("data: ")+maxResponseSSELineBytes+1)
+	copy(oversized, "data: ")
+	for i := len("data: "); i < len(oversized); i++ {
+		oversized[i] = 'x'
+	}
+	require.False(t, detector.Observe(oversized, false))
+	require.True(t, detector.DetectionIncomplete())
+	require.LessOrEqual(t, len(detector.line), maxResponseSSELineBytes)
+	require.Empty(t, detector.line, "overflow clears buffered bytes while discarding the rest of the line")
+
+	toolCallLine := []byte("\n" + `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n")
+	require.True(t, detector.Observe(toolCallLine, false), "detection resumes at the next SSE line")
+	require.True(t, detector.DetectionIncomplete(), "incomplete status remains visible after later detection")
 }
 
 func TestResponseDetectorCloseClearsIncompleteSSELine(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
 	require.False(t, detector.Observe(payload, false))

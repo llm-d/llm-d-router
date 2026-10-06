@@ -244,6 +244,39 @@ func TestObserveToolCallingResponseRecordsUpstreamAndForwardedPresence(t *testin
 	}
 	assert.True(t, attributes[toolcalling.ResponseAttributeUpstreamToolCallPresent])
 	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeUpstreamDetectionIncomplete])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedDetectionIncomplete])
+}
+
+func TestObserveToolCallingResponseReportsOversizedSSEDetection(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+
+	reqCtx := &RequestContext{
+		toolCallingSurface:             reqcommon.APITypeChatCompletions,
+		toolCallingRequest:             true,
+		toolCallingResponseEventStream: true,
+	}
+	oversized := make([]byte, 2<<20)
+	copy(oversized, "data: ")
+	for i := len("data: "); i < len(oversized); i++ {
+		oversized[i] = 'x'
+	}
+	reqCtx.observeToolCallingResponse(oversized, oversized, true, span)
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attributes := make(map[string]bool, len(ended[0].Attributes()))
+	for _, attribute := range ended[0].Attributes() {
+		attributes[string(attribute.Key)] = attribute.Value.AsBool()
+	}
+	assert.False(t, attributes[toolcalling.ResponseAttributeUpstreamToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedToolCallPresent])
+	assert.True(t, attributes[toolcalling.ResponseAttributeUpstreamDetectionIncomplete])
+	assert.True(t, attributes[toolcalling.ResponseAttributeForwardedDetectionIncomplete])
 }
 
 func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
@@ -272,9 +305,9 @@ func TestObserveToolCallingResponseSkipsNonToolRequest(t *testing.T) {
 }
 
 func TestClearToolCallingResponseDetectors(t *testing.T) {
-	upstreamDetector, err := toolcalling.NewResponseDetector(toolcalling.APISurfaceChatCompletions, true)
+	upstreamDetector, err := toolcalling.NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
-	forwardedDetector, err := toolcalling.NewResponseDetector(toolcalling.APISurfaceChatCompletions, true)
+	forwardedDetector, err := toolcalling.NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	partial := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
 	upstreamDetector.Observe(partial, false)
