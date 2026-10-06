@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func TestResponseSummarySpanAttributes(t *testing.T) {
@@ -39,41 +41,41 @@ func TestResponseSummarySpanAttributes(t *testing.T) {
 func TestResponseDetectorJSON(t *testing.T) {
 	tests := []struct {
 		name    string
-		surface APISurface
+		surface reqcommon.APIType
 		body    string
 		want    bool
 	}{
 		{
 			name:    "chat completions tool calls",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			body:    `{"choices":[{"message":{"tool_calls":[{"type":"function","function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`,
 			want:    true,
 		},
 		{
 			name:    "empty chat tool calls",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			body:    `{"choices":[{"message":{"tool_calls":[]}}]}`,
 		},
 		{
 			name:    "legacy chat function call",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			body:    `{"choices":[{"message":{"function_call":{"name":"sentinel_name","arguments":"sentinel_arguments"}}}]}`,
 			want:    true,
 		},
 		{
 			name:    "messages tool use",
-			surface: APISurfaceMessages,
+			surface: reqcommon.APITypeMessages,
 			body:    `{"content":[{"type":"tool_use","name":"sentinel_name","input":{"secret":"sentinel_arguments"}}]}`,
 			want:    true,
 		},
 		{
 			name:    "text mentioning tool use is not a tool call",
-			surface: APISurfaceMessages,
+			surface: reqcommon.APITypeMessages,
 			body:    `{"content":[{"type":"text","text":"tool_use"}]}`,
 		},
 		{
 			name:    "malformed response",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			body:    `{"choices":[`,
 		},
 	}
@@ -89,12 +91,12 @@ func TestResponseDetectorJSON(t *testing.T) {
 func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 	tests := []struct {
 		name    string
-		surface APISurface
+		surface reqcommon.APIType
 		chunks  []string
 	}{
 		{
 			name:    "chat completions delta",
-			surface: APISurfaceChatCompletions,
+			surface: reqcommon.APITypeChatCompletions,
 			chunks: []string{
 				`data: {"choices":[{"delta":{"tool_`,
 				`calls":[{"index":0,"function":{"name":"sentinel_name",`,
@@ -103,7 +105,7 @@ func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 		},
 		{
 			name:    "messages content block start",
-			surface: APISurfaceMessages,
+			surface: reqcommon.APITypeMessages,
 			chunks: []string{
 				"event: content_block_start\ndata: {\"type\":\"content_block_start\",",
 				"\"content_block\":{\"type\":\"tool_use\",\"name\":\"sentinel_name\",\"input\":{\"secret\":\"sentinel_arguments\"}}}\n\n",
@@ -127,7 +129,7 @@ func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 }
 
 func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	for _, chunk := range []string{
 		`data: {"choices":[{"delta":{"content":"tool_calls"}}]}` + "\n",
@@ -140,12 +142,14 @@ func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
 }
 
 func TestResponseDetectorRejectsUnsupportedSurface(t *testing.T) {
-	_, err := NewResponseDetector(APISurface("unsupported"), false)
-	require.Error(t, err)
+	for _, api := range []reqcommon.APIType{reqcommon.APIType(-1), reqcommon.APITypeResponses} {
+		_, err := NewResponseDetector(api, false)
+		require.Error(t, err)
+	}
 }
 
 func TestResponseDetectorDoesNotRetainCompletedPayload(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	payload := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n"
 	require.True(t, detector.Observe([]byte(payload), false))
