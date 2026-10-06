@@ -779,34 +779,34 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	}
 }
 
-func (reqCtx *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
-	if reqCtx == nil || !reqCtx.toolCallingRequest || reqCtx.toolCallingResponseRecorded {
+func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
 		return
 	}
-	if reqCtx.toolCallingUpstreamDetector == nil || reqCtx.toolCallingForwardedDetector == nil {
-		upstreamDetector, err := toolcalling.NewResponseDetector(reqCtx.toolCallingSurface, reqCtx.toolCallingResponseEventStream)
+	if r.toolCallingUpstreamDetector == nil || r.toolCallingForwardedDetector == nil {
+		upstreamDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
 		if err != nil {
 			return
 		}
-		forwardedDetector, err := toolcalling.NewResponseDetector(reqCtx.toolCallingSurface, reqCtx.toolCallingResponseEventStream)
+		forwardedDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
 		if err != nil {
 			return
 		}
-		reqCtx.toolCallingUpstreamDetector = upstreamDetector
-		reqCtx.toolCallingForwardedDetector = forwardedDetector
+		r.toolCallingUpstreamDetector = upstreamDetector
+		r.toolCallingForwardedDetector = forwardedDetector
 	}
 
-	reqCtx.toolCallingUpstreamPresent = reqCtx.toolCallingUpstreamDetector.Observe(upstream, endOfStream)
-	reqCtx.toolCallingForwardedPresent = reqCtx.toolCallingForwardedDetector.Observe(forwarded, endOfStream)
+	r.toolCallingUpstreamPresent = r.toolCallingUpstreamDetector.Observe(upstream, endOfStream)
+	r.toolCallingForwardedPresent = r.toolCallingForwardedDetector.Observe(forwarded, endOfStream)
 	if !endOfStream {
 		return
 	}
-	reqCtx.toolCallingResponseRecorded = true
+	r.toolCallingResponseRecorded = true
 	if span != nil {
 		span.SetAttributes((toolcalling.ResponseSummary{
 			ToolCallingRequested:     true,
-			UpstreamToolCallPresent:  reqCtx.toolCallingUpstreamPresent,
-			ForwardedToolCallPresent: reqCtx.toolCallingForwardedPresent,
+			UpstreamToolCallPresent:  r.toolCallingUpstreamPresent,
+			ForwardedToolCallPresent: r.toolCallingForwardedPresent,
 		}).SpanAttributes()...)
 	}
 }
