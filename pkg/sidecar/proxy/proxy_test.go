@@ -21,19 +21,26 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
 
@@ -320,5 +327,61 @@ var _ = Describe("Reverse Proxy", func() {
 				<-stoppedCh
 			})
 		})
+	})
+})
+
+var _ = Describe("SSRF protection startup warning", func() {
+	It("is logged once per process when protection is disabled", func() {
+		var mu sync.Mutex
+		var logged []string
+		logger := funcr.New(func(prefix, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			logged = append(logged, prefix+" "+args)
+		}, funcr.Options{Verbosity: logging.DEFAULT})
+		ctx, cancelFn := context.WithCancel(log.IntoContext(context.Background(), logger))
+		defer cancelFn()
+
+		// Two data parallel ranks, so two servers share the validator.
+		httpLn, err := fwknet.ReserveListener()
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { _ = httpLn.Close() })
+		rankLn, err := fwknet.ReserveListener()
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { _ = rankLn.Close() })
+
+		decoderURL, err := url.Parse("http://localhost:8001")
+		Expect(err).ToNot(HaveOccurred())
+
+		proxy := NewProxy(Config{
+			Port:             strconv.Itoa(httpLn.Addr().(*net.TCPAddr).Port),
+			DecoderURL:       decoderURL,
+			DataParallelSize: 2,
+		})
+		proxy.HTTPListener = httpLn
+		proxy.DataParallelListeners = []net.Listener{rankLn}
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- proxy.Start(ctx) }()
+
+		Eventually(proxy.readyCh, "5s").Should(BeClosed())
+		cancelFn()
+		Eventually(errCh, "5s").Should(Receive(BeNil()))
+
+		mu.Lock()
+		defer mu.Unlock()
+		var warnings []string
+		for _, line := range logged {
+			if strings.Contains(line, "SSRF protection is disabled") {
+				warnings = append(warnings, line)
+			}
+		}
+		Expect(warnings).To(HaveLen(1))
+		Expect(warnings[0]).To(And(
+			ContainSubstring("--"+enableSSRFProtection),
+			ContainSubstring(routing.PrefillEndpointHeader),
+			ContainSubstring(routing.EncoderEndpointsHeader),
+			ContainSubstring(routing.KVCacheSourceHeader),
+		))
 	})
 })

@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestRecordDisaggDecision(t *testing.T) {
@@ -28,13 +30,13 @@ func TestRecordDisaggDecision(t *testing.T) {
 	LlmdDisaggDecisionCount.Reset()
 
 	model := "test-model"
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeDecodeOnly)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodeDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
-	RecordDisaggDecision("test-plugin", "test-type", model, DecisionTypeEncodePrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathDecodeOnly)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathPrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathPrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathEncodeDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathEncodePrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathEncodePrefillDecode)
+	RecordDisaggDecision("test-plugin", "test-type", model, metricsutil.DisaggPathEncodePrefillDecode)
 
 	expected := `
 		# HELP llm_d_epp_disagg_decision_total [ALPHA] Total number of disaggregation routing decisions made
@@ -54,7 +56,7 @@ func TestRecordDisaggDecision(t *testing.T) {
 func TestRecordDisaggDecisionEmptyModel(t *testing.T) {
 	LlmdDisaggDecisionCount.Reset()
 
-	RecordDisaggDecision("test-plugin", "test-type", "", DecisionTypeDecodeOnly)
+	RecordDisaggDecision("test-plugin", "test-type", "", metricsutil.DisaggPathDecodeOnly)
 
 	expected := `
 		# HELP llm_d_epp_disagg_decision_total [ALPHA] Total number of disaggregation routing decisions made
@@ -74,10 +76,10 @@ func TestDisaggDecisionType(t *testing.T) {
 		prefillUsed bool
 		want        string
 	}{
-		{false, false, DecisionTypeDecodeOnly},
-		{false, true, DecisionTypePrefillDecode},
-		{true, false, DecisionTypeEncodeDecode},
-		{true, true, DecisionTypeEncodePrefillDecode},
+		{false, false, metricsutil.DisaggPathDecodeOnly},
+		{false, true, metricsutil.DisaggPathPrefillDecode},
+		{true, false, metricsutil.DisaggPathEncodeDecode},
+		{true, true, metricsutil.DisaggPathEncodePrefillDecode},
 	}
 	for _, tt := range tests {
 		got := DisaggDecisionType(tt.encodeUsed, tt.prefillUsed)

@@ -1299,7 +1299,9 @@ func TestProcessor(t *testing.T) {
 						}
 					}
 				}
-				assert.Equal(t, []string{"decode"}, stages, "only the decode series should remain")
+				// Only this test writes to "unpartitioned-series-test", so asserting
+				// absence of "" is race-free across parallel tests.
+				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
 			})
 
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {

@@ -125,9 +125,15 @@ func New(name string, cfg Config) *Producer {
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
 
-// Produces declares the request-wide reusable prefix token floor.
+// Produces declares the request-wide reusable prefix token floor, and the
+// best-match peer this plugin stashes on the request for its own PreRequest to
+// read back. Both keys are name-bound to this instance, so two configured
+// p2p-source producers do not share them.
 func (p *Producer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0)}
+	return map[plugin.DataKey]any{
+		p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0),
+		p.attrKeyValue:                (*bestMatchPeer)(nil),
+	}
 }
 
 // Consumes declares the PrefixCacheMatchInfo dependency so the data-layer
@@ -181,7 +187,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		hasTierData bool
 	}
 	maxCached := 0
-	var matches []sourceMatch
+	matches := make([]sourceMatch, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if ep.GetMetadata() == nil {
 			continue

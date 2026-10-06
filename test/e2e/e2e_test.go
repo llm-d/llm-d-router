@@ -23,7 +23,7 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/test/e2e/utils"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
@@ -211,8 +211,8 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			gomega.Expect(podHdr).Should(gomega.Equal(podHdrChat))
 
 			// Metrics Validation
-			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypePrefillDecode, simModelName)
-			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
+			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathPrefillDecode, simModelName)
+			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathDecodeOnly, simModelName)
 			gomega.Eventually(func(g gomega.Gomega) {
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter)).To(gomega.Equal(4))
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter2)).To(gomega.Equal(2))
@@ -474,8 +474,8 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			gomega.Expect(podHdr).Should(gomega.Equal(podHdrChat))
 
 			// Metrics Validation
-			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypePrefillDecode, simModelName)
-			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
+			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathPrefillDecode, simModelName)
+			labelFilter2 := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathDecodeOnly, simModelName)
 			gomega.Eventually(func(g gomega.Gomega) {
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter)).To(gomega.Equal(4))
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter2)).To(gomega.Equal(2))
@@ -564,9 +564,9 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			gomega.Expect(podHdr).Should(gomega.BeElementOf(prefillDecodePods))
 
 			// Metrics: text + image_embeds requests recorded as decode-only (encode skipped)
-			decodeOnlyFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
+			decodeOnlyFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathDecodeOnly, simModelName)
 			// Metrics: encode-decode decisions recorded, one per entry in mmRequests.
-			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeEncodeDecode, simModelName)
+			labelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathEncodeDecode, simModelName)
 			gomega.Eventually(func(g gomega.Gomega) {
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", decodeOnlyFilter)).To(gomega.Equal(2))
 				g.Expect(utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", labelFilter)).To(gomega.Equal(len(mmRequests)))
@@ -625,8 +625,8 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
 
 			// Metrics: text + image_embeds requests recorded as decode-only or prefill-decode (encode skipped)
-			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypePrefillDecode, simModelName)
-			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
+			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathPrefillDecode, simModelName)
+			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathDecodeOnly, simModelName)
 			gomega.Eventually(func(g gomega.Gomega) {
 				pdCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", pdLabelFilter)
 				doCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", doLabelFilter)
@@ -638,8 +638,8 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			// in mmRequests contributes one encode-prefill-decode or encode-decode
 			// decision (encode-decode when the prefix cache hits on the second
 			// same-image request).
-			// epdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeEncodePrefillDecode, simModelName)
-			// edLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeEncodeDecode, simModelName)
+			// epdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathEncodePrefillDecode, simModelName)
+			// edLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathEncodeDecode, simModelName)
 			// epdCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", epdLabelFilter)
 			// edCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", edLabelFilter)
 			// gomega.Expect(epdCount + edCount).Should(gomega.Equal(len(mmRequests)))
@@ -674,8 +674,8 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			gomega.Expect(podHdr).Should(gomega.Equal(epdPods[0]))
 
 			// Metrics: text requests recorded as decode-only or prefill-decode (encode skipped)
-			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypePrefillDecode, simModelName)
-			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, disagg.DecisionTypeDecodeOnly, simModelName)
+			pdLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathPrefillDecode, simModelName)
+			doLabelFilter := fmt.Sprintf(`decision_type=%q,model_name="%s"`, metricsutil.DisaggPathDecodeOnly, simModelName)
 			gomega.Eventually(func(g gomega.Gomega) {
 				pdCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", pdLabelFilter)
 				doCount := utils.GetCounterMetric(metricsURL, "llm_d_epp_disagg_decision_total", doLabelFilter)

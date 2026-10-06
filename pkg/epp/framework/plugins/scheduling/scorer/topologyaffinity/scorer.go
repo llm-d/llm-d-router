@@ -88,13 +88,18 @@ func (s *Scorer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-// Consumes returns the Topology attribute as optional: a missing producer
-// logs a startup warning rather than an error, since the scorer scores every
-// endpoint 0 (no signal, not an error) rather than depending on the
-// attribute to function.
+// Consumes returns the Topology attribute and the peer endpoint the scorer
+// grades against as optional: a missing producer logs a startup warning rather
+// than an error, since the scorer scores every endpoint 0 (no signal, not an
+// error) rather than depending on either to function. The peer endpoint is a
+// request attribute published by the disagg profile handler, which is absent in
+// deployments that do not disaggregate.
 func (s *Scorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Optional: map[fwkplugin.DataKey]any{s.dataKey: attrtopology.Topology{}},
+		Optional: map[fwkplugin.DataKey]any{
+			s.dataKey:                    attrtopology.Topology{},
+			topoutil.PeerEndpointDataKey: fwksched.Endpoint(nil),
+		},
 	}
 }
 

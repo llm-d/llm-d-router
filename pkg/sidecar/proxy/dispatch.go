@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -183,9 +184,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
 			if len(prefillHostPort) > 0 {
-				metrics.RecordDisagg(metrics.DisaggTypeEPD)
+				metrics.RecordDisagg(metricsutil.DisaggPathEncodePrefillDecode)
 			} else {
-				metrics.RecordDisagg(metrics.DisaggTypeED)
+				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
 			}
 			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
 			return
@@ -202,7 +203,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 
 		if len(prefillHostPort) > 0 {
 			logger.V(logging.DEBUG).Info("using P/D protocol")
-			metrics.RecordDisagg(metrics.DisaggTypePD)
+			metrics.RecordDisagg(metricsutil.DisaggPathPrefillDecode)
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
