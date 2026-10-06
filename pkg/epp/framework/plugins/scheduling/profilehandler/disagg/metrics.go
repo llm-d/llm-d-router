@@ -27,17 +27,6 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-const (
-	// DecisionTypeDecodeOnly is for requests that are routed to decode instance only.
-	DecisionTypeDecodeOnly = "decode-only"
-	// DecisionTypePrefillDecode is for requests that are gone through P/D or EP/D.
-	DecisionTypePrefillDecode = "prefill-decode"
-	// DecisionTypeEncodeDecode is for requests that are gone through E/PD.
-	DecisionTypeEncodeDecode = "encode-decode"
-	// DecisionTypeEncodePrefillDecode is for requests that are gone through E/P/D.
-	DecisionTypeEncodePrefillDecode = "encode-prefill-decode"
-)
-
 var (
 	// LlmdDisaggDecisionCount records disaggregation routing decisions, covering all stages:
 	// decode-only, prefill-decode, encode-decode, encode-prefill-decode.
@@ -70,8 +59,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 }
 
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
-// The decisionType must be one of the DecisionType* constants (DecisionTypeDecodeOnly,
-// DecisionTypePrefillDecode, DecisionTypeEncodeDecode, DecisionTypeEncodePrefillDecode).
+// The decisionType must be one of the metricsutil.DisaggPath* constants.
 // The model parameter should be the target model name; if empty, "unknown" is used.
 func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string) {
 	if modelName == "" {
@@ -80,17 +68,17 @@ func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string
 	LlmdDisaggDecisionCount.WithLabelValues(pluginName, pluginType, modelName, decisionType).Inc()
 }
 
-// DisaggDecisionType returns the DecisionType* constant corresponding to which
+// DisaggDecisionType returns the metricsutil.DisaggPath* constant corresponding to which
 // disaggregation stages were used for a request.
 func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	switch {
 	case encodeUsed && prefillUsed:
-		return DecisionTypeEncodePrefillDecode
+		return metricsutil.DisaggPathEncodePrefillDecode
 	case encodeUsed:
-		return DecisionTypeEncodeDecode
+		return metricsutil.DisaggPathEncodeDecode
 	case prefillUsed:
-		return DecisionTypePrefillDecode
+		return metricsutil.DisaggPathPrefillDecode
 	default:
-		return DecisionTypeDecodeOnly
+		return metricsutil.DisaggPathDecodeOnly
 	}
 }

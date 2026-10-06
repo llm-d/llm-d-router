@@ -108,7 +108,7 @@ func TestVLLMBlockStored(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -142,7 +142,7 @@ func TestVLLMBlockStoredWithLora(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -181,7 +181,7 @@ func TestVLLMBlockStoredWithHMAMetadata(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -255,7 +255,7 @@ func TestDecodeVLLMEvent_BlockStoredMissingTrailingFields(t *testing.T) {
 			rawBytes, err := msgpack.Marshal(tt.event)
 			require.NoError(t, err)
 
-			event, err := adapter.decodeVLLMEvent(rawBytes)
+			event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 			require.NoError(t, err)
 
 			blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -292,7 +292,7 @@ func TestDecodeVLLMEvent_BlockStoredExtraTrailingFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -326,7 +326,7 @@ func TestDecodeVLLMEvent_BlockRemovedExtraTrailingFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockRemoved, ok := event.(*kvevents.BlockRemovedEvent)
@@ -349,7 +349,7 @@ func TestDecodeVLLMEvent_BlockRemovedMissingMedium(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockRemoved, ok := event.(*kvevents.BlockRemovedEvent)
@@ -425,7 +425,7 @@ func TestDecodeVLLMEvent_BlockStoredInvalidHMAMetadata(t *testing.T) {
 			rawBytes, err := msgpack.Marshal(tt.event)
 			require.NoError(t, err)
 
-			_, err = adapter.decodeVLLMEvent(rawBytes)
+			_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -445,7 +445,7 @@ func TestDecodeVLLMEvent_BlockRemovedInvalidGroupIdx(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	_, err = adapter.decodeVLLMEvent(rawBytes)
+	_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "group_idx")
 }
@@ -473,7 +473,7 @@ func TestVLLMBlockStoredInvalidExtraKeys(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	_, err = adapter.decodeVLLMEvent(rawBytes)
+	_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "extra_keys[0] has invalid type")
 }
@@ -492,7 +492,7 @@ func TestVLLMBlockRemoved(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -511,7 +511,7 @@ func TestVLLMAllBlocksCleared(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -528,10 +528,10 @@ func TestVLLMUnknownTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
-	assert.Contains(t, err.Error(), "unknown vLLM event tag")
+	assert.Contains(t, err.Error(), "unknown event tag")
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -540,7 +540,7 @@ func TestVLLMMalformedPayload(t *testing.T) {
 
 	rawBytes := []byte{0xFF, 0xFF, 0xFF}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
@@ -551,7 +551,7 @@ func TestVLLMEmptyPayload(t *testing.T) {
 
 	rawBytes := []byte{}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
@@ -565,7 +565,7 @@ func TestVLLMMissingTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 	assert.Contains(t, err.Error(), "malformed tagged union")
@@ -705,7 +705,7 @@ func TestVLLMParseMessage_MapEncodedErrors(t *testing.T) {
 	}{
 		"unknown tag": {
 			event:   map[string]any{"type": "SomethingNew"},
-			wantErr: "unknown vLLM event tag: SomethingNew",
+			wantErr: "unknown event tag: SomethingNew",
 		},
 		"missing tag": {
 			event:   map[string]any{"block_hashes": []any{uint64(1)}},

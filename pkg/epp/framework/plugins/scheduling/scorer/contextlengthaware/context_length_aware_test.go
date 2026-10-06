@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -186,6 +188,30 @@ func TestRoutingLengthSnapshotIgnoresLateReusableTokens(t *testing.T) {
 		ReusableTokensProducerName: producerName,
 	})
 	assert.Equal(t, 40, otherPlugin.getContextLength(request))
+}
+
+// Filter and Score each receive a request confined to the plugin's
+// declarations, so the snapshot must survive that scope for both to agree.
+func TestRoutingLengthSnapshotSurvivesRequestScope(t *testing.T) {
+	producerName := testReusableTokensProducerName
+	plugin := NewContextLengthAware("scoped-cache-aware", &contextLengthAwareParameters{
+		Label:                      testPrefillWorkRangeLabel,
+		ReusableTokensProducerName: producerName,
+	})
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{plugin})
+	request := createHundredTokenRequest()
+
+	filterRequest, filterViolations := datalayer.ScopeRequest(logr.Discard(), "Filter", plugin, request)
+	assert.Equal(t, 100, plugin.getContextLength(filterRequest))
+	require.NoError(t, filterViolations.Write())
+
+	request.PutAttribute(
+		attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+		attrprefix.ReusablePrefixTokens(60),
+	)
+	scoreRequest, scoreViolations := datalayer.ScopeRequest(logr.Discard(), "Score", plugin, request)
+	assert.Equal(t, 100, plugin.getContextLength(scoreRequest))
+	require.NoError(t, scoreViolations.Write())
 }
 
 func TestReusableTokensFilter(t *testing.T) {

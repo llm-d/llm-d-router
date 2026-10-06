@@ -56,19 +56,11 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvName, err := paramString(params, ParamKVConnector)
+	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvConn, err := kv.Build(kvName)
-	if err != nil {
-		return nil, fmt.Errorf("prefill: %w", err)
-	}
-	ecName, err := paramString(params, ParamECConnector)
-	if err != nil {
-		return nil, fmt.Errorf("prefill: %w", err)
-	}
-	ecConn, err := ec.Build(ecName)
+	ecConn, err := buildECConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
@@ -140,7 +132,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
 		body[reqcommon.FieldKVTransferParams] = kvParams

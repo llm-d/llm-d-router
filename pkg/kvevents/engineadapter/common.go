@@ -77,24 +77,44 @@ func getHashAsUint64(raw any) (uint64, error) {
 	}
 }
 
-// decodeEvent decodes a single msgpack event, extracts the tag, and dispatches to the appropriate converter.
-// Used by SGLang adapter. The vLLM adapter uses its own single-pass []any decoder.
+// decodeEvent decodes a single msgpack event and dispatches it to the converter
+// for its tag. vLLM and SGLang send events either as positional arrays or as
+// field-name maps; toFields converts a map into the positional layout, so each
+// converter handles only that layout. The vLLM and SGLang adapters differ only
+// in toFields and their converter set.
 func decodeEvent(
 	rawEventBytes []byte,
-	converters map[string]func([]byte) (kvevents.GenericEvent, error),
+	toFields func(map[string]any) ([]any, error),
+	converters map[string]func([]any) (kvevents.GenericEvent, error),
 ) (kvevents.GenericEvent, error) {
-	var taggedUnion []any
-	if err := msgpack.Unmarshal(rawEventBytes, &taggedUnion); err != nil {
-		return nil, fmt.Errorf("failed to decode tagged union: %w", err)
+	var decoded any
+	if err := msgpack.Unmarshal(rawEventBytes, &decoded); err != nil {
+		return nil, fmt.Errorf("unmarshal event payload: %w", err)
 	}
 
-	if len(taggedUnion) < 1 {
+	var fields []any
+	switch ev := decoded.(type) {
+	case []any:
+		fields = ev
+	case map[string]any:
+		if toFields == nil {
+			return nil, fmt.Errorf("map-encoded event but no field mapper is configured")
+		}
+		var err error
+		if fields, err = toFields(ev); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("event is neither an array nor a map: %T", decoded)
+	}
+
+	if len(fields) < 1 {
 		return nil, fmt.Errorf("malformed tagged union: no tag")
 	}
 
-	tag, ok := taggedUnion[0].(string)
+	tag, ok := fields[0].(string)
 	if !ok {
-		return nil, fmt.Errorf("event tag is not a string: %T", taggedUnion[0])
+		return nil, fmt.Errorf("event tag is not a string: %T", fields[0])
 	}
 
 	converter, exists := converters[tag]
@@ -102,7 +122,7 @@ func decodeEvent(
 		return nil, fmt.Errorf("unknown event tag: %s", tag)
 	}
 
-	return converter(rawEventBytes)
+	return converter(fields)
 }
 
 // convertBlockHashes converts raw hash values to uint64 slice.

@@ -18,9 +18,10 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
 	"unsafe"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -577,23 +579,23 @@ func TestEstimateBackend_ChatAudioFeature(t *testing.T) {
 	}
 }
 
-// TestAudioEstimator_DefaultDuration asserts that without a duration header,
-// the estimator uses the default duration (10s).
+// TestAudioEstimator_DefaultDuration asserts a clip with no readable payload
+// falls back to the default duration, and that the fallback is configurable. A
+// clip that does carry a payload takes its duration from it instead; those cases
+// live in the WAV and byte-rate tests below.
 func TestAudioEstimator_DefaultDuration(t *testing.T) {
-	expected := defaultAudioOverheadTokens + defaultAudioTokensPerSecond*defaultAudioDuration
+	expected := defaultAudioOverheadTokens + int(defaultAudioTokensPerSecond*defaultAudioDuration)
 
-	short := estimateBackend{}
-	tp, err := short.produce(context.Background(), chatInputAudioBody("AABBCCDD", "wav"))
+	tp, err := estimateBackend{}.produce(context.Background(), chatAudioURLBody("https://example.com/speech.wav"))
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
-	assert.Equal(t, expected, tp.Prompts[0].MultiModalFeatures[0].Length, "short base64 uses default duration")
+	assert.Equal(t, expected, tp.Prompts[0].MultiModalFeatures[0].Length, "a clip carried by URL has no payload to measure")
 
-	long := estimateBackend{}
-	longBase64 := strings.Repeat("A", 80000)
-	tp2, err := long.produce(context.Background(), chatInputAudioBody(longBase64, "wav"))
+	configured := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{DefaultDuration: 4}})}
+	tp2, err := configured.produce(context.Background(), chatAudioURLBody("https://example.com/speech.wav"))
 	require.NoError(t, err)
 	require.Len(t, tp2.Prompts[0].MultiModalFeatures, 1)
-	assert.Equal(t, expected, tp2.Prompts[0].MultiModalFeatures[0].Length, "long base64 also uses default duration without header")
+	assert.Equal(t, defaultAudioOverheadTokens+int(defaultAudioTokensPerSecond*4), tp2.Prompts[0].MultiModalFeatures[0].Length)
 }
 
 // TestParseAudioMetadataHeaders covers full, partial, missing, and malformed
@@ -620,6 +622,24 @@ func TestParseAudioMetadataHeaders(t *testing.T) {
 			want:    audioMetadata{},
 		},
 		{
+			name:    "byte rate present",
+			headers: map[string]string{metadata.AudioBytesPerSecondHeaderKey: "16000"},
+			want:    audioMetadata{bytesPerSecond: 16000},
+		},
+		{
+			name: "both present",
+			headers: map[string]string{
+				metadata.AudioDurationHeaderKey:       "12.5",
+				metadata.AudioBytesPerSecondHeaderKey: "16000",
+			},
+			want: audioMetadata{duration: 12.5, bytesPerSecond: 16000},
+		},
+		{
+			name:    "malformed byte rate ignored",
+			headers: map[string]string{metadata.AudioBytesPerSecondHeaderKey: "fast"},
+			want:    audioMetadata{},
+		},
+		{
 			name:    "non-positive ignored",
 			headers: map[string]string{metadata.AudioDurationHeaderKey: "-1"},
 			want:    audioMetadata{},
@@ -629,6 +649,240 @@ func TestParseAudioMetadataHeaders(t *testing.T) {
 			assert.Equal(t, tc.want, parseAudioMetadataHeaders(tc.headers))
 		})
 	}
+}
+
+// chatAudioURLBody builds a chat request carrying a single audio_url block, the
+// shape of a clip carried by reference rather than by payload.
+func chatAudioURLBody(url string) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+		Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: []fwkrh.ContentBlock{
+			{Type: "audio_url", AudioURL: fwkrh.AudioURLBlock{URL: url}},
+		}}}},
+	}}
+}
+
+// audioCtx carries audio metadata the way the request headers would.
+func audioCtx(a audioMetadata) context.Context {
+	return withMMMetadata(context.Background(), mmMetadata{audio: a})
+}
+
+// wavBase64 builds a base64 16-bit PCM WAV payload with the given sample rate,
+// channel count, and data-chunk length, the shape a client sends in an
+// input_audio block. Its byte rate is sampleRate*channels*2, so the duration the
+// estimator reads back is dataLen/byteRate.
+func wavBase64(sampleRate, channels, dataLen int) string {
+	const bitsPerSample = 16
+	blockAlign := channels * bitsPerSample / 8
+	byteRate := sampleRate * blockAlign
+	buf := make([]byte, 0, 44+dataLen)
+	put32 := func(v int) { buf = binary.LittleEndian.AppendUint32(buf, uint32(v)) }
+	put16 := func(v int) { buf = binary.LittleEndian.AppendUint16(buf, uint16(v)) }
+	buf = append(buf, "RIFF"...)
+	put32(36 + dataLen)
+	buf = append(buf, "WAVE"...)
+	buf = append(buf, "fmt "...)
+	put32(16) // PCM fmt chunk size
+	put16(1)  // PCM
+	put16(channels)
+	put32(sampleRate)
+	put32(byteRate)
+	put16(blockAlign)
+	put16(bitsPerSample)
+	buf = append(buf, "data"...)
+	put32(dataLen)
+	buf = append(buf, make([]byte, dataLen)...)
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+// rawAudioBase64 builds a base64 payload of n bytes that is not a WAV, so the
+// estimator falls back to its byte rate.
+func rawAudioBase64(n int) string {
+	return base64.StdEncoding.EncodeToString(make([]byte, n))
+}
+
+// audioTokens is the expected count for a clip of the given length under the
+// built-in defaults, spelled out so each case below states its own duration.
+func audioTokens(seconds float64) int {
+	return defaultAudioOverheadTokens + int(defaultAudioTokensPerSecond*seconds)
+}
+
+// TestAudioEstimator_WAVDuration asserts the zero-config estimator reads the
+// duration out of a PCM WAV header: 48000 bytes at 32000 B/s is 1.5s.
+func TestAudioEstimator_WAVDuration(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 48000), "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, audioTokens(1.5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestAudioEstimator_WAVDataURL asserts a payload sent as a data URL rather than
+// bare base64 resolves to the same duration, so both client shapes agree.
+func TestAudioEstimator_WAVDataURL(t *testing.T) {
+	clip := wavBase64(16000, 1, 48000) // 1.5s
+
+	bare, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	require.NoError(t, err)
+	dataURL, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody("data:audio/wav;base64,"+clip, "wav"))
+	require.NoError(t, err)
+
+	assert.Equal(t, audioTokens(1.5), bare.Prompts[0].MultiModalFeatures[0].Length)
+	assert.Equal(t, bare.Prompts[0].MultiModalFeatures[0].Length, dataURL.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestAudioEstimator_WAVByteRateFromHeader asserts the duration comes from the
+// byte rate the payload declares, not from an assumed one: the same 176400-byte
+// clip is 5.5125s as 16kHz mono and 1s as 44.1kHz 16-bit stereo.
+func TestAudioEstimator_WAVByteRateFromHeader(t *testing.T) {
+	const dataLen = 176400
+
+	mono, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, dataLen), "wav"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5.5125), mono.Prompts[0].MultiModalFeatures[0].Length, "176400 bytes at 32000 B/s")
+
+	stereo, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(wavBase64(44100, 2, dataLen), "wav"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(1), stereo.Prompts[0].MultiModalFeatures[0].Length, "the same bytes at 176400 B/s are one second")
+}
+
+// TestAudioEstimator_NonWAVUsesByteRate asserts a payload that is not a WAV is
+// converted through the byte rate: 48000 bytes at the default 16000 B/s is 3s.
+func TestAudioEstimator_NonWAVUsesByteRate(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(rawAudioBase64(48000), "mp3"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestAudioEstimator_DefaultBytesPerSecond asserts the configured default byte
+// rate changes the duration read out of a non-WAV payload.
+func TestAudioEstimator_DefaultBytesPerSecond(t *testing.T) {
+	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+		DefaultBytesPerSecond: 32000,
+	}})}
+	tp, err := b.produce(context.Background(), chatInputAudioBody(rawAudioBase64(32000), "mp3"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(1), tp.Prompts[0].MultiModalFeatures[0].Length, "32000 bytes at 32000 B/s is one second")
+}
+
+// TestAudioEstimator_HeaderBytesPerSecondWins asserts the byte rate a request
+// declares beats the configured default, so clips of different bitrates in one
+// deployment are each measured with their own rate.
+func TestAudioEstimator_HeaderBytesPerSecondWins(t *testing.T) {
+	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+		DefaultBytesPerSecond: 32000,
+	}})}
+	body := chatInputAudioBody(rawAudioBase64(32000), "mp3")
+
+	tp, err := b.produce(withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{bytesPerSecond: 16000}}), body)
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(2), tp.Prompts[0].MultiModalFeatures[0].Length, "32000 bytes at 16000 B/s is two seconds")
+}
+
+// TestAudioEstimator_DurationHeaderBeatsByteRate asserts a declared duration
+// short-circuits the byte-rate path entirely.
+func TestAudioEstimator_DurationHeaderBeatsByteRate(t *testing.T) {
+	tp, err := estimateBackend{}.produce(
+		withMMMetadata(context.Background(), mmMetadata{audio: audioMetadata{duration: 5, bytesPerSecond: 1}}),
+		chatInputAudioBody(rawAudioBase64(32000), "mp3"))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestAudioEstimateConfig_FlatShape checks the audio fields load directly under
+// estimate.audio and the old dynamic block is rejected.
+func TestAudioEstimateConfig_FlatShape(t *testing.T) {
+	handle := plugin.NewEppHandle(context.Background(), nil)
+	p, err := PluginFactory("estimate", plugin.StrictDecoder(json.RawMessage(
+		`{"estimate":{"audio":{"tokensPerSecond":25,"overheadTokens":2,"defaultBytesPerSecond":32000,"defaultDuration":5,"maxAudioTokens":750}}}`)), handle)
+	require.NoError(t, err)
+	assert.Equal(t,
+		audioEstimator{tokensPerSec: 25, overheadTokens: 2, defBytesPerSec: 32000, defDuration: 5, maxTokens: 750},
+		p.(*Plugin).backend.(estimateBackend).aud)
+
+	_, err = PluginFactory("estimate", plugin.StrictDecoder(json.RawMessage(
+		`{"estimate":{"audio":{"dynamic":{"tokensPerSecond":25}}}}`)), handle)
+	require.ErrorContains(t, err, `unknown field "dynamic"`)
+}
+
+// TestAudioEstimator_MaxAudioTokens asserts the cap bounds the tower's tokens for
+// a long clip, the way maxVideoTokens bounds a long video, with the overhead
+// added on top, as models add their markers outside their own limit.
+func TestAudioEstimator_MaxAudioTokens(t *testing.T) {
+	b := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{MaxAudioTokens: 10}})}
+	tp, err := b.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 48000), "wav"))
+	require.NoError(t, err)
+	assert.Equal(t, 10+defaultAudioOverheadTokens, tp.Prompts[0].MultiModalFeatures[0].Length, "uncapped this clip is %d", audioTokens(1.5))
+}
+
+// TestAudioEstimator_HeaderDurationOverridesPayload asserts a header-provided
+// duration wins over the duration the payload itself declares.
+func TestAudioEstimator_HeaderDurationOverridesPayload(t *testing.T) {
+	body := chatInputAudioBody(wavBase64(16000, 1, 48000), "wav")
+
+	withMeta, err := estimateBackend{}.produce(audioCtx(audioMetadata{duration: 30}), body)
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(30), withMeta.Prompts[0].MultiModalFeatures[0].Length)
+
+	fromPayload, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(1.5), fromPayload.Prompts[0].MultiModalFeatures[0].Length, "the header must win over the payload")
+}
+
+// TestAudioEstimator_MalformedPayloadStillCounts asserts a truncated or
+// non-decodable payload yields a positive count rather than zero weight.
+func TestAudioEstimator_MalformedPayloadStillCounts(t *testing.T) {
+	for _, tc := range []struct{ name, data string }{
+		{"not base64", "!!!!not-base64!!!!"},
+		{"riff without fmt", base64.StdEncoding.EncodeToString([]byte("RIFF????WAVEjunkjunk"))},
+		{"truncated header", base64.StdEncoding.EncodeToString([]byte("RIFF"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(tc.data, "wav"))
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, tp.Prompts[0].MultiModalFeatures[0].Length, 1)
+		})
+	}
+}
+
+// TestAudioEstimator_Qwen3OmniAndGemma4 asserts the two model shapes the issue
+// calls out are reachable by configuration alone. Both are dynamic mode and
+// differ only in rate: gemma4's mel front end takes 20ms frames at a 10ms hop
+// through two stride-2 convolutions, a token per 40ms, while Qwen3-Omni's
+// encoder turns each 1s chunk into 13 tokens. Qwen3-VL has no audio tower, so
+// Qwen3-Omni is the audio member of that family. Both wrap a clip in begin/end
+// markers, which is the per-clip overhead of 2.
+func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
+	clip := wavBase64(16000, 1, 96000) // 96000 bytes at 32000 B/s is 3s
+
+	gemma4 := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+		TokensPerSecond: 25,
+		OverheadTokens:  2,
+		MaxAudioTokens:  100000,
+	}})}
+	tp, err := gemma4.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	require.NoError(t, err)
+	assert.Equal(t, 3*25+2, tp.Prompts[0].MultiModalFeatures[0].Length, "gemma4-shaped audio length")
+
+	qwen3omni := estimateBackend{aud: newAudioEstimator(&estimateConfig{Audio: &audioEstimateConfig{
+		TokensPerSecond: 13,
+		OverheadTokens:  2,
+	}})}
+	tp, err = qwen3omni.produce(context.Background(), chatInputAudioBody(clip, "wav"))
+	require.NoError(t, err)
+	assert.Equal(t, 3*13+2, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
+}
+
+// TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different
+// length produce different token streams, so audio weighting reaches the
+// locality keys instead of collapsing to one placeholder.
+func TestEstimateBackend_ChatAudioWeightingDistinct(t *testing.T) {
+	short, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 32000), "wav"))
+	require.NoError(t, err)
+	long, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(wavBase64(16000, 1, 128000), "wav"))
+	require.NoError(t, err)
+
+	assert.Equal(t, audioTokens(1), short.Prompts[0].MultiModalFeatures[0].Length, "1s clip")
+	assert.Equal(t, audioTokens(4), long.Prompts[0].MultiModalFeatures[0].Length, "4s clip")
+	assert.NotEqual(t, len(short.Prompts[0].TokenIDs), len(long.Prompts[0].TokenIDs), "clip length must change the token stream")
 }
 
 // TestEstimateBackend_MessagesImageFeature asserts an Anthropic messages image

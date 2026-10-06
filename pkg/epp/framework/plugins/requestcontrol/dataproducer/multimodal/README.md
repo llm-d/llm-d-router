@@ -130,7 +130,8 @@ schedulingProfiles:
   - `encoder_cache_queries_total` — every item-hash lookup against the LRU;
     labels `{plugin_type, plugin_name, modality}`.
   - `encoder_cache_hits_total` — the subset of those lookups that matched, per endpoint;
-    labels `{plugin_type, plugin_name, pod, modality}`.
+    labels `{plugin_type, plugin_name, pod, modality}`. An endpoint's series are deleted
+    when its state is removed.
   - `encoder_cache_hit_ratio` — histogram of matched items over total items per endpoint
     for a single lookup; labels `{plugin_type, plugin_name}`.
 - The producer remains tokenizer-free for request shapes where typed media blocks are

@@ -31,6 +31,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 )
 
 func TestRegisterMetrics(t *testing.T) {
@@ -94,13 +95,13 @@ func TestPreRequestRecordsPrediction(t *testing.T) {
 	// the prompt still lands in the denominator.
 	tokens := []uint32{1, 2, 3, 4}
 	runPrediction(t, p, "seed", tokens, endpoints, result)
-	require.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name))
-	require.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name))
+	require.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
+	require.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
 
 	// The same prompt now matches every block on the endpoint that was chosen.
 	runPrediction(t, p, "repeat", tokens, endpoints, result)
-	assert.Equal(t, float64(len(tokens)), metricSum(t, predictedCachedTokensMetric, name))
-	assert.Equal(t, float64(2*len(tokens)), metricSum(t, promptTokensMetric, name))
+	assert.Equal(t, float64(len(tokens)), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(2*len(tokens)), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
 }
 
 // A prompt whose length is not a multiple of the block size still hashes its
@@ -116,10 +117,10 @@ func TestPreRequestPredictionBoundedByPromptLength(t *testing.T) {
 	// 5 tokens at block size 4 hash to 2 blocks, the second covering 1 token.
 	tokens := []uint32{1, 2, 3, 4, 5}
 	runPrediction(t, p, "seed", tokens, endpoints, result)
-	require.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name))
+	require.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
 
 	runPrediction(t, p, "repeat", tokens, endpoints, result)
-	assert.Equal(t, float64(len(tokens)), metricSum(t, predictedCachedTokensMetric, name),
+	assert.Equal(t, float64(len(tokens)), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode),
 		"a full match must report the prompt's 5 tokens, not 2 blocks * 4 tokens")
 }
 
@@ -142,8 +143,8 @@ func TestPreRequestPredictionBoundsEachPromptSeparately(t *testing.T) {
 	runPredictionWithBody(t, p, "seed", body, endpoints, result)
 	runPredictionWithBody(t, p, "repeat", body, endpoints, result)
 
-	assert.Equal(t, float64(13), metricSum(t, predictedCachedTokensMetric, name))
-	assert.Equal(t, float64(26), metricSum(t, promptTokensMetric, name))
+	assert.Equal(t, float64(13), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(26), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
 }
 
 // A token cap below the block size hashes nothing, so no endpoint can be
@@ -165,8 +166,53 @@ func TestPreRequestPredictionCountsUnhashedPrompts(t *testing.T) {
 	tokens := []uint32{1, 2, 3, 4, 5}
 	runPrediction(t, p, "unhashed", tokens, endpoints, result)
 
-	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name))
-	assert.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name))
+	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
+}
+
+// A disaggregated request's cached-token count comes back from the prefiller,
+// so the prediction is recorded for the prefill endpoint rather than the
+// primary one.
+func TestPreRequestPredictionFollowsPrefillEndpoint(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-predicted-pd"
+	p := producerForPrediction(t, name, 2)
+	decode := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "decode", Namespace: "default"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	prefill := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "prefill", Namespace: "default"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoints := []fwksched.Endpoint{decode, prefill}
+	decodeOnly := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{decode}},
+		},
+	}
+	disaggregated := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode":                          {TargetEndpoints: []fwksched.Endpoint{decode}},
+			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{prefill}},
+		},
+	}
+
+	// Only the decode endpoint holds the prompt after this request.
+	tokens := []uint32{1, 2, 3, 4}
+	runPrediction(t, p, "seed", tokens, endpoints, decodeOnly)
+	require.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name, prefixmetrics.RoleDecode))
+
+	// The prefill endpoint holds nothing yet, so the prediction is zero even
+	// though the primary endpoint would fully match.
+	runPrediction(t, p, "cold-prefill", tokens, endpoints, disaggregated)
+	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RolePrefill))
+	assert.Equal(t, float64(len(tokens)), metricSum(t, promptTokensMetric, name, prefixmetrics.RolePrefill))
+
+	runPrediction(t, p, "warm-prefill", tokens, endpoints, disaggregated)
+	assert.Equal(t, float64(len(tokens)), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RolePrefill))
+	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
 }
 
 func producerForPrediction(t *testing.T, name string, blockSize int) *dataProducer {
@@ -216,7 +262,7 @@ const (
 
 // metricSum reads a shared prefix metric out of the registry it is registered
 // against, since those metrics live in another package.
-func metricSum(t *testing.T, metricName, pluginName string) float64 {
+func metricSum(t *testing.T, metricName, pluginName, role string) float64 {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
 	require.NoError(t, err)
@@ -225,10 +271,12 @@ func metricSum(t *testing.T, metricName, pluginName string) float64 {
 			continue
 		}
 		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "plugin_name" && label.GetValue() == pluginName {
-					return metric.GetHistogram().GetSampleSum()
-				}
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName && labels["endpoint_role"] == role {
+				return metric.GetHistogram().GetSampleSum()
 			}
 		}
 	}

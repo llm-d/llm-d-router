@@ -35,6 +35,7 @@ import (
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -98,7 +99,7 @@ func statusHandler(status int, body string) http.Handler {
 func TestDisaggTypeMetricSelection(t *testing.T) {
 	encoderHeader := http.CanonicalHeaderKey(routing.EncoderEndpointsHeader)
 	prefillHeader := http.CanonicalHeaderKey(routing.PrefillEndpointHeader)
-	allTypes := []string{metrics.DisaggTypePD, metrics.DisaggTypeEPD, metrics.DisaggTypeED}
+	allTypes := []string{metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode, metricsutil.DisaggPathEncodeDecode}
 
 	tests := []struct {
 		name   string
@@ -120,12 +121,12 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 				prefillHeader: []string{"prefill1:8000"},
 			},
 			allowed: []string{"prefill1"},
-			want:    metrics.DisaggTypePD,
+			want:    metricsutil.DisaggPathPrefillDecode,
 		},
 		{
 			name:   "prefill only records prefill-decode",
 			header: http.Header{prefillHeader: []string{"prefill1:8000"}},
-			want:   metrics.DisaggTypePD,
+			want:   metricsutil.DisaggPathPrefillDecode,
 		},
 		{
 			name: "encoder and prefill records encode-prefill-decode",
@@ -133,12 +134,12 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 				encoderHeader: []string{"enc1:8000"},
 				prefillHeader: []string{"prefill1:8000"},
 			},
-			want: metrics.DisaggTypeEPD,
+			want: metricsutil.DisaggPathEncodePrefillDecode,
 		},
 		{
 			name:   "encoder only records encode-decode",
 			header: http.Header{encoderHeader: []string{"enc1:8000"}},
-			want:   metrics.DisaggTypeED,
+			want:   metricsutil.DisaggPathEncodeDecode,
 		},
 	}
 

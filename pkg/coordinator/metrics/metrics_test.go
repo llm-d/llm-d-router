@@ -24,6 +24,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestWithLabel_AppendsAndDoesNotAliasBase(t *testing.T) {
@@ -153,9 +155,9 @@ func TestUpstreamFamily_Records(t *testing.T) {
 
 func TestExecutionPathAndProbes_Records(t *testing.T) {
 	Reset()
-	IncExecutionPath("m", PathEncodePrefillDecode)
-	IncExecutionPath("m", PathEncodePrefillDecode)
-	IncExecutionPath("m", PathDecodeOnly)
+	IncExecutionPath("m", metricsutil.DisaggPathEncodePrefillDecode)
+	IncExecutionPath("m", metricsutil.DisaggPathEncodePrefillDecode)
+	IncExecutionPath("m", metricsutil.DisaggPathDecodeOnly)
 	IncConditionalDecodeProbes(ProbeResultServed)
 	IncConditionalDecodeProbes(ProbeResultDeferred)
 	IncConditionalDecodeProbes(ProbeResultDeferred)
@@ -164,10 +166,10 @@ func TestExecutionPathAndProbes_Records(t *testing.T) {
 	RecordRequestInputTokens("m", 512)
 
 	require.InDelta(t, 2.0,
-		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", PathEncodePrefillDecode)), 1e-9,
+		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", metricsutil.DisaggPathEncodePrefillDecode)), 1e-9,
 	)
 	require.InDelta(t, 1.0,
-		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", PathDecodeOnly)), 1e-9,
+		promtestutil.ToFloat64(executionPathTotal.WithLabelValues("m", metricsutil.DisaggPathDecodeOnly)), 1e-9,
 	)
 	require.InDelta(t, 1.0,
 		promtestutil.ToFloat64(conditionalDecodeProbesTotal.WithLabelValues(ProbeResultServed)), 1e-9,

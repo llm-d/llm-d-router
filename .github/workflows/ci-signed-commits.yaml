@@ -52,16 +52,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Verify Signed-off-by trailer matches commit author email (DCO)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          is_merge_group=0
+          pr_author_login=""
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             base="${{ github.event.merge_group.base_sha }}"
             head="${{ github.event.merge_group.head_sha }}"
+            is_merge_group=1
+            # The queue's branch ref is gh-readonly-queue/<base>/pr-<number>-<sha>;
+            # pull the PR number out of it to look up its real author login.
+            pr_number=$(echo "${{ github.event.merge_group.head_ref }}" | sed -E 's#.*/pr-([0-9]+)-[0-9a-f]+$#\1#')
+            pr_author_login=$(gh api "repos/${{ github.repository }}/pulls/$pr_number" --jq '.user.login')
           else
             base="${{ github.event.pull_request.base.sha }}"
             head="${{ github.event.pull_request.head.sha }}"
@@ -83,6 +93,20 @@ jobs:
               continue
             fi
             match=0
+            # The merge queue squashes a PR into one commit authored as the
+            # PR's account; an account with "keep my email private" set gets
+            # a <id>+<login>@users.noreply.github.com author address there,
+            # which never equals the Signed-off-by email the original
+            # per-commit checks on the PR already verified under
+            # pull_request_target. Trust it only when the login embedded in
+            # that address matches the PR's actual author, so a forged
+            # noreply-shaped address for someone else's account still fails.
+            if [ "$is_merge_group" -eq 1 ] && [[ "$author_email" =~ ^[0-9]+\+(.+)@users\.noreply\.github\.com$ ]]; then
+              commit_login="${BASH_REMATCH[1]}"
+              if [ "$commit_login" = "$pr_author_login" ]; then
+                match=1
+              fi
+            fi
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               case "$line" in

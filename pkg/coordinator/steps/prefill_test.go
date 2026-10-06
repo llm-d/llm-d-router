@@ -372,6 +372,81 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
+func TestPrefillStep_ResponsesFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-3"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 2345},
+		Body: map[string]any{
+			"model":             "test-model",
+			"input":             "hello",
+			"max_output_tokens": 800,
+			"store":             true,
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["model"] != "test-model" {
+		t.Fatalf("expected model from original body, got %v", prefillBody["model"])
+	}
+	if _, ok := prefillBody["input"]; !ok {
+		t.Fatal("expected input from original body in responses format")
+	}
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("prefill request should not have a tokens field")
+	}
+	if _, ok := prefillBody["kv_transfer_params"]; !ok {
+		t.Fatal("expected kv_transfer_params in responses format")
+	}
+	// The Responses API caps output on max_output_tokens, so the client value
+	// is rewritten rather than left to run the prefiller to completion.
+	if prefillBody["max_output_tokens"] != float64(1) {
+		t.Fatalf("expected max_output_tokens=1, got %v", prefillBody["max_output_tokens"])
+	}
+	// store defaults to true in the Responses schema, so a prefill step that
+	// forwarded it would ask a store-enabled worker to retain its output.
+	if prefillBody["store"] != false {
+		t.Fatalf("expected store=false, got %v", prefillBody["store"])
+	}
+	// The Responses API defines neither field, so capping them would put an
+	// unknown field on the wire.
+	if _, ok := prefillBody["max_tokens"]; ok {
+		t.Fatalf("responses request carries max_tokens=%v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("responses request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
+	}
+}
+
 func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 	var prefillBody map[string]any
 

@@ -89,7 +89,8 @@ func RecordRequestInputTokens(modelName string, tokens int) {
 }
 
 // IncExecutionPath increments execution_path_total for the given model and
-// path (decode-only, prefill-decode, or encode-prefill-decode).
+// path (decode-only, prefill-decode, or encode-prefill-decode). Encode always
+// implies prefill, so encode-decode is not a reachable path.
 func IncExecutionPath(modelName, path string) {
 	executionPathTotal.WithLabelValues(boundModel(modelName), path).Inc()
 }
