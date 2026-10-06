@@ -38,7 +38,7 @@ var hopByHopHeaders = map[string]bool{
 
 // internalForwardingHeaders are set only by the coordinator; a client copy is
 // dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-pin-host-port.
+// EPP routes on epp-profile and x-llm-d-pin-host-port.
 var internalForwardingHeaders = map[string]bool{
 	"epp-profile":                         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,

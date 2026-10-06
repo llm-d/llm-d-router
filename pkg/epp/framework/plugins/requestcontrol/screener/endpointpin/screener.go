@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package endpointpin screens a request down to the endpoint named in its
-// x-pin-host-port header.
+// x-llm-d-pin-host-port header.
 package endpointpin
 
 import (
@@ -39,7 +39,7 @@ const PluginType = "endpoint-pin-screener"
 var _ fwkrc.Screener = (*Screener)(nil)
 
 // Screener keeps only the endpoint whose <ip:port> equals the request's
-// x-pin-host-port header.
+// x-llm-d-pin-host-port header.
 type Screener struct {
 	typedName plugin.TypedName
 }

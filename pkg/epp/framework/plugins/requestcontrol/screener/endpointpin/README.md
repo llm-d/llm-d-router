@@ -3,18 +3,19 @@
 **Type:** `endpoint-pin-screener`
 **Interfaces:** `requestcontrol.Screener`
 
-Keeps only the endpoint that the request's `x-pin-host-port` header names.
+Keeps only the endpoint that the request's `x-llm-d-pin-host-port` header names.
 
 ## What it does
 
 Some requests must land on one known pod. For example, in SGLang
 disaggregation the decode body names the prefill pod in `bootstrap_host`, so the
 prefill request must go to that pod. The caller sends the `<ip:port>` of the pod
-on `x-pin-host-port`. Only the request that must be pinned carries the header.
+on `x-llm-d-pin-host-port`. Only the request that must be pinned carries the
+header.
 
 ## How It Works
 
-- A request without `x-pin-host-port` keeps every endpoint.
+- A request without `x-llm-d-pin-host-port` keeps every endpoint.
 - A request with the header keeps the one endpoint whose `<ip:port>` equals the
   header value. The value is parsed, so every spelling of an address matches.
   IPv6 addresses are in brackets, as `net.JoinHostPort` writes them.
@@ -26,11 +27,12 @@ A pinned request can therefore wait in the queue and then get `503`, and a
 profile filter can still remove the pinned endpoint, for example a prefill
 filter on a decode pod, which also gives `503`.
 
-EPP removes `x-pin-host-port` from the request it forwards to the model server.
+EPP removes `x-llm-d-pin-host-port` from the request it forwards to the model
+server.
 
 ## Inputs consumed
 
-- The `x-pin-host-port` request header.
+- The `x-llm-d-pin-host-port` request header.
 
 ## Configuration
 
@@ -49,9 +51,9 @@ request. Do not add it to a scheduling profile.
 - A pin names an HTTP endpoint. With several data-parallel ranks behind one
   SGLang port, SGLang chooses the rank inside that endpoint.
 - EPP cannot tell a trusted pin from a client pin. The coordinator drops a
-  client's `x-pin-host-port` on its pipeline and passthrough paths. A caller that
-  reaches EPP without the coordinator can pin a request to any endpoint that the
-  scheduling profile accepts.
+  client's `x-llm-d-pin-host-port` on its pipeline and passthrough paths. A
+  caller that reaches EPP without the coordinator can pin a request to any
+  endpoint that the scheduling profile accepts.
 
 ## Related Documentation
 

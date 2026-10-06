@@ -55,7 +55,7 @@ const (
 
 	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled
 	// on. The endpoint-pin-screener keeps only that endpoint.
-	EndpointPinHeader = "x-pin-host-port"
+	EndpointPinHeader = "x-llm-d-pin-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

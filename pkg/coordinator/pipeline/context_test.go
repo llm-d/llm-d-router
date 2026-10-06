@@ -104,7 +104,7 @@ func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 
 	out := rc.ForwardedHeaders()
 
-	for _, name := range []string{"epp-profile", "x-pin-host-port"} {
+	for _, name := range []string{"epp-profile", "x-llm-d-pin-host-port"} {
 		if _, ok := out[name]; ok {
 			t.Fatalf("%s should not be forwarded: %v", name, out)
 		}

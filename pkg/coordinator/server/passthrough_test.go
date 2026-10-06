@@ -182,7 +182,7 @@ func TestPassthrough_ValidRequestIDPreserved(t *testing.T) {
 }
 
 func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
-	// EPP schedules a request only on the endpoint x-pin-host-port names, so a
+	// EPP schedules a request only on the endpoint x-llm-d-pin-host-port names, so a
 	// client must not reach EPP with one through the passthrough.
 	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
 	srv := newTestServerWithGateway(nil, upstream.URL)
