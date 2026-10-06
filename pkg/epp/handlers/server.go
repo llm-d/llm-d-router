@@ -805,9 +805,11 @@ func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, 
 	r.toolCallingResponseRecorded = true
 	if span != nil {
 		span.SetAttributes((toolcalling.ResponseSummary{
-			ToolCallingRequested:     true,
-			UpstreamToolCallPresent:  r.toolCallingUpstreamPresent,
-			ForwardedToolCallPresent: r.toolCallingForwardedPresent,
+			ToolCallingRequested:         true,
+			UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
+			ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
+			UpstreamDetectionIncomplete:  r.toolCallingUpstreamDetector.DetectionIncomplete(),
+			ForwardedDetectionIncomplete: r.toolCallingForwardedDetector.DetectionIncomplete(),
 		}).SpanAttributes()...)
 	}
 }

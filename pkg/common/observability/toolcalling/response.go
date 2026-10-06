@@ -28,16 +28,21 @@ import (
 )
 
 const (
-	ResponseAttributeUpstreamToolCallPresent  = "llm_d.tool_calling.response.upstream_present"
-	ResponseAttributeForwardedToolCallPresent = "llm_d.tool_calling.response.forwarded_present"
+	ResponseAttributeUpstreamToolCallPresent      = "llm_d.tool_calling.response.upstream_present"
+	ResponseAttributeForwardedToolCallPresent     = "llm_d.tool_calling.response.forwarded_present"
+	ResponseAttributeUpstreamDetectionIncomplete  = "llm_d.tool_calling.response.upstream_detection_incomplete"
+	ResponseAttributeForwardedDetectionIncomplete = "llm_d.tool_calling.response.forwarded_detection_incomplete"
+	maxResponseSSELineBytes                       = 1 << 20
 )
 
 // ResponseSummary contains only bounded presence information. It deliberately
 // does not retain response bodies, tool names, or tool arguments.
 type ResponseSummary struct {
-	ToolCallingRequested     bool
-	UpstreamToolCallPresent  bool
-	ForwardedToolCallPresent bool
+	ToolCallingRequested         bool
+	UpstreamToolCallPresent      bool
+	ForwardedToolCallPresent     bool
+	UpstreamDetectionIncomplete  bool
+	ForwardedDetectionIncomplete bool
 }
 
 // SpanAttributes returns response presence attributes only for requests that
@@ -50,6 +55,8 @@ func (summary ResponseSummary) SpanAttributes() []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.Bool(ResponseAttributeUpstreamToolCallPresent, summary.UpstreamToolCallPresent),
 		attribute.Bool(ResponseAttributeForwardedToolCallPresent, summary.ForwardedToolCallPresent),
+		attribute.Bool(ResponseAttributeUpstreamDetectionIncomplete, summary.UpstreamDetectionIncomplete),
+		attribute.Bool(ResponseAttributeForwardedDetectionIncomplete, summary.ForwardedDetectionIncomplete),
 	}
 }
 
@@ -57,11 +64,13 @@ func (summary ResponseSummary) SpanAttributes() []attribute.KeyValue {
 // arbitrarily chunked input and keeps only the incomplete current line between
 // calls; completed lines are parsed immediately and cleared.
 type ResponseDetector struct {
-	surface         reqcommon.APIType
-	eventStream     bool
-	toolCallPresent bool
-	line            []byte
-	finished        bool
+	surface             reqcommon.APIType
+	eventStream         bool
+	toolCallPresent     bool
+	detectionIncomplete bool
+	discardingLine      bool
+	line                []byte
+	finished            bool
 }
 
 // NewResponseDetector creates a detector for a supported response API surface.
@@ -76,13 +85,22 @@ func NewResponseDetector(surface reqcommon.APIType, eventStream bool) (*Response
 // Non-streaming responses are parsed once at endOfStream; streaming responses
 // are parsed one completed SSE data line at a time.
 func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
-	if detector == nil || detector.finished {
-		return detector != nil && detector.toolCallPresent
+	if detector == nil {
+		return false
+	}
+	if detector.finished {
+		return detector.toolCallPresent
+	}
+	if detector.toolCallPresent {
+		if endOfStream {
+			detector.Close()
+		}
+		return true
 	}
 
 	if detector.eventStream {
 		detector.observeSSE(chunk)
-		if endOfStream && !detector.toolCallPresent {
+		if endOfStream && !detector.toolCallPresent && !detector.discardingLine {
 			detector.processSSELine()
 		}
 	} else if endOfStream {
@@ -90,10 +108,14 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	}
 
 	if endOfStream {
-		detector.clearLine()
-		detector.finished = true
+		detector.Close()
 	}
 	return detector.toolCallPresent
+}
+
+// DetectionIncomplete reports whether an oversized SSE line was discarded.
+func (detector *ResponseDetector) DetectionIncomplete() bool {
+	return detector != nil && detector.detectionIncomplete
 }
 
 // Close clears any incomplete SSE line and prevents further observation.
@@ -104,17 +126,31 @@ func (detector *ResponseDetector) Close() {
 		return
 	}
 	detector.clearLine()
+	detector.discardingLine = false
 	detector.finished = true
 }
 
 func (detector *ResponseDetector) observeSSE(chunk []byte) {
 	for _, b := range chunk {
+		if detector.discardingLine {
+			if b == '\n' {
+				detector.discardingLine = false
+			}
+			continue
+		}
 		if b == '\n' {
 			detector.processSSELine()
 			if detector.toolCallPresent {
 				detector.clearLine()
 				return
 			}
+			continue
+		}
+		if len(detector.line) == maxResponseSSELineBytes {
+			detector.clearLine()
+			detector.line = nil
+			detector.discardingLine = true
+			detector.detectionIncomplete = true
 			continue
 		}
 		detector.line = append(detector.line, b)
