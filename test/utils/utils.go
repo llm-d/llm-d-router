@@ -269,9 +269,9 @@ func SetupNamespace(testConfig *TestConfig, nsName string) bool {
 
 // DeleteNamespace deletes nsName and waits until the API server reports it gone,
 // so a caller that recreates it does not race the terminating namespace. The
-// wait is ReadyTimeout, not ExistsTimeout: finalizing a namespace means reaping
-// every workload still in it, which under parallel runs sharing one node takes
-// far longer than an object needs to appear in the API server.
+// wait uses ReadyTimeout because finalizing a namespace reaps every workload
+// still in it, which under parallel runs sharing one node takes far longer than
+// an object needs to appear in the API server.
 func DeleteNamespace(testConfig *TestConfig, nsName string) {
 	ginkgo.By("Deleting namespace " + nsName)
 	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})

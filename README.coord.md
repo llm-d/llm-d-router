@@ -102,24 +102,10 @@ make -f Makefile.coord.mk test-e2e-coordinator-3epp   # 3-EPP
 
 **Running the tests in parallel**
 
-By default the end to end tests are run in groups that are parallel to each other. The number of groups running in parallel at any time is controlled via the `E2E_NUM_PROCS` environment variable, which defaults to five. To run all of the tests in a serial fashion, use `E2E_NUM_PROCS=1`.
+The end to end tests run as parallel spec groups. Each process gets its own namespace and its own gateway NodePort, so the groups do not interfere with each other. One vllm-render deployment is shared by every process and lives in the base namespace. `E2E_NUM_PROCS`, `NAMESPACE`, and `E2E_GATEWAY_PORT` in the variables table control the group count and the per-process names and ports. To run the suite serially:
 
 ```bash
 E2E_NUM_PROCS=1 make -f Makefile.coord.mk test-e2e-coordinator
-```
-
-Each parallel process gets its own namespace and its own gateway NodePort, so the groups do not interfere with each other. One vllm-render deployment is shared by every process and lives in the base namespace.
-
-**Setting the test namespace**
-
-The namespace(s) in which the tests run vary based on whether or not the tests are being run in parallel.
-
-If the tests are being run in parallel, the suite creates resources in namespaces of the form `<base>-N`, where `<base>` by default is `e2e-coordinator` and `N` is the process number of the process running the test. `<base>` can be changed by setting `NAMESPACE`.
-
-If the tests are not being run in parallel, then by default the suite creates resources in the `default` namespace. To change it, set the same variable:
-
-```bash
-export NAMESPACE=<MY_NS>
 ```
 
 **Keeping the cluster on failure**
@@ -167,5 +153,5 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name used by the test pools |
 | `NAMESPACE` | `e2e-coordinator` in parallel, `default` when `E2E_NUM_PROCS=1` | Base namespace for test resources. In parallel runs each process uses `<base>-N` |
 | `K8S_CONTEXT` | _(empty)_ | Use an existing cluster context instead of creating a Kind cluster |
-| `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready |
+| `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready. The shared test helpers in `test/utils` read the same variable with a `3m` default, so an unset value gives the coordinator suite `10m` and helper waits such as namespace deletion `3m` |
 | `E2E_EPP_TOPOLOGY` | `single` | EPP topology: `single` (one EPP + one pool) or `3epp` (per-role EPP + pool). `test-e2e-coordinator-3epp` sets `3epp` |

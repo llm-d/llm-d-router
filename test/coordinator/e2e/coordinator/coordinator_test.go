@@ -141,13 +141,13 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	nsName := getNamespace()
 
 	// Pool first so the EPP can resolve its --pool-name.
-	createInferencePool(true, &specWorkload)
+	createInferencePool(nsName, true)
 	expectPoolExists()
 
-	createEndPointPickers(&specWorkload)
+	createEndPointPickers(nsName)
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
-	createModelServers(encodeReplicas, prefillReplicas, decodeReplicas, &specWorkload)
+	createModelServers(nsName, encodeReplicas, prefillReplicas, decodeReplicas)
 
 	encodePods := getPodNames(encodeSelector)
 	prefillPods := getPodNames(prefillSelector)
@@ -160,7 +160,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	if len(coordinatorConfig) > 0 {
 		cfg = coordinatorConfig[0]
 	}
-	createCoordinator(cfg, &specWorkload)
+	createCoordinator(nsName, cfg)
 
 	req, err := http.NewRequest(http.MethodPost,
 		gatewayBaseURL()+path,

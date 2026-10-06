@@ -163,12 +163,15 @@ func testWrapper(test func()) func() {
 			if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
 				return
 			}
-			testutils.DeleteObjects(testConfig, stableInfraObjects, nsName)
-			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
-
+			// Deleting the namespace reaps every object in it, so the per-object
+			// deletes with their serial NotFound waits are only needed when the
+			// namespace is not ours to delete.
 			if createdNameSpace {
 				testutils.DeleteNamespace(testConfig, nsName)
+				return
 			}
+			testutils.DeleteObjects(testConfig, stableInfraObjects, nsName)
+			testutils.DeleteObjects(testConfig, envoyObjects, nsName)
 		})
 
 		test()
@@ -208,10 +211,10 @@ func createCRDs() {
 // for the active topology and waits for the Deployments to become ready. The
 // single-EPP topology creates one EPP from eppConfig; the 3-EPP topology creates
 // one per role, each from its role config with a per-role ConfigMap.
-// It appends the created ids to objects (see createTracked).
-func createEndPointPickers(objects *[]string) {
+// It appends the created ids to specWorkload.
+func createEndPointPickers(nsName string) {
 	for _, e := range eppsToCreate() {
-		createOneEndPointPicker(e, objects)
+		createOneEndPointPicker(nsName, e)
 	}
 }
 
@@ -219,21 +222,21 @@ func createEndPointPickers(objects *[]string) {
 // the 3-EPP topology each role gets its own ConfigMap (epp-config-<role>) and the
 // shared Deployment's config volume is retargeted to it (see renameEPPConfigVolume),
 // so the three EPPs do not share one ConfigMap.
-func createOneEndPointPicker(e roleEPP, objects *[]string) {
+func createOneEndPointPicker(nsName string, e roleEPP) {
 	cmName := "epp-config"
 	if threeEPP {
 		cmName = "epp-config-" + e.role
 	}
-	createEPPConfigMap(cmName, e.config)
-	*objects = append(*objects, "ConfigMap/"+cmName)
+	createEPPConfigMap(nsName, cmName, e.config)
+	specWorkload = append(specWorkload, "ConfigMap/"+cmName)
 
 	// eppManifest is the EPP Deployment only (see createStableInfra).
 	docs := testutils.ReadYaml(eppManifest)
-	docs = e2eutil.SubstituteMany(docs, eppSubstitutionsFor(e.eppName, e.poolName))
+	docs = e2eutil.SubstituteMany(docs, eppSubstitutionsFor(nsName, e.eppName, e.poolName))
 	if threeEPP {
 		docs = renameEPPConfigVolume(docs, cmName)
 	}
-	podsInDeploymentsReady(getNamespace(), createTracked(getNamespace(), docs, objects))
+	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
 }
 
 // renameEPPConfigVolume retargets the EPP Deployment's config volume, volume
@@ -259,18 +262,15 @@ func renameEPPConfigVolume(docs []string, cmName string) []string {
 // createInferencePool creates the InferencePool(s) for the active topology: one
 // pool covering all three worker roles (single-EPP), or one role-scoped pool per
 // role (3-EPP). When toDelete is set, the existing pool(s) are removed first so
-// the test starts clean. It appends the created ids to objects (see
-// createTracked).
-func createInferencePool(toDelete bool, objects *[]string) {
-	nsName := getNamespace()
-
+// the test starts clean. It appends the created ids to specWorkload.
+func createInferencePool(nsName string, toDelete bool) {
 	if toDelete {
 		for _, name := range poolNames() {
-			deletePoolIfExists(name)
+			deletePoolIfExists(nsName, name)
 		}
 	}
 
-	subs := eppSubstitutionsFor(eppName, poolNameBase)
+	subs := eppSubstitutionsFor(nsName, eppName, poolNameBase)
 	// TARGET_PORTS is a YAML block-sequence fragment for the pool manifest's
 	// targetPorts field, at that field's 2-space indentation. The coordinator's
 	// vLLM workers all listen on 8000.
@@ -287,14 +287,13 @@ func createInferencePool(toDelete bool, objects *[]string) {
 	}
 	docs := testutils.ReadYaml(manifest)
 	docs = e2eutil.SubstituteMany(docs, subs)
-	createTracked(nsName, docs, objects)
+	createTracked(nsName, docs, &specWorkload)
 }
 
 // deletePoolIfExists removes the named InferencePool when present so a rerun
 // against a persistent cluster starts clean. testutils.DeleteObjects asserts
 // the object exists, so a fresh cluster needs the existence check first.
-func deletePoolIfExists(name string) {
-	nsName := getNamespace()
+func deletePoolIfExists(nsName, name string) {
 	pool := &inferenceapi.InferencePool{}
 	err := testConfig.K8sClient.Get(testConfig.Context,
 		types.NamespacedName{Namespace: nsName, Name: name}, pool)
@@ -307,10 +306,10 @@ func deletePoolIfExists(name string) {
 
 // createModelServers deploys the vLLM encode/prefill/decode workers from the
 // coordinator-epd kustomize environment with the given per-type replica counts and
-// waits for their Deployments to be ready. It appends the created ids to objects
-// (see createTracked).
-func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int, objects *[]string) {
-	subs := allSubstitutions()
+// waits for their Deployments to be ready. It appends the created ids to
+// specWorkload.
+func createModelServers(nsName string, encodeReplicas, prefillReplicas, decodeReplicas int) {
+	subs := allSubstitutions(nsName)
 	subs["${VLLM_REPLICA_COUNT_E}"] = strconv.Itoa(encodeReplicas)
 	subs["${VLLM_REPLICA_COUNT_P}"] = strconv.Itoa(prefillReplicas)
 	subs["${VLLM_REPLICA_COUNT_D}"] = strconv.Itoa(decodeReplicas)
@@ -319,14 +318,13 @@ func createModelServers(encodeReplicas, prefillReplicas, decodeReplicas int, obj
 	docs = e2eutil.SubstituteMany(docs, subs)
 	docs = e2eutil.RemoveEmptyArgs(docs)
 	docs = e2eutil.RemoveEmptyLabels(docs)
-	podsInDeploymentsReady(getNamespace(), createTracked(getNamespace(), docs, objects))
+	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
 }
 
 // createCoordinator builds the coordinator ConfigMap from the given pipeline
 // config, deploys the coordinator Deployment, and waits for readiness. It
-// appends the created ids to objects (see createTracked).
-func createCoordinator(config string, objects *[]string) {
-	nsName := getNamespace()
+// appends the created ids to specWorkload.
+func createCoordinator(nsName, config string) {
 	coordinatorYAML := e2eutil.SubstituteMany([]string{config}, map[string]string{
 		"${NAMESPACE}":        nsName,
 		"${RENDER_NAMESPACE}": baseNsName,
@@ -343,14 +341,14 @@ func createCoordinator(config string, objects *[]string) {
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "creating coordinator ConfigMap")
 	}
-	*objects = append(*objects, "ConfigMap/llm-d-coordinator-config")
+	specWorkload = append(specWorkload, "ConfigMap/llm-d-coordinator-config")
 
 	// Only the Deployment is created per spec (see createStableInfra).
 	docs := e2eutil.FilterKinds(coordinatorComponentDocs(), "ConfigMap", "Service", "ServiceAccount")
 	docs = e2eutil.SubstituteMany(docs, coordinatorSubstitutions())
 	docs = e2eutil.RemoveEmptyArgs(docs)
 
-	podsInDeploymentsReady(nsName, createTracked(nsName, docs, objects))
+	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
 	waitForCoordinatorReady()
 }
 
@@ -378,11 +376,11 @@ func pollReady(url string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func createEPPConfigMap(name, content string) {
+func createEPPConfigMap(nsName, name, content string) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: getNamespace(),
+			Namespace: nsName,
 		},
 		Data: map[string]string{"epp-config.yaml": content},
 	}
@@ -434,19 +432,19 @@ func createStableInfra(nsName string, objects *[]string) {
 	// inference-gateway component's split files; the Deployment is recreated per
 	// spec in createEndPointPickers. In the 3-EPP topology this runs once per role.
 	for _, e := range eppsToCreate() {
-		subs := eppSubstitutionsFor(e.eppName, e.poolName)
+		subs := eppSubstitutionsFor(nsName, e.eppName, e.poolName)
 		for _, manifest := range []string{eppRbacManifest, eppServiceAccountManifest, eppServicesManifest} {
 			applyManifest(nsName, manifest, subs, objects)
 		}
 	}
 }
 
-func eppSubstitutionsFor(name, pool string) map[string]string {
+func eppSubstitutionsFor(nsName, name, pool string) map[string]string {
 	return map[string]string{
 		"${EPP_NAME}":               name,
 		"${POOL_NAME}":              pool,
 		"${EPP_IMAGE}":              eppImage,
-		"${NAMESPACE}":              getNamespace(),
+		"${NAMESPACE}":              nsName,
 		"${METRICS_ENDPOINT_AUTH}":  "false",
 		"${EPP_REPLICA_COUNT}":      "1",
 		"${ENABLE_LEADER_ELECTION}": "false",
@@ -462,8 +460,8 @@ func vllmExtraArgs(flags ...string) string {
 }
 
 // allSubstitutions returns the substitution map for the coordinator-epd kustomize
-// environment (vLLM workers only).
-func allSubstitutions() map[string]string {
+// environment (vLLM workers only), with the workers placed in nsName.
+func allSubstitutions(nsName string) map[string]string {
 	// The pipeline base64-inlines each image into the request body, and the dummy
 	// tokenizer counts that blob as text: the largest test image is ~97k tokens,
 	// far past the simulator's default 1024-token context. Every vLLM role raises
@@ -494,7 +492,7 @@ func allSubstitutions() map[string]string {
 		"${KV_CACHE_ENABLED}":        "false",
 		"${HF_TOKEN}":                "",
 		"${EPP_NAME}":                workerEPPName,
-		"${NAMESPACE}":               getNamespace(),
+		"${NAMESPACE}":               nsName,
 		"${DECODE_ROLE}":             "decode",
 	}
 }
