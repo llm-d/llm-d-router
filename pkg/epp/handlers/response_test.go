@@ -271,6 +271,27 @@ func TestObserveToolCallingResponseSkipsNonToolRequest(t *testing.T) {
 	assert.False(t, reqCtx.toolCallingResponseRecorded)
 }
 
+func TestClearToolCallingResponseDetectors(t *testing.T) {
+	upstreamDetector, err := toolcalling.NewResponseDetector(toolcalling.APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	forwardedDetector, err := toolcalling.NewResponseDetector(toolcalling.APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	partial := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
+	upstreamDetector.Observe(partial, false)
+	forwardedDetector.Observe(partial, false)
+
+	reqCtx := &RequestContext{
+		toolCallingUpstreamDetector:  upstreamDetector,
+		toolCallingForwardedDetector: forwardedDetector,
+	}
+	reqCtx.clearToolCallingResponseDetectors()
+
+	assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+	assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+	assert.False(t, upstreamDetector.Observe(nil, true), "closed upstream detector must discard the partial event")
+	assert.False(t, forwardedDetector.Observe(nil, true), "closed forwarded detector must discard the partial event")
+}
+
 func TestHandleStreamedResponseBody(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	tests := []struct {

@@ -96,6 +96,17 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	return detector.toolCallPresent
 }
 
+// Close clears any incomplete SSE line and prevents further observation.
+// Process calls it when the response lifecycle ends, including cancellation
+// or errors before the stream reaches end-of-stream.
+func (detector *ResponseDetector) Close() {
+	if detector == nil {
+		return
+	}
+	detector.clearLine()
+	detector.finished = true
+}
+
 func (detector *ResponseDetector) observeSSE(chunk []byte) {
 	for _, b := range chunk {
 		if b == '\n' {

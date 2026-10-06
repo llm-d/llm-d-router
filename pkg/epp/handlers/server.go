@@ -378,6 +378,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
+	defer func() { reqCtx.clearToolCallingResponseDetectors() }()
 
 	// Request-phase failures (parser resolution, body parsing, admission
 	// rejection) leave the switch before the success path, so both call this.
@@ -808,6 +809,20 @@ func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, 
 			UpstreamToolCallPresent:  r.toolCallingUpstreamPresent,
 			ForwardedToolCallPresent: r.toolCallingForwardedPresent,
 		}).SpanAttributes()...)
+	}
+}
+
+func (r *RequestContext) clearToolCallingResponseDetectors() {
+	if r == nil {
+		return
+	}
+	if r.toolCallingUpstreamDetector != nil {
+		r.toolCallingUpstreamDetector.Close()
+		r.toolCallingUpstreamDetector = nil
+	}
+	if r.toolCallingForwardedDetector != nil {
+		r.toolCallingForwardedDetector.Close()
+		r.toolCallingForwardedDetector = nil
 	}
 }
 
