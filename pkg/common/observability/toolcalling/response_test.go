@@ -193,6 +193,20 @@ func TestResponseDetectorDoesNotRetainCompletedPayload(t *testing.T) {
 	require.NotContains(t, string(detector.line[:cap(detector.line)]), "sentinel_", "completed payload bytes must be cleared")
 }
 
+func TestResponseDetectorCloseClearsIncompleteSSELine(t *testing.T) {
+	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
+	require.False(t, detector.Observe(payload, false))
+	require.Contains(t, string(detector.line[:cap(detector.line)]), "sentinel_arguments")
+
+	detector.Close()
+
+	require.Empty(t, detector.line)
+	require.Equal(t, make([]byte, cap(detector.line)), detector.line[:cap(detector.line)])
+	require.False(t, detector.Observe([]byte("more data\n"), false), "closed detector must ignore later chunks")
+}
+
 func TestResponseSummaryOmitsAttributesForNonToolCallingRequest(t *testing.T) {
 	attributes := (ResponseSummary{}).SpanAttributes()
 	require.Empty(t, attributes)
