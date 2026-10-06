@@ -51,6 +51,7 @@ type processorFactory func(
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 	clock clock.WithTicker,
 	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
@@ -75,17 +76,18 @@ var _ processor = &internal.Processor{}
 type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
-	config             *Config
-	registry           contracts.FlowRegistryDataPlane
-	flowRegistry       contracts.FlowRegistry
-	registryBackground contracts.FlowRegistryBackground
-	saturationDetector flowcontrol.SaturationDetector
-	endpointCandidates contracts.EndpointCandidates
-	usageLimitPolicy   flowcontrol.UsageLimitPolicy
-	clock              clock.WithTicker
-	logger             logr.Logger
-	processorFactory   processorFactory
-	processor          processor
+	config              *Config
+	registry            contracts.FlowRegistryDataPlane
+	flowRegistry        contracts.FlowRegistry
+	registryBackground  contracts.FlowRegistryBackground
+	saturationDetector  flowcontrol.SaturationDetector
+	endpointCandidates  contracts.EndpointCandidates
+	usageLimitPolicy    flowcontrol.UsageLimitPolicy
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy
+	clock               clock.WithTicker
+	logger              logr.Logger
+	processorFactory    processorFactory
+	processor           processor
 
 	// --- Lifecycle state ---
 
@@ -96,12 +98,13 @@ type FlowController struct {
 
 // Deps groups the external FlowController build dependencies to construct a FlowController.
 type Deps struct {
-	Registry           contracts.FlowRegistry
-	SaturationDetector flowcontrol.SaturationDetector
-	EndpointCandidates contracts.EndpointCandidates
-	UsageLimitPolicy   flowcontrol.UsageLimitPolicy
-	Clock              clock.WithTicker
-	ProcessorFactory   processorFactory
+	Registry            contracts.FlowRegistry
+	SaturationDetector  flowcontrol.SaturationDetector
+	EndpointCandidates  contracts.EndpointCandidates
+	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
+	BandSelectionPolicy flowcontrol.BandSelectionPolicy
+	Clock               clock.WithTicker
+	ProcessorFactory    processorFactory
 
 	// InFlightEvictor enables demand-driven in-flight eviction when Config.EnableEviction is set.
 	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
@@ -125,16 +128,17 @@ func NewFlowController(
 		registryBackground = bg
 	}
 	fc := &FlowController{
-		config:             config,
-		registry:           deps.Registry,
-		flowRegistry:       deps.Registry,
-		registryBackground: registryBackground,
-		saturationDetector: deps.SaturationDetector,
-		endpointCandidates: deps.EndpointCandidates,
-		usageLimitPolicy:   deps.UsageLimitPolicy,
-		clock:              deps.Clock,
-		logger:             log.FromContext(ctx).WithName("flow-controller"),
-		parentCtx:          ctx,
+		config:              config,
+		registry:            deps.Registry,
+		flowRegistry:        deps.Registry,
+		registryBackground:  registryBackground,
+		saturationDetector:  deps.SaturationDetector,
+		endpointCandidates:  deps.EndpointCandidates,
+		usageLimitPolicy:    deps.UsageLimitPolicy,
+		bandSelectionPolicy: deps.BandSelectionPolicy,
+		clock:               deps.Clock,
+		logger:              log.FromContext(ctx).WithName("flow-controller"),
+		parentCtx:           ctx,
 	}
 
 	if deps.ProcessorFactory == nil {
@@ -145,6 +149,7 @@ func NewFlowController(
 			saturationDetector flowcontrol.SaturationDetector,
 			endpointCandidates contracts.EndpointCandidates,
 			usageLimitPolicy flowcontrol.UsageLimitPolicy,
+			bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 			clock clock.WithTicker,
 			noEndpointRequestTTL time.Duration,
 			cleanupSweepInterval time.Duration,
@@ -160,6 +165,7 @@ func NewFlowController(
 				saturationDetector,
 				endpointCandidates,
 				usageLimitPolicy,
+				bandSelectionPolicy,
 				clock,
 				noEndpointRequestTTL,
 				cleanupSweepInterval,
@@ -203,6 +209,7 @@ func NewFlowController(
 		fc.saturationDetector,
 		fc.endpointCandidates,
 		fc.usageLimitPolicy,
+		fc.bandSelectionPolicy,
 		fc.clock,
 		fc.config.NoEndpointRequestTTL,
 		fc.config.ExpiryCleanupInterval,

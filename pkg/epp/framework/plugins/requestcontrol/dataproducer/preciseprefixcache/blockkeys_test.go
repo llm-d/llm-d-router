@@ -17,12 +17,58 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	"context"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
+
+// computeBlockKeys returns one MM block-index slice per returned prompt,
+// aligned positionally with the keys; prompts with no keys are skipped from
+// both slices.
+func TestComputeBlockKeys_PerPromptMMIndices(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	twoBlocks := make([]uint32, 2*testBlockSize)
+	for i := range twoBlocks {
+		twoBlocks[i] = uint32(i)
+	}
+	short := []uint32{1, 2, 3}
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, ts []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			if len(ts) < testBlockSize {
+				return nil, nil
+			}
+			return []kvblock.BlockHash{0xA1, 0xA2}, nil
+		},
+	}
+
+	req := &scheduling.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "a", Offset: 0, Length: 16}}},
+					{TokenIDs: short},
+					{TokenIDs: twoBlocks},
+					{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityAudio, Hash: "b", Offset: 16, Length: 16}}},
+				},
+			},
+		},
+	}
+
+	keys, mmIndices, err := computeBlockKeys(ctx, idx, req, testBlockSize)
+	require.NoError(t, err)
+	require.Len(t, keys, 3, "the short prompt yields no keys and is skipped")
+	assert.Equal(t, [][]int{{0}, nil, {1}}, mmIndices)
+}
 
 func TestMultimodalBlockIndices(t *testing.T) {
 	tests := []struct {

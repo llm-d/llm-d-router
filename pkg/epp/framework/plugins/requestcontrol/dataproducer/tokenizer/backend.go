@@ -68,6 +68,7 @@ type warmer interface {
 // an authentication rejection, or on context cancellation.
 func (b renderBackend) warmup(ctx context.Context) {
 	logger := log.FromContext(ctx)
+	ctx = withUnobservedRender(ctx)
 	// The warmup credential, when set, authenticates the probe's render calls.
 	if b.warmupAuth != "" {
 		ctx = withAuthHeader(ctx, b.warmupAuth)

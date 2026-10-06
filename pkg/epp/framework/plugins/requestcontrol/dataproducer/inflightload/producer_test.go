@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,48 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 	// producer's key.
 	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+}
+
+// Produce and PreRequest receive a request confined to the plugin's
+// declarations, so the outlen bucket must be readable through that scope.
+func TestInFlightLoadProducer_ReadsOutlenBucketThroughScope(t *testing.T) {
+	t.Parallel()
+
+	p := newTestProducer(t)
+	datagraph.RegisterScopeSpecs([]fwkplugin.Plugin{p})
+	scoped, violations := datagraph.ScopeRequest(logr.Discard(), requestcontrol.PreRequestExtensionPoint, p,
+		requestWithBucket(outlenbucket.Long, nil))
+
+	// LONG bucket estimates 4096; an unreadable bucket falls back to UNKNOWN.
+	require.Equal(t, int64(4096), p.tokenEstimator.EstimateOutputFromRequest(scoped))
+	require.NoError(t, violations.Write())
+}
+
+// The outlen-bucket plugin and this producer declare the bucket with the same
+// type, so the data graph links them and orders the bucket first.
+func TestInFlightLoadProducer_OrderedAfterOutlenBucket(t *testing.T) {
+	t.Parallel()
+
+	p := newTestProducer(t)
+	bucket, err := outlenbucket.PluginFactory("outlen-bucket", nil, nil)
+	require.NoError(t, err)
+	tokens := &tokenStubProducer{}
+
+	ordered, err := datagraph.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{p, bucket, tokens})
+	require.NoError(t, err)
+	require.Less(t, slices.Index(ordered, bucket.TypedName().String()), slices.Index(ordered, p.TypedName().String()))
+}
+
+// tokenStubProducer satisfies the producer's required TokenizedRequest
+// dependency so the data graph validates.
+type tokenStubProducer struct{}
+
+func (*tokenStubProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "token-stub", Name: "token-stub"}
+}
+
+func (*tokenStubProducer) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}}
 }
 
 // prefixMatchInfoProducerName selects which prefix producer (approximate or

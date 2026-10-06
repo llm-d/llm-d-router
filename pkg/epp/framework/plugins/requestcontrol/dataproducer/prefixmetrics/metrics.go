@@ -27,7 +27,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
+)
+
+// Values of the endpoint_role label: the stage the endpoint serves for the request.
+const (
+	RolePrefill = "prefill"
+	RoleDecode  = "decode"
 )
 
 var predictedCachedTokens = prometheus.NewHistogramVec(
@@ -39,7 +46,7 @@ var predictedCachedTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var promptTokens = prometheus.NewHistogramVec(
@@ -51,7 +58,7 @@ var promptTokens = prometheus.NewHistogramVec(
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var registerOnce sync.Once
@@ -65,12 +72,31 @@ func Register() {
 }
 
 // RecordPrediction records a request's prompt tokens alongside the subset the
-// producer expects the scheduler's chosen endpoint to serve from its prefix
-// cache. The two are observed together so the predicted hit rate divides counts
-// taken over the same requests. llm_d_epp_request_input_tokens is not a usable
+// producer expects the endpoint chosen by PredictionTarget to serve from its
+// prefix cache. The two are observed together so the predicted hit rate divides
+// counts taken over the same requests. llm_d_epp_request_input_tokens is not a usable
 // denominator here: it is recorded from the model server's response, so it
 // omits requests that fail or return no usage, which this metric still counts.
-func RecordPrediction(pluginName, pluginType string, predictedCached, prompt int) {
-	predictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(predictedCached))
-	promptTokens.WithLabelValues(pluginName, pluginType).Observe(float64(prompt))
+func RecordPrediction(pluginName, pluginType, role string, predictedCached, prompt int) {
+	predictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(predictedCached))
+	promptTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(prompt))
+}
+
+// PredictionTarget returns the endpoint to record the request's prefix-cache
+// prediction for, and the endpoint_role to record it under. A request with a
+// target in prefillProfile is attributed to that endpoint, because the
+// sidecar's nixlv2 KV connector reports the prefiller's cached-token count. The
+// other KV connectors report the decoder's count, which this does not match.
+// It returns a nil endpoint when the primary profile selected none.
+func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) (fwksched.Endpoint, string) {
+	if result == nil {
+		return nil, ""
+	}
+	if pr := result.ProfileResults[prefillProfile]; pr != nil && len(pr.TargetEndpoints) > 0 {
+		return pr.TargetEndpoints[0], RolePrefill
+	}
+	if primary := result.ProfileResults[result.PrimaryProfileName]; primary != nil && len(primary.TargetEndpoints) > 0 {
+		return primary.TargetEndpoints[0], RoleDecode
+	}
+	return nil, ""
 }

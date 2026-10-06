@@ -337,6 +337,11 @@ type responseWriterWithBuffer struct {
 	statusCode  int
 	wroteHeader bool
 
+	// header holds the headers set while buffering. They reach the underlying
+	// writer only on flushBufferAndGoDirect, so a response that is never
+	// flushed leaves the client's headers untouched.
+	header http.Header
+
 	// ready receives an error (or nil) when the first Write happens,
 	// signaling that there's data available for inspection or an error occurred.
 	ready     chan struct{}
@@ -347,6 +352,7 @@ type responseWriterWithBuffer struct {
 func newResponseWriterWithBuffer(w flushableResponseWriter) *responseWriterWithBuffer {
 	rw := &responseWriterWithBuffer{
 		writerFlusher: w,
+		header:        make(http.Header),
 		ready:         make(chan struct{}, 1), // buffered to avoid blocking sender
 	}
 	rw.buffering.Store(true)
@@ -354,6 +360,9 @@ func newResponseWriterWithBuffer(w flushableResponseWriter) *responseWriterWithB
 }
 
 func (w *responseWriterWithBuffer) Header() http.Header {
+	if w.buffering.Load() {
+		return w.header
+	}
 	return w.writerFlusher.Header()
 }
 
@@ -442,6 +451,10 @@ func (w *responseWriterWithBuffer) writeHeaderOnce() {
 		return
 	}
 	w.wroteHeader = true
+	dstHeader := w.writerFlusher.Header()
+	for key, values := range w.header {
+		dstHeader[key] = values
+	}
 	if w.statusCode != 0 {
 		w.writerFlusher.WriteHeader(w.statusCode)
 	}

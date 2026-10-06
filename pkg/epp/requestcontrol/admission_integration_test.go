@@ -33,6 +33,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -107,10 +108,11 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 		ExpiryCleanupInterval:    10 * time.Millisecond,
 		EnqueueChannelBufferSize: 100,
 	}, fccontroller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: candidates,
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  candidates,
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	return &realFlowControlHarness{
