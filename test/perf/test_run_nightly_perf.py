@@ -321,6 +321,21 @@ class DeployEPPTests(OfflineTestCase):
         self.assertFalse(router["monitoring"]["prometheus"]["auth"]["enabled"])
         self.assertTrue(router["proxy"]["enabled"])
 
+    def test_autoscaling_enabled_omits_static_replicas_override(self):
+        config = {
+            "router": {
+                "epp": {
+                    "autoscaling": {
+                        "enabled": True,
+                        "minReplicas": 1,
+                        "maxReplicas": 4,
+                    }
+                }
+            }
+        }
+        overrides = self.deploy(config, epp_replicas=2)
+        self.assertNotIn("replicas", overrides["router"]["epp"])
+
 
 class PercentileTests(unittest.TestCase):
     def test_scheduler_delta_percentiles_in_milliseconds(self):

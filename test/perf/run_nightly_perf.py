@@ -109,7 +109,7 @@ def double_memory(mem_str):
     val = int(mem_str)
     return str(val * 2)
 
-def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1):
+def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1, epp_cpu_limit=None):
     print(f"Deploying EPP standalone using Helm chart from: {chart_path} (version: {chart_version})")
     
     if not os.path.exists(router_config_path):
@@ -145,13 +145,16 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     epp_repository = os.environ.get("EPP_REPOSITORY", "llm-d-router-endpoint-picker")
     epp_tag = os.environ.get("EPP_TAG", "main")
     
-    cpu_limit = double_cpu(epp_cpu)
+    cpu_limit = epp_cpu_limit if epp_cpu_limit is not None else double_cpu(epp_cpu)
     mem_limit = double_memory(epp_memory)
+    epp_cfg = guide_router.get("epp")
+    autoscaling_cfg = epp_cfg.get("autoscaling") if isinstance(epp_cfg, dict) else None
+    enabled_val = autoscaling_cfg.get("enabled") if isinstance(autoscaling_cfg, dict) else False
+    autoscaling_enabled = enabled_val is True or str(enabled_val) in ("1", "t", "T", "true", "TRUE", "True")
     
     overrides = {
         "router": {
             "epp": {
-                "replicas": epp_replicas,
                 "image": {
                     "registry": epp_registry,
                     "repository": epp_repository,
@@ -193,6 +196,9 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
             }
         }
     }
+
+    if not autoscaling_enabled:
+        overrides["router"]["epp"]["replicas"] = epp_replicas
 
     # Clear model-server labels replaced by the simulator.
     try:
