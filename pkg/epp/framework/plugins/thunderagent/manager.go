@@ -32,8 +32,6 @@ const endpointStaleAfter = 5 * time.Second
 // session is one agent trajectory, identified by its agent-identity session id.
 // All fields are guarded by sessionManager.mu.
 type session struct {
-	// endpoint the session is bound to; nil before the first dispatch and
-	// after the endpoint leaves the pool.
 	endpoint *endpointState
 	// committedTokens is usage.total_tokens of the last completed turn.
 	committedTokens int64
