@@ -25,10 +25,12 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -708,8 +710,11 @@ func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
 		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
 			&mockPDDecider{allow: false}, nil)
 
+		LlmdDisaggDecisionCount.Reset()
 		got := h.Pick(ctx, req, profiles, decodeResults)
 		assert.ElementsMatch(t, []string{}, profileNames(got), "decider should decline prefill")
+		assert.InDelta(t, 1, testutil.ToFloat64(LlmdDisaggDecisionCount.WithLabelValues(
+			"", DisaggProfileHandlerType, "unknown", metricsutil.DisaggPathDecodeOnly)), 0)
 
 		res, err := h.ProcessResults(ctx, req, decodeResults)
 		assert.NoError(t, err, "a declined prefill stage must not fail the request")
@@ -732,9 +737,39 @@ func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
 			defaultDecodeProfile:  decodeResults[defaultDecodeProfile],
 			defaultPrefillProfile: nil,
 		}
+		LlmdDisaggDecisionCount.Reset()
+		got = h.Pick(ctx, req, profiles, failedResults)
+		assert.ElementsMatch(t, []string{}, profileNames(got), "all stages should be done")
+		assert.Equal(t, 0, testutil.CollectAndCount(LlmdDisaggDecisionCount),
+			"a request rejected for no prefill endpoint must not be counted as a routing decision")
+
 		_, err := h.ProcessResults(ctx, req, failedResults)
 		assert.Error(t, err, "a required prefill stage that found no endpoint must fail the request")
 	})
+}
+
+func TestHandler_PrefillFirst_PrefillUnavailableNotCounted(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
+		WithStageOrder(StageOrderPrefillFirst)
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultPrefillProfile: nil,
+		defaultDecodeProfile:  makeProfileRunResult("pod1"),
+	}
+
+	LlmdDisaggDecisionCount.Reset()
+	got := h.Pick(ctx, req, profiles, results)
+	assert.ElementsMatch(t, []string{}, profileNames(got), "all stages should be done")
+	assert.Equal(t, 0, testutil.CollectAndCount(LlmdDisaggDecisionCount),
+		"a request rejected for no prefill endpoint must not be counted as a routing decision")
+
+	_, err := h.ProcessResults(ctx, req, results)
+	assert.Error(t, err)
 }
 
 func TestHandler_ProcessResults_NilRequest(t *testing.T) {

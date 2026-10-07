@@ -116,6 +116,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/reserveendpoint"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/endpointpin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/selectivekv"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -619,10 +621,12 @@ func (r *Runner) registerInTreePlugins() {
 	// request control screeners
 	// Alpha
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
+	fwkplugin.Register(endpointpin.PluginType, fwkplugin.StabilityAlpha, endpointpin.Factory)
 
 	// bylabel role filters
+	// Stable
+	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityStable, bylabel.SelectorFactory)
 	// Beta
-	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityBeta, bylabel.SelectorFactory)
 	fwkplugin.Register(bylabel.EncodeRoleType, fwkplugin.StabilityBeta, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, fwkplugin.StabilityBeta, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
@@ -633,8 +637,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
 
 	// dataparallel profile handler
-	// Beta
-	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, fwkplugin.StabilityBeta, dataparallel.ProfileHandlerFactory)
+	// Stable
+	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, fwkplugin.StabilityStable, dataparallel.ProfileHandlerFactory)
 
 	// extra scheduling scorers
 	// Beta
@@ -646,9 +650,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(attributeweight.EndpointAttributeWeightScorerType, fwkplugin.StabilityAlpha, attributeweight.Factory)
 
 	// data layer models source/extractor
-	// Beta
-	fwkplugin.Register(srcmodels.ModelsDataSourceType, fwkplugin.StabilityBeta, srcmodels.ModelDataSourceFactory)
-	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityBeta, extmodels.ModelServerExtractorFactory)
+	// Stable
+	fwkplugin.Register(srcmodels.ModelsDataSourceType, fwkplugin.StabilityStable, srcmodels.ModelDataSourceFactory)
+	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityStable, extmodels.ModelServerExtractorFactory)
 	// Alpha
 	fwkplugin.Register(labelproducer.LabelProducerType, fwkplugin.StabilityAlpha, labelproducer.Factory)
 	fwkplugin.Register(attrtopology.TopologyExtractorType, fwkplugin.StabilityAlpha, exttopology.Factory)
@@ -659,12 +663,13 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(attrgpu.DCGMExtractorType, fwkplugin.StabilityAlpha, extdcgm.DCGMExtractorFactory)
 
 	// scheduling & profile handler plugins
+	// Stable
+	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityStable, single.SingleProfileHandlerFactory)
+	fwkplugin.Register(maxscore.MaxScorePickerType, fwkplugin.StabilityStable, maxscore.MaxScorePickerFactory)
+	fwkplugin.Register(random.RandomPickerType, fwkplugin.StabilityStable, random.RandomPickerFactory)
+	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, fwkplugin.StabilityStable, weightedrandom.WeightedRandomPickerFactory)
 	// Beta
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityBeta, prefix.PrefixCachePluginFactory)
-	fwkplugin.Register(maxscore.MaxScorePickerType, fwkplugin.StabilityBeta, maxscore.MaxScorePickerFactory)
-	fwkplugin.Register(random.RandomPickerType, fwkplugin.StabilityBeta, random.RandomPickerFactory)
-	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, fwkplugin.StabilityBeta, weightedrandom.WeightedRandomPickerFactory)
-	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityBeta, single.SingleProfileHandlerFactory)
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
@@ -685,6 +690,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(topologyaffinityscorer.ScorerType, fwkplugin.StabilityAlpha, topologyaffinityscorer.Factory)
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
+	fwkplugin.Register(selectivekv.PluginType, fwkplugin.StabilityAlpha, selectivekv.PluginFactory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
@@ -693,11 +699,12 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
 
 	// Flow Control plugins
+	// Stable
+	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, fwkplugin.StabilityStable, globalstrict.GlobalStrictFairnessPolicyFactory)
+	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fwkplugin.StabilityStable, fcfs.FCFSOrderingPolicyFactory)
 	// Beta
-	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, fwkplugin.StabilityBeta, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, fwkplugin.StabilityBeta, roundrobin.RoundRobinFairnessPolicyFactory)
 	fwkplugin.Register(programaware.ProgramAwarePluginType, fwkplugin.StabilityBeta, programaware.ProgramAwarePluginFactory)
-	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fwkplugin.StabilityBeta, fcfs.FCFSOrderingPolicyFactory)
 	fwkplugin.Register(edf.EDFOrderingPolicyType, fwkplugin.StabilityBeta, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, fwkplugin.StabilityBeta, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityBeta, usagelimits.StaticPolicyFactory)

@@ -789,6 +789,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		s.logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 			"request_id", uuidStr, "timeout", waitTimeout.String())
 		clientResponded = true
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusGatewayTimeout)
 		if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")

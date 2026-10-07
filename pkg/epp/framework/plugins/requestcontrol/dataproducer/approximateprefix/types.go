@@ -107,8 +107,10 @@ const (
 	// podActiveCheckInterval is the interval at which we check if pods are still active.
 	podActiveCheckInterval = 2 * time.Minute
 
-	// defaultBlockSizeTokens is the default token block size (vLLM default is 16).
-	defaultBlockSizeTokens = 16
+	// defaultBlockSizeTokens is the default token block size. It equals
+	// minBlockSizeTokens so an unset value does not trigger the below-minimum
+	// override and its startup warning.
+	defaultBlockSizeTokens = 64
 
 	// defaultMaxPrefixBlocks is the fallback block cap, consulted only when
 	// MaxPrefixTokensToMatch is 0 and MaxPrefixBlocksToMatch is non-zero; the

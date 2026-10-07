@@ -68,6 +68,10 @@ const (
 	// derived from the scheduling profile, because a per-phase EPP runs its only
 	// profile under another name.
 	ReservedEndpointHeader = "x-llm-d-reserved-host-port"
+
+	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled
+	// on. The endpoint-pin-screener keeps only that endpoint.
+	EndpointPinHeader = "x-llm-d-pin-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

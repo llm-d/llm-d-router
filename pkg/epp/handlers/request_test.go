@@ -433,6 +433,7 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 		routing.KVCacheSourceHeader,
+		routing.EndpointPinHeader,
 	}
 
 	tests := []struct {
@@ -454,7 +455,15 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				routing.EncoderEndpointsHeader,
 				routing.DataParallelEndpointHeader,
 				routing.KVCacheSourceHeader,
+				routing.EndpointPinHeader,
 			},
+		},
+		{
+			// The screener reads the client pin, so it stays on the request;
+			// the model server must not see it.
+			name:        "a client pin is removed and not set",
+			headers:     map[string]string{routing.EndpointPinHeader: "10.0.0.1:8000"},
+			wantRemoved: allRoutingHeaders,
 		},
 	}
 
