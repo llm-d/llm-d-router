@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 )
 
@@ -281,6 +282,28 @@ func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	require.Equal(t, int64(2), counter.count.Load())
 }
 
+func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := newTestStore(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-z", "third", time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", "first", time.Now())
+	seedReplica(t, server, testStateKey, "epp-m", "second", time.Now())
+	aggregate := func(values []any) any {
+		parts := make([]string, 0, len(values))
+		for _, value := range values {
+			parts = append(parts, value.(string))
+		}
+		return strings.Join(parts, ",")
+	}
+
+	for range 20 {
+		require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, "local", aggregate))
+		cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
+		require.True(t, ok)
+		require.Equal(t, "first,second,third", cached.(*aggregateCacheEntry).value)
+	}
+}
+
 func TestConcurrentSet(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
@@ -370,6 +393,22 @@ func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 	exists, err := store.client.HExists(context.Background(), store.hashKey(testStateKey, testEndpointID), testReplicaID).Result()
 	require.NoError(t, err)
 	require.False(t, exists)
+}
+
+func TestDeleteInvalidatesAggregateWhenRedisFails(t *testing.T) {
+	recorder := &commandRecorder{err: errors.New("redis unavailable")}
+	client := goredis.NewClient(&goredis.Options{})
+	client.AddHook(recorder)
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	store := &RedisStateStore{replicaID: testReplicaID, client: client, ttl: testTTL}
+	hashKey := store.hashKey(testStateKey, testEndpointID)
+	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testTTL)})
+
+	err := store.delete(context.Background(), testStateKey, testEndpointID)
+
+	require.ErrorContains(t, err, "redis unavailable")
+	_, ok := store.cache.Load(hashKey)
+	require.False(t, ok)
 }
 
 func TestSetWritesAndReadsAggregateInOneTransaction(t *testing.T) {
@@ -621,12 +660,17 @@ func TestFactoryConfiguration(t *testing.T) {
 		{
 			name:    "zero TTL",
 			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"0s\"}", server.Addr()),
-			wantErr: "ttl must be positive",
+			wantErr: "ttl must be at least 1s",
 		},
 		{
 			name:    "negative TTL",
 			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"-1s\"}", server.Addr()),
-			wantErr: "ttl must be positive",
+			wantErr: "ttl must be at least 1s",
+		},
+		{
+			name:    "sub-second TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"500ms\"}", server.Addr()),
+			wantErr: "ttl must be at least 1s",
 		},
 	}
 
@@ -660,4 +704,39 @@ func TestFactoryDoesNotRequireRedisAvailability(t *testing.T) {
 	require.NoError(t, err)
 	store := plugin.(*RedisStateStore)
 	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+}
+
+func TestFactoryClosesClientWithHandleContext(t *testing.T) {
+	server := miniredis.RunT(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := fwkplugin.NewEppHandle(ctx, nil)
+	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+		fmt.Sprintf(`{"address": %q}`, server.Addr()),
+	)), handle)
+	require.NoError(t, err)
+	store := plugin.(*RedisStateStore)
+
+	cancel()
+
+	require.Eventually(t, func() bool {
+		return errors.Is(store.client.Ping(context.Background()).Err(), goredis.ErrClosed)
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestFactoryGeneratesDistinctReplicaIDs(t *testing.T) {
+	server := miniredis.RunT(t)
+	newStore := func() *RedisStateStore {
+		plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+			fmt.Sprintf(`{"address": %q}`, server.Addr()),
+		)), nil)
+		require.NoError(t, err)
+		store := plugin.(*RedisStateStore)
+		t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+		return store
+	}
+
+	storeA := newStore()
+	storeB := newStore()
+
+	require.NotEqual(t, storeA.replicaID, storeB.replicaID)
 }

@@ -8,9 +8,9 @@ Redis. Each EPP publishes its local endpoint value. During `Set`, the plugin
 prepares a peer aggregate in its in-process cache. `Get` reads the contributor's
 live local value and combines it with the cached peer aggregate.
 
-The runtime binds one state handle per contributor. The handle retains the state
-key, live local value reader, and aggregation function. Each operation receives
-only its endpoint.
+The runtime registers each contributor's state key, live local value reader,
+and aggregation function with the syncer. State operations identify the
+registered configuration by key.
 
 ## Configuration
 
@@ -31,7 +31,8 @@ Parameters:
 - `address`: Redis address. Defaults to `localhost:6379`.
 - `password`: Optional Redis password.
 - `db`: Redis database number. Defaults to `0`.
-- `ttl`: Expiration for replica and coordination state. Defaults to `180s`.
+- `ttl`: Expiration for replica and coordination state. Defaults to `180s` and
+  must be at least `1s`.
 
 The configured Redis server must support field expiration and `SET NX GET`.
 Redis 7.4 or newer is required.
@@ -43,11 +44,12 @@ contributor without requiring global `gob.Register` calls.
 ## State Model
 
 Endpoint state is stored in one Redis hash per state key and endpoint. Each EPP
-owns one field in that hash. `Set` refreshes the field TTL, reads the hash in the
-same transaction, and caches the prepared peer aggregate locally. The aggregate
-expires with its oldest included value. `Get` reads the cache without accessing
-Redis and combines it with the contributor's live local value. If no peer value
-is available, `Get` aggregates the local value by itself.
+owns one field in that hash, identified by its hostname and a process-specific
+UUID. `Set` refreshes the field TTL, reads the hash in the same transaction,
+and caches the prepared peer aggregate locally. The aggregate expires with its
+oldest included value. `Get` reads the cache without accessing Redis and
+combines it with the contributor's live local value. If no peer value is
+available, `Get` aggregates the local value by itself.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.

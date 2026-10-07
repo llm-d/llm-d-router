@@ -7,9 +7,9 @@ Stores cross-replica state in the EPP process. It is intended for tests and
 single-replica deployments that do not need synchronization between EPP
 instances.
 
-The runtime binds one state handle per contributor. The handle retains the live
-local value reader and aggregation function. Each operation receives only its
-endpoint.
+The runtime registers each contributor's state key, live local value reader,
+and aggregation function with the syncer. State operations identify the
+registered configuration by key.
 
 ## What It Does
 

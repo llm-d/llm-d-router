@@ -23,11 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -73,7 +76,7 @@ type stateDefinition struct {
 	aggregate func([]any) any
 }
 
-func RedisStateStoreFactory(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	var cfg redisConfig
 	if params != nil {
 		if err := params.Decode(&cfg); err != nil {
@@ -92,24 +95,28 @@ func RedisStateStoreFactory(name string, params *json.Decoder, _ fwkplugin.Handl
 		}
 		ttl = parsed
 	}
-	if ttl <= 0 {
-		return nil, fmt.Errorf("redis-state-store: ttl must be positive, got %s", ttl)
+	if ttl < time.Second {
+		return nil, fmt.Errorf("redis-state-store: ttl must be at least 1s, got %s", ttl)
 	}
 
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "unknown"
 	}
+	replicaID := hostname + "-" + uuid.NewString()
 
 	client := goredis.NewClient(&goredis.Options{
 		Addr:     cfg.Address,
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	})
+	if handle != nil && handle.Context() != nil {
+		context.AfterFunc(handle.Context(), func() { _ = client.Close() })
+	}
 
 	return &RedisStateStore{
 		typedName: fwkplugin.TypedName{Type: RedisStateStoreType, Name: name},
-		replicaID: hostname,
+		replicaID: replicaID,
 		client:    client,
 		ttl:       ttl,
 		states:    make(map[fwkdl.StateKey]stateDefinition),
@@ -211,10 +218,11 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	}
 	remoteValues := make([]any, 0, len(raw))
 	var remoteExpiresAt time.Time
-	for field, encoded := range raw {
+	for _, field := range slices.Sorted(maps.Keys(raw)) {
 		if field == s.replicaID {
 			continue
 		}
+		encoded := raw[field]
 		stamped, err := gobDecode([]byte(encoded), value)
 		if err != nil {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
@@ -284,11 +292,8 @@ func (s *RedisStateStore) Get(ctx context.Context, key fwkdl.StateKey, endpointI
 
 func (s *RedisStateStore) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
 	hashKey := s.hashKey(key, endpointID)
-	if err := s.client.HDel(ctx, hashKey, s.replicaID).Err(); err != nil {
-		return err
-	}
 	s.cache.Delete(hashKey)
-	return nil
+	return s.client.HDel(ctx, hashKey, s.replicaID).Err()
 }
 
 func (s *RedisStateStore) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
