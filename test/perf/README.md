@@ -71,6 +71,25 @@ bucket boundary.
 When appending to a report with a different table header, the writer starts
 a new table and preserves the historical rows.
 
+### Tool-calling telemetry overhead
+
+Compare a baseline build without tool-calling telemetry against the candidate
+build using the same router configuration, simulator, resources, and load.
+Scheduler histogram quantiles exclude request parsing and response handling;
+they cannot establish the client-latency requirement for this instrumentation.
+
+- Use non-tool requests at representative body sizes, including prompt text that
+  mentions tool field names and text serialized with Unicode escapes.
+- Run JSON and SSE responses with tracing disabled, then enabled with identical
+  sampler and exporter settings on both builds.
+- After warm-up, collect client request p50/p99 latency, completed requests per
+  second, and errors from the load generator at identical offered load.
+- Alternate repeated baseline and candidate runs to distinguish overhead from
+  baseline variability. Missing measurements do not establish a passing result.
+
+The local field-capture benchmarks and OTLP tests validate individual code paths;
+they do not replace this gateway-to-model comparison.
+
 ### Offline regression tests
 
 With Python and `pyyaml` installed, run from the repository root:

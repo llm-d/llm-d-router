@@ -18,10 +18,16 @@ package handlers
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -35,13 +41,21 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	grpcmetadata "google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -216,6 +230,219 @@ func TestProcessRefreshesRequestSpanAfterDirectorResolvesFairness(t *testing.T) 
 			require.Equal(t, tracing.AttributionSourceAgentIdentity, source.AsString())
 		})
 	}
+}
+
+func TestProcessExportsToolCallingTelemetryOverOTLP(t *testing.T) {
+	exported := make(chan *coltracepb.ExportTraceServiceRequest, 16)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/traces" {
+			t.Errorf("unexpected export path %s", r.URL.Path)
+		}
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read exported traces: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		request := new(coltracepb.ExportTraceServiceRequest)
+		if err := proto.Unmarshal(payload, request); err != nil {
+			t.Errorf("decode exported traces: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		select {
+		case exported <- request:
+		default:
+			t.Error("unexpected number of trace exports")
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+	}))
+	t.Cleanup(collector.Close)
+
+	previousProvider, previousPropagator, previousHandler := otel.GetTracerProvider(), otel.GetTextMapPropagator(), otel.GetErrorHandler()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+		otel.SetErrorHandler(previousHandler)
+	})
+	// Keep exporter configuration independent of the developer's collector settings.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "OTEL_") {
+			t.Setenv(key, "")
+		}
+	}
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL+"/v1/traces")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+	shutdown, err := tracing.InitTracing(t.Context(), logr.Discard(), "tool-calling-test")
+	require.NoError(t, err)
+	flush := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, shutdown(ctx))
+	}
+	t.Cleanup(flush)
+
+	eppmetrics.Register()
+	expectedBySpanID := make(map[string][]attribute.KeyValue)
+	for _, api := range []struct {
+		surface  reqcommon.APIType
+		path     string
+		tools    string
+		choice   any
+		fields   []toolcalling.Field
+		response string
+		event    string
+	}{
+		{
+			surface: reqcommon.APITypeChatCompletions, path: "/v1/chat/completions",
+			tools:  `[{"type":"function","function":{"name":"sentinel_name","parameters":{"type":"object","properties":{"sentinel_schema":{"type":"string"}}}}}]`,
+			choice: "auto", fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat},
+			response: `{"choices":[{"message":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`,
+			event:    `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n\n",
+		},
+		{
+			surface: reqcommon.APITypeMessages, path: "/v1/messages",
+			tools:  `[{"name":"sentinel_name","input_schema":{"type":"object","properties":{"sentinel_schema":{"type":"string"}}}}]`,
+			choice: map[string]any{"type": "auto"}, fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice},
+			response: `{"content":[{"type":"tool_use","name":"sentinel_name","input":{"secret":"sentinel_arguments"}}]}`,
+			event:    `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"sentinel_name","input":{"secret":"sentinel_arguments"}}}` + "\n\n",
+		},
+	} {
+		for _, mode := range []string{"JSON", "SSE", "non-tool"} {
+			t.Run(api.surface.String()+"/"+mode, func(t *testing.T) {
+				eppmetrics.Reset()
+				body := map[string]any{"model": "m", "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "sentinel_prompt"}}}
+				if mode != "non-tool" {
+					body[string(toolcalling.FieldTools)] = json.RawMessage(api.tools)
+					body[string(toolcalling.FieldToolChoice)] = api.choice
+					if api.surface == reqcommon.APITypeChatCompletions {
+						body[string(toolcalling.FieldParallelToolCalls)] = false
+						body[string(toolcalling.FieldResponseFormat)] = map[string]any{"type": "json_object"}
+					}
+				}
+				requestBody, err := json.Marshal(body)
+				require.NoError(t, err)
+				contentType, chunks := "application/json", []string{api.response}
+				if mode == "SSE" {
+					contentType = "text/event-stream"
+					chunks = []string{api.event[:3], api.event[3:]}
+				}
+				srv := &replayProcessServer{
+					ctx: context.Background(),
+					reqs: []*extProcPb.ProcessingRequest{
+						newRequestHeaders(map[string]string{":path": api.path, "traceparent": upstreamTraceparent, reqcommon.RequestIDHeaderKey: api.surface.String() + "-" + mode}),
+						{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{Body: requestBody, EndOfStream: true}}},
+						{Request: &extProcPb.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{{Key: "content-type", RawValue: []byte(contentType)}}}}}},
+					},
+				}
+				for i, chunk := range chunks {
+					srv.reqs = append(srv.reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseBody{ResponseBody: &extProcPb.HttpBody{Body: []byte(chunk), EndOfStream: i == len(chunks)-1}}})
+				}
+				registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}, logr.Discard())
+				require.NoError(t, NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv))
+
+				var forwardedRequest, forwardedResponse []byte
+				outboundTraceparent := ""
+				for _, response := range srv.sentResponses {
+					if header := response.GetRequestHeaders(); header != nil {
+						for _, option := range header.GetResponse().GetHeaderMutation().GetSetHeaders() {
+							if option.GetHeader().GetKey() == "traceparent" {
+								outboundTraceparent = string(option.GetHeader().GetRawValue())
+							}
+						}
+					}
+					if chunk := response.GetRequestBody(); chunk != nil {
+						forwardedRequest = append(forwardedRequest, chunk.GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()...)
+					}
+					if chunk := response.GetResponseBody(); chunk != nil {
+						forwardedResponse = append(forwardedResponse, chunk.GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()...)
+					}
+				}
+				require.Equal(t, requestBody, forwardedRequest)
+				require.Equal(t, strings.Join(chunks, ""), string(forwardedResponse))
+				parts := strings.Split(outboundTraceparent, "-")
+				require.Len(t, parts, 4)
+				require.Equal(t, upstreamTraceID, parts[1])
+
+				snapshot, err := toolcalling.CaptureRequestJSON(api.surface, requestBody)
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(snapshot, snapshot)
+				require.NoError(t, err)
+				attrs := snapshot.SpanAttributes(statuses)
+				attrs = append(attrs, (toolcalling.ResponseSummary{ToolCallingRequested: mode != "non-tool", UpstreamToolCallPresent: true, ForwardedToolCallPresent: true}).SpanAttributes()...)
+				expectedBySpanID[parts[2]] = attrs
+
+				families, err := ctrlmetrics.Registry.Gather()
+				require.NoError(t, err)
+				foundMetric := false
+				for _, family := range families {
+					if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+						continue
+					}
+					foundMetric = true
+					if mode == "non-tool" {
+						require.Empty(t, family.GetMetric())
+						continue
+					}
+					require.Len(t, family.GetMetric(), len(api.fields))
+					for _, sample := range family.GetMetric() {
+						labels := make(map[string]string)
+						for _, label := range sample.GetLabel() {
+							labels[label.GetName()] = label.GetValue()
+						}
+						require.Len(t, labels, 4)
+						require.Equal(t, toolcalling.ComponentEPP, labels[toolcalling.MetricLabelComponent])
+						require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
+						require.Equal(t, string(toolcalling.FieldStatusPreserved), labels[toolcalling.MetricLabelStatus])
+						require.Contains(t, api.fields, toolcalling.Field(labels[toolcalling.MetricLabelField]))
+						require.Equal(t, float64(1), sample.GetCounter().GetValue())
+					}
+				}
+				require.Equal(t, mode != "non-tool", foundMetric, "only tool requests should emit field metrics")
+			})
+		}
+	}
+	flush()
+	for len(exported) > 0 {
+		request := <-exported
+		require.NotContains(t, request.String(), "sentinel_")
+		for _, resourceSpans := range request.GetResourceSpans() {
+			for _, scopeSpans := range resourceSpans.GetScopeSpans() {
+				for _, span := range scopeSpans.GetSpans() {
+					id := hex.EncodeToString(span.GetSpanId())
+					expected, exists := expectedBySpanID[id]
+					require.True(t, exists, "unexpected exported span %s", span.GetName())
+					delete(expectedBySpanID, id)
+					require.Equal(t, upstreamTraceID, hex.EncodeToString(span.GetTraceId()))
+					require.Equal(t, strings.Split(upstreamTraceparent, "-")[2], hex.EncodeToString(span.GetParentSpanId()))
+					actual := make(map[string]*commonpb.AnyValue)
+					for _, attr := range span.GetAttributes() {
+						if strings.HasPrefix(attr.GetKey(), "llm_d.tool_calling.") {
+							actual[attr.GetKey()] = attr.GetValue()
+						}
+					}
+					require.Len(t, actual, len(expected))
+					for _, want := range expected {
+						require.Contains(t, actual, string(want.Key))
+						value := new(commonpb.AnyValue)
+						switch typed := want.Value.AsInterface().(type) {
+						case string:
+							value.Value = &commonpb.AnyValue_StringValue{StringValue: typed}
+						case bool:
+							value.Value = &commonpb.AnyValue_BoolValue{BoolValue: typed}
+						default:
+							t.Fatalf("unexpected attribute type for %s", want.Key)
+						}
+						require.True(t, proto.Equal(value, actual[string(want.Key)]), "attribute %s", want.Key)
+					}
+				}
+			}
+		}
+	}
+	require.Empty(t, expectedBySpanID, "every request span must reach the OTLP collector")
 }
 
 // useTracerProvider installs tp and the W3C propagator for the duration of the
