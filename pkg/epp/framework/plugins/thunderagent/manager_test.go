@@ -41,8 +41,8 @@ func TestBindMovesSession(t *testing.T) {
 	require.Same(t, b, s.endpoint)
 	require.Empty(t, a.sessions)
 	require.Same(t, s, b.sessions["s1"])
-	require.Equal(t, float64(0), a.undecayedTokens())
-	require.Equal(t, float64(300), b.undecayedTokens())
+	require.Equal(t, float64(0), a.workingSetTokens())
+	require.Equal(t, float64(300), b.workingSetTokens())
 }
 
 // Removing a session drops it from the global index and from its endpoint;
@@ -98,8 +98,8 @@ func TestSnapshot(t *testing.T) {
 	snap := m.snapshot()
 	require.Equal(t, 1, snap.running)
 	require.Equal(t, 2, snap.idle)
-	require.Equal(t, endpointGauge{undecayed: 400, capacity: 1000}, snap.endpoints["default/ep-a"])
-	require.Equal(t, endpointGauge{undecayed: 50, capacity: 2000}, snap.endpoints["default/ep-b"])
+	require.Equal(t, endpointGauge{workingSet: 400, capacity: 1000}, snap.endpoints["default/ep-a"])
+	require.Equal(t, endpointGauge{workingSet: 50, capacity: 2000}, snap.endpoints["default/ep-b"])
 }
 
 // An endpoint with no sessions is dropped once it has not been seen for

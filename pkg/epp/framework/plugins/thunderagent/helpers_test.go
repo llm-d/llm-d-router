@@ -112,5 +112,5 @@ func endpointTokens(a *ThunderAgent, id string) float64 {
 	if !ok {
 		return -1
 	}
-	return p.undecayedTokens()
+	return p.workingSetTokens()
 }

@@ -38,13 +38,13 @@ type session struct {
 	// inflightTokens is the sum of the estimates of the session's turns
 	// currently being processed.
 	inflightTokens int64
-	lastResponseAt time.Time
 	lastActivity   time.Time
-	turnCount      int64
 }
 
-// undecayed is the session's KV footprint in tokens.
-func (s *session) undecayed() float64 {
+// size is the session's KV footprint in tokens. Each turn resends the whole
+// history, so the committed total and the in-flight estimates cover the same
+// KV and the larger one is taken.
+func (s *session) size() float64 {
 	if f := float64(s.inflightTokens); f > float64(s.committedTokens) {
 		return f
 	}
@@ -61,12 +61,10 @@ type endpointState struct {
 	updatedAt time.Time
 }
 
-// undecayedTokens is the endpoint's working set: the footprints of all its
-// sessions, running and idle.
-func (p *endpointState) undecayedTokens() float64 {
+func (p *endpointState) workingSetTokens() float64 {
 	var total float64
 	for _, s := range p.sessions {
-		total += s.undecayed()
+		total += s.size()
 	}
 	return total
 }
@@ -150,8 +148,8 @@ type gaugeSnapshot struct {
 }
 
 type endpointGauge struct {
-	undecayed float64
-	capacity  float64
+	workingSet float64
+	capacity   float64
 }
 
 // sweep drops sessions with no turn in flight that have been idle past the
@@ -189,7 +187,7 @@ func (m *sessionManager) snapshot() gaugeSnapshot {
 		}
 	}
 	for id, p := range m.endpoints {
-		snap.endpoints[id] = endpointGauge{undecayed: p.undecayedTokens(), capacity: p.capacity}
+		snap.endpoints[id] = endpointGauge{workingSet: p.workingSetTokens(), capacity: p.capacity}
 	}
 	return snap
 }

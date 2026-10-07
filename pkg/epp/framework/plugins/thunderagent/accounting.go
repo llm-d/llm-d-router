@@ -53,7 +53,6 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	// is in flight.
 	estimate := max(estimateTokens(request.RequestSizeBytes), 1)
 	s.inflightTokens += estimate
-	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
 
@@ -92,7 +91,6 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 	case estimate > s.committedTokens:
 		s.committedTokens = estimate
 	}
-	s.lastResponseAt = now
 	s.lastActivity = now
 	m.mu.Unlock()
 }

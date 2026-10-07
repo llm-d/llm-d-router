@@ -74,7 +74,7 @@ func newLedgerCollector(mgr *sessionManager) *ledgerCollector {
 			[]string{"state"}, nil),
 		workingSet: prometheus.NewDesc(fqName("thunder_agent_endpoint_working_set_tokens"),
 			metricsutil.HelpMsgWithStability("Session KV working set per endpoint in tokens. Compare with the engine's KV utilization: a large working set over a low engine utilization is the KV-thrashing signature.", compbasemetrics.ALPHA),
-			[]string{"endpoint", "view"}, nil),
+			[]string{"endpoint"}, nil),
 		capacity: prometheus.NewDesc(fqName("thunder_agent_endpoint_capacity_tokens"),
 			metricsutil.HelpMsgWithStability("KV token capacity per endpoint.", compbasemetrics.ALPHA),
 			[]string{"endpoint"}, nil),
@@ -92,7 +92,7 @@ func (c *ledgerCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.running), "running")
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.idle), "idle")
 	for endpoint, g := range snap.endpoints {
-		ch <- prometheus.MustNewConstMetric(c.workingSet, prometheus.GaugeValue, g.undecayed, endpoint, "undecayed")
+		ch <- prometheus.MustNewConstMetric(c.workingSet, prometheus.GaugeValue, g.workingSet, endpoint)
 		ch <- prometheus.MustNewConstMetric(c.capacity, prometheus.GaugeValue, g.capacity, endpoint)
 	}
 }

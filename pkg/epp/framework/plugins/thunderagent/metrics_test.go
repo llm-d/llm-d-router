@@ -37,10 +37,10 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 	runTurn(t, a, "s1", schedEndpoint("pod-a", 16, 100), 400, 300)
 
 	require.Equal(t, map[string]float64{
-		`endpoint_capacity_tokens{endpoint="default/pod-a"}`:                     1600,
-		`endpoint_working_set_tokens{endpoint="default/pod-a",view="undecayed"}`: 300,
-		`sessions{state="idle"}`:    1,
-		`sessions{state="running"}`: 0,
+		`endpoint_capacity_tokens{endpoint="default/pod-a"}`:    1600,
+		`endpoint_working_set_tokens{endpoint="default/pod-a"}`: 300,
+		`sessions{state="idle"}`:                                1,
+		`sessions{state="running"}`:                             0,
 	}, gather(t, reg))
 
 	a.mgr.mu.Lock()

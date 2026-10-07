@@ -165,7 +165,7 @@ func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
 		Endpoints:       make(map[string]endpointDump, len(snap.endpoints)),
 	}
 	for id, e := range snap.endpoints {
-		dump.Endpoints[id] = endpointDump{WorkingSetTokens: e.undecayed, CapacityTokens: e.capacity}
+		dump.Endpoints[id] = endpointDump{WorkingSetTokens: e.workingSet, CapacityTokens: e.capacity}
 	}
 	return json.Marshal(dump)
 }
