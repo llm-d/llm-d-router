@@ -527,6 +527,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.STRING,
 		},
 		{
+			name:     "LLMDPDProxyBootstrapRoom",
+			got:      LLMDPDProxyBootstrapRoom(1790000000000000123),
+			wantKey:  "llm_d.pd_proxy.bootstrap_room",
+			wantType: attribute.INT64,
+		},
+		{
 			name:     "LLMDPDProxyPrefillCandidates",
 			got:      LLMDPDProxyPrefillCandidates(3),
 			wantKey:  "llm_d.pd_proxy.prefill_candidates",

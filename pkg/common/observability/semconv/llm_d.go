@@ -119,6 +119,7 @@ const (
 	LLMDPDProxyRequestPathKey                 = attribute.Key("llm_d.pd_proxy.request_path")
 	LLMDPDProxyPrefillTargetKey               = attribute.Key("llm_d.pd_proxy.prefill_target")
 	LLMDPDProxyPrefillCandidatesKey           = attribute.Key("llm_d.pd_proxy.prefill_candidates")
+	LLMDPDProxyBootstrapRoomKey               = attribute.Key("llm_d.pd_proxy.bootstrap_room")
 	LLMDPDProxyDecodeTargetKey                = attribute.Key("llm_d.pd_proxy.decode.target")
 	LLMDPDProxyReasonKey                      = attribute.Key("llm_d.pd_proxy.reason")
 	LLMDPDProxyErrorKey                       = attribute.Key("llm_d.pd_proxy.error")
@@ -582,6 +583,11 @@ func LLMDPDProxyPrefillTarget(target string) attribute.KeyValue {
 // LLMDPDProxyPrefillCandidates returns an attribute for PD proxy prefill candidate count.
 func LLMDPDProxyPrefillCandidates(candidates int) attribute.KeyValue {
 	return LLMDPDProxyPrefillCandidatesKey.Int(candidates)
+}
+
+// LLMDPDProxyBootstrapRoom returns an attribute for the SGLang P/D bootstrap room ID.
+func LLMDPDProxyBootstrapRoom(room int64) attribute.KeyValue {
+	return LLMDPDProxyBootstrapRoomKey.Int64(room)
 }
 
 // LLMDPDProxyDecodeTarget returns an attribute for PD proxy decode target host/port.
