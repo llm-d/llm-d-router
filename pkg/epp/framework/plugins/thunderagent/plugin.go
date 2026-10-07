@@ -17,8 +17,8 @@ limitations under the License.
 // Package thunderagent provides session level admission control for agentic
 // workloads, a minimal implementation of ThunderAgent (arXiv 2602.13692).
 //
-// A session (an agent trajectory identified by the request FairnessID) is
-// bound to one pod and its KV token footprint is tracked from usage reports
+// A session (an agent trajectory identified by the session id the
+// agent-identity plugin publishes) is bound to one pod and its KV token footprint is tracked from usage reports
 // plus in-flight estimates. The engine's own KV utilization cannot serve this
 // purpose: a session waiting on a tool call still owns its context in the
 // prefix cache, but those blocks sit on the free list and are reported as
@@ -37,7 +37,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
 
 // ThunderAgentPluginType is the plugin type registered with the framework.
@@ -51,6 +51,7 @@ var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgent
 var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
+	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -102,11 +103,22 @@ func (a *ThunderAgent) TypedName() fwkplugin.TypedName {
 	return a.typedName
 }
 
-// sessionID returns the session identifier for a request, or "" for requests
-// carrying no explicit identity. Anonymous traffic is not tracked.
+// Consumes declares agent identity as a required input, so configuration
+// loading fails when no identity provider is enabled.
+func (a *ThunderAgent) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""},
+	}
+}
+
+// sessionID returns the session identifier published by the agent-identity
+// plugin, or "" for requests carrying none. The fairness ID is not used: an
+// explicit fairness header often carries a tenant rather than a session.
+// Anonymous traffic is not tracked.
 func sessionID(request *fwksched.InferenceRequest) string {
-	if request == nil || request.FairnessID == "" || request.FairnessID == metadata.DefaultFairnessID {
+	if request == nil {
 		return ""
 	}
-	return request.FairnessID
+	id, _ := fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
+	return id
 }

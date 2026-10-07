@@ -33,7 +33,7 @@ const maintenanceInterval = time.Second
 // seen for this long.
 const endpointStaleAfter = 5 * time.Second
 
-// session is one agent trajectory, identified by the request FairnessID.
+// session is one agent trajectory, identified by its agent-identity session id.
 // All fields are guarded by sessionManager.mu.
 type session struct {
 	// endpoint the session is bound to; nil before the first dispatch and

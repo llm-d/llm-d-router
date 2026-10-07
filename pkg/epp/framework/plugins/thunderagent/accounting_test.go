@@ -160,3 +160,25 @@ func TestAnonymousIgnored(t *testing.T) {
 	a.mgr.mu.Unlock()
 	require.Equal(t, 0, n)
 }
+
+// The session is the agent-identity attribute, also when an explicit
+// fairness header sets FairnessID to another value. FairnessID alone does not
+// identify a session.
+func TestSessionFollowsAgentIdentity(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+
+	withTenant := newRequest("s1", 400)
+	withTenant.FairnessID = "tenant-a"
+	require.NoError(t, a.PreRequest(context.Background(), withTenant, schedulingResultFor(ep)))
+	a.ResponseBody(context.Background(), withTenant, endOfStream(300, 100), nil)
+	s, ok := sessionOf(a, "s1")
+	require.True(t, ok)
+	require.Equal(t, int64(300), s.committedTokens)
+
+	fairnessOnly := newRequest("", 400)
+	fairnessOnly.FairnessID = "tenant-a"
+	require.NoError(t, a.PreRequest(context.Background(), fairnessOnly, schedulingResultFor(ep)))
+	_, ok = sessionOf(a, "tenant-a")
+	require.False(t, ok)
+}

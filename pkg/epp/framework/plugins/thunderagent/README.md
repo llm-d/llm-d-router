@@ -2,9 +2,12 @@
 
 Session level admission control for agentic workloads, a minimal
 implementation of ThunderAgent (arXiv 2602.13692). A session is an agent
-trajectory, identified by the request FairnessID. Without an explicit
-fairness header, the director fills it from the `agent-identity` plugin;
-requests with neither are not tracked.
+trajectory, identified by the session id the `agent-identity` plugin reads
+from the session headers Claude Code, OpenCode and Codex send; other clients
+send a header listed in its `additionalSessionHeaders`. The flow control
+fairness ID is not used. Requests with no session id are not tracked.
+`agent-identity` is a required dependency: configuration loading fails
+without it.
 
 This package currently ships the session ledger: each session's KV token
 footprint (the larger of the `usage.total_tokens` of its last completed turn

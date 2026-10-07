@@ -28,6 +28,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
 
 // testConfig uses round numbers so tests can assert exact values: 1000-token
@@ -59,12 +60,18 @@ func schedulingResultFor(endpoint fwksched.Endpoint) *fwksched.SchedulingResult 
 	}
 }
 
+// newRequest builds a request whose session id is published the way the
+// agent-identity plugin does; an empty sessionID leaves the request
+// anonymous.
 func newRequest(sessionID string, sizeBytes int) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
+	req := &fwksched.InferenceRequest{
 		RequestID:        "req-" + sessionID,
-		FairnessID:       sessionID,
 		RequestSizeBytes: sizeBytes,
 	}
+	if sessionID != "" {
+		req.PutAttribute(agentidentity.AgentIdentityKey, sessionID)
+	}
+	return req
 }
 
 func endOfStream(totalTokens, promptTokens int) *fwkrc.Response {
