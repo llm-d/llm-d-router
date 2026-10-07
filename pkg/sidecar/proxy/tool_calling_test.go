@@ -1,0 +1,177 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package proxy
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+)
+
+func TestToolCallingRequestComparisons(t *testing.T) {
+	tests := []struct {
+		name   string
+		api    reqcommon.APIType
+		before string
+		after  string
+		want   map[toolcalling.Field]toolcalling.FieldStatusValue
+	}{
+		{
+			name:   "chat semantic equality",
+			before: `{"tools":[{"b":1e2,"a":9007199254740993}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`,
+			after:  `{"response_format":{"type":"json_object"},"parallel_tool_calls":false,"tool_choice":"auto","tools":[{"a":9007199254740993,"b":100.0}]}`,
+			want: map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
+				toolcalling.FieldParallelToolCalls: toolcalling.FieldStatusPreserved, toolcalling.FieldResponseFormat: toolcalling.FieldStatusPreserved,
+			},
+		},
+		{
+			name: "changed and dropped", before: `{"tools":[1,2],"tool_choice":"auto"}`, after: `{"tools":[2,1]}`,
+			want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusChanged, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped},
+		},
+		{
+			name: "absent to null", before: `{}`, after: `{"tools":null}`,
+			want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusChanged},
+		},
+		{
+			name: "null to absent", before: `{"tools":null}`, after: `{}`,
+			want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusDropped},
+		},
+		{
+			name: "explicit null preserved", before: `{"tools":null}`, after: `{"tools":null}`,
+			want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusPreserved},
+		},
+		{
+			name: "messages supports only tools and choice", api: reqcommon.APITypeMessages,
+			before: `{"tools":[],"tool_choice":{"type":"any"},"parallel_tool_calls":false,"response_format":null}`,
+			after:  `{"tools":[],"tool_choice":{"type":"auto"}}`,
+			want:   map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusChanged},
+		},
+		{name: "non-tool", before: `{"messages":[]}`, after: `{"messages":[],"max_tokens":1}`},
+		{name: "nested fields", before: `{"messages":[{"tools":[]}]}`, after: `{"messages":[]}`},
+		{name: "messages unsupported fields", api: reqcommon.APITypeMessages, before: `{"parallel_tool_calls":true}`, after: `{"parallel_tool_calls":false}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request, err := captureToolCallingRequest(tt.api, []byte(tt.before))
+			require.NoError(t, err)
+			_, err = request.compareDispatched([]byte(tt.after))
+			require.NoError(t, err)
+			assertToolCallingStatuses(t, request.fieldStatuses(), tt.want)
+		})
+	}
+}
+
+func TestToolCallingRequestAggregatesDispatches(t *testing.T) {
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[1],"tool_choice":"auto"}`))
+	require.NoError(t, err)
+	// Preparing a request without dispatching it supplies no preservation evidence.
+	require.Empty(t, request.fieldStatuses())
+	for _, body := range []string{
+		`{"tools":[1],"tool_choice":"auto"}`,
+		`{"tools":[2],"tool_choice":"auto"}`,
+		`{"tool_choice":"auto"}`,
+		`{"tools":[1],"tool_choice":"auto"}`,
+		`{"tools":[1],"tool_choice":"auto"}`,
+	} {
+		_, err := request.compareDispatched([]byte(body))
+		require.NoError(t, err)
+	}
+	want := map[toolcalling.Field]toolcalling.FieldStatusValue{
+		toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
+	}
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+	// Callers cannot change the aggregate through a returned slice.
+	statuses := request.fieldStatuses()
+	statuses[0].Status = toolcalling.FieldStatusChanged
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+	stage, err := request.compareDispatched([]byte(`{"tools":[1],"tool_choice":"auto"}`))
+	require.NoError(t, err)
+	require.Equal(t, toolcalling.FieldStatusPreserved, stage[0].Status)
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+}
+
+func TestToolCallingRequestExplicitRejection(t *testing.T) {
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[],"tool_choice":null}`))
+	require.NoError(t, err)
+	_, err = request.compareDispatched([]byte(`{}`))
+	require.NoError(t, err)
+	request.rejectFields()
+	_, err = request.compareDispatched([]byte(`{"tools":[],"tool_choice":null}`))
+	require.NoError(t, err)
+	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+		toolcalling.FieldTools: toolcalling.FieldStatusRejected, toolcalling.FieldToolChoice: toolcalling.FieldStatusRejected,
+	})
+	plain, err := captureToolCallingRequest(reqcommon.APITypeMessages, []byte(`{"messages":[]}`))
+	require.NoError(t, err)
+	plain.rejectFields()
+	require.Empty(t, plain.fieldStatuses())
+}
+
+func TestToolCallingRequestCaptureFailures(t *testing.T) {
+	for _, body := range []string{`{"tools":`, `null`, `[]`, ``} {
+		request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(body))
+		require.Error(t, err)
+		require.Nil(t, request)
+		_, err = request.compareDispatched([]byte(`{"tools":[]}`))
+		require.NoError(t, err)
+		request.rejectFields()
+		require.Empty(t, request.fieldStatuses())
+	}
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	_, err = request.compareDispatched([]byte(`{"tools":`))
+	require.Error(t, err)
+	require.Empty(t, request.fieldStatuses())
+	_, err = request.compareDispatched([]byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	_, err = request.compareDispatched([]byte(`null`))
+	require.Error(t, err)
+	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusPreserved})
+}
+
+func TestToolCallingRequestUnsupportedAPI(t *testing.T) {
+	request, err := captureToolCallingRequest(reqcommon.APITypeResponses, []byte(`{"tools":[]}`))
+	require.Error(t, err)
+	require.Nil(t, request)
+}
+
+func TestToolCallingRequestOwnsSnapshot(t *testing.T) {
+	body := []byte(`{"tools":[1]}`)
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, body)
+	require.NoError(t, err)
+	copy(body, `{"tools":[2]}`)
+	_, err = request.compareDispatched(body)
+	require.NoError(t, err)
+	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusChanged})
+}
+
+func assertToolCallingStatuses(t *testing.T, statuses []toolcalling.FieldStatus, want map[toolcalling.Field]toolcalling.FieldStatusValue) {
+	t.Helper()
+	require.Len(t, statuses, len(want))
+	seen := make(map[toolcalling.Field]bool, len(statuses))
+	for _, result := range statuses {
+		require.True(t, result.Observed)
+		require.False(t, seen[result.Field], "duplicate outcome for %s", result.Field)
+		seen[result.Field] = true
+		require.Contains(t, want, result.Field)
+		require.Equal(t, want[result.Field], result.Status)
+	}
+}
