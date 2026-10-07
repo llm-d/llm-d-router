@@ -217,12 +217,50 @@ def audit_inference_perf_logs(log_text, expected_stages=1):
     }
 
 
+def resolve_autoscaling_target(router_cfg, release_name):
+    """Resolves HPA target metadata for either EPP or standalone service-mode proxy."""
+    router = (router_cfg or {}).get("router") or {}
+    proxy = router.get("proxy") or {}
+    proxy_mode = str(proxy.get("mode") or "sidecar").lower()
+    proxy_autoscaling = proxy.get("autoscaling") or {}
+    epp = router.get("epp") or {}
+    epp_autoscaling = epp.get("autoscaling") or {}
+
+    if proxy_mode == "service" and proxy_autoscaling.get("enabled") is True:
+        return {
+            "component": "proxy",
+            "hpa_name": f"{release_name}-proxy",
+            "target_label": f"llm-d-router-proxy={release_name}-proxy",
+            "epp_label": f"llm-d-router-gateway={release_name}-epp",
+            "service_name": f"{release_name}-proxy",
+            "target_container": "envoy-proxy",
+            "min_replicas": int(proxy_autoscaling.get("minReplicas", 1)),
+            "target_cpu_pct": int(
+                proxy_autoscaling.get("targetCPUUtilizationPercentage", 80)
+            ),
+        }
+
+    return {
+        "component": "epp",
+        "hpa_name": f"{release_name}-epp",
+        "target_label": f"llm-d-router-gateway={release_name}-epp",
+        "epp_label": f"llm-d-router-gateway={release_name}-epp",
+        "service_name": f"{release_name}-epp",
+        "target_container": "epp",
+        "min_replicas": int(epp_autoscaling.get("minReplicas", 1)),
+        "target_cpu_pct": int(
+            epp_autoscaling.get("targetCPUUtilizationPercentage", 80)
+        ),
+    }
+
+
 def evaluate_autoscaling_run(
     timeline,
     min_replicas=1,
     target_cpu_pct=70,
     epp_log_errors=None,
     perf_audit=None,
+    target_container="epp",
 ):
     """Evaluates whether the autoscaling run satisfied all scale-up, scale-down, CPU, and error criteria."""
     failures = []
@@ -253,7 +291,7 @@ def evaluate_autoscaling_run(
     epp_cpu_series = [
         s.get("resources", {})
         .get("containers", {})
-        .get("epp", {})
+        .get(target_container, {})
         .get("cpu_m", 0)
         for s in timeline
     ]
@@ -282,7 +320,7 @@ def evaluate_autoscaling_run(
     )
     if not epp_cpu_metrics_verified:
         failures.append(
-            f"EPP CPU metrics did not exceed HPA target: peak_epp_cpu_m={peak_epp_cpu_m}m, "
+            f"Target ({target_container}) CPU metrics did not exceed HPA target: peak_cpu_m={peak_epp_cpu_m}m, "
             f"peak_hpa_cpu_pct={peak_hpa_cpu_pct}% (target={target_cpu_pct}%)."
         )
 
@@ -633,16 +671,17 @@ def main():
 
     ns = args.namespace if args.namespace else f"llm-d-hpa-{int(time.time())}"
     release_name = os.path.splitext(os.path.basename(args.router_config))[0]
-    hpa_name = f"{release_name}-epp"
-    epp_label = f"llm-d-router-gateway={release_name}-epp"
 
     with open(args.router_config, "r") as f:
         router_cfg = yaml.safe_load(f) or {}
-    autoscaling_cfg = (
-        (router_cfg.get("router") or {}).get("epp") or {}
-    ).get("autoscaling") or {}
-    min_replicas = int(autoscaling_cfg.get("minReplicas", 1))
-    target_cpu_pct = int(autoscaling_cfg.get("targetCPUUtilizationPercentage", 80))
+    target_info = resolve_autoscaling_target(router_cfg, release_name)
+    hpa_name = target_info["hpa_name"]
+    target_label = target_info["target_label"]
+    epp_label = target_info["epp_label"]
+    service_name = target_info["service_name"]
+    target_container = target_info["target_container"]
+    min_replicas = target_info["min_replicas"]
+    target_cpu_pct = target_info["target_cpu_pct"]
 
     with open(args.perf_job, "r") as f:
         job_cfg = yaml.safe_load(f) or {}
@@ -658,8 +697,11 @@ def main():
         while not stop_poller:
             ts = time.strftime("%H:%M:%S")
             hpa_state = sample_hpa(ns, hpa_name)
-            dep_state = sample_deployment_and_pods(ns, epp_label, pod_logs_cache)
-            top_state = sample_top_pods(ns, epp_label)
+            dep_state = sample_deployment_and_pods(ns, target_label, pod_logs_cache)
+            if target_label != epp_label:
+                epp_dep_state = sample_deployment_and_pods(ns, epp_label, pod_logs_cache)
+                dep_state["restarts"] = dep_state.get("restarts", 0) + epp_dep_state.get("restarts", 0)
+            top_state = sample_top_pods(ns, target_label)
             sample = {
                 "timestamp": ts,
                 "hpa": hpa_state,
@@ -674,7 +716,7 @@ def main():
                 (top_state.get("containers") or {}).get("envoy-proxy") or {}
             ).get("cpu_m", 0)
             print(
-                f"[{ts}] HPA replicas={hpa_state.get('current_replicas')}/{hpa_state.get('desired_replicas')} "
+                f"[{ts}] HPA ({target_info['component']}) replicas={hpa_state.get('current_replicas')}/{hpa_state.get('desired_replicas')} "
                 f"(ready={dep_state.get('ready_replicas')}) | "
                 f"HPA CPU={hpa_state.get('current_cpu_utilization_pct')}% (target={hpa_state.get('target_cpu_utilization_pct')}%) | "
                 f"EPP CPU={epp_cpu}m, Envoy CPU={env_cpu}m, Total CPU={top_state.get('total_cpu_m')}m",
@@ -706,10 +748,10 @@ def main():
             epp_cpu_limit=args.epp_cpu_limit,
         )
 
-        print("Waiting for metrics-server to report initial EPP pod CPU metrics...")
+        print("Waiting for metrics-server to report initial target pod CPU metrics...")
         start_wait = time.time()
         while time.time() - start_wait < 180:
-            initial_top = sample_top_pods(ns, epp_label)
+            initial_top = sample_top_pods(ns, target_label)
             if initial_top.get("pod_count", 0) >= min_replicas:
                 break
             time.sleep(5)
@@ -719,7 +761,9 @@ def main():
         poller_thread = Thread(target=poller_loop, daemon=True)
         poller_thread.start()
 
-        perf.run_benchmark(ns, args.perf_job, args.perf_chart, release_name)
+        perf.run_benchmark(
+            ns, args.perf_job, args.perf_chart, release_name, service_name=service_name
+        )
 
         job_pod_res = perf.run_cmd(
             f"kubectl get pods -n {ns} -l app=inference-perf -o jsonpath='{{.items[0].metadata.name}}'",
@@ -770,6 +814,7 @@ def main():
             target_cpu_pct=target_cpu_pct,
             epp_log_errors=epp_log_errors,
             perf_audit=perf_audit,
+            target_container=target_container,
         )
 
     finally:

@@ -21,11 +21,11 @@ config:
     type: constant
     stages:
       - rate: 1
-        duration: 30
+        duration: 20
       - rate: 12
-        duration: 180
+        duration: 90
       - rate: 1
-        duration: 120
+        duration: 30
     num_workers: 10
     worker_max_concurrency: 100
     worker_max_tcp_connections: 2500
@@ -40,7 +40,7 @@ config:
   data:
     type: shared_prefix
     shared_prefix:
-      num_groups: 10
+      num_groups: 25
       num_prompts_per_group: 5
       system_prompt_len: 2000
       question_len: 500

@@ -226,6 +226,76 @@ class ScalingVerificationTests(unittest.TestCase):
         self.assertTrue(verdict["scale_up_verified"])
         self.assertFalse(verdict["scale_down_verified"])
 
+    def test_resolve_autoscaling_target_for_epp_and_proxy_service(self):
+        epp_cfg = {
+            "router": {
+                "epp": {
+                    "autoscaling": {
+                        "enabled": True,
+                        "minReplicas": 1,
+                        "targetCPUUtilizationPercentage": 80,
+                    }
+                }
+            }
+        }
+        epp_target = hpa_test.resolve_autoscaling_target(epp_cfg, "rel-a")
+        self.assertEqual(epp_target["component"], "epp")
+        self.assertEqual(epp_target["hpa_name"], "rel-a-epp")
+        self.assertEqual(
+            epp_target["target_label"], "llm-d-router-gateway=rel-a-epp"
+        )
+        self.assertEqual(epp_target["service_name"], "rel-a-epp")
+        self.assertEqual(epp_target["target_container"], "epp")
+        self.assertEqual(epp_target["min_replicas"], 1)
+        self.assertEqual(epp_target["target_cpu_pct"], 80)
+
+        proxy_cfg = {
+            "router": {
+                "proxy": {
+                    "mode": "service",
+                    "autoscaling": {
+                        "enabled": True,
+                        "minReplicas": 2,
+                        "targetCPUUtilizationPercentage": 75,
+                    },
+                }
+            }
+        }
+        proxy_target = hpa_test.resolve_autoscaling_target(proxy_cfg, "rel-b")
+        self.assertEqual(proxy_target["component"], "proxy")
+        self.assertEqual(proxy_target["hpa_name"], "rel-b-proxy")
+        self.assertEqual(
+            proxy_target["target_label"], "llm-d-router-proxy=rel-b-proxy"
+        )
+        self.assertEqual(
+            proxy_target["epp_label"], "llm-d-router-gateway=rel-b-epp"
+        )
+        self.assertEqual(proxy_target["service_name"], "rel-b-proxy")
+        self.assertEqual(proxy_target["target_container"], "envoy-proxy")
+        self.assertEqual(proxy_target["min_replicas"], 2)
+        self.assertEqual(proxy_target["target_cpu_pct"], 75)
+
+    def test_evaluate_autoscaling_for_proxy_service_container(self):
+        timeline = [
+            self.make_sample("00:00", 1, 1, 1, 10, 0, 20),
+            self.make_sample("01:00", 1, 4, 1, 310, 0, 880),
+            self.make_sample("02:00", 4, 4, 4, 105, 0, 1050),
+            self.make_sample("05:00", 1, 1, 1, 8, 0, 18),
+        ]
+        verdict = hpa_test.evaluate_autoscaling_run(
+            timeline,
+            min_replicas=1,
+            target_cpu_pct=80,
+            epp_log_errors={},
+            perf_audit={"passed": True, "failed_requests": 0, "error_lines": []},
+            target_container="envoy-proxy",
+        )
+        self.assertTrue(verdict["passed"], verdict["failures"])
+        self.assertTrue(verdict["scale_up_verified"])
+        self.assertTrue(verdict["scale_down_verified"])
+        self.assertTrue(verdict["epp_cpu_metrics_verified"])
+        self.assertEqual(verdict["peak_epp_cpu_m"], 1050)
+
 
 if __name__ == "__main__":
     unittest.main()

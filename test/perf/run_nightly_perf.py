@@ -246,6 +246,10 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
     
     print("Waiting for EPP deployment to become ready...")
     run_cmd(f"kubectl rollout status deployment/{release_name}-epp -n {ns} --timeout=10m")
+    proxy_mode = str((guide_router.get("proxy") or {}).get("mode") or "sidecar").lower()
+    if proxy_mode == "service":
+        print("Waiting for standalone proxy deployment to become ready...")
+        run_cmd(f"kubectl rollout status deployment/{release_name}-proxy -n {ns} --timeout=10m")
 
 def get_epp_pod_name(ns, release_name):
     res = run_cmd(f"kubectl get pods -n {ns} -o jsonpath='{{.items[*].metadata.name}}'")
@@ -452,7 +456,7 @@ def calculate_percentiles(before, after):
     
     return p50 * 1000, p95 * 1000, p99 * 1000  # Convert to milliseconds
 
-def run_benchmark(ns, job_values_path, chart_path, release_name):
+def run_benchmark(ns, job_values_path, chart_path, release_name, service_name=None):
     print(f"Deploying benchmark job in namespace: {ns}")
     
     # Process job values file to point to EPP local Service URL
@@ -460,7 +464,8 @@ def run_benchmark(ns, job_values_path, chart_path, release_name):
         job_docs = yaml.safe_load(f)
         
     # Override server url to local namespace service
-    job_docs["config"]["server"]["base_url"] = f"http://{release_name}-epp:80"
+    target_service = service_name if service_name else f"{release_name}-epp"
+    job_docs["config"]["server"]["base_url"] = f"http://{target_service}:80"
     job_docs["token"]["hfSecret"]["name"] = "hf-secret"
     job_docs["token"]["hfSecret"]["key"] = "token"
     job_docs["job"]["serviceAccountName"] = "inference-perf-sa"
