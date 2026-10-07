@@ -56,7 +56,7 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
-	kvConn, err := buildKVConnector(params)
+	kvConn, err := buildSerialKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
@@ -135,7 +135,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
-		body[reqcommon.FieldKVTransferParams] = kvParams
+		setKVParams(body, kvParams)
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
 		}
@@ -147,11 +147,11 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			prompt = reqCtx.TokenIDs
 		}
 		body := map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"model":                         reqCtx.Model,
-			"prompt":                        prompt,
-			reqcommon.FieldKVTransferParams: kvParams,
+			"request_id": reqCtx.RequestID,
+			"model":      reqCtx.Model,
+			"prompt":     prompt,
 		}
+		setKVParams(body, kvParams)
 		reqcommon.CapSingleToken(body, format)
 		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features
@@ -163,11 +163,11 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 
 	case reqcommon.APITypeVLLMGenerate:
 		body := map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"token_ids":                     reqCtx.TokenIDs,
-			"model":                         reqCtx.Model,
-			reqcommon.FieldKVTransferParams: kvParams,
+			"request_id": reqCtx.RequestID,
+			"token_ids":  reqCtx.TokenIDs,
+			"model":      reqCtx.Model,
 		}
+		setKVParams(body, kvParams)
 		reqcommon.CapSingleToken(body, format)
 		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
 			body["features"] = features

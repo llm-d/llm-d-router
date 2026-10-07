@@ -164,6 +164,10 @@ func TestHasPreference(t *testing.T) {
 		{"token with a value and whitespace around =", map[string]string{PreferHeader: "wait = 10, respond-async"}, "wait", true},
 		{"token with a value and a parameter", map[string]string{PreferHeader: "return=minimal;x=1"}, "return", true},
 		{"value is not matched as a token", map[string]string{PreferHeader: "return=minimal"}, "minimal", false},
+		{"reserve-endpoint", map[string]string{PreferHeader: PreferReserveEndpoint}, PreferReserveEndpoint, true},
+		{"reserve-endpoint case insensitive", map[string]string{PreferHeader: "Reserve-Endpoint"}, PreferReserveEndpoint, true},
+		{"reserve-endpoint among tokens", map[string]string{PreferHeader: "if-available, reserve-endpoint;x=1"}, PreferReserveEndpoint, true},
+		{"reserve-endpoint does not match if-available", map[string]string{PreferHeader: PreferReserveEndpoint}, PreferIfAvailable, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

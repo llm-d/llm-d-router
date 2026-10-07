@@ -267,14 +267,16 @@ func (p *Pipeline) runStep(
 // They match each step file's own StepName constant by contract; keep the
 // two in sync.
 func classifyExecutionPath(executed map[string]bool) (string, bool) {
-	decodeIsh := executed["decode"] || executed["conditional-decode"]
+	// prefill-decode runs both phases in one step.
+	decodeIsh := executed["decode"] || executed["conditional-decode"] || executed["prefill-decode"]
 	if !decodeIsh {
 		return "", false
 	}
+	prefill := executed["prefill"] || executed["prefill-decode"]
 	switch {
-	case executed["encode"] && executed["prefill"]:
+	case executed["encode"] && prefill:
 		return metricsutil.DisaggPathEncodePrefillDecode, true
-	case executed["prefill"]:
+	case prefill:
 		return metricsutil.DisaggPathPrefillDecode, true
 	default:
 		return metricsutil.DisaggPathDecodeOnly, true

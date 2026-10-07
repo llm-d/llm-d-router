@@ -55,6 +55,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/reserveendpoint"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
@@ -268,6 +269,16 @@ func (m *mockPreRequestPlugin) PreRequest(ctx context.Context, request *fwksched
 
 type mockProducedDataType struct {
 	value int
+}
+
+// singleEndpointResult is a scheduling result whose primary profile picked md.
+func singleEndpointResult(profile string, md *fwkdl.EndpointMetadata) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
+		PrimaryProfileName: profile,
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			profile: {TargetEndpoints: []fwksched.Endpoint{fwksched.NewEndpoint(md, nil, nil)}},
+		},
+	}
 }
 
 // Clone implements types.Cloneable.
@@ -2342,6 +2353,76 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			var e errcommon.Error
 			require.ErrorAs(t, err, &e)
 			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
+}
+
+// TestPrepareRequest_ReserveEndpoint pins the director's handling of
+// "Prefer: reserve-endpoint": the NoContent answer of the plugin reaches the
+// caller with its headers, and a request that no plugin answered is rejected
+// with 500 so it never reaches a model server.
+func TestPrepareRequest_ReserveEndpoint(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	result := singleEndpointResult("prefill", &fwkdl.EndpointMetadata{
+		Address: "10.0.3.7",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	})
+	reserve := map[string]string{routing.PreferHeader: routing.PreferReserveEndpoint}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
+		wantErrCode string
+		wantHeaders map[string]string
+	}{
+		{
+			name:    "no Prefer header is forwarded",
+			headers: map[string]string{},
+			plugins: []fwkrc.PreRequest{reserveendpoint.New()},
+		},
+		{
+			name:        "reserve-endpoint with no plugin is rejected",
+			headers:     reserve,
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint with a plugin that does not answer is rejected",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{&mockPreRequestPlugin{name: "noop"}},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint is answered with the plugin's headers",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{reserveendpoint.New()},
+			wantErrCode: errcommon.NoContent,
+			wantHeaders: map[string]string{
+				routing.ReservedEndpointHeader:  "10.0.3.7:8000",
+				routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: tt.headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, result)
+
+			assert.NotNil(t, got.TargetPod, "TargetPod stays set so the stream-end cleanup releases plugin state")
+			if tt.wantErrCode == "" {
+				require.NoError(t, err)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tt.wantErrCode, e.Code)
+			assert.Equal(t, tt.wantHeaders, e.Headers)
 		})
 	}
 }

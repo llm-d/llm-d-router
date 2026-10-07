@@ -96,6 +96,21 @@ func TestBuildDoesNotInjectUseOpenAIFormatIntoDecodeOrConditionalDecode(t *testi
 	}
 }
 
+func TestUsesOpenAIFormatParam(t *testing.T) {
+	for stepType, want := range map[string]bool{
+		steps.EncodeStepName:            true,
+		steps.PrefillStepName:           true,
+		steps.PrefillDecodeStepName:     true,
+		steps.DecodeStepName:            false,
+		steps.ConditionalDecodeStepName: false,
+		steps.RenderStepName:            false,
+	} {
+		if got := usesOpenAIFormatParam(stepType); got != want {
+			t.Errorf("usesOpenAIFormatParam(%q) = %v, want %v", stepType, got, want)
+		}
+	}
+}
+
 // TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML reproduces a
 // coordinator.yaml carrying the deprecated per-step override this PR removed:
 // decode or conditional-decode setting use_openai_format under their own

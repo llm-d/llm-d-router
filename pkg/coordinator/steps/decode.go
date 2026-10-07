@@ -50,7 +50,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err := rejectUseOpenAIFormatOverride(DecodeStepName, params); err != nil {
 		return nil, err
 	}
-	kvConn, err := buildKVConnector(params)
+	kvConn, err := buildSerialKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
@@ -68,7 +68,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, gatewayHeaders(reqCtx, gateway.PhaseDecode))
 	if err != nil {
 		return err
 	}
@@ -81,8 +81,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // prefill and conditional-decode). decode is the terminal pipeline step: its body
 // is streamed straight to the client and no later step reads reqCtx.Body. A clone
 // would also be insufficient, since injectUUIDs mutates nested values that a shallow
-// maps.Clone would still share. This is sound only while the pipeline runs steps
-// sequentially; if it ever goes concurrent, decode must copy like the others.
+// maps.Clone would still share. This is sound only while every other body built
+// from reqCtx.Body is marshaled before this runs: the pipeline runs steps
+// sequentially, and prefill-decode marshals its prefill body first.
 func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
@@ -91,9 +92,9 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeVLLMGenerate:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		setKVParams(reqCtx.Body, kvParams)
 	case reqcommon.APITypeCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		setKVParams(reqCtx.Body, kvParams)
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}

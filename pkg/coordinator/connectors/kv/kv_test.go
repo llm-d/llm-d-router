@@ -19,13 +19,14 @@ package kv
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-func TestSGLangKV_Params(t *testing.T) {
+func TestSGLangKV_NoKVTransferParams(t *testing.T) {
 	c, err := Build(SGLang)
 	if err != nil {
 		t.Fatalf("Build(%q): %v", SGLang, err)
@@ -33,41 +34,129 @@ func TestSGLangKV_Params(t *testing.T) {
 	if c.Name() != SGLang {
 		t.Fatalf("Name() = %q, want %q", c.Name(), SGLang)
 	}
+	reqCtx := &pipeline.RequestContext{KVTransferParams: map[string]any{"ignored": "field"}}
+	if got := c.PreparePrefillKVParams(context.Background(), reqCtx); got != nil {
+		t.Errorf("prefill params = %v, want nil", got)
+	}
+	if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); got != nil {
+		t.Errorf("decode params = %v, want nil", got)
+	}
+}
 
-	reqCtx := &pipeline.RequestContext{
-		KVTransferParams: map[string]any{
-			reqcommon.FieldBootstrapHost: "10.0.0.42",
-			reqcommon.FieldBootstrapPort: 8998,
-			reqcommon.FieldBootstrapRoom: int64(12345),
-		},
+func TestSGLangKV_ApplyTransferFields(t *testing.T) {
+	c, err := Build(SGLang)
+	if err != nil {
+		t.Fatalf("Build(%q): %v", SGLang, err)
 	}
-
-	// Prefill: must have the required bootstrap fields; bootstrap_room is random so check type.
-	prefill := c.PreparePrefillKVParams(context.Background(), reqCtx)
-	if prefill["do_remote_decode"] != true {
-		t.Errorf("prefill: do_remote_decode = %v, want true", prefill["do_remote_decode"])
-	}
-	if prefill["do_remote_prefill"] != false {
-		t.Errorf("prefill: do_remote_prefill = %v, want false", prefill["do_remote_prefill"])
-	}
-	if prefill[reqcommon.FieldBootstrapPort] != sglangBootstrapPort {
-		t.Errorf("prefill: %s = %v, want %d", reqcommon.FieldBootstrapPort, prefill[reqcommon.FieldBootstrapPort], sglangBootstrapPort)
-	}
-	room, ok := prefill[reqcommon.FieldBootstrapRoom].(string)
-	if !ok || room == "" {
-		t.Errorf("prefill: %s = %v (%T), want non-empty string", reqcommon.FieldBootstrapRoom, prefill[reqcommon.FieldBootstrapRoom], prefill[reqcommon.FieldBootstrapRoom])
+	concurrent, ok := c.(ConcurrentConnector)
+	if !ok {
+		t.Fatalf("%q is not a ConcurrentConnector", SGLang)
 	}
 
-	// Decode: forwards prefill-response kv_transfer_params plus remote flags.
-	wantDecode := map[string]any{
-		reqcommon.FieldBootstrapHost: "10.0.0.42",
-		reqcommon.FieldBootstrapPort: 8998,
-		reqcommon.FieldBootstrapRoom: int64(12345),
-		"do_remote_decode":           false,
-		"do_remote_prefill":          true,
+	prefill := map[string]any{"model": "m", "routed_dp_rank": 1, "data_parallel_rank": 2}
+	decode := map[string]any{"model": "m", "disagg_prefill_dp_rank": 3, "stream": true}
+	if err := concurrent.ApplyTransferFields(context.Background(), "10.0.3.7:8000", prefill, decode); err != nil {
+		t.Fatalf("ApplyTransferFields: %v", err)
 	}
-	if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, wantDecode) {
-		t.Errorf("decode params:\n got=%v\nwant=%v", got, wantDecode)
+
+	room, ok := prefill[reqcommon.FieldBootstrapRoom].(int64)
+	if !ok || room < 0 {
+		t.Fatalf("%s = %v (%T), want a non-negative int64", reqcommon.FieldBootstrapRoom, prefill[reqcommon.FieldBootstrapRoom], prefill[reqcommon.FieldBootstrapRoom])
+	}
+	for name, body := range map[string]map[string]any{"prefill": prefill, "decode": decode} {
+		if body[reqcommon.FieldBootstrapHost] != "10.0.3.7" {
+			t.Errorf("%s: %s = %v, want 10.0.3.7", name, reqcommon.FieldBootstrapHost, body[reqcommon.FieldBootstrapHost])
+		}
+		if body[reqcommon.FieldBootstrapPort] != resolveSGLangBootstrapPort(context.Background()) {
+			t.Errorf("%s: %s = %v, want the resolved bootstrap port", name, reqcommon.FieldBootstrapPort, body[reqcommon.FieldBootstrapPort])
+		}
+		if body[reqcommon.FieldBootstrapRoom] != room {
+			t.Errorf("%s: %s = %v, want the same room %d on both bodies", name, reqcommon.FieldBootstrapRoom, body[reqcommon.FieldBootstrapRoom], room)
+		}
+		for _, field := range sglangRankFields {
+			if _, present := body[field]; present {
+				t.Errorf("%s: client rank field %q was not removed", name, field)
+			}
+		}
+		if _, present := body[reqcommon.FieldKVTransferParams]; present {
+			t.Errorf("%s: kv_transfer_params must not be set", name)
+		}
+	}
+	if decode["stream"] != true {
+		t.Errorf("decode: unrelated field changed: stream = %v", decode["stream"])
+	}
+}
+
+func TestSGLangKV_ApplyTransferFieldsHost(t *testing.T) {
+	tests := []struct {
+		hostPort string
+		wantHost string
+		wantErr  bool
+	}{
+		{hostPort: "10.0.3.7:8000", wantHost: "10.0.3.7"},
+		{hostPort: "[fd00::7]:8000", wantHost: "fd00::7"},
+		{hostPort: "", wantErr: true},
+		{hostPort: "10.0.3.7", wantErr: true},
+		{hostPort: "10.0.3.7:8000:1", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.hostPort, func(t *testing.T) {
+			bodies := map[string]map[string]any{"prefill": {"model": "m"}, "decode": {"model": "m"}}
+			err := (sglangKV{}).ApplyTransferFields(context.Background(), tt.hostPort, bodies["prefill"], bodies["decode"])
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				for name, body := range bodies {
+					if _, present := body[reqcommon.FieldBootstrapHost]; present {
+						t.Errorf("%s: body changed on error", name)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ApplyTransferFields: %v", err)
+			}
+			for name, body := range bodies {
+				if body[reqcommon.FieldBootstrapHost] != tt.wantHost {
+					t.Errorf("%s: %s = %v, want %s", name, reqcommon.FieldBootstrapHost, body[reqcommon.FieldBootstrapHost], tt.wantHost)
+				}
+			}
+		})
+	}
+}
+
+func TestSGLangKV_ApplyTransferFieldsNewRoomPerCall(t *testing.T) {
+	a, b := map[string]any{}, map[string]any{}
+	for _, body := range []map[string]any{a, b} {
+		if err := (sglangKV{}).ApplyTransferFields(context.Background(), "10.0.3.7:8000", body, map[string]any{}); err != nil {
+			t.Fatalf("ApplyTransferFields: %v", err)
+		}
+	}
+	if a[reqcommon.FieldBootstrapRoom] == b[reqcommon.FieldBootstrapRoom] {
+		t.Errorf("two requests got the same room %v", a[reqcommon.FieldBootstrapRoom])
+	}
+}
+
+func TestSGLangKV_ConflictingClientHeaders(t *testing.T) {
+	got := (sglangKV{}).ConflictingClientHeaders()
+	if len(got) != 1 || got[0] != sglangRankHeader {
+		t.Fatalf("ConflictingClientHeaders() = %v, want [%s]", got, sglangRankHeader)
+	}
+	if got[0] != strings.ToLower(got[0]) {
+		t.Errorf("header %q must be lower case: the step deletes it from a lower-case header map", got[0])
+	}
+}
+
+func TestSerialConnectorsAreNotConcurrent(t *testing.T) {
+	for _, name := range []string{NIXL, SharedStorage} {
+		c, err := Build(name)
+		if err != nil {
+			t.Fatalf("Build(%q): %v", name, err)
+		}
+		if _, ok := c.(ConcurrentConnector); ok {
+			t.Errorf("%q must not be a ConcurrentConnector", name)
+		}
 	}
 }
 

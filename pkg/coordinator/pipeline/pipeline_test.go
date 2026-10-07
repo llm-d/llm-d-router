@@ -433,6 +433,8 @@ func TestExecute_ExecutionPathTable(t *testing.T) {
 		{"decode-only via cache hit", []string{"conditional-decode"}, metricsutil.DisaggPathDecodeOnly},
 		{"prefill-decode without encode", []string{"prefill", "decode"}, metricsutil.DisaggPathPrefillDecode},
 		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, metricsutil.DisaggPathEncodePrefillDecode},
+		{"concurrent prefill-decode step", []string{"prefill-decode"}, metricsutil.DisaggPathPrefillDecode},
+		{"encode then concurrent prefill-decode step", []string{"encode", "prefill-decode"}, metricsutil.DisaggPathEncodePrefillDecode},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

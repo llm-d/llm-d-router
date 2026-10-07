@@ -127,7 +127,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		if err != nil {
 			return nil, fmt.Errorf("reading response from gateway: %w", err)
 		}
-		v.Info("response body", "status", resp.StatusCode, logutil.HTTPBodyKey, RedactBody(respBody))
+		v.Info("response body", "status", resp.StatusCode, "headers", httplog.RedactedHeaders(resp.Header), logutil.HTTPBodyKey, RedactBody(respBody))
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 

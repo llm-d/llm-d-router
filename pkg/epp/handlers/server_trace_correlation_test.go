@@ -44,21 +44,21 @@ const (
 	upstreamTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 )
 
-// scriptedProcessServer replays one RequestHeaders message, then reports EOF so
+// scriptedProcessServer replays its messages in order, then reports EOF so
 // Process returns cleanly.
 type scriptedProcessServer struct {
 	mockProcessServer
 	ctx  context.Context
-	req  *extProcPb.ProcessingRequest
-	sent bool
+	reqs []*extProcPb.ProcessingRequest
 }
 
 func (m *scriptedProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
-	if m.sent {
+	if len(m.reqs) == 0 {
 		return nil, io.EOF
 	}
-	m.sent = true
-	return m.req, nil
+	req := m.reqs[0]
+	m.reqs = m.reqs[1:]
+	return req, nil
 }
 
 func (m *scriptedProcessServer) Context() context.Context { return m.ctx }
@@ -94,8 +94,8 @@ func runProcessWithContext(ctx context.Context, t *testing.T, headers map[string
 	}, funcr.Options{Verbosity: 2})
 
 	srv := &scriptedProcessServer{
-		ctx: log.IntoContext(ctx, capture),
-		req: newRequestHeaders(headers),
+		ctx:  log.IntoContext(ctx, capture),
+		reqs: []*extProcPb.ProcessingRequest{newRequestHeaders(headers)},
 	}
 	require.NoError(t, NewStreamingServer(nil, nil, nil, 0).Process(srv))
 

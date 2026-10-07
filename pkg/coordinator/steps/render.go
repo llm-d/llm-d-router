@@ -354,7 +354,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	}
 	defer resp.Body.Close()
 
-	if err := checkStatus(RenderStepName, resp); err != nil {
+	if err := checkStatus(RenderStepName, resp, http.StatusOK); err != nil {
 		return err
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)

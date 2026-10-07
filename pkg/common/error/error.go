@@ -58,11 +58,15 @@ type Error struct {
 }
 
 const (
-	Unknown            = "Unknown"
-	BadRequest         = "BadRequest"
-	Unauthorized       = "Unauthorized"
-	Forbidden          = "Forbidden"
-	NotFound           = "NotFound"
+	Unknown      = "Unknown"
+	BadRequest   = "BadRequest"
+	Unauthorized = "Unauthorized"
+	Forbidden    = "Forbidden"
+	NotFound     = "NotFound"
+	// NoContent is a 204 answer: the error's headers and no body. It is the
+	// code of a request EPP answers without forwarding, such as a
+	// "Prefer: reserve-endpoint" ask.
+	NoContent          = "NoContent"
 	PreconditionFailed = "PreconditionFailed"
 	Internal           = "Internal"
 	ServiceUnavailable = "ServiceUnavailable"
@@ -84,6 +88,13 @@ func CanonicalCode(err error) string {
 	return Unknown
 }
 
+// IsAnswer reports whether err is a NoContent answer. The answer travels the
+// error path to reach Envoy as an immediate response. Handlers log it at info
+// level and keep it out of the error metrics and the error status of spans.
+func IsAnswer(err error) bool {
+	return CanonicalCode(err) == NoContent
+}
+
 // BuildErrResponse maps an error to an Envoy ImmediateResponse with the appropriate
 // HTTP status code and error message body. If the error code is not recognized,
 // it returns a gRPC error instead of an ImmediateResponse.
@@ -99,6 +110,8 @@ func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
 		httpCode = envoyTypePb.StatusCode_Forbidden
 	case NotFound:
 		httpCode = envoyTypePb.StatusCode_NotFound
+	case NoContent:
+		httpCode = envoyTypePb.StatusCode_NoContent
 	case PreconditionFailed:
 		httpCode = envoyTypePb.StatusCode_PreconditionFailed
 	case ResourceExhausted:
@@ -117,7 +130,9 @@ func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
 		},
 	}
 
-	if err.Error() != "" {
+	// A 204 carries no body. Envoy writes one onto the wire after the headers
+	// anyway, and the client, which reads none, drops the connection.
+	if httpCode != envoyTypePb.StatusCode_NoContent && err.Error() != "" {
 		ir.Body = []byte(err.Error())
 	}
 

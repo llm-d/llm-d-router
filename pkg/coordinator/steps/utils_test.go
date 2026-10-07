@@ -562,11 +562,15 @@ func TestGatewayHeaders_NoClientHeaders(t *testing.T) {
 
 func TestCheckStatus(t *testing.T) {
 	tests := []struct {
-		name     string
+		name string
+		// want is the wanted status; 0 means 200.
+		want     int
 		status   int
 		body     string
 		wantBody string
 		wantErr  bool
+		// wantPlain is an error that is not a pipeline.UpstreamError.
+		wantPlain bool
 	}{
 		{name: "ok", status: http.StatusOK, body: "answer"},
 		{name: "client error", status: http.StatusBadRequest, body: "bad prompt", wantBody: "bad prompt", wantErr: true},
@@ -580,23 +584,42 @@ func TestCheckStatus(t *testing.T) {
 			wantBody: strings.Repeat("a", maxErrorBodySize),
 			wantErr:  true,
 		},
+		{name: "wanted error status", want: http.StatusPreconditionFailed, status: http.StatusPreconditionFailed, body: "answer"},
+		{name: "success status where an error status is wanted", want: http.StatusPreconditionFailed, status: http.StatusOK, body: "answer", wantErr: true, wantPlain: true},
+		{name: "other error status than wanted", want: http.StatusPreconditionFailed, status: http.StatusServiceUnavailable, body: "overloaded", wantBody: "overloaded", wantErr: true},
+		{name: "wanted 204", want: http.StatusNoContent, status: http.StatusNoContent},
+		{name: "200 where 204 is wanted", want: http.StatusNoContent, status: http.StatusOK, body: "answer", wantErr: true, wantPlain: true},
+		{name: "error status where 204 is wanted", want: http.StatusNoContent, status: http.StatusPreconditionFailed, body: "answer", wantBody: "answer", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := &http.Response{StatusCode: tt.status, Body: io.NopCloser(strings.NewReader(tt.body))}
+			want := tt.want
+			if want == 0 {
+				want = http.StatusOK
+			}
 
-			err := checkStatus(RenderStepName, resp)
+			err := checkStatus(RenderStepName, resp, want)
 			if !tt.wantErr {
 				if err != nil {
 					t.Fatalf("checkStatus: %v", err)
 				}
-				// The body of a 200 response stays unread for the caller.
+				// The body of a wanted response stays unread for the caller.
 				if body, _ := io.ReadAll(resp.Body); string(body) != tt.body {
 					t.Errorf("response body = %q, want %q", body, tt.body)
 				}
 				return
 			}
 			var upstream *pipeline.UpstreamError
+			if tt.wantPlain {
+				if err == nil || errors.As(err, &upstream) || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d, want %d", tt.status, want)) {
+					t.Fatalf("error = %v, want a plain error that names the status %d and the wanted %d", err, tt.status, want)
+				}
+				if body, _ := io.ReadAll(resp.Body); string(body) != tt.body {
+					t.Errorf("response body = %q, want %q unread", body, tt.body)
+				}
+				return
+			}
 			if !errors.As(err, &upstream) {
 				t.Fatalf("error = %v, want a pipeline.UpstreamError", err)
 			}
@@ -741,6 +764,33 @@ func TestPostToGateway_StatusIsUpstreamError(t *testing.T) {
 	if upstream.Step != req.step || upstream.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("error = {Step: %q, StatusCode: %d}, want {%q, %d}",
 			upstream.Step, upstream.StatusCode, req.step, http.StatusServiceUnavailable)
+	}
+}
+
+func TestPostToGateway_WantStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	defer server.Close()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	req := testGatewayRequest
+	req.wantStatus = http.StatusPreconditionFailed
+	resp, err := postToGateway(context.Background(), logr.Discard(), gwClient, req)
+	if err != nil {
+		t.Fatalf("postToGateway with wantStatus 412: %v", err)
+	}
+	resp.Body.Close()
+
+	// The zero wantStatus wants 200.
+	resp, err = postToGateway(context.Background(), logr.Discard(), gwClient, testGatewayRequest)
+	if resp != nil {
+		resp.Body.Close()
+		t.Error("expected no response with an error")
+	}
+	var upstream *pipeline.UpstreamError
+	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("error = %v, want a pipeline.UpstreamError 412", err)
 	}
 }
 

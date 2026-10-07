@@ -259,6 +259,51 @@ func TestClient_RequestBuffersBodyOnlyAtTrace(t *testing.T) {
 	})
 }
 
+// At TRACE the response line carries the response headers, so an answer that
+// a step reads from a header (for example a 204 with the reserved endpoint) is
+// visible in the log. Sensitive headers stay redacted.
+func TestClient_TraceLogsResponseHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Llm-D-Reserved-Host-Port", "10.0.3.7:8000")
+		w.Header().Set("Set-Cookie", "session=secret")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	var lines []map[string]any
+	logger := funcr.NewJSON(func(obj string) {
+		var line map[string]any
+		if err := json.Unmarshal([]byte(obj), &line); err != nil {
+			t.Errorf("log line is not JSON: %v", err)
+			return
+		}
+		lines = append(lines, line)
+	}, funcr.Options{Verbosity: logutil.TRACE})
+
+	c := New(config.GatewayConfig{Address: srv.URL})
+	resp, err := c.Post(log.IntoContext(context.Background(), logger), "/v1/chat/completions", []byte(`{"q":1}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var headers map[string]any
+	for _, line := range lines {
+		if line["msg"] == "response body" {
+			headers, _ = line["headers"].(map[string]any)
+		}
+	}
+	if headers == nil {
+		t.Fatalf("no response body line with headers in %v", lines)
+	}
+	if got := headers["x-llm-d-reserved-host-port"]; got != "10.0.3.7:8000" {
+		t.Errorf("x-llm-d-reserved-host-port = %v, want %q", got, "10.0.3.7:8000")
+	}
+	if got := headers["set-cookie"]; got == "session=secret" {
+		t.Errorf("set-cookie = %v, want it redacted", got)
+	}
+}
+
 func TestClient_BaseURLAndTransport(t *testing.T) {
 	c := New(config.GatewayConfig{Address: "http://gw:80"})
 	if c.BaseURL() != "http://gw:80" {
