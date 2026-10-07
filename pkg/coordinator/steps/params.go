@@ -42,6 +42,23 @@ func buildKVConnector(params map[string]any) (kv.Connector, error) {
 	return kv.Build(name)
 }
 
+// buildSerialKVConnector builds the KV connector for a step that sends prefill
+// and decode one after the other. A connector that needs both requests in
+// flight together cannot complete on that path, so it fails at startup.
+func buildSerialKVConnector(params map[string]any) (kv.Connector, error) {
+	conn, err := buildKVConnector(params)
+	if err != nil {
+		return nil, err
+	}
+	if _, concurrent := conn.(kv.ConcurrentConnector); concurrent {
+		return nil, fmt.Errorf("kv_connector %q sends prefill and decode together; use the %q step instead of the %q and %q steps",
+			conn.Name(), PrefillDecodeStepName, PrefillStepName, DecodeStepName)
+	}
+	return conn, nil
+}
+
+// buildECConnector builds the EC connector named by the ec_connector step
+// parameter; an absent parameter selects the default connector.
 func buildECConnector(params map[string]any) (ec.Connector, error) {
 	name, err := paramString(params, ParamECConnector)
 	if err != nil {

@@ -50,6 +50,22 @@ type Connector interface {
 	PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any
 }
 
+// ConcurrentConnector is a Connector whose prefill and decode requests must be
+// in flight at the same time. Only the prefill-decode step runs it; the
+// prefill and decode steps reject it.
+type ConcurrentConnector interface {
+	Connector
+	// ApplyTransferFields writes the transfer fields into the prefill and
+	// decode bodies before the two requests are sent, and removes the client
+	// fields that conflict with them. prefillHostPort is the <ip:port> EPP
+	// reserved for the prefill request.
+	ApplyTransferFields(ctx context.Context, prefillHostPort string, prefillBody, decodeBody map[string]any) error
+	// ConflictingClientHeaders names the client headers, in lower case, that
+	// conflict with the transfer fields. The prefill-decode step does not
+	// forward them.
+	ConflictingClientHeaders() []string
+}
+
 // Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.
 func Build(name string) (Connector, error) {
 	if name == "" {

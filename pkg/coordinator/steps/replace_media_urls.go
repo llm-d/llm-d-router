@@ -271,7 +271,7 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	}
 	defer resp.Body.Close()
 
-	if err := checkStatus(ReplaceMediaURLsStepName, resp); err != nil {
+	if err := checkStatus(ReplaceMediaURLsStepName, resp, http.StatusOK); err != nil {
 		return nil, "", err
 	}
 

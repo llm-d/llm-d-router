@@ -59,14 +59,21 @@ func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]st
 	return headers
 }
 
-// checkStatus returns a pipeline.UpstreamError tagged with step when the status
-// of resp is other than 200. A non-200 consumes up to maxErrorBodySize of the
-// body; a 200 leaves it unread. Closing stays with the caller.
-func checkStatus(step string, resp *http.Response) error {
-	if resp.StatusCode == http.StatusOK {
+// checkStatus returns an error tagged with step when the status of resp is
+// other than wantStatus. A pipeline.UpstreamError consumes up to
+// maxErrorBodySize of the body. A success status where a status other than
+// 200 is the answer means EPP forwarded a request it should have answered;
+// that error and wantStatus leave the body unread. Closing stays with the
+// caller.
+func checkStatus(step string, resp *http.Response, wantStatus int) error {
+	switch {
+	case resp.StatusCode == wantStatus:
 		return nil
+	case wantStatus != http.StatusOK && resp.StatusCode < http.StatusBadRequest:
+		return fmt.Errorf("%s: HTTP %d, want %d; does EPP support the request?", step, resp.StatusCode, wantStatus)
+	default:
+		return upstreamError(step, resp.StatusCode, readErrorBody(resp.Body))
 	}
-	return upstreamError(step, resp.StatusCode, readErrorBody(resp.Body))
 }
 
 // gatewayRequest is the parameter of a POST that a step sends to the gateway.
@@ -80,11 +87,13 @@ type gatewayRequest struct {
 	path     string
 	body     []byte
 	headers  map[string]string
+	// wantStatus is the status of a successful answer. Zero means 200.
+	wantStatus int
 }
 
 // postToGateway sends req to the gateway and returns the response. On success
 // the caller closes the response body. An error returns a nil response, with
-// the body already closed when the status was other than 200.
+// the body already closed when the status was other than req.wantStatus.
 func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, req gatewayRequest) (*http.Response, error) {
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info(req.logMsg, "method", "POST", "path", req.path, "bodyLen", len(req.body), "headers", httplog.RedactedHeaders(req.headers))
@@ -96,11 +105,23 @@ func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Cl
 	if err != nil {
 		return nil, fmt.Errorf("%s: request: %w", req.step, err)
 	}
-	if err := checkStatus(req.step, resp); err != nil {
+	wantStatus := req.wantStatus
+	if wantStatus == 0 {
+		wantStatus = http.StatusOK
+	}
+	if err := checkStatus(req.step, resp, wantStatus); err != nil {
 		_ = resp.Body.Close()
 		return nil, err
 	}
 	return resp, nil
+}
+
+// setKVParams writes kvParams as the body's kv_transfer_params. A nil map is
+// not written: the connector carries its fields elsewhere.
+func setKVParams(body map[string]any, kvParams map[string]any) {
+	if kvParams != nil {
+		body[reqcommon.FieldKVTransferParams] = kvParams
+	}
 }
 
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to
