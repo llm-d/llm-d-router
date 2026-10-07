@@ -52,7 +52,7 @@ absorb further processing modes as they are added.
 - [Components](#components)
 - [Request lifecycle](#request-lifecycle)
   - [RequestContext](#requestcontext)
-  - [x-llm-d-epp-profile routing](#epp-profile-routing)
+  - [x-llm-d-epp-profile routing](#x-llm-d-epp-profile-routing)
 - [EPP integration](#epp-integration)
   - [Per-phase scheduling profiles](#per-phase-scheduling-profiles)
   - [Decode disaggregation deciders](#decode-disaggregation-deciders)
@@ -303,7 +303,7 @@ phase call to the configured gateway, and the EPP picks the pod for that phase.
 One EPP instance and one InferencePool cover all three worker roles (encode, prefill,
 decode); the pods differ only by their `llm-d.ai/role` label. The Gateway routes every
 coordinator-to-worker call to that EPP, which runs the scheduling profile named by the
-call's `x-llm-d-epp-profile` header (see [x-llm-d-epp-profile routing](#epp-profile-routing)) via the
+call's `x-llm-d-epp-profile` header (see [x-llm-d-epp-profile routing](#x-llm-d-epp-profile-routing)) via the
 `header-profile-handler` plugin. The coordinator drives the cascade across phases;
 each EPP call is single-phase scheduling.
 

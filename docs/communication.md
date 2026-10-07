@@ -16,7 +16,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Stage 4: encode (fan-out, one per image)](#stage-4-encode-fan-out-one-per-image)
 - [Stage 5: prefill](#stage-5-prefill)
 - [Stage 6: decode](#stage-6-decode)
-- [x-llm-d-epp-profile Header and Routing](#epp-profile-header-and-routing)
+- [x-llm-d-epp-profile Header and Routing](#x-llm-d-epp-profile-header-and-routing)
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Responses Requests (/v1/responses)](#responses-requests-v1responses)
@@ -64,7 +64,7 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /infere
 [decode] - Forwards to decode worker, streams response back to client
 ```
 
-All requests from the coordinator to workers include the `x-llm-d-epp-profile` HTTP header indicating the pipeline stage (see [x-llm-d-epp-profile Header and Routing](#epp-profile-header-and-routing)).
+All requests from the coordinator to workers include the `x-llm-d-epp-profile` HTTP header indicating the pipeline stage (see [x-llm-d-epp-profile Header and Routing](#x-llm-d-epp-profile-header-and-routing)).
 
 ---
 
