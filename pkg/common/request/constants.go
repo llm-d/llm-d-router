@@ -18,6 +18,10 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// EPPProfileHeaderKey names the scheduling profile the EPP must run for a
+	// request. The coordinator sets it on every phase call, Envoy routes on it,
+	// and the header-profile-handler reads it.
+	EPPProfileHeaderKey = "x-llm-d-epp-profile"
 	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
 	// between phases of a disaggregated request.
 	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"

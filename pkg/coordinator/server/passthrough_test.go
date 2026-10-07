@@ -87,7 +87,7 @@ func doPassthrough(t *testing.T, srv *Server, req *http.Request) *httptest.Respo
 
 func TestPassthrough_ForwardsUnregisteredGET(t *testing.T) {
 	// /v1/models is a GET that the coordinator does not register; the passthrough
-	// must forward it verbatim to the gateway with EPP-Profile: decode.
+	// must forward it verbatim to the gateway with x-llm-d-epp-profile: decode.
 	upstream, cap := newCapturingUpstream(t, http.StatusOK, `{"data":[]}`)
 	srv := newTestServerWithGateway(nil, upstream.URL)
 

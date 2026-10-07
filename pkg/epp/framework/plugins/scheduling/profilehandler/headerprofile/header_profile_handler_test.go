@@ -31,10 +31,10 @@ import (
 )
 
 // ingestedHeaderKey is the key request.Headers actually carries once the EPP's request
-// handler stores it (always lowercased, see pkg/epp/handlers/request.go). Handlers are
-// constructed with the mixed-case defaultHeaderName throughout these tests specifically
-// to exercise the constructor's normalization against this lowercase key.
-const ingestedHeaderKey = "epp-profile"
+// handler stores it (always lowercased, see pkg/epp/handlers/request.go). The default
+// header name is already lowercase, so the two coincide; a configured name's
+// normalization is covered by its own case in TestNewHeaderProfileHandler.
+const ingestedHeaderKey = defaultHeaderName
 
 type fakeSchedulerProfile struct{}
 
@@ -204,12 +204,12 @@ func TestHeaderProfileNoMatchError(t *testing.T) {
 		{
 			name:           "empty profile name reports missing header",
 			profileName:    "",
-			wantErrContain: `missing "epp-profile" header`,
+			wantErrContain: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:           "non-empty profile name reports the unconfigured value",
 			profileName:    "prefill",
-			wantErrContain: `no scheduling profile configured for "epp-profile" header value "prefill"`,
+			wantErrContain: `no scheduling profile configured for "x-llm-d-epp-profile" header value "prefill"`,
 		},
 	}
 
@@ -450,7 +450,7 @@ func TestHeaderProfilePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ProcessResults() expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), `missing "epp-profile" header`) {
+	if !strings.Contains(err.Error(), `missing "x-llm-d-epp-profile" header`) {
 		t.Errorf("ProcessResults() error = %q, want it to report the missing header, not the failed default", err.Error())
 	}
 }
@@ -485,21 +485,21 @@ func TestHeaderProfileProcessResults(t *testing.T) {
 			request:         nil,
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-profile" header`,
+			wantErrContains: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, empty header, reports missing header",
 			request:         &fwksched.InferenceRequest{Headers: map[string]string{}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-profile" header`,
+			wantErrContains: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, unconfigured header value, reports the value",
 			request:         &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `no scheduling profile configured for "epp-profile" header value "prefill"`,
+			wantErrContains: `no scheduling profile configured for "x-llm-d-epp-profile" header value "prefill"`,
 		},
 		{
 			name: "multiple profiles returns error",

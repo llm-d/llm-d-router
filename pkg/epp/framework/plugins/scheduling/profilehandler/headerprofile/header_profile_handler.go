@@ -26,6 +26,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -35,19 +36,14 @@ const (
 	HeaderProfileHandlerType = "header-profile-handler"
 
 	// defaultHeaderName is the request header read when parameters.HeaderName is empty.
-	// Kept mixed-case for the README and for tests that use it as a mixed-case
-	// constructor input; defaultHeaderNameLower is the form actually used as a header
-	// key.
-	defaultHeaderName = "EPP-Profile"
+	// Already lowercase, matching how the EPP stores ingested header keys, so it needs
+	// none of the normalization a configured headerName goes through.
+	defaultHeaderName = reqcommon.EPPProfileHeaderKey
 
 	// defaultProfileName is the scheduling profile run when parameters.DefaultProfile is
 	// empty.
 	defaultProfileName = "decode"
 )
-
-// defaultHeaderNameLower is defaultHeaderName normalized once at init, the same way
-// NewHeaderProfileHandler normalizes any configured headerName.
-var defaultHeaderNameLower = strings.ToLower(defaultHeaderName)
 
 // compile-time type assertion
 var _ fwksched.ProfileHandler = &HeaderProfileHandler{}
@@ -83,7 +79,7 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
-		headerName = defaultHeaderNameLower
+		headerName = defaultHeaderName
 	}
 
 	defaultProfile = strings.TrimSpace(defaultProfile)

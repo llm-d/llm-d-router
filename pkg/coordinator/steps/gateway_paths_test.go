@@ -65,7 +65,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 				"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
 			})
 		default:
-			t.Errorf("unexpected EPP-Profile: %s", phase)
+			t.Errorf("unexpected x-llm-d-epp-profile: %s", phase)
 			http.Error(w, "unexpected phase", 404)
 		}
 	}))
@@ -127,7 +127,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		t.Fatalf("decode failed: %v", err)
 	}
 
-	// --- Validate EPP-Profile headers ---
+	// --- Validate x-llm-d-epp-profile headers ---
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -143,7 +143,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 
 	for i, expected := range expectedPhases {
 		if receivedPhases[i] != expected {
-			t.Errorf("request %d: expected EPP-Profile %q, got %q", i, expected, receivedPhases[i])
+			t.Errorf("request %d: expected x-llm-d-epp-profile %q, got %q", i, expected, receivedPhases[i])
 		}
 	}
 }
@@ -256,6 +256,6 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		t.Fatalf("expected /v1/completions, got %s", receivedPath)
 	}
 	if receivedPhase != gateway.PhaseDecode {
-		t.Fatalf("expected EPP-Profile: decode, got %q", receivedPhase)
+		t.Fatalf("expected x-llm-d-epp-profile: decode, got %q", receivedPhase)
 	}
 }

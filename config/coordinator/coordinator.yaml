@@ -161,7 +161,7 @@ pipeline:
     # -------------------------------------------------------------------
     # async-broker: optional, and when enabled it must run first. Bridges
     # the coordinator to the llm-d-async broker. A request that carries the
-    # mode header (default X-AP-Mode: passthrough | enqueue | wait) opts
+    # mode header (default x-llm-d-async-mode: passthrough | enqueue | wait) opts
     # into async serving: passthrough labels it (quota classification,
     # objective and fairness headers) and lets the pipeline continue;
     # enqueue answers 202 with the request id; wait holds the connection

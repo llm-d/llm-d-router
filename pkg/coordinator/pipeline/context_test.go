@@ -95,16 +95,16 @@ func TestForwardedHeaders_ExcludesHopByHopAndContentHeaders(t *testing.T) {
 func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 	rc := &RequestContext{
 		OriginalHeaders: http.Header{
-			"EPP-Profile":   {"decode"},
-			"X-Request-Id":  {"abc-123"},
-			"Authorization": {"Bearer token"},
+			"X-Llm-D-Epp-Profile": {"decode"},
+			"X-Request-Id":        {"abc-123"},
+			"Authorization":       {"Bearer token"},
 		},
 	}
 
 	out := rc.ForwardedHeaders()
 
-	if _, ok := out["epp-profile"]; ok {
-		t.Fatalf("epp-profile should not be forwarded: %v", out)
+	if _, ok := out["x-llm-d-epp-profile"]; ok {
+		t.Fatalf("x-llm-d-epp-profile should not be forwarded: %v", out)
 	}
 	if got := out["x-request-id"]; got != "abc-123" {
 		t.Errorf("x-request-id = %q, want %q", got, "abc-123")

@@ -45,7 +45,7 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -187,7 +187,7 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -293,7 +293,7 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -455,7 +455,7 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)

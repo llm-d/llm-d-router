@@ -47,7 +47,7 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 		requestCount.Add(1)
 
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
-			t.Errorf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Errorf("expected x-llm-d-epp-profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -456,7 +456,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
-			t.Fatalf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
+			t.Fatalf("expected x-llm-d-epp-profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
 		}
 
 		body, _ := io.ReadAll(r.Body)

@@ -90,7 +90,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		t.Fatalf("expected path %s, got %s", testChatCompletionsPath, receivedPath)
 	}
 	if receivedPhaseHeader != gateway.PhaseDecode {
-		t.Fatalf("expected EPP-Profile: %s, got %q", gateway.PhaseDecode, receivedPhaseHeader)
+		t.Fatalf("expected x-llm-d-epp-profile: %s, got %q", gateway.PhaseDecode, receivedPhaseHeader)
 	}
 	if receivedBody["model"] != testModelName {
 		t.Fatalf("expected model %s in request body, got %v", testModelName, receivedBody["model"])
