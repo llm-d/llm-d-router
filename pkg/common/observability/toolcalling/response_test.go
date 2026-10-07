@@ -17,6 +17,7 @@ limitations under the License.
 package toolcalling
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -139,6 +140,75 @@ func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 	}
 }
 
+func TestResponseDetectorSSEEventFraming(t *testing.T) {
+	for _, ending := range []struct {
+		name  string
+		value string
+	}{
+		{name: "LF", value: "\n"},
+		{name: "CR", value: "\r"},
+		{name: "CRLF", value: "\r\n"},
+	} {
+		for _, tt := range []struct {
+			name    string
+			surface APISurface
+			lines   []string
+		}{
+			{name: "chat", surface: APISurfaceChatCompletions, lines: []string{
+				`data: {"choices":[{"delta":`,
+				": keepalive",
+				"data",
+				`data:{"tool_calls":[{"index":0}]}}]}`,
+			}},
+			{name: "messages", surface: APISurfaceMessages, lines: []string{
+				"event: content_block_start",
+				`data: {"type":"content_block_start",`,
+				`data: "content_block":{"type":"tool_use","name":"sentinel_name"}}`,
+			}},
+		} {
+			t.Run(ending.name+"/"+tt.name, func(t *testing.T) {
+				event := strings.Join(tt.lines, ending.value) + ending.value + ending.value
+				for split := 0; split <= len(event); split++ {
+					detector, err := NewResponseDetector(tt.surface, true)
+					require.NoError(t, err)
+					detector.Observe([]byte(event[:split]), false)
+					require.True(t, detector.Observe([]byte(event[split:]), false), "split at byte %d", split)
+					require.False(t, detector.DetectionIncomplete())
+					require.Empty(t, detector.eventData)
+				}
+			})
+		}
+	}
+}
+
+func TestResponseDetectorWaitsForSSEEventBoundary(t *testing.T) {
+	payload := `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n"
+	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	require.False(t, detector.Observe([]byte(payload), false))
+	require.True(t, detector.Observe([]byte("\n"), false))
+
+	detector, err = NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	require.False(t, detector.Observe([]byte(payload+"data: invalid\n\n"), false), "all data lines belong to the same JSON payload")
+}
+
+func TestResponseDetectorBoundsMultilineSSEEvent(t *testing.T) {
+	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	require.NoError(t, err)
+	line := "data: " + strings.Repeat("x", 1024) + "\n"
+	for i := 0; i <= maxResponseSSEEventBytes/1024; i++ {
+		require.False(t, detector.Observe([]byte(line), false))
+		require.LessOrEqual(t, len(detector.line)+len(detector.eventData), maxResponseSSEEventBytes)
+	}
+	require.True(t, detector.DetectionIncomplete(), "many short lines must not bypass the buffer limit")
+	require.Empty(t, detector.eventData)
+	payload := `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n"
+	require.False(t, detector.Observe([]byte(payload), false), "the remainder of an oversized event must be discarded")
+	require.True(t, detector.Observe([]byte("\n"+payload+"\n"), false), "detection resumes at the next event")
+	require.True(t, detector.DetectionIncomplete())
+}
+
 func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
 	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
@@ -193,10 +263,12 @@ func TestResponseDetectorRejectsUnsupportedSurface(t *testing.T) {
 func TestResponseDetectorDoesNotRetainCompletedPayload(t *testing.T) {
 	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
-	payload := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n"
+	payload := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n\n"
 	require.True(t, detector.Observe([]byte(payload), false))
 	require.Empty(t, detector.line)
 	require.NotContains(t, string(detector.line[:cap(detector.line)]), "sentinel_", "completed payload bytes must be cleared")
+	require.Empty(t, detector.eventData)
+	require.NotContains(t, string(detector.eventData[:cap(detector.eventData)]), "sentinel_")
 	require.True(t, detector.Observe([]byte("data: more content"), false))
 	require.Empty(t, detector.line, "detector must stop buffering after finding a tool call")
 }
@@ -205,18 +277,18 @@ func TestResponseDetectorBoundsOversizedSSELine(t *testing.T) {
 	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 
-	oversized := make([]byte, len("data: ")+maxResponseSSELineBytes+1)
+	oversized := make([]byte, len("data: ")+maxResponseSSEEventBytes+1)
 	copy(oversized, "data: ")
 	for i := len("data: "); i < len(oversized); i++ {
 		oversized[i] = 'x'
 	}
 	require.False(t, detector.Observe(oversized, false))
 	require.True(t, detector.DetectionIncomplete())
-	require.LessOrEqual(t, len(detector.line), maxResponseSSELineBytes)
+	require.LessOrEqual(t, len(detector.line), maxResponseSSEEventBytes)
 	require.Empty(t, detector.line, "overflow clears buffered bytes while discarding the rest of the line")
 
-	toolCallLine := []byte("\n" + `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n")
-	require.True(t, detector.Observe(toolCallLine, false), "detection resumes at the next SSE line")
+	toolCallLine := []byte("\n\n" + `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n\n")
+	require.True(t, detector.Observe(toolCallLine, false), "detection resumes at the next SSE event")
 	require.True(t, detector.DetectionIncomplete(), "incomplete status remains visible after later detection")
 }
 
@@ -226,11 +298,15 @@ func TestResponseDetectorCloseClearsIncompleteSSELine(t *testing.T) {
 	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
 	require.False(t, detector.Observe(payload, false))
 	require.Contains(t, string(detector.line[:cap(detector.line)]), "sentinel_arguments")
+	require.False(t, detector.Observe([]byte("\n"), false))
+	require.Contains(t, string(detector.eventData), "sentinel_arguments")
 
 	detector.Close()
 
 	require.Empty(t, detector.line)
 	require.Equal(t, make([]byte, cap(detector.line)), detector.line[:cap(detector.line)])
+	require.Empty(t, detector.eventData)
+	require.Equal(t, make([]byte, cap(detector.eventData)), detector.eventData[:cap(detector.eventData)])
 	require.False(t, detector.Observe([]byte("more data\n"), false), "closed detector must ignore later chunks")
 }
 
