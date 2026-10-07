@@ -28,6 +28,11 @@ const (
 	// use the same revision.
 	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
 
+	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
+	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
+	// system.
+	DefaultFairnessID = "default-flow"
+
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
 	FieldMaxTokens            = "max_tokens"

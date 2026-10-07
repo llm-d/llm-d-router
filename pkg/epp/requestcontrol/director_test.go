@@ -628,7 +628,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
-			wantFairnessID:         metadata.DefaultFairnessID,
+			wantFairnessID:         reqcommon.DefaultFairnessID,
 			wantSource:             tracing.AttributionSourceDefault,
 		},
 		{
@@ -1321,7 +1321,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if parseErr == nil && test.wantSource != "" {
 					wantID := test.wantSpanFairnessID
 					if wantID == "" {
-						wantID = metadata.DefaultFairnessID
+						wantID = reqcommon.DefaultFairnessID
 					}
 					found := false
 					for _, span := range recorder.Ended() {

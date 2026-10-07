@@ -25,12 +25,12 @@ import (
 	"sync"
 	"time"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const ProgramAwarePluginType = "program-aware-fairness"
@@ -219,7 +219,7 @@ func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetric
 
 func programIDFor(req *fwksched.InferenceRequest) string {
 	if req == nil || req.FairnessID == "" {
-		return metadata.DefaultFairnessID
+		return reqcommon.DefaultFairnessID
 	}
 	return req.FairnessID
 }

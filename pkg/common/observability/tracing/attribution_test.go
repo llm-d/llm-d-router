@@ -29,6 +29,7 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const testFairnessID = "team-a"
@@ -88,7 +89,7 @@ func TestRequestAttributionResolution(t *testing.T) {
 	}{
 		{
 			name:       "empty header defaults",
-			wantID:     DefaultAttributionID,
+			wantID:     reqcommon.DefaultFairnessID,
 			wantSource: AttributionSourceDefault,
 		},
 		{
@@ -138,7 +139,7 @@ func TestSetRequestAttributionNormalizes(t *testing.T) {
 		{
 			name:       "empty identity defaults",
 			source:     AttributionSourceAgentIdentity,
-			wantID:     DefaultAttributionID,
+			wantID:     reqcommon.DefaultFairnessID,
 			wantSource: AttributionSourceDefault,
 		},
 		{
@@ -296,7 +297,7 @@ func TestSetRequestAttributionRacesSpanStart(t *testing.T) {
 
 	for _, span := range recorder.Ended() {
 		id, source, present := endedAttribution(t, recorder, span.Name())
-		before := id == DefaultAttributionID && source == AttributionSourceDefault
+		before := id == reqcommon.DefaultFairnessID && source == AttributionSourceDefault
 		after := id == "agent-7" && source == AttributionSourceAgentIdentity
 		if !present || (!before && !after) {
 			t.Errorf("span %q attribution = (%q, %q, %v), want a whole pair from before or after resolution", span.Name(), id, source, present)

@@ -245,7 +245,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 			reqCtx.SchedulingRequest.FairnessID = agentID
 			source = tracing.AttributionSourceAgentIdentity
 		} else {
-			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
 			source = tracing.AttributionSourceDefault
 		}
 	}

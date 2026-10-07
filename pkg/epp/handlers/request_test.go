@@ -38,6 +38,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -584,9 +585,6 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 	otel.SetTracerProvider(provider)
 	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
 
-	// The ingress sentinel must match the one the Director resolves to.
-	require.Equal(t, metadata.DefaultFairnessID, tracing.DefaultAttributionID)
-
 	for _, tc := range []struct {
 		name               string
 		headers            []*configPb.HeaderValue
@@ -594,7 +592,7 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 	}{
 		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
 		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
-		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, tracing.DefaultAttributionID, tracing.AttributionSourceDefault},
+		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, reqcommon.DefaultFairnessID, tracing.AttributionSourceDefault},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{

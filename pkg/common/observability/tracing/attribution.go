@@ -25,12 +25,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 const (
-	// DefaultAttributionID matches the default fairness identity used by scheduling.
-	DefaultAttributionID = "default-flow"
-
 	// AttributionSourceHeader means the fairness identity came from the request header.
 	// It does not assert that the header producer was authenticated.
 	AttributionSourceHeader = "header"
@@ -68,7 +66,7 @@ type attributionKey struct{}
 // an unrecognised source as default, keeping the source attribute a closed set.
 func normalizeAttribution(id, source string) (string, string) {
 	if id == "" {
-		return DefaultAttributionID, AttributionSourceDefault
+		return reqcommon.DefaultFairnessID, AttributionSourceDefault
 	}
 
 	switch source {

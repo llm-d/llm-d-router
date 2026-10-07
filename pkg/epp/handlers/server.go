@@ -290,9 +290,9 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	if reqCtx == nil {
-		return metadata.DefaultFairnessID, "0"
+		return reqcommon.DefaultFairnessID, "0"
 	}
-	fairnessID := metadata.DefaultFairnessID
+	fairnessID := reqcommon.DefaultFairnessID
 	if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.FairnessID != "" {
 		fairnessID = reqCtx.SchedulingRequest.FairnessID
 	}
