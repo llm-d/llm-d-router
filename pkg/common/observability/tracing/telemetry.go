@@ -23,6 +23,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
@@ -35,6 +37,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/version"
@@ -370,19 +373,93 @@ func localHTTPCollectorOptions() []otlptracehttp.Option {
 
 const instrumentationName = "llm-d-router"
 
+// tracerCacheState holds a copy-on-write map of scoped tracers bound to a
+// specific TracerProvider and build metadata tuple.
+type tracerCacheState struct {
+	provider  trace.TracerProvider
+	buildRef  string
+	commitSHA string
+	tracers   map[string]trace.Tracer
+}
+
+// fastNoopTracer returns the caller's context unchanged and a shared no-op
+// span without allocating a context wrapper or span value on each Start call.
+type fastNoopTracer struct {
+	noop.Tracer
+}
+
+var (
+	// initialDefaultTP is the default global TracerProvider installed before
+	// InitTracing registers an SDK provider.
+	initialDefaultTP              = otel.GetTracerProvider()
+	noopSpan         trace.Span   = noop.Span{}
+	noopTracer       trace.Tracer = fastNoopTracer{}
+	tracerCacheMu    sync.Mutex
+	tracerCache      atomic.Pointer[tracerCacheState]
+)
+
+func (fastNoopTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	return ctx, noopSpan
+}
+
 // Tracer returns a tracer for the given instrumentation scope, defaulting to
 // "llm-d-router". Build version and commit SHA are attached so every span in a
-// trace carries consistent scope metadata.
+// trace carries consistent scope metadata. While the global TracerProvider
+// remains initialDefaultTP, Tracer returns fastNoopTracer; once a provider is
+// configured, scoped tracers are cached in tracerCache and invalidated when
+// the global provider or build metadata changes.
 func Tracer(scope ...string) trace.Tracer {
+	tp := otel.GetTracerProvider()
+	if tp == initialDefaultTP {
+		return noopTracer
+	}
 	name := instrumentationName
 	if len(scope) > 0 && scope[0] != "" {
 		name = scope[0]
 	}
-	return otel.Tracer(
+	buildRef, commitSHA := version.BuildRef, version.CommitSHA
+	if st := tracerCache.Load(); st != nil &&
+		st.provider == tp &&
+		st.buildRef == buildRef &&
+		st.commitSHA == commitSHA {
+		if t, ok := st.tracers[name]; ok {
+			return t
+		}
+	}
+
+	tracerCacheMu.Lock()
+	defer tracerCacheMu.Unlock()
+	st := tracerCache.Load()
+	if st != nil &&
+		st.provider == tp &&
+		st.buildRef == buildRef &&
+		st.commitSHA == commitSHA {
+		if t, ok := st.tracers[name]; ok {
+			return t
+		}
+	}
+	t := tp.Tracer(
 		name,
-		trace.WithInstrumentationVersion(version.BuildRef),
+		trace.WithInstrumentationVersion(buildRef),
 		trace.WithInstrumentationAttributes(
-			attribute.String("commit-sha", version.CommitSHA),
+			attribute.String("commit-sha", commitSHA),
 		),
 	)
+	nextMap := make(map[string]trace.Tracer)
+	if st != nil &&
+		st.provider == tp &&
+		st.buildRef == buildRef &&
+		st.commitSHA == commitSHA {
+		for k, v := range st.tracers {
+			nextMap[k] = v
+		}
+	}
+	nextMap[name] = t
+	tracerCache.Store(&tracerCacheState{
+		provider:  tp,
+		buildRef:  buildRef,
+		commitSHA: commitSHA,
+		tracers:   nextMap,
+	})
+	return t
 }

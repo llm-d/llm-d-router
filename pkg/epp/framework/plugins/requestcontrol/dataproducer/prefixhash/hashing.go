@@ -70,10 +70,9 @@ func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 		return nil
 	}
 
-	var result [][]BlockHash
+	result := make([][]BlockHash, 0, len(tp.Prompts))
 	for _, p := range tp.Prompts {
-		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
-		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+		hashes := hashPrompt(p.TokenIDs, blockSizeTokens, maxPrefixBlocks, request.TargetModel, tp.CacheSalt)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
 		}
@@ -85,41 +84,41 @@ func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, b
 	return result
 }
 
-// computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
-
-	h := xxhash.New()
-	// Different models should have different hashes even with the same body.
-	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
-		_, _ = h.Write([]byte(cacheSalt))
+func hashPrompt(tokens []uint32, blockSizeTokens, maxPrefixBlocks int, targetModel, cacheSalt string) []BlockHash {
+	if len(tokens) == 0 || blockSizeTokens <= 0 || maxPrefixBlocks <= 0 {
+		return nil
 	}
 
-	prevBlockHash := BlockHash(h.Sum64())
+	numBlocks := (len(tokens) + blockSizeTokens - 1) / blockSizeTokens
+	if numBlocks > maxPrefixBlocks {
+		numBlocks = maxPrefixBlocks
+	}
 
-	count := 0
-	for block := range seq {
-		if count >= maxPrefixBlocks {
-			break
-		}
+	// Different models should have different hashes even with the same body.
+	var prevBlockHash BlockHash
+	if cacheSalt == "" {
+		prevBlockHash = BlockHash(xxhash.Sum64String(targetModel))
+	} else {
+		var h xxhash.Digest
 		h.Reset()
-		blockID := block.Hash()
-		_, _ = h.Write(toBytes(BlockHash(blockID)))
-		_, _ = h.Write(toBytes(prevBlockHash))
-		blockHashes = append(blockHashes, BlockHash(h.Sum64()))
+		_, _ = h.WriteString(targetModel)
+		_, _ = h.WriteString(cacheSalt)
+		prevBlockHash = BlockHash(h.Sum64())
+	}
 
-		prevBlockHash = blockHashes[len(blockHashes)-1]
-		count++
+	blockHashes := make([]BlockHash, 0, numBlocks)
+	var buf [16]byte
+	for i := range numBlocks {
+		start := i * blockSizeTokens
+		end := min(start+blockSizeTokens, len(tokens))
+		blockID := (HashBlock{Tokens: tokens[start:end]}).Hash()
+		PutBlockHash(buf[:8], BlockHash(blockID))
+		PutBlockHash(buf[8:16], prevBlockHash)
+		prevBlockHash = BlockHash(xxhash.Sum64(buf[:16]))
+		blockHashes = append(blockHashes, prevBlockHash)
 	}
 
 	return blockHashes
-}
-
-func toBytes(i BlockHash) []byte {
-	bytes := make([]byte, 8)
-	PutBlockHash(bytes, i)
-	return bytes
 }
 
 // PutBlockHash writes h into the first 8 bytes of buf in little-endian order.

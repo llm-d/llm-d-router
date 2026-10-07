@@ -21,13 +21,22 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"runtime"
+	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/fxamacker/cbor/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/llm-d/llm-d-router/pkg/common/collections"
 )
+
+const isLittleEndian = runtime.GOARCH == "amd64" ||
+	runtime.GOARCH == "arm64" ||
+	runtime.GOARCH == "386" ||
+	runtime.GOARCH == "riscv64" ||
+	runtime.GOARCH == "ppc64le" ||
+	runtime.GOARCH == "mips64le" ||
+	runtime.GOARCH == "mipsle" ||
+	runtime.GOARCH == "wasm"
 
 // defaultBlockSize is the default number of tokens per block.
 // 16 is the default value used by vLLM.
@@ -210,14 +219,20 @@ func hashXXH64(h *xxhash.Digest, parent uint64, tokens []uint32, extras []MMHash
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], parent)
 	_, _ = h.Write(buf[:])
-	var tb [256]byte
-	for i := 0; i < len(tokens); {
-		n := min(len(tokens)-i, len(tb)/4)
-		for j := 0; j < n; j++ {
-			binary.LittleEndian.PutUint32(tb[j*4:], tokens[i+j])
+	if len(tokens) > 0 {
+		if isLittleEndian {
+			_, _ = h.Write(unsafe.Slice((*byte)(unsafe.Pointer(&tokens[0])), len(tokens)*4))
+		} else {
+			var tb [256]byte
+			for i := 0; i < len(tokens); {
+				n := min(len(tokens)-i, len(tb)/4)
+				for j := 0; j < n; j++ {
+					binary.LittleEndian.PutUint32(tb[j*4:], tokens[i+j])
+				}
+				_, _ = h.Write(tb[:n*4])
+				i += n
+			}
 		}
-		_, _ = h.Write(tb[:n*4])
-		i += n
 	}
 	for _, mm := range extras {
 		binary.LittleEndian.PutUint64(buf[:], uint64(len(mm.Hash)))
@@ -227,48 +242,9 @@ func hashXXH64(h *xxhash.Digest, parent uint64, tokens []uint32, extras []MMHash
 	return h.Sum64()
 }
 
-// prefixHashes returns a slice of uint64 hashes.
-// extraFeatures must be the same length as tokenChunks (callers guarantee this).
-func (db *chunkedTokenDatabase) prefixHashes(
-	parentHash uint64, tokenChunks [][]uint32, extraFeatures []*BlockExtraFeatures,
-	digest *xxhash.Digest,
-) []uint64 {
-	prefix := parentHash
-	hashes := make([]uint64, len(tokenChunks))
-	for i, chunk := range tokenChunks {
-		var extras []MMHash
-		if extraFeatures[i] != nil {
-			extras = extraFeatures[i].MMHashes
-		}
-		if digest != nil {
-			prefix = hashXXH64(digest, prefix, chunk, extras)
-		} else {
-			prefix = db.hash(prefix, chunk, extras)
-		}
-		hashes[i] = prefix
-	}
-	return hashes
-}
-
 // BlockSize returns the number of tokens per block.
 func (db *chunkedTokenDatabase) BlockSize() int {
 	return db.BlockSizeTokens
-}
-
-// chunkTokens splits the input slice of tokens into chunks of size blockSize.
-func (db *chunkedTokenDatabase) chunkTokens(tokens []uint32) [][]uint32 {
-	bs := db.BlockSizeTokens
-	var chunks [][]uint32
-	for i := 0; i < len(tokens); i += bs {
-		end := i + bs
-		if end > len(tokens) {
-			break // no partial blocks
-		}
-
-		chunks = append(chunks, tokens[i:end])
-	}
-
-	return chunks
 }
 
 // TokensToKVBlockKeys converts tokens into kv_block.Keys.
@@ -276,33 +252,50 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	parentKey BlockHash, tokens []uint32, modelName string,
 	extraFeatures []*BlockExtraFeatures,
 ) ([]BlockHash, error) {
-	chunks := db.chunkTokens(tokens)
-	if len(chunks) == 0 {
+	bs := db.BlockSizeTokens
+	if bs <= 0 {
+		return nil, nil
+	}
+	numChunks := len(tokens) / bs
+	if numChunks == 0 {
 		return nil, nil
 	}
 
-	var digest *xxhash.Digest // one per call
-	if db.HashAlgorithm == HashAlgorithmXXH64 {
-		digest = xxhash.New()
+	if extraFeatures != nil && len(extraFeatures) != numChunks {
+		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d (blockSizeTokens=%d, tokens=%d)",
+			len(extraFeatures), numChunks, bs, len(tokens))
 	}
 
-	var currentParentHash uint64
+	var (
+		digestValue       xxhash.Digest
+		digest            *xxhash.Digest
+		currentParentHash uint64
+	)
+	if db.HashAlgorithm == HashAlgorithmXXH64 {
+		digest = &digestValue
+	}
+
 	if parentKey != EmptyBlockHash {
 		currentParentHash = uint64(parentKey)
 	} else {
 		currentParentHash = db.getInitHash(modelName, digest)
 	}
 
-	if extraFeatures == nil {
-		extraFeatures = make([]*BlockExtraFeatures, len(chunks))
-	} else if len(extraFeatures) != len(chunks) {
-		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d (blockSizeTokens=%d, tokens=%d)",
-			len(extraFeatures), len(chunks), db.BlockSizeTokens, len(tokens))
+	res := make([]BlockHash, numChunks)
+	prefix := currentParentHash
+	for i := range numChunks {
+		chunk := tokens[i*bs : (i+1)*bs]
+		var extras []MMHash
+		if extraFeatures != nil && extraFeatures[i] != nil {
+			extras = extraFeatures[i].MMHashes
+		}
+		if digest != nil {
+			prefix = hashXXH64(digest, prefix, chunk, extras)
+		} else {
+			prefix = db.hash(prefix, chunk, extras)
+		}
+		res[i] = BlockHash(prefix)
 	}
 
-	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures, digest)
-
-	return collections.SliceMap(ph, func(hashVal uint64) BlockHash {
-		return BlockHash(hashVal)
-	}), nil
+	return res, nil
 }
