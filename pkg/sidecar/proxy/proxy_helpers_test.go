@@ -24,6 +24,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
@@ -302,6 +303,24 @@ var _ = Describe("readJSONBody", func() {
 			ContainSubstring("rejecting unsupported responses field"),
 			ContainSubstring(reqcommon.FieldPreviousResponseID),
 		)))
+	})
+})
+
+var _ = Describe("createDecoderProxyHandler", func() {
+	It("labels the decoder-unavailable error body as JSON", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
+		w := httptest.NewRecorder()
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(w, postBody(`{"model":"m"}`))
+
+		resp := w.Result()
+		Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+		Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
 	})
 })
 

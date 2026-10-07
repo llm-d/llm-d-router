@@ -25,7 +25,10 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
@@ -55,6 +58,8 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	roomID := s.generateSGLangRoomID()
+	// SGLang keys its P/D transfer state and log lines by the bootstrap room.
+	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	// Inject bootstrap info for both prefill and decode
 	bootstrapInfo := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)

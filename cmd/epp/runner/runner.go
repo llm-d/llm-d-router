@@ -83,6 +83,7 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -114,6 +115,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/selectivekv"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -196,6 +198,7 @@ type Runner struct {
 	healthGRPCServer *grpc.Server
 	healthGRPCPort   uint16
 	draining         *atomic.Bool
+	isLeader         *atomic.Bool
 
 	// grpcListener and healthListener are optional pre-bound listeners for the
 	// runWithFileDiscovery path; when set, the ext_proc and health servers serve
@@ -297,31 +300,59 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	return r.runWithGracefulShutdown(ctx, mgr, opts.DrainTimeout)
+	return r.runWithGracefulShutdown(ctx, mgr, opts.EnableLeaderElection, opts.DrainTimeout)
 }
 
 // runWithGracefulShutdown runs the ext_proc and health servers on a context that
-// outlives the manager. On SIGTERM (ctx cancelled) the manager stops and releases
-// its leader lease, the pod is marked NotServing (so Kubernetes drains it from the
-// Service endpoints), and the ext_proc server keeps accepting requests for
-// drainTimeout so in-flight and pre-DNS-refresh requests are served rather than
-// rejected. A drainTimeout of 0 stops the servers as soon as the manager
-// terminates. setup() has stashed the servers on r.
-func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, drainTimeout time.Duration) error {
+// outlives the manager; see serveWithDrain. setup() has stashed the servers on r.
+func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, leaderElection bool, drainTimeout time.Duration) error {
+	extProc := func(c context.Context) error {
+		return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+	}
+	health := func(c context.Context) error {
+		return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
+	}
+	// Without leader election setup() sets isLeader for readiness alone, so it
+	// says nothing about a lease.
+	var elected *atomic.Bool
+	if leaderElection {
+		elected = r.isLeader
+	}
+	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
+}
+
+// serveWithDrain runs extProc and health on a context that outlives the manager.
+// The drain starts on SIGTERM (ctx cancelled; the manager stops and releases its
+// leader lease) and when the manager stops on its own after this instance was
+// elected, which is how a lost lease surfaces. The pod is marked NotServing (so
+// Kubernetes drains it from the Service endpoints), and the ext_proc server keeps
+// accepting requests for drainTimeout so in-flight and pre-DNS-refresh requests
+// are served rather than rejected. ext_proc then stops gracefully, finishing its
+// streams, and the health server stops after it so liveness holds meanwhile. A
+// drainTimeout of 0 stops ext_proc as soon as the manager terminates. A manager
+// that fails before election, or with leader election disabled (elected is nil),
+// stops both servers at once.
+func serveWithDrain(ctx context.Context, startManager func(context.Context) error, extProc, health func(context.Context) error,
+	draining, elected *atomic.Bool, drainTimeout time.Duration) error {
 	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
-	// immediately stop the ext_proc/health servers.
+	// immediately stop the ext_proc/health servers. stopExtProc ends ext_proc alone.
 	serveCtx, serveCancel := context.WithCancel(context.Background())
 	defer serveCancel()
+	extProcStop, stopExtProc := context.WithCancel(context.Background())
+	defer stopExtProc()
 
+	extProcDone := make(chan struct{})
 	serveErr := make(chan error, 1)
 	go func() {
 		g := newRunnableGroup()
 		g.Add("ext-proc", func(c context.Context) error {
-			return r.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(c)
+			defer close(extProcDone)
+			c, cancel := context.WithCancel(c)
+			defer cancel()
+			defer context.AfterFunc(extProcStop, cancel)()
+			return extProc(c)
 		})
-		g.Add("health", func(c context.Context) error {
-			return runnable.NoLeaderElection(runnable.GRPCServer("health", r.healthGRPCServer, r.healthGRPCPort)).Start(c)
-		})
+		g.Add("health", health)
 		serveErr <- g.Run(serveCtx)
 	}()
 
@@ -330,33 +361,40 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	// the Service endpoints while we keep serving in-flight traffic.
 	go func() {
 		<-ctx.Done()
-		r.draining.Store(true)
+		draining.Store(true)
 		setupLog.Info("Shutdown signal received: draining (NotServing) while finishing in-flight requests", "drainTimeout", drainTimeout)
 	}()
 
 	// Blocks until SIGTERM cancels ctx; returns once the manager has stopped and
 	// released the leader lease (LeaderElectionReleaseOnCancel).
 	setupLog.Info("Controller manager starting")
-	mgrErr := mgr.Start(ctx)
-	if mgrErr != nil {
+	mgrErr := startManager(ctx)
+	switch {
+	case mgrErr == nil:
+		setupLog.Info("Controller manager terminated; starting drain window")
+	case elected != nil && elected.Load() && ctx.Err() == nil:
+		draining.Store(true)
+		setupLog.Error(mgrErr, "Controller manager stopped after this instance led: draining (NotServing) while finishing in-flight requests", "drainTimeout", drainTimeout)
+	default:
 		setupLog.Error(mgrErr, "Error starting controller manager")
 		serveCancel()
 		<-serveErr
 		return mgrErr
 	}
-	setupLog.Info("Controller manager terminated; starting drain window")
 
-	// Keep serving ext_proc for the drain window, then stop. GracefulStop drains
-	// in-flight streams.
+	// Keep serving ext_proc for the drain window, then stop it. GracefulStop
+	// drains in-flight streams while the health server keeps answering.
 	select {
 	case <-time.After(drainTimeout):
 		setupLog.Info("Drain window elapsed, stopping ext_proc server")
 	case err := <-serveErr:
 		// The servers exited on their own (e.g. listener error) during the drain.
-		return err
+		return errors.Join(mgrErr, err)
 	}
+	stopExtProc()
+	<-extProcDone
 	serveCancel()
-	return <-serveErr
+	return errors.Join(mgrErr, <-serveErr)
 }
 
 // setup configures the internal state of the Runner, including the manager,
@@ -423,8 +461,10 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 
 	isLeader := &atomic.Bool{}
 	isLeader.Store(false)
+	r.isLeader = isLeader
 
-	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, managerOverrides...)
+	overrides := append([]func(*ctrl.Options){opts.LeaderElectionOverride()}, managerOverrides...)
+	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, overrides...)
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
 		return nil, nil, err
@@ -619,8 +659,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
 
 	// bylabel role filters
+	// Stable
+	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityStable, bylabel.SelectorFactory)
 	// Beta
-	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityBeta, bylabel.SelectorFactory)
 	fwkplugin.Register(bylabel.EncodeRoleType, fwkplugin.StabilityBeta, bylabel.EncodeRoleFactory)
 	fwkplugin.Register(bylabel.DecodeRoleType, fwkplugin.StabilityBeta, bylabel.DecodeRoleFactory)
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
@@ -631,8 +672,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
 
 	// dataparallel profile handler
-	// Beta
-	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, fwkplugin.StabilityBeta, dataparallel.ProfileHandlerFactory)
+	// Stable
+	fwkplugin.Register(dataparallel.DataParallelProfileHandlerType, fwkplugin.StabilityStable, dataparallel.ProfileHandlerFactory)
 
 	// extra scheduling scorers
 	// Beta
@@ -644,9 +685,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(attributeweight.EndpointAttributeWeightScorerType, fwkplugin.StabilityAlpha, attributeweight.Factory)
 
 	// data layer models source/extractor
-	// Beta
-	fwkplugin.Register(srcmodels.ModelsDataSourceType, fwkplugin.StabilityBeta, srcmodels.ModelDataSourceFactory)
-	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityBeta, extmodels.ModelServerExtractorFactory)
+	// Stable
+	fwkplugin.Register(srcmodels.ModelsDataSourceType, fwkplugin.StabilityStable, srcmodels.ModelDataSourceFactory)
+	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityStable, extmodels.ModelServerExtractorFactory)
 	// Alpha
 	fwkplugin.Register(labelproducer.LabelProducerType, fwkplugin.StabilityAlpha, labelproducer.Factory)
 	fwkplugin.Register(attrtopology.TopologyExtractorType, fwkplugin.StabilityAlpha, exttopology.Factory)
@@ -657,12 +698,13 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(attrgpu.DCGMExtractorType, fwkplugin.StabilityAlpha, extdcgm.DCGMExtractorFactory)
 
 	// scheduling & profile handler plugins
+	// Stable
+	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityStable, single.SingleProfileHandlerFactory)
+	fwkplugin.Register(maxscore.MaxScorePickerType, fwkplugin.StabilityStable, maxscore.MaxScorePickerFactory)
+	fwkplugin.Register(random.RandomPickerType, fwkplugin.StabilityStable, random.RandomPickerFactory)
+	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, fwkplugin.StabilityStable, weightedrandom.WeightedRandomPickerFactory)
 	// Beta
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityBeta, prefix.PrefixCachePluginFactory)
-	fwkplugin.Register(maxscore.MaxScorePickerType, fwkplugin.StabilityBeta, maxscore.MaxScorePickerFactory)
-	fwkplugin.Register(random.RandomPickerType, fwkplugin.StabilityBeta, random.RandomPickerFactory)
-	fwkplugin.Register(weightedrandom.WeightedRandomPickerType, fwkplugin.StabilityBeta, weightedrandom.WeightedRandomPickerFactory)
-	fwkplugin.Register(single.SingleProfileHandlerType, fwkplugin.StabilityBeta, single.SingleProfileHandlerFactory)
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
@@ -683,6 +725,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(topologyaffinityscorer.ScorerType, fwkplugin.StabilityAlpha, topologyaffinityscorer.Factory)
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
+	fwkplugin.Register(selectivekv.PluginType, fwkplugin.StabilityAlpha, selectivekv.PluginFactory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
@@ -691,14 +734,16 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
 
 	// Flow Control plugins
+	// Stable
+	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, fwkplugin.StabilityStable, globalstrict.GlobalStrictFairnessPolicyFactory)
+	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fwkplugin.StabilityStable, fcfs.FCFSOrderingPolicyFactory)
 	// Beta
-	fwkplugin.Register(globalstrict.GlobalStrictFairnessPolicyType, fwkplugin.StabilityBeta, globalstrict.GlobalStrictFairnessPolicyFactory)
 	fwkplugin.Register(roundrobin.RoundRobinFairnessPolicyType, fwkplugin.StabilityBeta, roundrobin.RoundRobinFairnessPolicyFactory)
 	fwkplugin.Register(programaware.ProgramAwarePluginType, fwkplugin.StabilityBeta, programaware.ProgramAwarePluginFactory)
-	fwkplugin.Register(fcfs.FCFSOrderingPolicyType, fwkplugin.StabilityBeta, fcfs.FCFSOrderingPolicyFactory)
 	fwkplugin.Register(edf.EDFOrderingPolicyType, fwkplugin.StabilityBeta, edf.EDFOrderingPolicyFactory)
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, fwkplugin.StabilityBeta, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityBeta, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(bandselection.StrictBandSelectionPolicyType, fwkplugin.StabilityBeta, bandselection.StrictPolicyFactory)
 	// Alpha
 	fwkplugin.Register(evictfiltering.SheddableFilterType, fwkplugin.StabilityAlpha, evictfiltering.SheddableFilterFactory)
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
@@ -1056,10 +1101,11 @@ func (r *Runner) initAdmissionControl(
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 
 	deps := fccontroller.Deps{
-		Registry:           registry,
-		SaturationDetector: eppConfig.SaturationDetector,
-		EndpointCandidates: endpointCandidates,
-		UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		Registry:            registry,
+		SaturationDetector:  eppConfig.SaturationDetector,
+		EndpointCandidates:  endpointCandidates,
+		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
+		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor

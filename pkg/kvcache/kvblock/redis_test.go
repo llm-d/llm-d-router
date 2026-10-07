@@ -48,3 +48,27 @@ func createRedisIndexForTesting(t *testing.T) Index {
 func TestRedisIndexBehavior(t *testing.T) {
 	testCommonIndexBehavior(t, createRedisIndexForTesting)
 }
+
+// TestRedisIndexEvictLookupFailure verifies that a lookup failure (e.g. lost
+// connectivity) is propagated instead of being reported as a successful no-op,
+// so callers and metrics do not treat a failed eviction as completed.
+func TestRedisIndexEvictLookupFailure(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	server.Close()
+
+	require.Error(t, index.Evict(t.Context(), BlockHash(0xC1EA00F1), EngineKey, []PodEntry{{}}))
+}
+
+// TestRedisIndexEvictMissingEngineKeyIsNoOp pins the intentional no-op when
+// the engine key has no request-key mapping: eviction of an absent key is not
+// an error and must not be counted as a failure.
+func TestRedisIndexEvictMissingEngineKeyIsNoOp(t *testing.T) {
+	index := createRedisIndexForTesting(t)
+
+	require.NoError(t, index.Evict(t.Context(), BlockHash(0xC1EA00F2), EngineKey, []PodEntry{{}}))
+}

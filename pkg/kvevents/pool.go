@@ -31,12 +31,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 const (
-	defaultEventSourceDeviceTier = "gpu"
+	defaultEventSourceDeviceTier = kvcache.GPUTier
 	defaultPodSelector           = ""
 )
 
@@ -129,6 +130,10 @@ type PodDiscoveryConfig struct {
 	// ReplaySocketPort is the port where vLLM pods expose their ZMQ ROUTER
 	// socket for replay requests. Disabled when not set (0 or negative).
 	ReplaySocketPort int `json:"replaySocketPort,omitempty"`
+	// SnapshotSocketPort is the port where vLLM pods serve KV cache snapshots,
+	// offset by rank like SocketPort. A subscriber loads the snapshot in place
+	// of a full replay. Disabled when not set (0 or negative).
+	SnapshotSocketPort int `json:"snapshotSocketPort,omitempty"`
 }
 
 // EffectiveReplayPort returns the replay socket port.

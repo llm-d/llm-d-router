@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // OffloadingConnector kv_transfer_params fields. The role is encoded by the
@@ -150,6 +151,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	pw := &bufferedResponseWriter{}
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
+	metrics.RecordPrefillDuration(prefillDuration)
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
@@ -157,6 +159,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
+		metrics.RecordError(metrics.StagePrefill)
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
@@ -194,9 +197,18 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	decodeStart := time.Now()
 
-	s.decoderProxy.ServeHTTP(w, cloneRequestWithBody(decodeCtx, r, decodeBody))
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
+	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(
 		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
 		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),

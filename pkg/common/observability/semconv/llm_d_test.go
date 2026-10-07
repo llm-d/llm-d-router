@@ -178,6 +178,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantKey:  "llm_d.epp.profile_handler.decode_failed",
 			wantType: attribute.BOOL,
 		},
+		{
+			name:     "LLMDEPPProfileHandlerPrefillFailed",
+			got:      LLMDEPPProfileHandlerPrefillFailed(true),
+			wantKey:  "llm_d.epp.profile_handler.prefill_failed",
+			wantType: attribute.BOOL,
+		},
 
 		// EPP Disagg
 		{
@@ -519,6 +525,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			got:      LLMDPDProxyPrefillTarget("10.0.0.1:8000"),
 			wantKey:  "llm_d.pd_proxy.prefill_target",
 			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyBootstrapRoom",
+			got:      LLMDPDProxyBootstrapRoom(1790000000000000123),
+			wantKey:  "llm_d.pd_proxy.bootstrap_room",
+			wantType: attribute.INT64,
 		},
 		{
 			name:     "LLMDPDProxyPrefillCandidates",

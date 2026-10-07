@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -1026,6 +1027,48 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 				t.Fatalf("did not expect a warning log for %s, infos=%v", tc.kvConn, sink.infos)
 			}
 		})
+	}
+}
+
+func TestPrefillStep_DebugRequestRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": nil})
+	}))
+	defer server.Close()
+
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamKVConnector:    kv.SharedStorage,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger, records := captureLogger(logutil.DEBUG)
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test-model",
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: make(map[string]any),
+		OriginalHeaders:  http.Header{"Authorization": {"Bearer secret"}},
+	}
+	if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{
+		`"msg"="request body"`,
+		`"path"="` + reqcommon.PathVLLMGenerate + `"`,
+		`"bodyLen"=`,
+		`"authorization"="[REDACTED]"`,
+		`"x-request-id"="req-1"`,
+	}
+	if got := countRecords(records(), want...); got != 1 {
+		t.Errorf("%d records contain %v, want 1, records=%v", got, want, records())
+	}
+	if got := countRecords(records(), "Bearer secret"); got != 0 {
+		t.Errorf("%d records contain the authorization value, want 0, records=%v", got, records())
 	}
 }
 

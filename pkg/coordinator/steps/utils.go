@@ -17,16 +17,21 @@ limitations under the License.
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 
 	"github.com/go-logr/logr"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -44,6 +49,58 @@ func readErrorBody(r io.Reader) []byte {
 // server can map an upstream 4xx to a client error and a 5xx to a gateway fault.
 func upstreamError(step string, statusCode int, body []byte) error {
 	return &pipeline.UpstreamError{Step: step, StatusCode: statusCode, Body: string(body)}
+}
+
+// gatewayHeaders returns a fresh map per call, so the caller may modify it.
+func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]string {
+	headers := reqCtx.ForwardedHeaders()
+	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
+	headers[gateway.EPPProfileHeader] = phase
+	return headers
+}
+
+// checkStatus returns a pipeline.UpstreamError tagged with step when the status
+// of resp is other than 200. A non-200 consumes up to maxErrorBodySize of the
+// body; a 200 leaves it unread. Closing stays with the caller.
+func checkStatus(step string, resp *http.Response) error {
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	return upstreamError(step, resp.StatusCode, readErrorBody(resp.Body))
+}
+
+// gatewayRequest is the parameter of a POST that a step sends to the gateway.
+type gatewayRequest struct {
+	// logMsg is the message of the DEBUG request record.
+	logMsg string
+	// step tags the errors.
+	step string
+	// upstream labels the call's metrics.
+	upstream string
+	path     string
+	body     []byte
+	headers  map[string]string
+}
+
+// postToGateway sends req to the gateway and returns the response. On success
+// the caller closes the response body. An error returns a nil response, with
+// the body already closed when the status was other than 200.
+func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, req gatewayRequest) (*http.Response, error) {
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info(req.logMsg, "method", "POST", "path", req.path, "bodyLen", len(req.body), "headers", httplog.RedactedHeaders(req.headers))
+	}
+
+	call := coordmetrics.StartUpstreamCall(req.upstream)
+	resp, err := gwClient.Post(ctx, req.path, req.body, req.headers)
+	call.Done()
+	if err != nil {
+		return nil, fmt.Errorf("%s: request: %w", req.step, err)
+	}
+	if err := checkStatus(req.step, resp); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
 }
 
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to

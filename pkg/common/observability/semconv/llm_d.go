@@ -60,6 +60,7 @@ const (
 	LLMDEPPProfileHandlerTotalProfilesKey    = attribute.Key("llm_d.epp.profile_handler.total_profiles")
 	LLMDEPPProfileHandlerExecutedProfilesKey = attribute.Key("llm_d.epp.profile_handler.executed_profiles")
 	LLMDEPPProfileHandlerDecodeFailedKey     = attribute.Key("llm_d.epp.profile_handler.decode_failed")
+	LLMDEPPProfileHandlerPrefillFailedKey    = attribute.Key("llm_d.epp.profile_handler.prefill_failed")
 
 	// EPP Producer attributes
 	LLMDEPPProducerCandidateEndpointsKey = attribute.Key("llm_d.epp.producer.candidate_endpoints")
@@ -118,6 +119,7 @@ const (
 	LLMDPDProxyRequestPathKey                 = attribute.Key("llm_d.pd_proxy.request_path")
 	LLMDPDProxyPrefillTargetKey               = attribute.Key("llm_d.pd_proxy.prefill_target")
 	LLMDPDProxyPrefillCandidatesKey           = attribute.Key("llm_d.pd_proxy.prefill_candidates")
+	LLMDPDProxyBootstrapRoomKey               = attribute.Key("llm_d.pd_proxy.bootstrap_room")
 	LLMDPDProxyDecodeTargetKey                = attribute.Key("llm_d.pd_proxy.decode.target")
 	LLMDPDProxyReasonKey                      = attribute.Key("llm_d.pd_proxy.reason")
 	LLMDPDProxyErrorKey                       = attribute.Key("llm_d.pd_proxy.error")
@@ -284,6 +286,11 @@ func LLMDEPPProfileHandlerExecutedProfiles(executed int) attribute.KeyValue {
 // LLMDEPPProfileHandlerDecodeFailed returns an attribute indicating whether decode execution failed.
 func LLMDEPPProfileHandlerDecodeFailed(failed bool) attribute.KeyValue {
 	return LLMDEPPProfileHandlerDecodeFailedKey.Bool(failed)
+}
+
+// LLMDEPPProfileHandlerPrefillFailed returns an attribute indicating whether a required prefill execution failed.
+func LLMDEPPProfileHandlerPrefillFailed(failed bool) attribute.KeyValue {
+	return LLMDEPPProfileHandlerPrefillFailedKey.Bool(failed)
 }
 
 // EPP Disagg helpers
@@ -576,6 +583,11 @@ func LLMDPDProxyPrefillTarget(target string) attribute.KeyValue {
 // LLMDPDProxyPrefillCandidates returns an attribute for PD proxy prefill candidate count.
 func LLMDPDProxyPrefillCandidates(candidates int) attribute.KeyValue {
 	return LLMDPDProxyPrefillCandidatesKey.Int(candidates)
+}
+
+// LLMDPDProxyBootstrapRoom returns an attribute for the SGLang P/D bootstrap room ID.
+func LLMDPDProxyBootstrapRoom(room int64) attribute.KeyValue {
+	return LLMDPDProxyBootstrapRoomKey.Int64(room)
 }
 
 // LLMDPDProxyDecodeTarget returns an attribute for PD proxy decode target host/port.

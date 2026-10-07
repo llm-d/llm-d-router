@@ -369,9 +369,8 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return upstreamError(RenderStepName, resp.StatusCode, respBody)
+	if err := checkStatus(RenderStepName, resp); err != nil {
+		return err
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

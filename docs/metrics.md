@@ -231,6 +231,36 @@ self-consistent, but CJK, code, and chat-template-heavy inputs shift it against 
 `llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
 candidate rather than the chosen one, which bounds the reuse available to any routing decision.
 
+### Token producer render
+
+These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
+families are registered when the plugin is created; observations require render calls made for
+requests. The startup warmup probe is not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
+
+`backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
+one whose caller went away before the render returned, and it is not counted as a failure. `reason`
+is one of:
+
+| Reason | Meaning |
+|---|---|
+| `timeout` | The render budget (`vllm.timeout` for completions, the larger of `vllm.timeout` and `vllm.mmTimeout` otherwise), an `endpointDiscovery.attemptTimeout`, or the caller's deadline expired. |
+| `status` | The render endpoint returned a non-2xx status. |
+| `connection` | The request could not be sent or the connection failed before a response arrived. |
+| `decode` | The response body could not be decoded. |
+| `no_endpoints` | Endpoint discovery has no render endpoint to select. |
+| `other` | Any other failure. |
+
+A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
+skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
+render budget, while a render endpoint that is down shows `connection` failures with short
+durations. The plugin also logs render failures at error level with the elapsed time and the
+configured timeout, at most once every 10 seconds per plugin instance.
+
 ### Multimodal encoder cache
 
 These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an
@@ -291,6 +321,7 @@ This plugin records the routing decision for each request.
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
 *   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
+    Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.

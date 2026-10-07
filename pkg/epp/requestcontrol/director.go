@@ -251,6 +251,16 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}
+	reservationPending := false
+	reservationReleaser, hasReservationReleaser := d.admissionController.(dispatchReservationReleaser)
+	if hasReservationReleaser {
+		reservationPending = true
+		defer func() {
+			if reservationPending {
+				reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+			}
+		}()
+	}
 
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
 	if len(endpointCandidates) == 0 {
@@ -304,6 +314,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	reqCtx, err = d.prepareRequest(ctx, reqCtx, result)
 	if err != nil {
 		return reqCtx, err
+	}
+	if reservationPending {
+		reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+		reservationPending = false
 	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err

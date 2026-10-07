@@ -309,6 +309,55 @@ func TestDetector_Saturation(t *testing.T) {
 	}
 }
 
+func TestDetector_DispatchReservations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	reg := newLocalRegistry()
+	endpoint := newFakeEndpoint(reg, "endpoint-a")
+
+	t.Run("request mode counts pending dispatches idempotently", func(t *testing.T) {
+		t.Parallel()
+		detector := newDetector("test", config{mode: modeRequests, maxConcurrency: 8}, logr.Discard())
+
+		for i := range 6 {
+			require.True(t, detector.ReserveDispatch(fmt.Sprintf("req-%d", i)))
+		}
+		require.False(t, detector.ReserveDispatch("req-0"), "duplicate reservation must be ignored")
+		require.InDelta(t, 0.75, detector.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+
+		require.True(t, detector.ReleaseDispatch("req-0"))
+		require.False(t, detector.ReleaseDispatch("req-0"), "duplicate release must be ignored")
+		require.False(t, detector.ReleaseDispatch("unknown"), "unknown release must be ignored")
+		require.InDelta(t, 0.625, detector.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+
+	t.Run("hybrid mode uses pending request saturation as a lower bound", func(t *testing.T) {
+		t.Parallel()
+		detector := newDetector("test", config{
+			mode:                modeHybrid,
+			maxConcurrency:      8,
+			maxTokenConcurrency: 80_000,
+		}, logr.Discard())
+
+		for i := range 6 {
+			detector.ReserveDispatch(fmt.Sprintf("hybrid-%d", i))
+		}
+		require.InDelta(t, 0.75, detector.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+
+	t.Run("token mode is unchanged", func(t *testing.T) {
+		t.Parallel()
+		detector := newDetector("test", config{
+			mode:                modeTokens,
+			maxTokenConcurrency: 80_000,
+		}, logr.Discard())
+
+		detector.ReserveDispatch("token-only")
+		require.InDelta(t, 0.0, detector.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+}
+
 // TestDetector_Lifecycle verifies the full state transition cycle.
 func TestDetector_Lifecycle(t *testing.T) {
 	t.Parallel()

@@ -117,7 +117,7 @@ type decodeOutcome struct {
 func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyResponse func(*http.Response) error) (*httputil.ReverseProxy, *decodeOutcome) {
 	out := &decodeOutcome{}
 	proxy := &httputil.ReverseProxy{
-		Director:      func(_ *http.Request) {},
+		Director:      func(_ *http.Request) {}, //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
 		FlushInterval: -1,
 		Transport:     transport,
 		ModifyResponse: func(resp *http.Response) error {

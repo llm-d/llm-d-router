@@ -73,7 +73,7 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 
 	var parsedResp *fwkrh.ParsedResponse
-	parser, err := s.getOrResolveParser(ctx, reqCtx)
+	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else {
