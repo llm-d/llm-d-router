@@ -267,18 +267,18 @@ func (s *RedisStateStore) Set(ctx context.Context, key fwkdl.StateKey, endpointI
 }
 
 // get combines the live local value with the peer aggregate prepared by set.
-func (s *RedisStateStore) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) (any, error) {
+func (s *RedisStateStore) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) any {
 	hashKey := s.hashKey(key, endpointID)
 	cached, ok := s.cache.Load(hashKey)
 	if !ok {
-		return aggregate([]any{local}), nil
+		return aggregate([]any{local})
 	}
 	entry := cached.(*aggregateCacheEntry)
 	if !entry.expiresAt.After(time.Now()) {
 		s.cache.CompareAndDelete(hashKey, cached)
-		return aggregate([]any{local}), nil
+		return aggregate([]any{local})
 	}
-	return aggregate([]any{local, entry.value}), nil
+	return aggregate([]any{local, entry.value})
 }
 
 func (s *RedisStateStore) Get(ctx context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
@@ -286,8 +286,7 @@ func (s *RedisStateStore) Get(ctx context.Context, key fwkdl.StateKey, endpointI
 	if err != nil {
 		return nil, false, err
 	}
-	value, err := s.get(ctx, key, endpointID, state.read(endpointID), state.aggregate)
-	return value, err == nil, err
+	return s.get(ctx, key, endpointID, state.read(endpointID), state.aggregate), true, nil
 }
 
 func (s *RedisStateStore) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {

@@ -155,8 +155,7 @@ func sumCustomValues(values []any) any {
 
 func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string, local any) int {
 	t.Helper()
-	value, err := store.get(context.Background(), key, endpointID, local, sumInts)
-	require.NoError(t, err)
+	value := store.get(context.Background(), key, endpointID, local, sumInts)
 	return value.(int)
 }
 
@@ -230,12 +229,11 @@ func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	require.NoError(t, store.set(
 		context.Background(), testStateKey, testEndpointID, &customValue{Count: 4}, sumCustomValues,
 	))
-	value, err := store.get(
+	value := store.get(
 		context.Background(), testStateKey, testEndpointID,
 		&customValue{Count: 4}, sumCustomValues,
 	)
 
-	require.NoError(t, err)
 	require.Equal(t, &customValue{Count: 11}, value)
 }
 
@@ -327,9 +325,8 @@ func TestGetReturnsLiveLocalBeforeSet(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
 
-	value, err := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
+	value := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
 
-	require.NoError(t, err)
 	require.Equal(t, 4, value)
 	require.Zero(t, counter.count.Load())
 }
@@ -356,9 +353,8 @@ func TestExpiredPeerAggregateFallsBackToLiveLocal(t *testing.T) {
 		expiresAt: time.Now().Add(-time.Second),
 	})
 
-	value, err := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
+	value := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
 
-	require.NoError(t, err)
 	require.Equal(t, 4, value)
 	_, cached := store.cache.Load(hashKey)
 	require.False(t, cached)
