@@ -349,11 +349,21 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	n := len(weightedScorePerEndpoint)
 	storage := make([]fwksched.ScoredEndpoint, n)
 	scoredEndpoints := make([]*fwksched.ScoredEndpoint, n)
+	endpoints := make([]fwksched.Endpoint, n)
 	i := 0
 	for endpoint, score := range weightedScorePerEndpoint {
-		storage[i] = fwksched.ScoredEndpoint{Endpoint: endpoint, Score: score}
+		endpoints[i] = endpoint
+		storage[i].Score = score
 		scoredEndpoints[i] = &storage[i]
 		i++
+	}
+	// The picker sees each candidate through a scope until it returns; storage
+	// is then restored in place, so ScoredCandidates and any target pointing
+	// into storage carry the underlying endpoint. Violations dropped: Pick has
+	// no error return, see runFilterPlugins.
+	scoped, _ := datalayer.Scope(logger, pickerExtensionPoint, p.picker, endpoints)
+	for i := range storage {
+		storage[i].Endpoint = scoped[i]
 	}
 	typedName := p.picker.TypedName()
 	debug := logger.V(logutil.DEBUG)
@@ -389,11 +399,15 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+	for i := range storage {
+		storage[i].Endpoint = endpoints[i]
+	}
 	if debugEnabled {
 		debug.Info("Completed running picker plugin successfully", "plugin", typedName, "result", result)
 	}
 
 	if result != nil {
+		result.TargetEndpoints = datalayer.Unscope(result.TargetEndpoints)
 		// Record the complete candidate set, which pickers narrow to their
 		// selection. Pickers reorder and truncate the pointer slice, never the
 		// backing array, so storage still holds every scored candidate.
