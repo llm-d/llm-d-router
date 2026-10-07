@@ -47,8 +47,11 @@ Gate: a pod's room is `utilThreshold * capacity` minus its working set.
 Turns of admitted sessions always dispatch. A paused session's next turn
 waits until its own pod has room again (strict origin affinity: a session
 never moves, so its warm prefix is never abandoned; the exceptions are its
-pod leaving the pool or being filtered out of the scheduling candidates). A
-new session is admitted onto a pod with room, and holds until one fits it.
+pod leaving the pool or being filtered out of the scheduling candidates).
+This differs from the original ThunderAgent, which restores a paused session
+onto any pod with room; here a paused session waits for its own pod, at most
+until `headWaitStarvationMs`. A new session is admitted onto a pod with room,
+and holds until one fits it.
 Among the sessions that fit, admitted goes before paused before new; a
 session that fits no pod does not block the others, so smaller sessions can
 take room a larger paused one waits for. Any head waiting past

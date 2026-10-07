@@ -53,6 +53,10 @@ type candidate struct {
 // next turn dispatches only when its own pod has room again. A new session dispatches
 // only when some pod has room, and is then reserved onto that pod.
 //
+// Unlike the original ThunderAgent, which restores a paused session onto any
+// pod with room, a paused session waits for its own pod, so its warm prefix
+// is kept. The wait is bounded by headWaitStarvationMs.
+//
 // Order among the sessions allowed to dispatch:
 // waited past headWaitStarvationMs (oldest first) ->
 // class (admitted -> paused -> new) -> smallest footprint -> oldest.
