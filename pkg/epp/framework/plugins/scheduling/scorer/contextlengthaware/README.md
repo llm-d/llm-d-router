@@ -4,8 +4,8 @@
 
 Routes inference requests based on a token count, with optional filtering.
 Scoring is always applied; filtering is off by default. The routing length is
-the total prompt length unless `reusableTokensProducerName` enables P2P cache
-subtraction.
+the total prompt length. `includeMaxOutputTokens` adds the requested output
+cap, and `reusableTokensProducerName` enables P2P cache subtraction.
 
 **Use Cases:**
 - Route short prompts to pods with smaller GPU memory.
@@ -40,6 +40,10 @@ metadata:
   `p2p-source-producer` instance whose `ReusablePrefixTokens` request attribute
   is subtracted from the total prompt length. Requires a `label` other than
   `llm-d.ai/context-length-range`. Empty disables cache subtraction.
+- `includeMaxOutputTokens` (bool, optional, default: `false`): Add the
+  request's output token cap to the routing length. See
+  [Output token reservation](#output-token-reservation). Cannot be combined
+  with `reusableTokensProducerName`.
 
 **Configuration Example:**
 ```yaml
@@ -67,6 +71,57 @@ name-bound attribute from that `p2p-source-producer`. Missing request data at
 runtime leaves the total prompt length unchanged. This includes requests for
 which the producer finds no pullable source. The default configuration does
 not consume this attribute and always uses total prompt length.
+
+#### Output Token Reservation
+
+A model server rejects a request whose prompt plus requested output exceeds
+its maximum model length. Under P/D the prefill leg runs with a one-token
+output budget, so such a request completes prefill and then fails on decode.
+
+With `includeMaxOutputTokens: true`, the routing length is the total prompt
+length plus the output cap that the request parser normalizes across APIs
+(for example `max_completion_tokens` or `max_tokens` for Chat Completions and
+`max_output_tokens` for Responses). With `enableFiltering`, a pod is removed
+when that length exceeds its range maximum, so set each range maximum to at
+most the pod's `--max-model-len`. If the filter removes every decode pod, the
+EPP returns 503 and no pod receives the request. The longer routing length
+also moves requests into higher ranges for scoring.
+
+A request without a cap reserves nothing. vLLM `/v1/completions` defaults
+`max_tokens` to 16, so such a request within 16 tokens of the limit still
+reaches a pod and is rejected there.
+
+Configure the reservation in the decode profile, or in the only profile when
+P/D is not used. Prefill pods need room for the prompt and one output token.
+
+The prompt length comes from the `token-producer`. With the `vllm` backend,
+set `vllm.prefillOnly: true`; otherwise a renderer with the same maximum model
+length rejects the requests this filter should catch, no token count is
+published, and the routing length is the output cap alone.
+
+```yaml
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: meta-llama/Llama-3.1-8B-Instruct
+      vllm:
+        url: http://vllm-render:8000
+        prefillOnly: true
+  - type: context-length-aware
+    name: decode-context-fit
+    parameters:
+      enableFiltering: true
+      includeMaxOutputTokens: true
+schedulingProfiles:
+  - name: decode
+    plugins:
+      - pluginRef: decode-filter
+      - pluginRef: decode-context-fit
+      - pluginRef: max-score-picker
+```
+
+A decode pod started with `--max-model-len 8192` carries the label
+`llm-d.ai/context-length-range: "0-8192"`.
 
 #### P2P Cache-Aware Prefill Work
 
