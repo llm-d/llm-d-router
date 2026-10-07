@@ -11,7 +11,7 @@ spec:
     metadata:
       labels:
         app: vllm-qwen3-32b
-        inference.networking.k8s.io/engine-type: vllm
+        llm-d.ai/engine-type: vllm
     spec:
       initContainers:
       - name: vllm-render

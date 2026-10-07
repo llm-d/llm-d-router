@@ -36,7 +36,7 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile":                         true,
+	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 }
 
@@ -116,6 +116,9 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 }
 
 // RequestContext carries all state for a single request through the pipeline.
+//
+// OriginalBody is never re-marshalled from Body, so a step reading it after
+// another step has mutated Body sees the payload as the client sent it.
 type RequestContext struct {
 	RequestID          string
 	RevisionDecisionID string

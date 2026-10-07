@@ -23,9 +23,11 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const finishReasonCacheThreshold = "cache_threshold"
@@ -45,7 +47,20 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	if cacheHitThreshold, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
 		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
-		needsPrefill, err := s.tryDecode(w, decodeReq, body)
+		attemptStart := time.Now()
+		attemptWriter, attemptStatus := captureResponseStatus(w)
+		attemptReturned := false
+		defer recordDecodeAbort(&attemptReturned, attemptStart)
+		needsPrefill, err := s.tryDecode(attemptWriter, decodeReq, body)
+		attemptReturned = true
+		// An attempt that falls back to prefill is not sampled; the decode after
+		// prefill is this request's decode stage.
+		if !needsPrefill {
+			metrics.RecordDecodeDuration(time.Since(attemptStart))
+			if err != nil || attemptStatus.failed() {
+				metrics.RecordError(metrics.StageDecode)
+			}
+		}
 		if err != nil {
 			return
 		}
@@ -74,7 +89,16 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	decodeReq := cloneRequestWithBody(r.Context(), r, decodeRequestBody)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	decodeStart := time.Now()
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	decodeReturned = true
+	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+	}
 }
 
 // tryDecode attempts to decode and returns whether prefill is needed.
@@ -136,8 +160,19 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request) (bool, error) {
 	// Run ServeHTTP in a goroutine so we can inspect the initial choice to determine if we need to prefill.
 	done := make(chan struct{})
+	// Written by the decode goroutine, read after done is closed.
+	var aborted bool
 	go func() {
 		defer close(done)
+		// net/http only recovers http.ErrAbortHandler on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
 		s.decoderProxy.ServeHTTP(w, r)
 	}()
 
@@ -152,9 +187,25 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 	statusCode := w.getStatusCode()
 	if isHTTPError(statusCode) {
-		if err := w.flushBufferAndGoDirect(); err != nil {
-			s.logger.Error(err, "failed to flush buffer to client")
-			return false, err
+		// A status of 0 means the decoder never called WriteHeader or Write.
+		// Flushing that would commit an empty 200. Leave it unwritten so the
+		// abort below drops the connection instead.
+		var flushErr error
+		if statusCode != 0 {
+			flushErr = w.flushBufferAndGoDirect()
+			if flushErr != nil {
+				s.logger.Error(flushErr, "failed to flush buffer to client")
+			}
+		}
+		// The decode goroutine may still be writing. Wait for it, then replay
+		// the abort here. net/http only recovers http.ErrAbortHandler on the
+		// request goroutine.
+		<-done
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
+		if flushErr != nil {
+			return false, flushErr
 		}
 		return false, fmt.Errorf("decode request failed with status code: %d", statusCode)
 	}
@@ -173,6 +224,11 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 		return false, err
 	}
 	<-done
+	if aborted {
+		// Replay the abort on the request goroutine, where net/http recovers it
+		// and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
 	return false, nil
 }
 
@@ -242,9 +298,12 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	// send prefill request
 	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
 	pw := &bufferedResponseWriter{}
+	prefillStart := time.Now()
 	prefillHandler.ServeHTTP(pw, preq)
+	metrics.RecordPrefillDuration(time.Since(prefillStart))
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		w.WriteHeader(pw.statusCode)
 		if pw.buffer.Len() > 0 {

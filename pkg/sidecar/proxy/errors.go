@@ -85,6 +85,7 @@ func sendError(err error, errorType string, code int, w http.ResponseWriter) err
 		return err
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, err = w.Write(b)
 	return err

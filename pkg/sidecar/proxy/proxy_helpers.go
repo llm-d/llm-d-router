@@ -173,6 +173,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.Is(err, syscall.ECONNREFUSED):
 			s.logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
+			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 

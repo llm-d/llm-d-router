@@ -198,8 +198,13 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
-| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type` | Prompt tokens the prediction was measured against. |
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the prediction was measured against. |
+
+For a request disaggregated into prefill and decode stages, the prediction is recorded for the
+`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
+KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
 by `llm_d_epp_prefix_prompt_tokens_sum`. Both are observed in one call, so the ratio divides counts
@@ -213,9 +218,10 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-Under disaggregated prefill/decode the ratios describe different pods. The prediction follows the
-primary profile's endpoint, while `llm_d_epp_request_cached_tokens` carries the count the sidecar
-takes from the prefiller. The gap between the ratios is not index accuracy in that topology.
+The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
+`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
+request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
+describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
 
 Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
 server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
@@ -225,12 +231,43 @@ self-consistent, but CJK, code, and chat-template-heavy inputs shift it against 
 `llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
 candidate rather than the chosen one, which bounds the reuse available to any routing decision.
 
+### Token producer render
+
+These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
+families are registered when the plugin is created; observations require render calls made for
+requests. The startup warmup probe is not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
+
+`backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
+one whose caller went away before the render returned, and it is not counted as a failure. `reason`
+is one of:
+
+| Reason | Meaning |
+|---|---|
+| `timeout` | The render budget (`vllm.timeout` for completions, the larger of `vllm.timeout` and `vllm.mmTimeout` otherwise), an `endpointDiscovery.attemptTimeout`, or the caller's deadline expired. |
+| `status` | The render endpoint returned a non-2xx status. |
+| `connection` | The request could not be sent or the connection failed before a response arrived. |
+| `decode` | The response body could not be decoded. |
+| `no_endpoints` | Endpoint discovery has no render endpoint to select. |
+| `other` | Any other failure. |
+
+A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
+skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
+render budget, while a render endpoint that is down shows `connection` failures with short
+durations. The plugin also logs render failures at error level with the elapsed time and the
+configured timeout, at most once every 10 seconds per plugin instance.
+
 ### Multimodal encoder cache
 
 These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an
-EPP-side LRU of multimodal item hashes per endpoint to estimate model-server encoder-cache locality.
-It does not report raw encoder metrics from the model server. The metric families are registered
-when the producer is created; observations require multimodal cache lookups.
+EPP-side, reference-aware cache model of multimodal item hashes per endpoint to estimate
+model-server encoder-cache locality. It does not report raw encoder metrics from the model server.
+The metric families are registered when the producer is created; observations require multimodal
+cache lookups.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
@@ -285,6 +322,7 @@ This plugin records the routing decision for each request.
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
 *   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
+    Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.
@@ -337,7 +375,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_queue_size` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Requests currently held in the queue. |
 | `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
-| `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector` | Candidate endpoints with missing or stale metrics. |
+| `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
 | `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
@@ -410,16 +448,15 @@ These metrics are owned by the EPP Flow Control layer.
 #### `llm_d_epp_flow_control_stale_endpoints`
 
 *   **Type:** Gauge
-*   **Labels:** `detector`
+*   **Labels:** `detector`, `stage`
 *   **Description:** Number of candidate endpoints whose metrics are missing or older than the
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
-    `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
-    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
-    out stale metrics in another stage; per-stage stale accounting is tracked in
-    [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
+    `inference_extension_*` twin). `stage` is `prefill` or `decode` when flow control evaluates a
+    pipeline stage separately, and empty when the detector is evaluated without stage partitioning.
 *   **Usage:** A nonzero value during a dispatch stall indicates a model server metrics collection
-    problem (endpoint path, port, TLS, or authentication) rather than genuine overload.
+    problem (endpoint path, port, TLS, or authentication) rather than genuine overload. Check the
+    `stage` label to localize the collection problem to one pipeline stage.
 
 #### `llm_d_epp_flow_control_capacity_utilization_requests`
 

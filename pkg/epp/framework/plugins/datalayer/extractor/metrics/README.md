@@ -36,9 +36,7 @@ The plugin populates several standard keys on the endpoint:
 
 The plugin config supports:
 
--   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`. 
-    The deprecated GAIE key `inference.networking.k8s.io/engine-type` is also supported as a fallback, 
-    but will be removed in a future release.
+-   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engine config can also include `customMetrics` entries. Each entry

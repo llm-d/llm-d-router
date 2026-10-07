@@ -148,14 +148,15 @@ func convertFlowControl(in *configapiv1alpha1.FlowControlConfig) *configapiv1.Fl
 	}
 
 	out := &configapiv1.FlowControlConfig{
-		MaxBytes:                    copyQuantity(in.MaxBytes),
-		MaxRequests:                 copyQuantity(in.MaxRequests),
-		DefaultRequestTTL:           copyDuration(in.DefaultRequestTTL),
-		NoEndpointRequestTTL:        copyDuration(in.NoEndpointRequestTTL),
-		DefaultPriorityBand:         convertPriorityBandPtr(in.DefaultPriorityBand),
-		DefaultNegativePriorityBand: convertPriorityBandPtr(in.DefaultNegativePriorityBand),
-		UsageLimitPolicyPluginRef:   in.UsageLimitPolicyPluginRef,
-		EnableEviction:              in.EnableEviction,
+		MaxBytes:                     copyQuantity(in.MaxBytes),
+		MaxRequests:                  copyQuantity(in.MaxRequests),
+		DefaultRequestTTL:            copyDuration(in.DefaultRequestTTL),
+		NoEndpointRequestTTL:         copyDuration(in.NoEndpointRequestTTL),
+		DefaultPriorityBand:          convertPriorityBandPtr(in.DefaultPriorityBand),
+		DefaultNegativePriorityBand:  convertPriorityBandPtr(in.DefaultNegativePriorityBand),
+		UsageLimitPolicyPluginRef:    in.UsageLimitPolicyPluginRef,
+		BandSelectionPolicyPluginRef: in.BandSelectionPolicyPluginRef,
+		EnableEviction:               in.EnableEviction,
 	}
 
 	if in.PriorityBands != nil {

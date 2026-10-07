@@ -120,6 +120,22 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		inflightModel = model
 	}
 
+	// DetectAPIType gates this so the check follows the same classification
+	// every pipeline step uses. Any other path it reads as Responses reaches
+	// the passthrough catch-all, which never parses a body. Which paths and
+	// methods each API serves is settled in
+	// https://github.com/llm-d/llm-d-router/issues/3091.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		// The router serves only stateless Responses requests, disaggregated
+		// or not; the rest is resolved upstream of it. err names a field from
+		// a fixed list, so echoing it reflects no client-controlled content.
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
 	requestIDReplaced := !validRequestID.MatchString(requestID)

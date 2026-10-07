@@ -66,22 +66,19 @@ func (s *blockKeysState) Clone() plugin.StateData {
 	return &blockKeysState{perPromptKeys: cp}
 }
 
-// recordPrediction reports the prompt tokens the index expects the scheduler's
-// chosen endpoint to serve from its prefix cache. It reads the unweighted
-// cached-block count rather than the tier-weighted match score, so a RAM-tier
-// hit contributes its full token count, and it counts speculative entries
-// because those are part of what the router acted on. The token processor drops
-// a prompt's trailing partial block, so the block-to-token conversion cannot
-// exceed the prompt length.
+// recordPrediction reports the prompt tokens the index expects the endpoint
+// chosen by prefixmetrics.PredictionTarget to serve from its prefix cache. It
+// reads the unweighted cached-block count rather than the tier-weighted match
+// score, so a RAM-tier hit contributes its full token count, and it counts
+// speculative entries because those are part of what the router acted on. The
+// token processor drops a prompt's trailing partial block, so the block-to-token
+// conversion cannot exceed the prompt length.
 func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	if schedulingResult == nil || schedulingResult.ProfileResults == nil {
+	endpoint, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalPrefillProfile)
+	if endpoint == nil {
 		return
 	}
-	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return
-	}
-	raw, ok := primary.TargetEndpoints[0].Get(p.dk)
+	raw, ok := endpoint.Get(p.dk)
 	if !ok {
 		return
 	}
@@ -92,7 +89,7 @@ func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedu
 	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return
 	}
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type,
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role,
 		info.CachedBlockCount()*info.BlockSizeTokens(), request.Body.TokenizedRequest.TokenCount())
 }
 

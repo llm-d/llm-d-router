@@ -19,10 +19,11 @@ package error
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func TestError_Error(t *testing.T) {
@@ -223,54 +224,94 @@ func TestErrorConstants(t *testing.T) {
 
 func TestBuildErrResponse(t *testing.T) {
 	tests := []struct {
-		name             string
-		err              error
-		wantHTTPStatus   envoyTypePb.StatusCode
-		wantBodyContains string
-		wantGRPCErr      bool
-		wantHeaders      map[string]string
+		name           string
+		err            error
+		apiType        reqcommon.APIType
+		wantHTTPStatus envoyTypePb.StatusCode
+		wantBody       string
+		wantGRPCErr    bool
+		wantHeaders    map[string]string
 	}{
 		{
-			name:             "BadRequest returns 400",
-			err:              Error{Code: BadRequest, Msg: "invalid model name"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_BadRequest,
-			wantBodyContains: "invalid model name",
+			name:           "BadRequest returns 400",
+			err:            Error{Code: BadRequest, Msg: "invalid model name"},
+			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantBody:       `{"error":{"message":"invalid model name","type":"invalid_request_error","code":400}}`,
 		},
 		{
-			name:             "Unauthorized returns 401",
-			err:              Error{Code: Unauthorized, Msg: "missing token"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_Unauthorized,
-			wantBodyContains: "missing token",
+			name:           "Unauthorized returns 401",
+			err:            Error{Code: Unauthorized, Msg: "missing token"},
+			wantHTTPStatus: envoyTypePb.StatusCode_Unauthorized,
+			wantBody:       `{"error":{"message":"missing token","type":"authentication_error","code":401}}`,
 		},
 		{
-			name:             "Forbidden returns 403",
-			err:              Error{Code: Forbidden, Msg: "unsafe content blocked"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_Forbidden,
-			wantBodyContains: "unsafe content blocked",
+			name:           "Forbidden returns 403",
+			err:            Error{Code: Forbidden, Msg: "unsafe content blocked"},
+			wantHTTPStatus: envoyTypePb.StatusCode_Forbidden,
+			wantBody:       `{"error":{"message":"unsafe content blocked","type":"permission_error","code":403}}`,
 		},
 		{
-			name:             "NotFound returns 404",
-			err:              Error{Code: NotFound, Msg: "model not found"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_NotFound,
-			wantBodyContains: "model not found",
+			name:           "NotFound returns 404",
+			err:            Error{Code: NotFound, Msg: "model not found"},
+			wantHTTPStatus: envoyTypePb.StatusCode_NotFound,
+			wantBody:       `{"error":{"message":"model not found","type":"not_found_error","code":404}}`,
 		},
 		{
-			name:             "ResourceExhausted returns 429",
-			err:              Error{Code: ResourceExhausted, Msg: "no capacity"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_TooManyRequests,
-			wantBodyContains: "no capacity",
+			name:           "PreconditionFailed returns 412",
+			err:            Error{Code: PreconditionFailed, Msg: "revision mismatch"},
+			wantHTTPStatus: envoyTypePb.StatusCode_PreconditionFailed,
+			wantBody:       `{"error":{"message":"revision mismatch","type":"invalid_request_error","code":412}}`,
 		},
 		{
-			name:             "Internal returns 500",
-			err:              Error{Code: Internal, Msg: "unexpected failure"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_InternalServerError,
-			wantBodyContains: "unexpected failure",
+			name:           "ResourceExhausted returns 429",
+			err:            Error{Code: ResourceExhausted, Msg: "no capacity"},
+			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
+			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
 		},
 		{
-			name:             "ServiceUnavailable returns 503",
-			err:              Error{Code: ServiceUnavailable, Msg: "no endpoints"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_ServiceUnavailable,
-			wantBodyContains: "no endpoints",
+			name:           "Internal returns 500",
+			err:            Error{Code: Internal, Msg: "unexpected failure"},
+			wantHTTPStatus: envoyTypePb.StatusCode_InternalServerError,
+			wantBody:       `{"error":{"message":"unexpected failure","type":"server_error","code":500}}`,
+		},
+		{
+			name:           "ServiceUnavailable returns 503",
+			err:            Error{Code: ServiceUnavailable, Msg: "no endpoints"},
+			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
+			wantBody:       `{"error":{"message":"no endpoints","type":"server_error","code":503}}`,
+		},
+		{
+			name:           "message is JSON-escaped",
+			err:            Error{Code: BadRequest, Msg: `json: cannot unmarshal string into Go struct field "messages"`},
+			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantBody:       `{"error":{"message":"json: cannot unmarshal string into Go struct field \"messages\"","type":"invalid_request_error","code":400}}`,
+		},
+		{
+			name:           "HTML characters are not escaped",
+			err:            Error{Code: BadRequest, Msg: "invalid character '<' looking for beginning of value"},
+			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantBody:       `{"error":{"message":"invalid character '<' looking for beginning of value","type":"invalid_request_error","code":400}}`,
+		},
+		{
+			name:           "Messages API BadRequest uses the Anthropic envelope",
+			err:            Error{Code: BadRequest, Msg: "must have valid messages field"},
+			apiType:        reqcommon.APITypeMessages,
+			wantHTTPStatus: envoyTypePb.StatusCode_BadRequest,
+			wantBody:       `{"type":"error","error":{"type":"invalid_request_error","message":"must have valid messages field"}}`,
+		},
+		{
+			name:           "Messages API Internal maps to api_error",
+			err:            Error{Code: Internal, Msg: "no pods available in datastore"},
+			apiType:        reqcommon.APITypeMessages,
+			wantHTTPStatus: envoyTypePb.StatusCode_InternalServerError,
+			wantBody:       `{"type":"error","error":{"type":"api_error","message":"no pods available in datastore"}}`,
+		},
+		{
+			name:           "Messages API ServiceUnavailable maps to overloaded_error",
+			err:            Error{Code: ServiceUnavailable, Msg: "no endpoints"},
+			apiType:        reqcommon.APITypeMessages,
+			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
+			wantBody:       `{"type":"error","error":{"type":"overloaded_error","message":"no endpoints"}}`,
 		},
 		{
 			name:        "plain error returns gRPC error",
@@ -278,23 +319,17 @@ func TestBuildErrResponse(t *testing.T) {
 			wantGRPCErr: true,
 		},
 		{
-			name:             "headers are included in response",
-			err:              Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
-			wantHTTPStatus:   envoyTypePb.StatusCode_TooManyRequests,
-			wantBodyContains: "no capacity",
-			wantHeaders:      map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
-		},
-		{
-			name:             "nil headers omits header mutation",
-			err:              Error{Code: ResourceExhausted, Msg: "no capacity"},
-			wantHTTPStatus:   envoyTypePb.StatusCode_TooManyRequests,
-			wantBodyContains: "no capacity",
+			name:           "headers follow content-type",
+			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
+			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
+			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
+			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := BuildErrResponse(tt.err)
+			resp, err := BuildErrResponse(tt.err, tt.apiType)
 
 			if tt.wantGRPCErr {
 				if err == nil {
@@ -320,25 +355,21 @@ func TestBuildErrResponse(t *testing.T) {
 			if ir.GetStatus().GetCode() != tt.wantHTTPStatus {
 				t.Errorf("HTTP status = %v, want %v", ir.GetStatus().GetCode(), tt.wantHTTPStatus)
 			}
-			if tt.wantBodyContains != "" && !strings.Contains(string(ir.GetBody()), tt.wantBodyContains) {
-				t.Errorf("body %q should contain %q", string(ir.GetBody()), tt.wantBodyContains)
+			if got := string(ir.GetBody()); got != tt.wantBody {
+				t.Errorf("body = %s, want %s", got, tt.wantBody)
 			}
-			if len(tt.wantHeaders) > 0 {
-				if ir.Headers == nil || len(ir.Headers.SetHeaders) == 0 {
-					t.Fatal("expected response headers, got none")
-				}
-				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
-				for _, h := range ir.Headers.SetHeaders {
-					gotHeaders[h.Header.Key] = string(h.Header.RawValue)
-				}
-				for k, v := range tt.wantHeaders {
-					if gotHeaders[k] != v {
-						t.Errorf("header %q = %q, want %q", k, gotHeaders[k], v)
-					}
-				}
-			} else if !tt.wantGRPCErr {
-				if ir.Headers != nil && len(ir.Headers.SetHeaders) > 0 {
-					t.Errorf("expected no headers, got %v", ir.Headers.SetHeaders)
+
+			setHeaders := ir.GetHeaders().GetSetHeaders()
+			if len(setHeaders) != len(tt.wantHeaders)+1 {
+				t.Fatalf("headers = %v, want content-type and %d more", setHeaders, len(tt.wantHeaders))
+			}
+			if key, value := setHeaders[0].GetHeader().GetKey(), string(setHeaders[0].GetHeader().GetRawValue()); key != "content-type" || value != "application/json" {
+				t.Errorf("first header = %s: %s, want content-type: application/json", key, value)
+			}
+			for _, h := range setHeaders[1:] {
+				key, value := h.GetHeader().GetKey(), string(h.GetHeader().GetRawValue())
+				if want := tt.wantHeaders[key]; value != want {
+					t.Errorf("header %q = %q, want %q", key, value, want)
 				}
 			}
 		})

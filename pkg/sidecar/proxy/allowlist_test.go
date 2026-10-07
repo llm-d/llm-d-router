@@ -92,36 +92,6 @@ var _ = Describe("AllowlistValidator", func() {
 			))
 		})
 
-		It("should extract selector from deprecated alpha InferencePool (flat map)", func() {
-			av := &AllowlistValidator{
-				gvr: schema.GroupVersionResource{
-					Group:    "inference.networking.x-k8s.io",
-					Version:  "v1alpha2",
-					Resource: "inferencepools",
-				},
-			}
-			pool := &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
-					"kind":       "InferencePool",
-					"metadata":   map[string]interface{}{"name": "test-pool"},
-					"spec": map[string]interface{}{
-						"selector": map[string]interface{}{
-							"app.kubernetes.io/name": "my-model",
-							"component":              "serving",
-						},
-					},
-				},
-			}
-
-			selector, err := av.poolSelector(pool)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(selector.String()).To(SatisfyAll(
-				ContainSubstring("app.kubernetes.io/name=my-model"),
-				ContainSubstring("component=serving"),
-			))
-		})
-
 		It("should fail for GA pool with flat selector (no matchLabels)", func() {
 			av := &AllowlistValidator{
 				gvr: schema.GroupVersionResource{
@@ -172,14 +142,14 @@ var _ = Describe("AllowlistValidator", func() {
 		It("should fail when selector is missing", func() {
 			av := &AllowlistValidator{
 				gvr: schema.GroupVersionResource{
-					Group:    "inference.networking.x-k8s.io",
-					Version:  "v1alpha2",
+					Group:    routing.InferencePoolAPIGroup,
+					Version:  "v1",
 					Resource: "inferencepools",
 				},
 			}
 			pool := &unstructured.Unstructured{
 				Object: map[string]interface{}{
-					"apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+					"apiVersion": "inference.networking.k8s.io/v1",
 					"kind":       "InferencePool",
 					"metadata":   map[string]interface{}{"name": "test-pool"},
 					"spec":       map[string]interface{}{},
@@ -205,6 +175,11 @@ var _ = Describe("AllowlistValidator", func() {
 					"valid-pod.test-namespace.svc.cluster.local",
 				),
 			}
+		})
+
+		It("should reject the inference.networking.x-k8s.io pool group", func() {
+			_, err := NewAllowlistValidator(true, "inference.networking.x-k8s.io", "test-namespace", "test-pool")
+			Expect(err).To(MatchError(ContainSubstring("pool-group must be")))
 		})
 
 		It("should allow targets in the allowlist", func() {

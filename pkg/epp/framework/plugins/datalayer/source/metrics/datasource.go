@@ -18,9 +18,15 @@ limitations under the License.
 package metrics
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -62,14 +68,20 @@ type metricsDatasourceParams struct {
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
+	// Families lists metric families to keep in addition to the ones the source's extractors
+	// declare (FamilyReader). Every other line of a scrape is dropped before parsing. The list
+	// must cover the families of extractors that do not declare theirs; when it is empty and
+	// such an extractor is bound, the source parses the whole response.
+	Families []string `json:"families,omitempty"`
 }
 
 // NewHTTPMetricsDataSource constructs a MetricsDataSource with the given scheme and path.
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
+	parser, observer := newMetricsParser(nil, 0)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
-		MetricsDataSourceType, name, parseMetrics)
+		MetricsDataSourceType, name, parser, observer)
 }
 
 // MetricsDataSourceFactory is a factory function used to instantiate data layer's
@@ -97,6 +109,9 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
+	parser, observer := newMetricsParser(cfg.Families, 0)
+	opts = append(opts, observer)
+
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
 			SkipVerify:     cfg.InsecureSkipVerify,
@@ -104,7 +119,7 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MetricsDataSourceType, name, parseMetrics, opts...)
+		MetricsDataSourceType, name, parser, opts...)
 }
 
 func defaultDataSourceConfigParams() *metricsDatasourceParams {
@@ -118,4 +133,155 @@ func defaultDataSourceConfigParams() *metricsDatasourceParams {
 func parseMetrics(data io.Reader) (PrometheusMetricMap, error) {
 	parser := expfmt.NewTextParser(model.LegacyValidation)
 	return parser.TextToMetricFamilies(data)
+}
+
+// FamilyReader is implemented by extractors that can name the metric families they read.
+type FamilyReader interface {
+	MetricFamilies() []string
+}
+
+// newMetricsParser returns the source's parser and the option that feeds it the bound
+// extractors. The parser keeps the configured families and those the bound extractors declare.
+// Without configured families, it parses the whole response while any bound extractor is not a
+// FamilyReader. A positive maxBytes caps the bytes read from a response.
+func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
+	var (
+		filter   atomic.Pointer[familyFilter]
+		declared = slices.Clone(families)
+		opaque   bool
+	)
+	if len(declared) > 0 {
+		filter.Store(newFamilyFilter(declared))
+	}
+	parser := func(data io.Reader) (PrometheusMetricMap, error) {
+		if maxBytes > 0 {
+			data = io.LimitReader(data, maxBytes)
+		}
+		if f := filter.Load(); f != nil {
+			return f.parse(data)
+		}
+		return parseMetrics(data)
+	}
+	// AppendExtractor serializes the observer calls.
+	observer := func(ext fwkplugin.Plugin) {
+		reader, ok := ext.(FamilyReader)
+		if !ok {
+			if len(families) == 0 {
+				opaque = true
+				filter.Store(nil)
+			}
+			return
+		}
+		declared = append(declared, reader.MetricFamilies()...)
+		if !opaque && len(declared) > 0 {
+			filter.Store(newFamilyFilter(declared))
+		}
+	}
+	return parser, http.WithExtractorObserver(observer)
+}
+
+// sampleSuffixes are the suffixes of histogram and summary samples, which the text parser files
+// under the base family. Counters are declared under their _total name and need no suffix.
+var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count")}
+
+// familyFilter parses only the lines of the listed metric families.
+type familyFilter struct {
+	families map[string]struct{}
+	readers  sync.Pool
+}
+
+func newFamilyFilter(families []string) *familyFilter {
+	f := &familyFilter{families: make(map[string]struct{}, len(families))}
+	for _, name := range families {
+		f.families[name] = struct{}{}
+	}
+	f.readers.New = func() any { return bufio.NewReaderSize(nil, 64*1024) }
+	return f
+}
+
+func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
+	r := f.readers.Get().(*bufio.Reader)
+	r.Reset(data)
+	defer func() {
+		r.Reset(nil)
+		f.readers.Put(r)
+	}()
+
+	var kept bytes.Buffer
+	var long []byte // a line longer than the reader's buffer, assembled across reads
+	var excluded map[string]struct{}
+	for {
+		line, err := r.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			long = append(long, line...)
+			continue
+		}
+		if long != nil {
+			line = append(long, line...)
+			long = nil
+		}
+		if f.keep(line, &excluded) {
+			kept.Write(line)
+			if len(line) > 0 && line[len(line)-1] != '\n' {
+				kept.WriteByte('\n')
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return parseMetrics(&kept)
+}
+
+// keep reports whether a text-format line belongs to a listed family. A declared, unlisted
+// family takes precedence over suffix matching for its samples.
+func (f *familyFilter) keep(line []byte, excluded *map[string]struct{}) bool {
+	line = bytes.TrimLeft(line, " \t")
+	metadata := bytes.HasPrefix(line, []byte("#"))
+	if metadata {
+		comment := bytes.TrimLeft(line[1:], " \t")
+		end := bytes.IndexAny(comment, " \t")
+		if end < 0 || (!bytes.Equal(comment[:end], []byte("HELP")) && !bytes.Equal(comment[:end], []byte("TYPE"))) {
+			return false
+		}
+		line = bytes.TrimLeft(comment[end:], " \t")
+	}
+	end := bytes.IndexAny(line, "{ \t\r\n")
+	if end < 0 {
+		end = len(line)
+	}
+	name := line[:end]
+	if len(name) == 0 {
+		return false
+	}
+	if _, ok := f.families[string(name)]; ok {
+		return true
+	}
+	if metadata {
+		if f.matchesSuffix(name) {
+			if *excluded == nil {
+				*excluded = make(map[string]struct{})
+			}
+			(*excluded)[string(name)] = struct{}{}
+		}
+		return false
+	}
+	if _, ok := (*excluded)[string(name)]; ok {
+		return false
+	}
+	return f.matchesSuffix(name)
+}
+
+func (f *familyFilter) matchesSuffix(name []byte) bool {
+	for _, suffix := range sampleSuffixes {
+		if bytes.HasSuffix(name, suffix) {
+			if _, ok := f.families[string(name[:len(name)-len(suffix)])]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }

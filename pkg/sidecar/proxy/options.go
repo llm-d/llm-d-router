@@ -291,7 +291,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
-	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
+	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup,
+		"Kubernetes resource group of the InferencePool this sidecar is associated with. "+
+			"Only `inference.networking.k8s.io` is currently supported.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
