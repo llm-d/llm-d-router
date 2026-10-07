@@ -44,8 +44,8 @@ func TestTurnAccounting(t *testing.T) {
 }
 
 // During a later turn the footprint is the max of the committed total and
-// the new in-flight estimate, not their sum: the new prefill covers the same
-// history.
+// the in-flight estimates, not their sum: the new prefill covers the same
+// history. Overlapping turns of one session add up while in flight.
 func TestFootprintIsMaxNotSum(t *testing.T) {
 	a := newTestAgent(testConfig())
 	ep := schedEndpoint("pod-a", 0, 0)
@@ -56,8 +56,51 @@ func TestFootprintIsMaxNotSum(t *testing.T) {
 	_ = startTurn(t, a, "s1", ep, 800) // in-flight estimate 200 < committed 300
 	require.Equal(t, float64(300), endpointTokens(a, "default/pod-a"))
 
-	_ = startTurn(t, a, "s1", ep, 2000) // a newer turn replaces the estimate: in-flight 500 > 300
-	require.Equal(t, float64(500), endpointTokens(a, "default/pod-a"))
+	_ = startTurn(t, a, "s1", ep, 2000) // overlapping turn: in-flight 200+500=700 > 300
+	require.Equal(t, float64(700), endpointTokens(a, "default/pod-a"))
+}
+
+// Each overlapping turn removes only its own estimate: when a small turn ends
+// first, the larger turn still in flight keeps counting, although the small
+// turn's usage total becomes the committed size.
+func TestOverlappingTurnsSettleIndependently(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+	runTurn(t, a, "s1", ep, 400, 300)
+
+	big := startTurn(t, a, "s1", ep, 2000)  // 500 in flight
+	small := startTurn(t, a, "s1", ep, 400) // 100 more
+	require.Equal(t, float64(600), endpointTokens(a, "default/pod-a"))
+
+	a.ResponseBody(context.Background(), small, endOfStream(150, 100), nil)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(500), s.inflightTokens)
+	require.Equal(t, float64(500), endpointTokens(a, "default/pod-a"), "the big turn still counts")
+
+	a.ResponseBody(context.Background(), big, endOfStream(520, 500), nil)
+	s, _ = sessionOf(a, "s1")
+	require.Equal(t, int64(0), s.inflightTokens)
+	require.Equal(t, float64(520), endpointTokens(a, "default/pod-a"))
+}
+
+// A response for a request PreRequest never charged leaves the session alone.
+func TestResponseWithoutEstimateIgnored(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+	runTurn(t, a, "s1", ep, 400, 300)
+
+	a.ResponseBody(context.Background(), newRequest("s1", 400), endOfStream(900, 900), nil)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(300), s.committedTokens)
+}
+
+// A turn charges at least one token, so a session with an empty request in
+// flight is not taken for idle.
+func TestEmptyRequestStillInFlight(t *testing.T) {
+	a := newTestAgent(testConfig())
+	_ = startTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 0)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(1), s.inflightTokens)
 }
 
 // Idle sessions past the TTL are dropped by maintenance, and a pod that then

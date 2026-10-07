@@ -8,8 +8,8 @@ requests with neither are not tracked.
 
 This package currently ships the session ledger: each session's KV token
 footprint (the larger of the `usage.total_tokens` of its last completed turn
-and the byte estimate of the turn in flight; a session is assumed to have at
-most one request in flight) and the pod it is bound to, exposed through the
+and the sum of the byte estimates of its turns in flight) and the pod it is
+bound to, exposed through the
 `llm_d_epp_thunder_agent_sessions`,
 `llm_d_epp_thunder_agent_endpoint_working_set_tokens` and
 `llm_d_epp_thunder_agent_endpoint_capacity_tokens` gauges. Comparing the working set against
