@@ -64,3 +64,24 @@ func TestFactoryRejectsInvalidSweepInterval(t *testing.T) {
 	_, err := Factory("thunder", json.NewDecoder(strings.NewReader(`{"evictionSweepSeconds": 0}`)), nil)
 	require.ErrorContains(t, err, "evictionSweepSeconds")
 }
+
+// DumpState reports counts and per-endpoint totals but no session ids.
+func TestDumpState(t *testing.T) {
+	a := newTestAgent(testConfig())
+	runTurn(t, a, "secret-session", schedEndpoint("pod-a", 0, 0), 400, 300)
+	_ = startTurn(t, a, "other", schedEndpoint("pod-a", 0, 0), 800)
+
+	raw, err := a.DumpState()
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "secret-session")
+
+	var got stateDump
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, stateDump{
+		RunningSessions: 1,
+		IdleSessions:    1,
+		Endpoints: map[string]endpointDump{
+			"default/pod-a": {WorkingSetTokens: 500, CapacityTokens: 1000},
+		},
+	}, got)
+}

@@ -20,6 +20,10 @@ the engine's own KV utilization shows the KV-thrashing signature: idle
 sessions own their context in the prefix cache, but the engine reports those
 blocks as free.
 
+The same values (session counts, per-pod working set and capacity) are
+available from the `/debug/plugins/state` endpoint. Session ids never appear
+in metrics or state dumps.
+
 The admission gate (flow control fairness policy plus pause sweep) and the
 placement scorer build on this ledger in follow-up changes.
 

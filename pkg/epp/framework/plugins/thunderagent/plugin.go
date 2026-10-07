@@ -54,6 +54,7 @@ var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
+	_ fwkplugin.StateDumper       = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -139,4 +140,32 @@ func sessionID(request *fwksched.InferenceRequest) string {
 	}
 	id, _ := fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
 	return id
+}
+
+// stateDump is the snapshot returned by DumpState. Session ids come from
+// client headers, so they are omitted; sessions are only counted.
+type stateDump struct {
+	RunningSessions int                     `json:"runningSessions"`
+	IdleSessions    int                     `json:"idleSessions"`
+	Endpoints       map[string]endpointDump `json:"endpoints"`
+}
+
+type endpointDump struct {
+	WorkingSetTokens float64 `json:"workingSetTokens"`
+	CapacityTokens   float64 `json:"capacityTokens"`
+}
+
+// DumpState reports session counts and each endpoint's working set and
+// capacity, the same values as the metrics.
+func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
+	snap := a.mgr.snapshot()
+	dump := stateDump{
+		RunningSessions: snap.running,
+		IdleSessions:    snap.idle,
+		Endpoints:       make(map[string]endpointDump, len(snap.endpoints)),
+	}
+	for id, e := range snap.endpoints {
+		dump.Endpoints[id] = endpointDump{WorkingSetTokens: e.undecayed, CapacityTokens: e.capacity}
+	}
+	return json.Marshal(dump)
 }
