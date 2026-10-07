@@ -70,8 +70,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	var cacheMiss bool
-	transport := instrumentedTransport(s.gwClient.Transport(), coordmetrics.UpstreamConditionalDecode)
-	proxy, out := newDecodeProxy(logger, transport, func(resp *http.Response) error {
+	out := serveDecode(logger, s.gwClient.Transport(), reqCtx.ResponseWriter, proxyReq, coordmetrics.UpstreamConditionalDecode, func(resp *http.Response) error {
 		switch {
 		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
@@ -86,7 +85,6 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		}
 		return nil
 	})
-	proxy.ServeHTTP(reqCtx.ResponseWriter, proxyReq)
 
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
@@ -94,10 +92,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 	if out.TransportErr != nil {
 		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultTransportError)
-		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, Cause: out.TransportErr}
 	}
-	if out.Status >= http.StatusBadRequest {
-		return &pipeline.UpstreamStreamedError{Step: ConditionalDecodeStepName, StatusCode: out.Status}
+	if err := out.streamedError(ConditionalDecodeStepName); err != nil {
+		return err
 	}
 
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")
@@ -109,8 +106,8 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (ma
 	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		// The client's chat-completions body is forwarded as-is.
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		// The client's chat-completions or responses body is forwarded as-is.
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body["prompt"] = reqCtx.TokenIDs

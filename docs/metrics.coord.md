@@ -144,7 +144,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 | Coordinator metric | EPP counterpart | Difference |
 |---|---|---|
 | Request family (`llm_d_coordinator_request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
-| `llm_d_coordinator_execution_path_total` | `llm_d_epp_disagg_decision_total` | Coordinator observes the phases that actually ran on the client request; EPP records the routing decision that was made and adds plugin labels. |
+| `llm_d_coordinator_execution_path_total` | `llm_d_epp_disagg_decision_total` | Coordinator observes the phases that actually ran on the client request; EPP records the routing decision that was made and adds plugin labels. The coordinator's `path` and the EPP's `decision_type` take the same values. |
 | `llm_d_coordinator_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_conditional_decode_probes_total` | None | Unique to coordinator. |
 
 **EPP-only metrics:** Scheduling, flow control, and pool aggregates have no coordinator counterpart. EPP's token counts and TTFT do, but they are per request: the same prompt reaches EPP on more than one request, and decode-request TTFT starts after render, encode, and prefill have finished, so neither describes a client request. Only the coordinator sees a client request as one request. See [Deliberate omissions](#deliberate-omissions) for what it could report and why it does not today.

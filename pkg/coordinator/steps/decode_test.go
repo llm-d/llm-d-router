@@ -77,13 +77,19 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 			t.Fatal("decode request should not have a tokens field")
 		}
 
-		// Verify uuid was injected into the image_url content part
+		// The uuid lands on the image part only: hashIdx must not advance over
+		// the text parts, or every image would carry another image's hash.
 		messages := parsed["messages"].([]any)
 		msg := messages[0].(map[string]any)
 		content := msg["content"].([]any)
-		imgPart := content[0].(map[string]any)
-		if imgPart["uuid"] != "hash-a" {
-			t.Fatalf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
+		imgPart := content[1].(map[string]any)
+		if imgPart["uuid"] != testImageHash {
+			t.Errorf("expected uuid=hash-a in image_url part, got %v", imgPart["uuid"])
+		}
+		for _, idx := range []int{0, 2} {
+			if uuid, ok := content[idx].(map[string]any)["uuid"]; ok {
+				t.Errorf("text part %d must carry no uuid, got %v", idx, uuid)
+			}
 		}
 		// Verify image_url is preserved alongside the injected uuid
 		imgURL, ok := imgPart["image_url"].(map[string]any)
@@ -117,7 +123,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -127,10 +133,12 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 				map[string]any{
 					"role": "user",
 					"content": []any{
+						map[string]any{"type": "text", "text": "describe this"},
 						map[string]any{
 							"type":      "image_url",
 							"image_url": map[string]any{"url": "https://example.com/cat.jpg"},
 						},
+						map[string]any{"type": "text", "text": "in one word"},
 					},
 				},
 			},
@@ -151,6 +159,170 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 	respBody, _ := io.ReadAll(result.Body)
 	if !strings.Contains(string(respBody), "I see a cat.") {
 		t.Fatalf("expected response to contain 'I see a cat.', got: %s", string(respBody))
+	}
+}
+
+func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Fatal("expected kv_transfer_params in decode body")
+		}
+		if kvParams["block_id"] != "xyz" {
+			t.Errorf("kv_transfer_params.block_id = %v, want xyz", kvParams["block_id"])
+		}
+
+		// Verify no tokens field (dead field, never consumed downstream)
+		if _, ok := parsed["tokens"]; ok {
+			t.Fatal("decode request should not have a tokens field")
+		}
+
+		// The uuid lands on the image part only: hashIdx must not advance over
+		// the input_text parts, or every image would carry another image's hash.
+		input := parsed["input"].([]any)
+		item := input[0].(map[string]any)
+		content := item["content"].([]any)
+		imgPart := content[1].(map[string]any)
+		if imgPart["uuid"] != testImageHash {
+			t.Errorf("expected uuid=hash-a in input_image part, got %v", imgPart["uuid"])
+		}
+		if imgPart["image_url"] != "https://example.com/cat.jpg" {
+			t.Errorf("expected image_url preserved, got %v", imgPart["image_url"])
+		}
+		for _, idx := range []int{0, 2} {
+			if uuid, ok := content[idx].(map[string]any)["uuid"]; ok {
+				t.Errorf("input_text part %d must carry no uuid, got %v", idx, uuid)
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "llama-3",
+		Stream:       false,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		Body: map[string]any{
+			"model": "llama-3",
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{
+							"type":      "input_image",
+							"image_url": "https://example.com/cat.jpg",
+						},
+						map[string]any{"type": "input_text", "text": "in one word"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+}
+
+// A chat-completions request carrying a stray top-level "input" array must not
+// have that array's image part stamped with a uuid.
+func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		messages := parsed["messages"].([]any)
+		msgPart := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if msgPart["uuid"] != testImageHash {
+			t.Fatalf("expected uuid=%s on the messages image part, got %v", testImageHash, msgPart["uuid"])
+		}
+
+		input := parsed["input"].([]any)
+		inputPart := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if _, ok := inputPart["uuid"]; ok {
+			t.Fatalf("expected no uuid stamped on the stray input array's part, got %v", inputPart["uuid"])
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-stray-input",
+		OriginalPath: testChatCompletionsPath,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz"},
+		Body: map[string]any{
+			"model": "llama-3",
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/cat.jpg"}},
+					},
+				},
+			},
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_image", "image_url": "https://example.com/dog.jpg"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
 	}
 }
 
@@ -297,11 +469,11 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 
 // TestDecodeStep_UnreachableFormat_ReturnsError verifies that request paths
 // for formats prepareDecodeBody's switch does not handle explicitly
-// (APITypeMessages, APITypeResponses, APITypeSGLangGenerate) fail through
+// (APITypeMessages, APITypeSGLangGenerate) fail through
 // its default case, reporting an error instead of sending an unprepared
 // body upstream.
 func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathSGLangGenerate} {
+	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathSGLangGenerate} {
 		t.Run(path, func(t *testing.T) {
 			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
 			if err != nil {
@@ -501,5 +673,133 @@ func TestDecodeStep_TransportError(t *testing.T) {
 	result := recorder.Result()
 	if result.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected ErrorHandler-written 502, got %d", result.StatusCode)
+	}
+}
+
+// TestDecodeStep_Responses_StampsFunctionCallOutputImage verifies the uuid
+// stamping walk sees the same image set replace-media-urls built entries from,
+// including an image under a function_call_output's output. An unstamped part
+// makes the worker compute its own hash, so the entry primed into the encoder
+// cache for it is never looked up.
+func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
+	const outputImageHash = "hash-b"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("decode body did not parse: %v", err)
+			return
+		}
+
+		input, ok := parsed["input"].([]any)
+		if !ok || len(input) != 2 {
+			t.Errorf("expected 2 input items, got %v", parsed["input"])
+			return
+		}
+		contentPart := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+		if contentPart["uuid"] != testImageHash {
+			t.Errorf("content image uuid = %v, want %s", contentPart["uuid"], testImageHash)
+		}
+		outputPart := input[1].(map[string]any)["output"].([]any)[0].(map[string]any)
+		if outputPart["uuid"] != outputImageHash {
+			t.Errorf("output image uuid = %v, want %s", outputPart["uuid"], outputImageHash)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"output": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-output",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Index: 1, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz"},
+		Body: map[string]any{
+			"model": "llama-3",
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "https://example.com/cat.jpg"},
+					},
+				},
+				map[string]any{
+					"type":    "function_call_output",
+					"call_id": "call-1",
+					"output": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "https://example.com/dog.jpg"},
+					},
+				},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// A parts/entries count mismatch stamps the pairs it can and leaves the rest
+// untouched. Both walks read the same body, so neither direction is reachable
+// through a configured pipeline; the behavior is pinned because the two
+// directions fail differently. Surplus parts reach the worker with no uuid, so
+// it hashes the image itself and never reads the entry primed into the encoder
+// cache. Surplus entries leave mm_hashes naming an image the decode body does
+// not identify.
+func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
+	newInput := func(parts int) []any {
+		content := make([]any, 0, parts)
+		for i := 0; i < parts; i++ {
+			content = append(content, map[string]any{
+				"type":      reqcommon.PartTypeInputImage,
+				"image_url": fmt.Sprintf("data:image/jpeg;base64,img-%d", i),
+			})
+		}
+		return []any{map[string]any{"role": "user", "content": content}}
+	}
+	newEntries := func(n int) []pipeline.MultimodalEntry {
+		entries := make([]pipeline.MultimodalEntry, 0, n)
+		for i := 0; i < n; i++ {
+			entries = append(entries, pipeline.MultimodalEntry{Index: i, Hash: fmt.Sprintf("hash-%d", i)})
+		}
+		return entries
+	}
+
+	for _, tc := range []struct {
+		name    string
+		parts   int
+		entries int
+		// want is the expected uuid per part, nil where none must be stamped.
+		want []any
+	}{
+		{name: "counts agree", parts: 2, entries: 2, want: []any{"hash-0", "hash-1"}},
+		{name: "more parts than entries", parts: 3, entries: 2, want: []any{"hash-0", "hash-1", nil}},
+		{name: "more entries than parts", parts: 1, entries: 3, want: []any{"hash-0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := newInput(tc.parts)
+			injectImagePartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries))
+
+			content := input[0].(map[string]any)["content"].([]any)
+			for i, want := range tc.want {
+				if got := content[i].(map[string]any)["uuid"]; got != want {
+					t.Errorf("part %d uuid = %v, want %v", i, got, want)
+				}
+			}
+		})
 	}
 }

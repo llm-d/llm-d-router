@@ -196,12 +196,12 @@ func testWrapper(test func()) func() {
 	return func() {
 		ginkgo.BeforeAll(func() {
 			nsName := getNamespace()
-			createdNameSpace := setupNameSpace()
+			createdNameSpace := testutils.SetupNamespace(testConfig, nsName)
 			ginkgo.DeferCleanup(func() {
 				if ginkgo.CurrentSpecReport().Failed() && keepClusterOnFailure {
 					testutils.DumpPodsAndLogs(testConfig, nsName)
 				} else if createdNameSpace {
-					deleteNameSpace(nsName)
+					testutils.DeleteNamespace(testConfig, nsName)
 				}
 			})
 		})

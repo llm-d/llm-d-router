@@ -24,6 +24,8 @@ import (
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 // sampleCount returns the histogram's observation count. Plain histograms have
@@ -49,14 +51,14 @@ func TestRecordRequest(t *testing.T) {
 func TestRecordDisagg(t *testing.T) {
 	disaggRequestsTotal.Reset()
 
-	RecordDisagg(DisaggTypePD)
-	RecordDisagg(DisaggTypePD)
-	RecordDisagg(DisaggTypeEPD)
-	RecordDisagg(DisaggTypeED)
+	RecordDisagg(metricsutil.DisaggPathPrefillDecode)
+	RecordDisagg(metricsutil.DisaggPathPrefillDecode)
+	RecordDisagg(metricsutil.DisaggPathEncodePrefillDecode)
+	RecordDisagg(metricsutil.DisaggPathEncodeDecode)
 
-	require.Equal(t, 2.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(DisaggTypePD)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(DisaggTypeEPD)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(DisaggTypeED)))
+	require.Equal(t, 2.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(metricsutil.DisaggPathPrefillDecode)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(metricsutil.DisaggPathEncodePrefillDecode)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(disaggRequestsTotal.WithLabelValues(metricsutil.DisaggPathEncodeDecode)))
 }
 
 func TestRecordDurations(t *testing.T) {

@@ -577,3 +577,65 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 		})
 	}
 }
+
+// Consumes must name every attribute source configured, so the runtime scope
+// lets the reads in resolveSessionID through. Header sources contribute
+// nothing: headers are not part of the attribute store.
+func TestSessionIDHeader_Consumes(t *testing.T) {
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+
+	tests := []struct {
+		name    string
+		sources []SessionIDSource
+		want    []plugin.DataKey
+	}{
+		{
+			name:    "header source only",
+			sources: []SessionIDSource{{Header: DefaultHeader}},
+		},
+		{
+			name:    "attribute with a named producer",
+			sources: []SessionIDSource{{Attribute: "session-id", Producer: "session-id-producer"}},
+			want:    []plugin.DataKey{plugin.NewDataKey("session-id", "session-id-producer")},
+		},
+		{
+			name:    "producer-agnostic attribute",
+			sources: []SessionIDSource{{Attribute: "agent-identity"}},
+			want:    []plugin.DataKey{plugin.NewDataKey("agent-identity", "")},
+		},
+		{
+			name: "header and attribute sources mixed",
+			sources: []SessionIDSource{
+				{Header: DefaultHeader},
+				{Attribute: "session-id", Producer: "session-id-producer"},
+				{Attribute: "agent-identity"},
+			},
+			want: []plugin.DataKey{
+				plugin.NewDataKey("session-id", "session-id-producer"),
+				plugin.NewDataKey("agent-identity", ""),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSessionIDHeader(
+				SessionIDConfig{Sources: tt.sources, EvictionTTLSeconds: 300, EvictionSweepSeconds: 10},
+				"", testPluginKey, handle,
+			)
+
+			consumes := s.Consumes()
+			if len(consumes.Required) != 0 {
+				t.Errorf("Required = %v, want empty", consumes.Required)
+			}
+			if len(consumes.Optional) != len(tt.want) {
+				t.Fatalf("Optional = %v, want %d keys", consumes.Optional, len(tt.want))
+			}
+			for _, key := range tt.want {
+				if _, ok := consumes.Optional[key]; !ok {
+					t.Errorf("Optional is missing %v", key)
+				}
+			}
+		})
+	}
+}

@@ -43,15 +43,6 @@ const (
 	StageDecode  = "decode"
 )
 
-// Disaggregation type labels: which stages of the request are split across
-// pods. Spelled like the coordinator's stage path labels so dashboards can join
-// the two components.
-const (
-	DisaggTypePD  = "prefill-decode"
-	DisaggTypeEPD = "encode-prefill-decode"
-	DisaggTypeED  = "encode-decode"
-)
-
 var (
 	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -132,7 +123,8 @@ func RecordRequest(apiType string) {
 }
 
 // RecordDisagg counts a request routed through disaggregation for the given
-// disaggregation type (DisaggTypePD, DisaggTypeEPD, or DisaggTypeED).
+// disaggregation type (metricsutil.DisaggPathPrefillDecode,
+// DisaggPathEncodePrefillDecode, or DisaggPathEncodeDecode).
 func RecordDisagg(disaggType string) {
 	disaggRequestsTotal.WithLabelValues(disaggType).Inc()
 }

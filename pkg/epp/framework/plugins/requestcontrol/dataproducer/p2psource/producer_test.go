@@ -240,7 +240,8 @@ func TestProduces_DeclaresReusablePrefixTokens(t *testing.T) {
 	key := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName("custom")
 
 	produced := p.Produces()
-	require.Len(t, produced, 1)
+	require.Len(t, produced, 2)
+	require.Contains(t, produced, p.attrKey(), "the best-match stash is declared so PreRequest can read it back")
 	assert.Equal(t, attrprefix.ReusablePrefixTokens(0), produced[key])
 	assert.IsType(t, attrprefix.ReusablePrefixTokens(0), produced[key])
 	assert.Equal(t, plugin.NewDataKey("ReusablePrefixTokensDataKey", "custom").String(), key.String())

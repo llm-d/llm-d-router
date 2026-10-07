@@ -35,6 +35,7 @@ import (
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -98,7 +99,7 @@ func statusHandler(status int, body string) http.Handler {
 func TestDisaggTypeMetricSelection(t *testing.T) {
 	encoderHeader := http.CanonicalHeaderKey(routing.EncoderEndpointsHeader)
 	prefillHeader := http.CanonicalHeaderKey(routing.PrefillEndpointHeader)
-	allTypes := []string{metrics.DisaggTypePD, metrics.DisaggTypeEPD, metrics.DisaggTypeED}
+	allTypes := []string{metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode, metricsutil.DisaggPathEncodeDecode}
 
 	tests := []struct {
 		name   string
@@ -120,12 +121,12 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 				prefillHeader: []string{"prefill1:8000"},
 			},
 			allowed: []string{"prefill1"},
-			want:    metrics.DisaggTypePD,
+			want:    metricsutil.DisaggPathPrefillDecode,
 		},
 		{
 			name:   "prefill only records prefill-decode",
 			header: http.Header{prefillHeader: []string{"prefill1:8000"}},
-			want:   metrics.DisaggTypePD,
+			want:   metricsutil.DisaggPathPrefillDecode,
 		},
 		{
 			name: "encoder and prefill records encode-prefill-decode",
@@ -133,12 +134,12 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 				encoderHeader: []string{"enc1:8000"},
 				prefillHeader: []string{"prefill1:8000"},
 			},
-			want: metrics.DisaggTypeEPD,
+			want: metricsutil.DisaggPathEncodePrefillDecode,
 		},
 		{
 			name:   "encoder only records encode-decode",
 			header: http.Header{encoderHeader: []string{"enc1:8000"}},
-			want:   metrics.DisaggTypeED,
+			want:   metricsutil.DisaggPathEncodeDecode,
 		},
 	}
 
@@ -413,6 +414,89 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
 	}
+}
+
+func TestHandleP2PMetrics(t *testing.T) {
+	tests := []struct {
+		name          string
+		prefillStatus int
+		decoder       http.Handler
+		client        func() http.ResponseWriter
+		wantDelta     stageMetrics
+	}{
+		{
+			name:          "prefill 500 records prefill error and skips decode",
+			prefillStatus: http.StatusInternalServerError,
+			decoder: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after a prefill failure")
+			}),
+			client:    func() http.ResponseWriter { return httptest.NewRecorder() },
+			wantDelta: stageMetrics{prefillCount: 1, prefillErrors: 1},
+		},
+		{
+			name:          "decode 500 records decode error and duration",
+			prefillStatus: http.StatusOK,
+			decoder:       statusHandler(http.StatusInternalServerError, `{"error":"boom"}`),
+			client:        func() http.ResponseWriter { return httptest.NewRecorder() },
+			wantDelta:     stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		},
+		{
+			name:          "client write failure records decode error",
+			prefillStatus: http.StatusOK,
+			decoder:       statusHandler(http.StatusOK, `{"choices":[]}`),
+			client:        func() http.ResponseWriter { return errWriter{} },
+			wantDelta:     stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		},
+		{
+			name:          "success records durations only",
+			prefillStatus: http.StatusOK,
+			decoder:       statusHandler(http.StatusOK, `{"choices":[]}`),
+			client:        func() http.ResponseWriter { return httptest.NewRecorder() },
+			wantDelta:     stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefill := httptest.NewServer(statusHandler(tt.prefillStatus, `{}`))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+			s.logger = log.Log
+			s.decoderProxy = tt.decoder
+
+			before := snapshotStageMetrics(t)
+			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
+func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
+	prefill := httptest.NewServer(statusHandler(http.StatusOK, `{}`))
+	defer prefill.Close()
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+	s.logger = log.Log
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic(http.ErrAbortHandler)
+	})
+
+	before := snapshotStageMetrics(t)
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		s.handleP2P(httptest.NewRecorder(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	}()
+	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
+	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		snapshotStageMetrics(t).delta(before))
 }
 
 func TestRecordDecodeAbort(t *testing.T) {

@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 )
 
 // Parameter key constants for step configuration maps.
@@ -30,6 +33,22 @@ const (
 )
 
 const ModalityImage = "image"
+
+func buildKVConnector(params map[string]any) (kv.Connector, error) {
+	name, err := paramString(params, ParamKVConnector)
+	if err != nil {
+		return nil, err
+	}
+	return kv.Build(name)
+}
+
+func buildECConnector(params map[string]any) (ec.Connector, error) {
+	name, err := paramString(params, ParamECConnector)
+	if err != nil {
+		return nil, err
+	}
+	return ec.Build(name)
+}
 
 // paramInt reads an integer step parameter. The config decoder may hand a number
 // back as int, int64, float64, or json.Number depending on its source and YAML

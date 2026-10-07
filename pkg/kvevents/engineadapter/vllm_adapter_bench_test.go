@@ -116,7 +116,7 @@ func BenchmarkDecodeVLLMEvent_SinglePass(b *testing.B) {
 			b.SetBytes(int64(len(payload)))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, err := adapter.decodeVLLMEvent(payload)
+				_, err := decodeEvent(payload, mapEventToFields, adapter.eventConverters)
 				if err != nil {
 					b.Fatal(err)
 				}

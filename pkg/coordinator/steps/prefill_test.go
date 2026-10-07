@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -368,6 +369,81 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 	}
 	if _, ok := prefillBody["request_id"]; ok {
 		t.Fatal("chat format should not have request_id (uses original body)")
+	}
+}
+
+func TestPrefillStep_ResponsesFormat(t *testing.T) {
+	var prefillBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathResponses {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &prefillBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kv_transfer_params": map[string]any{"block_id": "block-3"},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewPrefillStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 2345},
+		Body: map[string]any{
+			"model":             "test-model",
+			"input":             "hello",
+			"max_output_tokens": 800,
+			"store":             true,
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if prefillBody["model"] != "test-model" {
+		t.Fatalf("expected model from original body, got %v", prefillBody["model"])
+	}
+	if _, ok := prefillBody["input"]; !ok {
+		t.Fatal("expected input from original body in responses format")
+	}
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := prefillBody["tokens"]; ok {
+		t.Fatal("prefill request should not have a tokens field")
+	}
+	if _, ok := prefillBody["kv_transfer_params"]; !ok {
+		t.Fatal("expected kv_transfer_params in responses format")
+	}
+	// The Responses API caps output on max_output_tokens, so the client value
+	// is rewritten rather than left to run the prefiller to completion.
+	if prefillBody["max_output_tokens"] != float64(1) {
+		t.Fatalf("expected max_output_tokens=1, got %v", prefillBody["max_output_tokens"])
+	}
+	// store defaults to true in the Responses schema, so a prefill step that
+	// forwarded it would ask a store-enabled worker to retain its output.
+	if prefillBody["store"] != false {
+		t.Fatalf("expected store=false, got %v", prefillBody["store"])
+	}
+	// The Responses API defines neither field, so capping them would put an
+	// unknown field on the wire.
+	if _, ok := prefillBody["max_tokens"]; ok {
+		t.Fatalf("responses request carries max_tokens=%v", prefillBody["max_tokens"])
+	}
+	if _, ok := prefillBody["max_completion_tokens"]; ok {
+		t.Fatalf("responses request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
 }
 
@@ -749,6 +825,48 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 				t.Fatalf("did not expect a warning log for %s, infos=%v", tc.kvConn, sink.infos)
 			}
 		})
+	}
+}
+
+func TestPrefillStep_DebugRequestRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": nil})
+	}))
+	defer server.Close()
+
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamKVConnector:    kv.SharedStorage,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger, records := captureLogger(logutil.DEBUG)
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test-model",
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: make(map[string]any),
+		OriginalHeaders:  http.Header{"Authorization": {"Bearer secret"}},
+	}
+	if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{
+		`"msg"="request body"`,
+		`"path"="` + reqcommon.PathVLLMGenerate + `"`,
+		`"bodyLen"=`,
+		`"authorization"="[REDACTED]"`,
+		`"x-request-id"="req-1"`,
+	}
+	if got := countRecords(records(), want...); got != 1 {
+		t.Errorf("%d records contain %v, want 1, records=%v", got, want, records())
+	}
+	if got := countRecords(records(), "Bearer secret"); got != 0 {
+		t.Errorf("%d records contain the authorization value, want 0, records=%v", got, records())
 	}
 }
 

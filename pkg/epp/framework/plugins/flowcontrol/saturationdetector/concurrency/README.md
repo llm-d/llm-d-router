@@ -26,9 +26,17 @@ The detector implements the `Filter` interface to protect individual endpoints. 
 
     EndpointLimit = Capacity * (1 + Headroom)
 
+In tokens and hybrid modes the token check also counts the uncached tokens the incoming request would add to each endpoint (the `UncachedRequestTokens` attribute from the in-flight load producer), so an endpoint is removed when admitting the request would take it over the limit:
+
+    InflightTokens + IncomingUncachedTokens <= TokenLimit
+
+An endpoint with no in-flight tokens always passes the token check. A request larger than the limit can still be placed on an idle endpoint, which is the best placement the pool can offer, and the engine's own limits decide whether it runs.
+
 This approach allows the Flow Controller to manage average pool load, while the Scheduler retains the flexibility to burst above ideal targets (the "Headroom") to satisfy affinity or scoring objectives.
 
-**Fail-Open Fallback:** To prevent complete routing failure, if *all* candidate endpoints are filtered out (i.e., the entire cluster is over the safety limits), the filter softens and returns the original list of endpoints, allowing the scheduler's scorers to pick the least-bad option.
+**Fail-Open Fallback:** To prevent complete routing failure, if *all* candidate endpoints are filtered out (i.e., the entire cluster is over the safety limits), the filter softens and returns the original list of endpoints, allowing the scheduler's scorers to pick the least-bad option. With `failOpen: false` the filter returns no endpoints instead, so the profile finds no endpoint and the request fails rather than overloading one.
+
+`failOpen: false` sheds requests, it does not queue them. With flow control enabled, the two gates use different inputs: flow control releases a request when pool saturation, computed from current load, is below 1, while the filter checks current load plus the incoming request. A request that flow control has released can therefore still be rejected by the filter when it fits on no endpoint.
 
 ## Inputs consumed
 
@@ -40,10 +48,11 @@ The plugin internally tracks active concurrency by hooking into the request life
 
 The plugin accepts JSON parameters decoding to the following fields:
 
-- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"`, `"tokens"`, or `"hybrid"`. In `"hybrid"` mode both request and token accounting are evaluated. Pool saturation is computed per endpoint as the larger of that endpoint's request and token ratios, then averaged across endpoints, so an endpoint saturated on either dimension is reflected even when distinct endpoints saturate on different dimensions. An endpoint is filtered out when either its request load or its token load reaches the limit. (Default: `"requests"`)
+- `concurrencyMode` (`string`): Evaluation mode. Valid values are `"requests"`, `"tokens"`, or `"hybrid"`. In `"hybrid"` mode both request and token accounting are evaluated. Pool saturation is computed per endpoint as the larger of that endpoint's request and token ratios, then averaged across endpoints, so an endpoint saturated on either dimension is reflected even when distinct endpoints saturate on different dimensions. An endpoint is filtered out when either its request load reaches the limit or its token load plus the request's uncached tokens exceeds the limit. (Default: `"requests"`)
 - `maxConcurrency` (`int64`): Maximum requests in flight. Serves as the "ideal" request capacity for a single endpoint. Must be > 0. (Default: `100`)
 - `maxTokenConcurrency` (`int64`): Maximum tokens in flight. The "tokens" mode equivalent of `maxConcurrency`. Must be > 0. (Default: `1000000`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal threshold, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
+- `failOpen` (`bool`): Whether the filter returns all candidates when every candidate is over its limit. When `false` it returns none. (Default: `true`)
 
 ## Trade-offs
 
