@@ -31,12 +31,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 const (
-	defaultEventSourceDeviceTier = "gpu"
+	defaultEventSourceDeviceTier = kvcache.GPUTier
 	defaultPodSelector           = ""
 )
 

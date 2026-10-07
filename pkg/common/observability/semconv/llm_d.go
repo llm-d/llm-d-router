@@ -60,6 +60,7 @@ const (
 	LLMDEPPProfileHandlerTotalProfilesKey    = attribute.Key("llm_d.epp.profile_handler.total_profiles")
 	LLMDEPPProfileHandlerExecutedProfilesKey = attribute.Key("llm_d.epp.profile_handler.executed_profiles")
 	LLMDEPPProfileHandlerDecodeFailedKey     = attribute.Key("llm_d.epp.profile_handler.decode_failed")
+	LLMDEPPProfileHandlerPrefillFailedKey    = attribute.Key("llm_d.epp.profile_handler.prefill_failed")
 
 	// EPP Producer attributes
 	LLMDEPPProducerCandidateEndpointsKey = attribute.Key("llm_d.epp.producer.candidate_endpoints")
@@ -284,6 +285,11 @@ func LLMDEPPProfileHandlerExecutedProfiles(executed int) attribute.KeyValue {
 // LLMDEPPProfileHandlerDecodeFailed returns an attribute indicating whether decode execution failed.
 func LLMDEPPProfileHandlerDecodeFailed(failed bool) attribute.KeyValue {
 	return LLMDEPPProfileHandlerDecodeFailedKey.Bool(failed)
+}
+
+// LLMDEPPProfileHandlerPrefillFailed returns an attribute indicating whether a required prefill execution failed.
+func LLMDEPPProfileHandlerPrefillFailed(failed bool) attribute.KeyValue {
+	return LLMDEPPProfileHandlerPrefillFailedKey.Bool(failed)
 }
 
 // EPP Disagg helpers

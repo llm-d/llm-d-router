@@ -16,6 +16,10 @@ limitations under the License.
 
 package kvcache
 
+// GPUTier is the tier name of blocks resident in GPU memory. KV events that
+// carry no medium are indexed under it.
+const GPUTier = "gpu"
+
 type KVCacheBackendConfig struct {
 	// Name is the identifier for this medium (e.g., "gpu", "cpu", "disk")
 	Name string `json:"name"`
@@ -27,7 +31,7 @@ type KVCacheBackendConfig struct {
 // via IndexerConfig.BackendConfigs.
 func DefaultKVCacheBackendConfig() []*KVCacheBackendConfig {
 	return []*KVCacheBackendConfig{
-		{Name: "gpu", Weight: 1.0},
+		{Name: GPUTier, Weight: 1.0},
 		{Name: "cpu", Weight: 0.8},
 		{Name: "shared_storage", Weight: 0.4},
 		{Name: "object_store", Weight: 0.2},

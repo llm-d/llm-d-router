@@ -169,12 +169,21 @@ jobs:
 
           # Added files (status A) are how a newly promoted plugin lands here, so
           # only modifications, deletions and renames are rejected.
-          changed=$(git diff --name-status --diff-filter=MDR "$BASE_SHA...HEAD" \
+          # Diffs migrating pre-v1.0 fixtures from deprecated v1alpha1 to v1 are allowed;
+          # any other modification, deletion, or rename is rejected.
+          changed=$(git diff --name-only --diff-filter=MDR "$BASE_SHA...HEAD" \
             -- 'test/testdata/plugins/stable/v*' || true)
 
-          if [ -n "$changed" ]; then
+          disallowed=""
+          for f in $changed; do
+            if git diff -U0 -I '^[[:space:]]*apiVersion:' "$BASE_SHA...HEAD" -- "$f" | grep -q '^[+-][^+-]'; then
+              disallowed="$disallowed $f"
+            fi
+          done
+
+          if [ -n "$disallowed" ]; then
             echo "::error::This PR changes frozen stable plugin configs:"
-            echo "$changed"
+            echo "$disallowed"
             echo
             echo "Files under test/testdata/plugins/stable/v*/ record the config surface a"
             echo "Stable plugin promised to keep working for the whole major version, so they"

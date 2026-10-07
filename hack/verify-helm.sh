@@ -362,6 +362,26 @@ if ! grep -q -- '--secure-serving=false' "${flag_render_output}"; then
   exit 1
 fi
 
+echo "Verifying router.epp.metricsDataSource.insecureSkipVerify renders the configured value..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for skip_verify_case in "default:true" "true:true" "false:false"; do
+    skip_verify_set="${skip_verify_case%%:*}"
+    skip_verify_want="${skip_verify_case##*:}"
+    skip_verify_args=""
+    if [ "${skip_verify_set}" != "default" ]; then
+      skip_verify_args="--set router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+    fi
+    skip_verify_render_output="${TEMP_DIR}/${chart}-insecure-skip-verify-${skip_verify_set}-render.yaml"
+    skip_verify_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway ${skip_verify_args} > ${skip_verify_render_output}"
+    echo "Executing: ${skip_verify_render_command}"
+    eval "${skip_verify_render_command}"
+    if ! grep -Eq -- "^[[:space:]]+insecureSkipVerify: ${skip_verify_want}$" "${skip_verify_render_output}"; then
+      echo "${chart} did not render insecureSkipVerify: ${skip_verify_want} for router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+      exit 1
+    fi
+  done
+done
+
 if ! HELM="${HELM}" bash "${SCRIPT_ROOT}/hack/verify-plugins-config.sh"; then
   echo "Structured plugins configuration validation failed"
   exit 1
