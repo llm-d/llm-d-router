@@ -107,8 +107,8 @@ func TestPassthrough_ForwardsUnregisteredGET(t *testing.T) {
 	if path != "/v1/models" {
 		t.Fatalf("upstream path: got %q want /v1/models", path)
 	}
-	if got := headers.Get(gateway.EPPProfileHeader); got != gateway.PhaseDecode {
-		t.Fatalf("upstream %s: got %q want %q", gateway.EPPProfileHeader, got, gateway.PhaseDecode)
+	if got := headers.Get(reqcommon.EPPProfileHeaderKey); got != gateway.PhaseDecode {
+		t.Fatalf("upstream %s: got %q want %q", reqcommon.EPPProfileHeaderKey, got, gateway.PhaseDecode)
 	}
 }
 

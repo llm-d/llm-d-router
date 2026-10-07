@@ -35,7 +35,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 	receivedPhases := []string{}
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		mu.Lock()
 		receivedPhases = append(receivedPhases, phase)
 		mu.Unlock()
@@ -157,7 +157,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 		receivedPaths = append(receivedPaths, r.URL.Path)
 		mu.Unlock()
 
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -223,7 +223,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		receivedPhase = r.Header.Get(gateway.EPPProfileHeader)
+		receivedPhase = r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{}}})
 	}))
 	defer gwServer.Close()

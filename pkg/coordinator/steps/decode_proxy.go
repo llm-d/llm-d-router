@@ -71,7 +71,7 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 		proxyReq.Header.Set(k, v)
 	}
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
-	proxyReq.Header.Set(gateway.EPPProfileHeader, gateway.PhaseDecode)
+	proxyReq.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 	for k, v := range extraHeaders {
 		proxyReq.Header.Set(k, v)
 	}

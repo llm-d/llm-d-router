@@ -53,7 +53,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedPreferHeader = r.Header.Get("Prefer")
-		receivedPhaseHeader = r.Header.Get(gateway.EPPProfileHeader)
+		receivedPhaseHeader = r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 

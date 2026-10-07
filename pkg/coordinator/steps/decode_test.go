@@ -39,8 +39,8 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		if r.URL.Path != testChatCompletionsPath {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseDecode {
-			t.Fatalf("expected x-llm-d-epp-profile: decode, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhaseDecode {
+			t.Fatalf("expected x-llm-d-epp-profile: decode, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 
 		body, _ := io.ReadAll(r.Body)

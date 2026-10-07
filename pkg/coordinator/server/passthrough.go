@@ -117,7 +117,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
-			r.Header.Set(gateway.EPPProfileHeader, gateway.PhaseDecode)
+			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 		},
 		FlushInterval: -1,
 		Transport:     transport,

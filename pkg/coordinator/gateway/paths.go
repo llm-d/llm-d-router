@@ -16,10 +16,7 @@ limitations under the License.
 
 package gateway
 
-import reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-
 const (
-	EPPProfileHeader  = reqcommon.EPPProfileHeaderKey
 	ContentTypeHeader = "Content-Type"
 	ContentTypeJSON   = "application/json"
 

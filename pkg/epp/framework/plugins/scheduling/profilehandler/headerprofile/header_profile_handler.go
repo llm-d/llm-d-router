@@ -35,11 +35,6 @@ const (
 	// HeaderProfileHandlerType is the type of the HeaderProfileHandler.
 	HeaderProfileHandlerType = "header-profile-handler"
 
-	// defaultHeaderName is the request header read when parameters.HeaderName is empty.
-	// Already lowercase, matching how the EPP stores ingested header keys, so it needs
-	// none of the normalization a configured headerName goes through.
-	defaultHeaderName = reqcommon.EPPProfileHeaderKey
-
 	// defaultProfileName is the scheduling profile run when parameters.DefaultProfile is
 	// empty.
 	defaultProfileName = "decode"
@@ -51,7 +46,7 @@ var _ fwksched.ProfileHandler = &HeaderProfileHandler{}
 // parameters configures the HeaderProfileHandler.
 type parameters struct {
 	// HeaderName is the request header whose value names the scheduling profile to run.
-	// Defaults to defaultHeaderName when empty.
+	// Defaults to reqcommon.EPPProfileHeaderKey when empty.
 	HeaderName string `json:"headerName"`
 	// DefaultProfile is the scheduling profile to run when the header is missing or
 	// blank. Defaults to defaultProfileName when empty. Useful for requests that never
@@ -79,7 +74,9 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHandler {
 	headerName = strings.ToLower(strings.TrimSpace(headerName))
 	if headerName == "" {
-		headerName = defaultHeaderName
+		// Already lowercase, so it needs none of the normalization a configured
+		// headerName goes through.
+		headerName = reqcommon.EPPProfileHeaderKey
 	}
 
 	defaultProfile = strings.TrimSpace(defaultProfile)
