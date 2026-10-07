@@ -33,8 +33,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -65,7 +67,7 @@ const (
 // Datastore defines the interface required by the Director.
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
+	ObjectiveGet(objectiveName string) *apixv1.InferenceObjective
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
 	// model name (prioritizing exact matches over generic wildcard rules) and
@@ -173,15 +175,21 @@ type Director struct {
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
-func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *v1alpha2.InferenceObjective {
+func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *apixv1.InferenceObjective {
 	infObjective := d.datastore.ObjectiveGet(reqCtx.ObjectiveKey)
 	if infObjective == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("No associated InferenceObjective found, using default", "objectiveKey", reqCtx.ObjectiveKey)
-		infObjective = &v1alpha2.InferenceObjective{
-			Spec: v1alpha2.InferenceObjectiveSpec{
+		infObjective = &apixv1.InferenceObjective{
+			Spec: apixv1.InferenceObjectiveSpec{
 				Priority: &d.defaultPriority,
 			},
 		}
+	} else if infObjective.Spec.Priority == nil {
+		// The API defines an unset priority as 0. Copy before defaulting:
+		// stored objectives are shared with concurrent readers.
+		copied := *infObjective
+		copied.Spec.Priority = ptr.To(int32(0))
+		infObjective = &copied
 	}
 	return infObjective
 }
@@ -238,18 +246,33 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
+	// Derive FairnessID from agent identity when no explicit header supplied it.
+	source := tracing.AttributionSourceHeader
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
 			reqCtx.SchedulingRequest.FairnessID = agentID
+			source = tracing.AttributionSourceAgentIdentity
 		} else {
-			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
+			source = tracing.AttributionSourceDefault
 		}
 	}
+	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
+	tracing.AttributeRequest(ctx, span)
 
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
+	}
+	reservationPending := false
+	reservationReleaser, hasReservationReleaser := d.admissionController.(dispatchReservationReleaser)
+	if hasReservationReleaser {
+		reservationPending = true
+		defer func() {
+			if reservationPending {
+				reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+			}
+		}()
 	}
 
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
@@ -304,6 +327,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	reqCtx, err = d.prepareRequest(ctx, reqCtx, result)
 	if err != nil {
 		return reqCtx, err
+	}
+	if reservationPending {
+		reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+		reservationPending = false
 	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
@@ -657,7 +684,8 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 // its side effects and the caller sees all failures.
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
 	schedulingResult *fwksched.SchedulingResult) error {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
@@ -665,9 +693,13 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 		if debugEnabled {
 			loggerDebug.Info("Running PreRequest plugin", "plugin", name)
 		}
+		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrc.PreRequestExtensionPoint, plugin, request)
 		before := time.Now()
-		err := plugin.PreRequest(ctx, request, schedulingResult)
+		err := plugin.PreRequest(ctx, scopedRequest, schedulingResult)
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
+		if err == nil {
+			err = violations.Write()
+		}
 		if err != nil {
 			if debugEnabled {
 				loggerDebug.Info("PreRequest plugin failed", "plugin", name, "error", err.Error())

@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
@@ -62,6 +63,41 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 
 	assert.Equal(t, initialQueries+4, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))
 	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey, img)))
+}
+
+func TestDeletedPodHitSeriesRemoved(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	producer := newTestProducer(t, nil, nil)
+	img := string(fwkrh.ModalityImage)
+	producer.putCacheEntry("hash-1", podA, podB)
+	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
+
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podB}, nil),
+	}))
+
+	assert.False(t, encoderCacheHitsTotal.DeleteLabelValues(ProducerType, testName, podB.String(), img),
+		"deleted pod's hit series must be removed")
+	assert.True(t, encoderCacheHitsTotal.DeleteLabelValues(ProducerType, testName, podA.String(), img),
+		"remaining pod's hit series must be kept")
+}
+
+func TestStalePodHitSeriesRemoved(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	producer := newTestProducer(t, nil, func() []k8stypes.NamespacedName { return []k8stypes.NamespacedName{podA} })
+	img := string(fwkrh.ModalityImage)
+	producer.putCacheEntry("hash-1", podA, podB)
+	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
+
+	producer.removeStalePods()
+
+	assert.False(t, encoderCacheHitsTotal.DeleteLabelValues(ProducerType, testName, podB.String(), img),
+		"stale pod's hit series must be removed")
+	assert.True(t, encoderCacheHitsTotal.DeleteLabelValues(ProducerType, testName, podA.String(), img),
+		"live pod's hit series must be kept")
 }
 
 func TestRecordHitRatioMetrics(t *testing.T) {

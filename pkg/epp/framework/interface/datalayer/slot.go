@@ -81,7 +81,7 @@ func (s *Slot[T]) Type() reflect.Type {
 func (s *Slot[T]) Put(w attributeWriter, val T) bool {
 	rv := reflect.ValueOf(val)
 	switch rv.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func: //nolint:govet // inline
 		if rv.IsNil() {
 			return false
 		}

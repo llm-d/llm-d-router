@@ -24,6 +24,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -41,6 +42,8 @@ var (
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		metadata.AudioDurationHeaderKey,
+		metadata.AudioBytesPerSecondHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
 	)
 
@@ -53,6 +56,16 @@ var (
 			metadata.FlowQueueDurationHeaderKey,
 		),
 		errcommon.RequestDroppedReasonHeaderKey,
+	)
+
+	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.
+	// Only EPP plugins may set them: client values are dropped on ingress and
+	// removed from the forwarded request when no plugin sets them.
+	InternalRoutingHeaders = sets.New(
+		routing.PrefillEndpointHeader,
+		routing.EncoderEndpointsHeader,
+		routing.DataParallelEndpointHeader,
+		routing.KVCacheSourceHeader,
 	)
 
 	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).

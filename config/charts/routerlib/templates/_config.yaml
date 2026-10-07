@@ -37,7 +37,8 @@ data:
       parameters:
         scheme: {{ .Values.router.epp.metricsDataSource.scheme | default "http" | quote }}
         path: {{ .Values.router.epp.metricsDataSource.path | default "/metrics" | quote }}
-        insecureSkipVerify: {{ .Values.router.epp.metricsDataSource.insecureSkipVerify | default true }}
+        {{- /* default treats false as empty, so hasKey keeps an explicit false. */}}
+        insecureSkipVerify: {{ ternary .Values.router.epp.metricsDataSource.insecureSkipVerify true (hasKey .Values.router.epp.metricsDataSource "insecureSkipVerify") }}
     - type: core-metrics-extractor
       {{- if ne $modelServerType "vllm" }}
       parameters:

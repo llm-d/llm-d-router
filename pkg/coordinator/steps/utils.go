@@ -17,16 +17,21 @@ limitations under the License.
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 
 	"github.com/go-logr/logr"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -44,6 +49,58 @@ func readErrorBody(r io.Reader) []byte {
 // server can map an upstream 4xx to a client error and a 5xx to a gateway fault.
 func upstreamError(step string, statusCode int, body []byte) error {
 	return &pipeline.UpstreamError{Step: step, StatusCode: statusCode, Body: string(body)}
+}
+
+// gatewayHeaders returns a fresh map per call, so the caller may modify it.
+func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]string {
+	headers := reqCtx.ForwardedHeaders()
+	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
+	headers[reqcommon.EPPProfileHeaderKey] = phase
+	return headers
+}
+
+// checkStatus returns a pipeline.UpstreamError tagged with step when the status
+// of resp is other than 200. A non-200 consumes up to maxErrorBodySize of the
+// body; a 200 leaves it unread. Closing stays with the caller.
+func checkStatus(step string, resp *http.Response) error {
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	return upstreamError(step, resp.StatusCode, readErrorBody(resp.Body))
+}
+
+// gatewayRequest is the parameter of a POST that a step sends to the gateway.
+type gatewayRequest struct {
+	// logMsg is the message of the DEBUG request record.
+	logMsg string
+	// step tags the errors.
+	step string
+	// upstream labels the call's metrics.
+	upstream string
+	path     string
+	body     []byte
+	headers  map[string]string
+}
+
+// postToGateway sends req to the gateway and returns the response. On success
+// the caller closes the response body. An error returns a nil response, with
+// the body already closed when the status was other than 200.
+func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, req gatewayRequest) (*http.Response, error) {
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info(req.logMsg, "method", "POST", "path", req.path, "bodyLen", len(req.body), "headers", httplog.RedactedHeaders(req.headers))
+	}
+
+	call := coordmetrics.StartUpstreamCall(req.upstream)
+	resp, err := gwClient.Post(ctx, req.path, req.body, req.headers)
+	call.Done()
+	if err != nil {
+		return nil, fmt.Errorf("%s: request: %w", req.step, err)
+	}
+	if err := checkStatus(req.step, resp); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
 }
 
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to
@@ -78,20 +135,110 @@ func unreachableFormatError(format reqcommon.APIType) error {
 }
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, and generate bodies, so any other
-// API collapses to APITypeVLLMGenerate; Chat Completions additionally requires
-// useOpenAIFormat. Generate is the fallback because its body carries the prompt
-// as reqCtx.TokenIDs and does not depend on the client's request shape.
+// build only Completions, Chat Completions, Responses, and generate bodies, so
+// any other API collapses to APITypeVLLMGenerate; Chat Completions and
+// Responses additionally require useOpenAIFormat. Generate is the fallback
+// because its body carries the prompt as reqCtx.TokenIDs and does not depend
+// on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
 		if useOpenAIFormat {
 			return detected
 		}
 	}
 	return reqcommon.APITypeVLLMGenerate
+}
+
+// promptItems returns the array an API carries its prompt items in: a
+// chat-completions messages array, or a Responses input array. ok is false for
+// an API that carries no item array, and for a body whose field is absent or
+// holds something other than an array.
+func promptItems(body map[string]any, apiType reqcommon.APIType) ([]any, bool) {
+	var field string
+	switch apiType {
+	case reqcommon.APITypeChatCompletions:
+		field = reqcommon.FieldMessages
+	case reqcommon.APITypeResponses:
+		field = reqcommon.FieldInput
+	default:
+		return nil, false
+	}
+	items, ok := body[field].([]any)
+	return items, ok
+}
+
+// isImagePart reports whether a content part of type partType names an image on
+// a request to apiType.
+//
+// A chat-completions request may name one either way: vLLM's chat parser primes
+// input_image and image_url through the same content part map, so an
+// input_image on a chat request reaches the model and has to be walked. A
+// Responses request names it input_image only, since the Responses input union
+// does not define image_url and a request carrying one fails the model server's
+// input validation before any worker sees it. The sidecar's encoder fan-out
+// applies the same rule.
+func isImagePart(partType string, apiType reqcommon.APIType) bool {
+	switch partType {
+	case reqcommon.PartTypeInputImage:
+		return true
+	case reqcommon.PartTypeImageURL:
+		return apiType != reqcommon.APITypeResponses
+	}
+	return false
+}
+
+// imagePart is an image content part together with the body position it was
+// found at, named for error messages: "message 0 content part 2", "input item 1
+// output part 0".
+type imagePart struct {
+	part     map[string]any
+	location string
+}
+
+// collectImageParts walks a chat-completions messages array or a Responses
+// input array and returns the image content parts in order.
+//
+// Every step that indexes reqCtx.MultimodalEntries by position walks from here:
+// replace-media-urls builds the entries, encode picks the part to prime, and
+// decode stamps the hash. They agree because they see the same parts in the
+// same order, so a second walk elsewhere would reintroduce the chance to
+// disagree. Walking once also lets the encode fan-out index by position instead
+// of re-walking per image (O(N*M) -> O(N+M)).
+//
+// Which part types count as an image is isImagePart's rule.
+func collectImageParts(items []any, apiType reqcommon.APIType) []imagePart {
+	itemLabel := "message"
+	if apiType == reqcommon.APITypeResponses {
+		itemLabel = "input item"
+	}
+
+	var parts []imagePart
+	for itemIdx, item := range items {
+		itemMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, array := range reqcommon.ItemPartArrays(itemMap, apiType) {
+			for partIdx, part := range array.Parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				partType, _ := partMap[reqcommon.FieldType].(string)
+				if !isImagePart(partType, apiType) {
+					continue
+				}
+				parts = append(parts, imagePart{
+					part:     partMap,
+					location: fmt.Sprintf("%s %d %s part %d", itemLabel, itemIdx, array.Field, partIdx),
+				})
+			}
+		}
+	}
+	return parts
 }
 
 // buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,

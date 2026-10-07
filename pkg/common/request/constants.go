@@ -18,6 +18,10 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// EPPProfileHeaderKey names the scheduling profile the EPP must run for a
+	// request. The coordinator sets it on every phase call, Envoy routes on it,
+	// and the header-profile-handler reads it.
+	EPPProfileHeaderKey = "x-llm-d-epp-profile"
 	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
 	// between phases of a disaggregated request.
 	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"
@@ -27,6 +31,11 @@ const (
 	// image). The coordinator must give every subrequest the same value so they
 	// use the same revision.
 	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
+
+	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
+	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
+	// system.
+	DefaultFairnessID = "default-flow"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"

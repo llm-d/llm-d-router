@@ -229,8 +229,11 @@ func PluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin
 	}, nil
 }
 
-// compile-time interface assertion
-var _ requestcontrol.RequestHeaderProcessor = &Plugin{}
+// compile-time interface assertions
+var (
+	_ requestcontrol.RequestHeaderProcessor = &Plugin{}
+	_ plugin.ProducerPlugin                 = &Plugin{}
+)
 
 // Plugin predicts the output-length bin for a request and stores it as a request
 // attribute for output-length-aware scheduling.
@@ -240,6 +243,11 @@ type Plugin struct {
 
 func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
+}
+
+// Produces declares the output-length bucket this plugin publishes.
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{AttributeKey: Bucket(0)}
 }
 
 // RequestHeader runs after the request body is parsed and attached, but before

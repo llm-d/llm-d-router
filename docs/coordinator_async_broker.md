@@ -9,9 +9,9 @@ The step is optional and must run first in the pipeline when enabled. Queued req
 | Mode | Behavior | For |
 | :---- | :---- | :---- |
 | No header | Untouched, the normal request path | default behavior, AP dispatch re-entry |
-| `X-AP-Mode: passthrough` | Forwarded live with quota classification and objective and fairness stamping | live traffic tied to async tenant quota and priority |
-| `X-AP-Mode: enqueue` | Written to the broker queue, answers 202 plus id, result collected later by id | batch, deferred work |
-| `X-AP-Mode: wait` | Written to the broker queue, connection held until the result lands | request and response semantics over the queue |
+| `x-llm-d-async-mode: passthrough` | Forwarded live with quota classification and objective and fairness stamping | live traffic tied to async tenant quota and priority |
+| `x-llm-d-async-mode: enqueue` | Written to the broker queue, answers 202 plus id, result collected later by id | batch, deferred work |
+| `x-llm-d-async-mode: wait` | Written to the broker queue, connection held until the result lands | request and response semantics over the queue |
 
 ## Request contract
 
@@ -20,10 +20,10 @@ Everything is communicated through headers on a standard OpenAI request, and pay
 ```
 POST http://gateway:8081/v1/chat/completions
 Content-Type: application/json
-X-Team: premium                    # tenant (quota account, fairness id)
-X-AP-Mode: wait                    # passthrough | enqueue | wait
+x-llm-d-tenant: premium                    # tenant (quota account, fairness id)
+x-llm-d-async-mode: wait                    # passthrough | enqueue | wait
 X-Request-Id: job-4217             # optional, enables retry and fetch by id
-X-Request-Timeout-Seconds: 30      # optional deadline
+x-llm-d-request-timeout-seconds: 30      # optional deadline
 
 {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Summarize this."}]}
 ```
@@ -37,7 +37,7 @@ HTTP/1.1 202 Accepted
 {"id": "job-4217", "status": "pending"}
 
 GET http://gateway:8081/v1/requests/job-4217
-X-Team: premium                    # must match the enqueueing tenant
+x-llm-d-tenant: premium                    # must match the enqueueing tenant
 
 HTTP/1.1 200 OK                    # the model's response, upstream status mirrored
 {"id": "chatcmpl-...", "object": "chat.completion", "choices": [...]}
@@ -103,9 +103,9 @@ To enable the step, add this block as the first entry under `steps:` in the coor
 | Param | Default | Description |
 | :---- | :---- | :---- |
 | `redis_url` | required | the Redis holding the async processor's queues |
-| `mode_header` | `X-AP-Mode` | selects the serving mode per request |
-| `tenant_header` | `X-Team` | resolves the tenant (quota account, fairness id) |
-| `timeout_header` | `X-Request-Timeout-Seconds` | per-request deadline for queued modes |
+| `mode_header` | `x-llm-d-async-mode` | selects the serving mode per request |
+| `tenant_header` | `x-llm-d-tenant` | resolves the tenant (quota account, fairness id) |
+| `timeout_header` | `x-llm-d-request-timeout-seconds` | per-request deadline for queued modes |
 | `routes` | none | selects queue and tier per (model, tenant), first match wins, empty fields match anything |
 | `default_queue` | `request-sortedset` | queue for requests matching no route |
 | `objectives` | none | InferenceObjective names stamped per tier, selected by quota classification |
@@ -122,8 +122,8 @@ All params and their defaults are documented in `pkg/coordinator/steps/asyncbrok
 
 | Clock | Runs from → until | Default | Where / Key | When it fires |
 | :---- | :---- | :---- | :---- | :---- |
-| Wait deadline | request accepted → result written to Redis | 60s | step param `timeouts.wait.default_seconds`, `X-Request-Timeout-Seconds` per request | hold answers 504 DEADLINE_EXCEEDED |
-| Enqueue deadline | request accepted (202) → result written to Redis | 1h | step param `timeouts.enqueue.default_seconds`, `X-Request-Timeout-Seconds` per request | fetch returns 504 DEADLINE_EXCEEDED |
+| Wait deadline | request accepted → result written to Redis | 60s | step param `timeouts.wait.default_seconds`, `x-llm-d-request-timeout-seconds` per request | hold answers 504 DEADLINE_EXCEEDED |
+| Enqueue deadline | request accepted (202) → result written to Redis | 1h | step param `timeouts.enqueue.default_seconds`, `x-llm-d-request-timeout-seconds` per request | fetch returns 504 DEADLINE_EXCEEDED |
 | Deadline clamp | applied once at admission, not a running clock | wait 1h, enqueue none | step param `timeouts.<mode>.max_seconds` | silently caps the requested deadline |
 | Wait hold cap | request accepted → result written to Redis or deadline | none | step param `wait_cap_seconds` | hold ends with 202 pending, still fetchable by id |
 | Per-dispatch attempt | AP worker sends the request → full response read back | 5m | AP flag `--request-timeout` | 504 DEADLINE_EXCEEDED, not retried |

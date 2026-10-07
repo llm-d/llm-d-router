@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -205,7 +206,7 @@ func TestHandleResponseBody(t *testing.T) {
 			if reqCtx == nil {
 				reqCtx = &RequestContext{
 					Response:          &Response{},
-					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 				}
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true)
@@ -267,7 +268,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 						"content-type": "text/event-stream; charset=utf-8",
 					},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true) // Hard coded to true since openAIParser does not endOfStream to switch logic.
 
@@ -307,7 +308,7 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 	histogram := findHistogramMetric(t, "llm_d_epp_request_ntpot_seconds", map[string]string{
 		"model_name":        "incoming-model",
 		"target_model_name": "target-model",
-		"fairness_id":       metadata.DefaultFairnessID,
+		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "3",
 	})
 	require.Equal(t, uint64(1), histogram.GetSampleCount())
@@ -406,7 +407,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 						"content-type": "text/event-stream",
 					},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 
 			for _, chunk := range tc.chunks {
@@ -449,7 +450,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 				"content-type": "text/event-stream",
 			},
 		},
-		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 	}
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
@@ -468,7 +469,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	labels := map[string]string{
 		"model_name":        "incoming-model",
 		"target_model_name": "target-model",
-		"fairness_id":       metadata.DefaultFairnessID,
+		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
 	}
 	// Each token count belongs to one request, so accumulating usage across chunks must not
@@ -692,7 +693,7 @@ func TestResponseSizeAccumulation(t *testing.T) {
 				Response: &Response{
 					Headers: map[string]string{},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			for i, chunk := range tt.chunks {
 				endOfStream := i == len(tt.chunks)-1
@@ -752,7 +753,7 @@ func TestStreamedEventAccumulation(t *testing.T) {
 			}
 			reqCtx := &RequestContext{
 				Response:          &Response{Headers: tt.headers},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			for i, chunk := range tt.chunks {
 				server.HandleResponseBody(ctx, reqCtx, chunk, i == len(tt.chunks)-1)

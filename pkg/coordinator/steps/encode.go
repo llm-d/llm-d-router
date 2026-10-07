@@ -29,7 +29,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -67,11 +66,7 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 		}
 		maxParallel = v
 	}
-	ecName, err := paramString(params, ParamECConnector)
-	if err != nil {
-		return nil, fmt.Errorf("encode: %w", err)
-	}
-	ecConn, err := ec.Build(ecName)
+	ecConn, err := buildECConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("encode: %w", err)
 	}
@@ -105,9 +100,9 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
-	var imageParts []map[string]any
-	if format == reqcommon.APITypeChatCompletions {
-		imageParts = collectImageParts(reqCtx.Body)
+	var imageParts []imagePart
+	if items, ok := promptItems(reqCtx.Body, format); ok {
+		imageParts = collectImageParts(items, format)
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -143,54 +138,51 @@ func (s *EncodeStep) executeOne(
 	index int,
 	entry pipeline.MultimodalEntry,
 	format reqcommon.APIType,
-	imageParts []map[string]any,
+	imageParts []imagePart,
 ) (map[string]any, http.Header, error) {
+	logger = logger.WithValues("index", index)
+
 	body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
 	if err != nil {
 		err = fmt.Errorf("encode[%d]: %w", index, err)
-		logger.Error(err, "encode fanout build body", "index", index)
+		logger.Error(err, "encode fanout build body")
 		return nil, nil, err
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		err = fmt.Errorf("encode[%d]: marshal: %w", index, err)
-		logger.Error(err, "encode fanout marshal", "index", index)
+		logger.Error(err, "encode fanout marshal")
 		return nil, nil, err
 	}
 
 	path := format.Path()
-	logger.V(logutil.DEFAULT).Info("sending sub-request", "index", index, "path", path)
-	headers := reqCtx.ForwardedHeaders()
-	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
-	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("sub-request body", "index", index, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
-	}
-
-	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
-	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
-	call.Done()
+	logger.V(logutil.DEFAULT).Info("sending sub-request", "path", path)
+	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+		logMsg:   "sub-request body",
+		step:     fmt.Sprintf("%s[%d]", EncodeStepName, index),
+		upstream: coordmetrics.UpstreamEncode,
+		path:     path,
+		body:     bodyBytes,
+		headers:  gatewayHeaders(reqCtx, gateway.PhaseEncode),
+	})
 	if err != nil {
-		err = fmt.Errorf("encode[%d]: request: %w", index, err)
-		logger.Error(err, "encode fanout request", "index", index, "path", path)
+		var upstream *pipeline.UpstreamError
+		if errors.As(err, &upstream) {
+			logger.Error(err, "encode fanout status", "status", upstream.StatusCode)
+		} else {
+			logger.Error(err, "encode fanout request", "path", path)
+		}
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		err := upstreamError(fmt.Sprintf("%s[%d]", EncodeStepName, index), resp.StatusCode, respBody)
-		logger.Error(err, "encode fanout status", "index", index, "status", resp.StatusCode)
-		return nil, nil, err
-	}
-
 	var encResp encodeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
 		err = fmt.Errorf("encode[%d]: decode response: %w", index, err)
-		logger.Error(err, "encode fanout decode", "index", index)
+		logger.Error(err, "encode fanout decode")
 		return nil, nil, err
 	}
-	return coerceParamsMap(logger.WithValues("index", index), encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
+	return coerceParamsMap(logger, encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
 }
 
 func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
@@ -215,22 +207,29 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	return tokenIDs
 }
 
-func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []map[string]any) (map[string]any, error) {
+func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, format reqcommon.APIType, imageParts []imagePart) (map[string]any, error) {
 	switch format {
-	case reqcommon.APITypeChatCompletions:
-		imageContent := buildSingleImageContent(imageParts, entry.Index)
-		body := map[string]any{
-			"model": reqCtx.Model,
-			"messages": []any{
-				map[string]any{
-					"role":    "user",
-					"content": []any{imageContent},
-				},
-			},
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+		if entry.Index < 0 || entry.Index >= len(imageParts) {
+			return nil, fmt.Errorf("no image part at index %d of %d: %w", entry.Index, len(imageParts), pipeline.ErrBadRequest)
 		}
-		reqcommon.CapSingleToken(body, format)
-		return body, nil
+		part := imageParts[entry.Index].part
+		// Without a URL the sub-request primes the encoder against a part it
+		// cannot fetch, under a hash the prefiller later looks up.
+		// replace-media-urls rejects this shape as it builds the entry this
+		// index came from, so the guard is defensive.
+		if reqcommon.MediaPartURL(part) == "" {
+			return nil, fmt.Errorf("image part %d carries no fetchable URL: %w", entry.Index, pipeline.ErrBadRequest)
+		}
+		// The part goes out unreshaped, so the options each API keeps beside
+		// the URL (Responses' detail sibling, chat's nested image_url fields)
+		// come along without per-format copying.
+		return reqcommon.NewEncoderPrimingBody(reqCtx.Body, part, format), nil
 	case reqcommon.APITypeVLLMGenerate:
+		// Unlike the OpenAI formats, this body carries no image: the encoder
+		// preprocesses nothing, so the client's mm_processor_kwargs and
+		// media_io_kwargs have no effect here. Render already applied them and
+		// returned the result as entry.Hash and entry.KwargsData.
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
@@ -250,47 +249,6 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// should not reach here; treat them as a programming error instead of
 		// silently sending a generate-shaped body to the wrong endpoint.
 		return nil, fmt.Errorf("unsupported request format %v", format)
-	}
-}
-
-// collectImageParts walks the request messages once and returns the image_url
-// parts in order, so the fan-out loop can index by position instead of
-// re-walking all parts per image (O(N*M) -> O(N+M)).
-func collectImageParts(body map[string]any) []map[string]any {
-	messages, _ := body["messages"].([]any)
-	var parts []map[string]any
-	for _, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] == imageURLPartType {
-				parts = append(parts, partMap)
-			}
-		}
-	}
-	return parts
-}
-
-func buildSingleImageContent(imageParts []map[string]any, index int) map[string]any {
-	if index >= 0 && index < len(imageParts) {
-		return map[string]any{
-			"type":      imageURLPartType,
-			"image_url": imageParts[index][imageURLPartType],
-		}
-	}
-	return map[string]any{
-		"type":      imageURLPartType,
-		"image_url": map[string]any{"url": ""},
 	}
 }
 

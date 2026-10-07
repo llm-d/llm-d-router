@@ -72,6 +72,8 @@ type RawMessage struct {
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
+	// retire marks a final reset: the source endpoint has no subscribers left.
+	retire bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and

@@ -30,6 +30,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
@@ -548,9 +549,9 @@ func TestDetector_Filter(t *testing.T) {
 	}
 }
 
-// staleGaugeValue reads the llm_d_epp_flow_control_stale_endpoints series for the given detector.
-// It returns -1 when the series is absent.
-func staleGaugeValue(t *testing.T, detectorName string) float64 {
+// staleGaugeValue reads the llm_d_epp_flow_control_stale_endpoints series for the given detector
+// and stage. It returns -1 when the series is absent.
+func staleGaugeValue(t *testing.T, detectorName, stage string) float64 {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
 	require.NoError(t, err)
@@ -559,10 +560,17 @@ func staleGaugeValue(t *testing.T, detectorName string) float64 {
 			continue
 		}
 		for _, m := range f.GetMetric() {
+			var gotDetector, gotStage string
 			for _, l := range m.GetLabel() {
-				if l.GetName() == "detector" && l.GetValue() == detectorName {
-					return m.GetGauge().GetValue()
+				switch l.GetName() {
+				case "detector":
+					gotDetector = l.GetValue()
+				case "stage":
+					gotStage = l.GetValue()
 				}
+			}
+			if gotDetector == detectorName && gotStage == stage {
+				return m.GetGauge().GetValue()
 			}
 		}
 	}
@@ -597,7 +605,7 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	}
 
 	detector.Saturation(context.Background(), pods)
-	require.Equal(t, 2.0, staleGaugeValue(t, detectorName), "stale and nil-metrics endpoints should both be counted")
+	require.Equal(t, 2.0, staleGaugeValue(t, detectorName, ""), "stale and nil-metrics endpoints should both be counted")
 	firstWarn := detector.lastStaleWarnNanos.Load()
 	require.NotZero(t, firstWarn, "first stale observation should record a log timestamp")
 
@@ -609,13 +617,63 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	// An empty candidate list has no stale endpoints; the gauge must not stay pinned at its last
 	// value, or an empty-pool stall reads as a metrics collection failure.
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{})
-	require.Equal(t, 0.0, staleGaugeValue(t, detectorName), "gauge should read zero for an empty candidate list")
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName, ""), "gauge should read zero for an empty candidate list")
 
 	// Re-observe staleness, then confirm fresh metrics clear it.
 	detector.Saturation(context.Background(), pods)
-	require.Equal(t, 2.0, staleGaugeValue(t, detectorName), "staleness should be re-observed after the empty list")
+	require.Equal(t, 2.0, staleGaugeValue(t, detectorName, ""), "staleness should be re-observed after the empty list")
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
-	require.Equal(t, 0.0, staleGaugeValue(t, detectorName), "gauge should return to zero when staleness clears")
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName, ""), "gauge should return to zero when staleness clears")
+}
+
+// TestDetector_StaleEndpointObservabilityPerStage verifies that the stale-endpoints gauge is
+// labeled by the pipeline stage named in ctx (flowcontrol.WithSaturationStage), so a decode
+// evaluation does not clobber a prefill evaluation's reading in the same dispatch cycle.
+func TestDetector_StaleEndpointObservabilityPerStage(t *testing.T) {
+	t.Parallel()
+
+	eppmetrics.Register()
+
+	config := Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+	}
+	detectorName := "stale-per-stage-test"
+	detector := NewDetector(detectorName, config, logr.Discard())
+
+	baseTime := time.Now()
+	prefillPods := []fwkdl.Endpoint{
+		makePodMetric("prefill-fresh", 1, 0.1, baseTime),
+		makePodMetric("prefill-stale", 1, 0.1, baseTime.Add(-2*time.Hour)),
+	}
+	decodePods := []fwkdl.Endpoint{
+		makePodMetric("decode-fresh", 1, 0.1, baseTime),
+	}
+
+	prefillCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStagePrefill)
+	decodeCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStageDecode)
+
+	detector.Saturation(prefillCtx, prefillPods)
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName, flowcontrol.SaturationStagePrefill),
+		"prefill stage should record its own stale count")
+
+	// Evaluating decode (with no stale endpoints) must not clobber the prefill reading recorded
+	// moments earlier in the same dispatch cycle.
+	detector.Saturation(decodeCtx, decodePods)
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode),
+		"decode stage should record its own stale count")
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName, flowcontrol.SaturationStagePrefill),
+		"decode's evaluation must not overwrite the prefill stage's series")
+
+	// An unpartitioned evaluation (no stage in ctx) uses the empty stage label and leaves the
+	// per-stage series untouched.
+	detector.Saturation(context.Background(), append(append([]fwkdl.Endpoint{}, prefillPods...), decodePods...))
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName, ""), "unpartitioned evaluation uses the empty stage label")
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName, flowcontrol.SaturationStagePrefill),
+		"unpartitioned evaluation must not overwrite the prefill stage's series")
+	require.Equal(t, 0.0, staleGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode),
+		"unpartitioned evaluation must not overwrite the decode stage's series")
 }
 
 func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {
@@ -634,7 +692,7 @@ func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {
 		makePodMetric("stale", 1, 0.1, time.Now().Add(-2*time.Hour)),
 	})
 
-	require.Equal(t, 1.0, staleGaugeValue(t, detectorName),
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName, ""),
 		"the stale endpoint gauge must record under the ignore policy too")
 }
 
