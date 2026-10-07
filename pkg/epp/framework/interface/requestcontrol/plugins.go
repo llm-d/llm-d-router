@@ -143,6 +143,7 @@ type RequestLine struct {
 
 // LocalResponse is a complete HTTP response produced by a Responder.
 type LocalResponse struct {
+	// StatusCode is the HTTP status code. Zero means http.StatusOK.
 	StatusCode int
 	Headers    map[string]string
 	Body       []byte

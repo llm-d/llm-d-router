@@ -30,6 +30,9 @@ const (
 	ModelsExtractorType = "models-data-extractor"
 )
 
+// OpenAIModelsPath is the OpenAI-compatible route that reports served models.
+const OpenAIModelsPath = "/v1/models"
+
 var ModelsAttributeKey = plugin.NewDataKey("/v1/models", ModelsExtractorType)
 
 // ModelDataCollection contains model data reported by model-server endpoints.

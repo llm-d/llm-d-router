@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"strings"
 
-	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -73,18 +72,16 @@ func (s *StreamingServer) tryRespondLocally(ctx context.Context, reqCtx *Request
 
 // immediateResponse renders a plugin response as the ext-proc message that ends the exchange.
 func immediateResponse(resp *fwkrc.LocalResponse) *extProcPb.ProcessingResponse {
-	headers := make([]*configPb.HeaderValueOption, 0, len(resp.Headers))
-	for key, value := range resp.Headers {
-		headers = append(headers, &configPb.HeaderValueOption{
-			Header: &configPb.HeaderValue{Key: key, RawValue: []byte(value)},
-		})
+	statusCode := resp.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
 	}
 
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: envoyTypePb.StatusCode(resp.StatusCode)},
-				Headers: &extProcPb.HeaderMutation{SetHeaders: headers},
+				Status:  &envoyTypePb.HttpStatus{Code: envoyTypePb.StatusCode(statusCode)},
+				Headers: &extProcPb.HeaderMutation{SetHeaders: envoy.GenerateHeadersMutation(resp.Headers)},
 				Body:    resp.Body,
 			},
 		},

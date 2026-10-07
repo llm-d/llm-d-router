@@ -3,8 +3,8 @@
 **Type:** `models-responder`
 **Interfaces:** `requestcontrol.Responder`, `requestcontrol.Screener`, `plugin.ConsumerPlugin`, `datalayer.Registrant`
 
-Answers `GET /v1/models` from EPP, aggregating the model lists collected from every endpoint
-in the pool. A model server only knows its own models, so routing the request to one of them
+Answers `GET /v1/models` from EPP, aggregating the model lists that the pool's endpoints have
+reported. A model server only knows its own models, so routing the request to one of them
 omits adapters loaded elsewhere.
 
 Enable this Alpha plugin with the EPP command-line flag `--allow-experimental-plugins=true`.

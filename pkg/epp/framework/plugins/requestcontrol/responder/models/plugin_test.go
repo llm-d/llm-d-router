@@ -339,6 +339,22 @@ func TestRespond_AnswersModelList(t *testing.T) {
 	assert.Equal(t, []string{"base"}, modelIDs(unmarshalModelResponse(t, resp.Body).Data))
 }
 
+func TestRespond_SkipsModelEntriesWithoutID(t *testing.T) {
+	t.Parallel()
+
+	endpoints := []fwkdl.Endpoint{endpointWithModels(
+		attrmodels.ModelData{},
+		attrmodels.ModelData{ID: "base"},
+	)}
+
+	resp, err := New().Respond(context.Background(),
+		&fwkrc.RequestLine{Method: http.MethodGet, Path: "/v1/models"}, endpoints)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, []string{"base"}, modelIDs(unmarshalModelResponse(t, resp.Body).Data))
+}
+
 func TestRespond_TrailingSlash(t *testing.T) {
 	t.Parallel()
 

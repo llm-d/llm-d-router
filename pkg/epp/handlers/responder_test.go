@@ -141,6 +141,16 @@ func TestImmediateResponseRendersStatusHeadersAndBody(t *testing.T) {
 	assert.Equal(t, map[string]string{"content-type": "application/json", "x-test": "value"}, gotHeaders)
 }
 
+func TestImmediateResponseDefaultsZeroStatusToOK(t *testing.T) {
+	t.Parallel()
+
+	response := immediateResponse(&fwkrc.LocalResponse{})
+
+	immediate := response.GetImmediateResponse()
+	require.NotNil(t, immediate)
+	assert.Equal(t, envoyTypePb.StatusCode_OK, immediate.Status.Code)
+}
+
 func TestRequestAnsweredLocalSendsImmediateResponse(t *testing.T) {
 	t.Parallel()
 

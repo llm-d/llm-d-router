@@ -70,3 +70,13 @@ func TestModelDataCollectionCloneCopiesShutdownDate(t *testing.T) {
 
 	assert.Equal(t, "2026-10-23", original[0].ShutdownDate)
 }
+
+func TestModelDataCollectionUnmarshalNullElement(t *testing.T) {
+	var collection ModelDataCollection
+
+	err := json.Unmarshal([]byte(`[null]`), &collection)
+
+	require.NoError(t, err)
+	require.Len(t, collection, 1)
+	assert.Equal(t, ModelData{}, collection[0])
+}

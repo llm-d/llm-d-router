@@ -39,9 +39,6 @@ import (
 
 const ModelsResponderType = "models-responder"
 
-// openAIModelsPath is the route this plugin answers.
-const openAIModelsPath = "/v1/models"
-
 // openAIModel is a public model item returned by the /v1/models API.
 type openAIModel struct {
 	ID           string `json:"id"`
@@ -178,7 +175,7 @@ func (p *Responder) Respond(ctx context.Context, request *fwkrc.RequestLine, end
 	if request == nil || request.Method != http.MethodGet {
 		return nil, nil //nolint:nilnil
 	}
-	if strings.TrimSuffix(request.Path, "/") != openAIModelsPath {
+	if strings.TrimSuffix(request.Path, "/") != attrmodels.OpenAIModelsPath {
 		return nil, nil //nolint:nilnil
 	}
 
@@ -229,6 +226,9 @@ func aggregate(endpoints []fwkdl.Endpoint) (json.RawMessage, int, error) {
 		}
 		collected++
 		for _, model := range c {
+			if model.ID == "" {
+				continue
+			}
 			if _, dup := seen[model.ID]; dup {
 				continue
 			}

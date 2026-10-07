@@ -117,6 +117,10 @@ lifecycle handled by the router.
 | `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. |
 | `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. |
 
+Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
+`llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
+`llm_d_epp_request_error_total` with empty `model_name` and `target_model_name` labels.
+
 #### Exemplars
 
 `llm_d_epp_request_duration_seconds` attaches the request's trace context to each

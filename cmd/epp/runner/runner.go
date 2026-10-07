@@ -666,8 +666,8 @@ func (r *Runner) registerInTreePlugins() {
 	// Stable
 	fwkplugin.Register(srcmodels.ModelsDataSourceType, fwkplugin.StabilityStable, srcmodels.ModelDataSourceFactory)
 	fwkplugin.Register(attrmodels.ModelsExtractorType, fwkplugin.StabilityStable, extmodels.ModelServerExtractorFactory)
-	fwkplugin.Register(respondermodels.ModelsResponderType, fwkplugin.StabilityAlpha, respondermodels.Factory)
 	// Alpha
+	fwkplugin.Register(respondermodels.ModelsResponderType, fwkplugin.StabilityAlpha, respondermodels.Factory)
 	fwkplugin.Register(labelproducer.LabelProducerType, fwkplugin.StabilityAlpha, labelproducer.Factory)
 	fwkplugin.Register(attrtopology.TopologyExtractorType, fwkplugin.StabilityAlpha, exttopology.Factory)
 

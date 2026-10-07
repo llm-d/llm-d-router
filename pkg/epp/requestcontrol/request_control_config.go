@@ -167,6 +167,7 @@ func (c *Config) OrderPlugins(sortedPluginNames []string) {
 	c.admissionPlugins = orderByName(c.admissionPlugins, rank)
 	c.dataProducerPlugins = orderByName(c.dataProducerPlugins, rank)
 	c.preRequestPlugins = orderByName(c.preRequestPlugins, rank)
+	c.responders = orderByName(c.responders, rank)
 	c.responseReceivedPlugins = orderByName(c.responseReceivedPlugins, rank)
 	c.responseStreamingPlugins = orderByName(c.responseStreamingPlugins, rank)
 }
