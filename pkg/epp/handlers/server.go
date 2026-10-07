@@ -378,7 +378,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
-	defer func() { reqCtx.clearToolCallingResponseDetectors() }()
+	defer func() {
+		// Finalize observations before detector cleanup and span.End on early exit.
+		if !reqCtx.responseHeadersReceivedAt.IsZero() {
+			reqCtx.recordToolCallingResponse(span, true)
+		}
+		reqCtx.clearToolCallingResponseDetectors()
+	}()
 
 	// Request-phase failures (parser resolution, body parsing, admission
 	// rejection) leave the switch before the success path, so both call this.
@@ -802,14 +808,21 @@ func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, 
 	if !endOfStream {
 		return
 	}
+	r.recordToolCallingResponse(span, false)
+}
+
+func (r *RequestContext) recordToolCallingResponse(span trace.Span, interrupted bool) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
+		return
+	}
 	r.toolCallingResponseRecorded = true
 	if span != nil {
 		span.SetAttributes((toolcalling.ResponseSummary{
 			ToolCallingRequested:         true,
 			UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
 			ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
-			UpstreamDetectionIncomplete:  r.toolCallingUpstreamDetector.DetectionIncomplete(),
-			ForwardedDetectionIncomplete: r.toolCallingForwardedDetector.DetectionIncomplete(),
+			UpstreamDetectionIncomplete:  interrupted || r.toolCallingUpstreamDetector.DetectionIncomplete(),
+			ForwardedDetectionIncomplete: interrupted || r.toolCallingForwardedDetector.DetectionIncomplete(),
 		}).SpanAttributes()...)
 	}
 }
