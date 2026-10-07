@@ -56,3 +56,7 @@ func TestScoreAbstainsWhenBoundPodMissing(t *testing.T) {
 
 	require.Nil(t, a.Score(context.Background(), newRequest("s1", 400), []fwksched.Endpoint{podB}))
 }
+
+func TestScorerCategory(t *testing.T) {
+	require.Equal(t, fwksched.Affinity, newTestAgent(testConfig()).Category())
+}

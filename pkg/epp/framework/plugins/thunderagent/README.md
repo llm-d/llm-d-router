@@ -1,8 +1,8 @@
 # ThunderAgent Plugin
 
 Tracks the KV cache footprint of agentic sessions on each pod, based on
-ThunderAgent (arXiv 2602.13692). It only observes: it does not change routing
-or admission.
+ThunderAgent (arXiv 2602.13692), and keeps each session on the pod that holds
+its KV. It does not change admission.
 
 A session is an agent trajectory, identified by the session id the
 `agent-identity` plugin reads from the session headers Claude Code, OpenCode
@@ -28,13 +28,33 @@ The same values (session counts, per-pod working set and capacity) are
 available from the `/debug/plugins/state` endpoint. Session ids never appear
 in metrics or state dumps.
 
+## Scorer
+
+Referenced as a scorer in a scheduling profile, the plugin gives 1.0 to the
+pod a session is bound to in the ledger and 0.0 to the other candidates. It
+returns no scores for requests with no session id, for sessions the ledger
+does not know, and when the bound pod is not a candidate; the other scorers
+then place the request, and `PreRequest` binds the session to the picked pod.
+Its category is `Affinity`.
+
+It does the same job as `session-affinity-scorer` with the `session_id`
+strategy, with one difference: the binding comes from the ledger, so a
+session stays on the pod whose KV the ledger counts for it. Do not configure
+both in one profile.
+
 ## Configuration
 
 ```yaml
+plugins:
+- type: agent-identity
 - type: thunder-agent
   name: thunder
   parameters:
     capacityTokens: 4194304        # fallback when cache_config_info is absent
     evictionTtlSeconds: 3600       # idle session state retention; the only release path
     evictionSweepSeconds: 10       # how often idle sessions are swept
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: thunder
 ```

@@ -23,7 +23,7 @@ import (
 )
 
 func (a *ThunderAgent) Category() fwksched.ScorerCategory {
-	return fwksched.Balance
+	return fwksched.Affinity
 }
 
 // Score pins a session to the pod recorded in the ledger: that pod scores
