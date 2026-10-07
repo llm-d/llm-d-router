@@ -48,14 +48,20 @@ field has no effect while that is off.
 
 Set `kvEventsConfig.podDiscoveryConfig.snapshotSocketPort` to the port where
 vLLM serves KV-event snapshots (offset by data-parallel rank like `socketPort`)
-to warm a pod's index from its current cache state. A subscriber that joins
-mid-stream, or sees the engine restart, loads the snapshot instead of replaying
-buffered events, then follows live events after the snapshot's sequence
-number. Without `replaySocketPort`, a gap in the event sequence reloads the
-snapshot as well. While the snapshot fails or is unavailable, the pod is
-indexed from live events alone, as it is with neither port set, and the load
-is retried after the replay cooldown. A snapshot that loads replaces that
-state.
+to warm a pod's index from its current cache state. This is experimental: it
+requires a vLLM build with
+[vllm-project/vllm#57789](https://github.com/vllm-project/vllm/pull/57789),
+whose wire format can still change.
+
+A subscriber that joins mid-stream, or sees the engine restart, loads the
+snapshot instead of replaying buffered events, then follows live events after
+the snapshot's sequence number. A restart shows as a sequence that moves
+backwards or as a new publisher identity, which vLLM sends with every batch
+and snapshot. Without `replaySocketPort`, a gap in the event sequence reloads
+the snapshot as well. While the snapshot fails, is unavailable or comes from
+another publisher identity, the pod is indexed from live events alone, as it
+is with neither port set, and the load is retried after the replay cooldown.
+A snapshot that loads replaces that state.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.

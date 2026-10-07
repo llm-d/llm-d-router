@@ -780,10 +780,11 @@ func TestZMQSubscriber_ReplayedLiveEventsDoNotTriggerAnotherReplay(t *testing.T)
 
 // snapshotServer answers snapshot requests with its current cut and batches.
 type snapshotServer struct {
-	mu       sync.Mutex
-	cut      int64
-	batches  [][]byte
-	requests atomic.Int32
+	mu        sync.Mutex
+	cut       int64
+	publisher []byte
+	batches   [][]byte
+	requests  atomic.Int32
 }
 
 func (s *snapshotServer) set(cut int64, batches ...[]byte) {
@@ -792,9 +793,34 @@ func (s *snapshotServer) set(cut int64, batches ...[]byte) {
 	s.cut, s.batches = cut, batches
 }
 
+func (s *snapshotServer) setPublisher(publisher byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publisher = publisherID(publisher)
+}
+
+// publisherID is the 16-byte identity a vLLM publisher that serves snapshots
+// sends with every batch and snapshot reply.
+func publisherID(publisher byte) []byte {
+	return bytes.Repeat([]byte{publisher}, 16)
+}
+
+// identified appends a publisher identity to a batch, as a vLLM publisher that
+// serves snapshots encodes live and replayed batches.
+func identified(t *testing.T, payload []byte, publisher byte) []byte {
+	t.Helper()
+	var fields []msgpack.RawMessage
+	require.NoError(t, msgpack.Unmarshal(payload, &fields))
+	id, err := msgpack.Marshal(publisherID(publisher))
+	require.NoError(t, err)
+	out, err := msgpack.Marshal(append(fields, id))
+	require.NoError(t, err)
+	return out
+}
+
 func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *snapshotServer {
 	t.Helper()
-	server := &snapshotServer{}
+	server := &snapshotServer{publisher: publisherID(0)}
 	rep := zmq4.NewRep(ctx)
 	require.NoError(t, rep.Listen(endpoint))
 	t.Cleanup(func() { rep.Close() })
@@ -805,7 +831,7 @@ func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *sn
 			}
 			server.requests.Add(1)
 			server.mu.Lock()
-			frames := [][]byte{seqFrame(uint64(server.cut)), make([]byte, 16)} //nolint:gosec // signed on the wire
+			frames := [][]byte{seqFrame(uint64(server.cut)), server.publisher} //nolint:gosec // signed on the wire
 			frames = append(frames, server.batches...)
 			server.mu.Unlock()
 			if err := rep.Send(zmq4.NewMsgFrom(frames...)); err != nil {
@@ -946,4 +972,43 @@ func TestZMQSubscriber_FailedSnapshotFallsBackToReplay(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "a failed snapshot must fall back to a full replay")
 	assert.Equal(t, int32(1), server.requests.Load())
 	assert.Equal(t, int32(2), h.buffer.requests.Load())
+}
+
+func TestZMQSubscriber_PublisherChangeReloadsSnapshot(t *testing.T) {
+	h, server := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	server.setPublisher(1)
+	h.send(t, 5, identified(t, buildEventBatchPayload(t), 1))
+	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+
+	// A restarted engine whose first frame continues the old sequence.
+	server.setPublisher(2)
+	server.set(6, buildDistinctBlockStoredPayload(t, 300))
+	h.send(t, 6, identified(t, buildDistinctBlockStoredPayload(t, 999), 2))
+	require.Eventually(t, func() bool {
+		oldHits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{oldRequestKey}, nil)
+		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && h.indexed(300)
+	}, 5*time.Second, 50*time.Millisecond, "a new publisher identity must replace the pod's state")
+	assert.False(t, h.indexed(999), "a frame at or before the cut is already in the snapshot")
+	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func TestZMQSubscriber_SnapshotFromAnotherPublisherIsNotApplied(t *testing.T) {
+	// The engine restarted between the live frame and the snapshot request.
+	h, server := newSnapshotHarness(t, 2, buildDistinctBlockStoredPayload(t, 100))
+	server.setPublisher(2)
+	h.send(t, 5, identified(t, buildDistinctBlockStoredPayload(t, 200), 1))
+	require.Eventually(t, func() bool { return h.indexed(200) }, 5*time.Second, 50*time.Millisecond,
+		"live frames must be indexed while no matching snapshot is loaded")
+	assert.False(t, h.indexed(100), "a snapshot from another publisher must not be applied")
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+	require.NoError(t, err)
+
+	h.send(t, 3, identified(t, buildDistinctBlockStoredPayload(t, 300), 2))
+	require.Eventually(t, func() bool {
+		oldHits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{oldRequestKey}, nil)
+		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && h.indexed(100) && h.indexed(300)
+	}, 5*time.Second, 50*time.Millisecond, "the restarted publisher's snapshot must replace the old blocks")
+	assert.Equal(t, int32(2), server.requests.Load())
 }

@@ -15,6 +15,7 @@
 package kvevents
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"github.com/vmihailenco/msgpack/v5/msgpcode"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,6 +42,7 @@ const (
 	maxConcurrentReplay         = 8
 	maxReplayNoProgressAttempts = 3
 	snapshotTimeout             = 30 * time.Second
+	publisherIDSize             = 16
 )
 
 var processReplayLimiter = semaphore.NewWeighted(maxConcurrentReplay)
@@ -65,6 +68,9 @@ type zmqSubscriber struct {
 	lastLiveSeq       uint64
 	hasLastLiveSeq    bool
 	lastReplayFailure time.Time
+	// publisherID identifies the engine process behind the live stream; it
+	// changes only when the engine restarts.
+	publisherID []byte
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
@@ -95,6 +101,22 @@ func parseEventFrame(frames [][]byte) (string, uint64, []byte, bool) {
 		return "", 0, nil, false
 	}
 	return string(frames[0]), binary.BigEndian.Uint64(frames[1]), frames[2], true
+}
+
+// batchPublisherID returns the identity a vLLM publisher that serves snapshots
+// appends to each batch, [ts, events, data_parallel_rank, publisher_id], or nil
+// for a batch without one. As the last element, a 16-byte publisher_id is the
+// batch's final bytes, so the events are not decoded here.
+func batchPublisherID(payload []byte) []byte {
+	const binHeaderSize = 2
+	if len(payload) < 1+binHeaderSize+publisherIDSize || payload[0] != msgpcode.FixedArrayLow|4 {
+		return nil
+	}
+	tail := payload[len(payload)-binHeaderSize-publisherIDSize:]
+	if tail[0] != msgpcode.Bin8 || tail[1] != publisherIDSize {
+		return nil
+	}
+	return tail[binHeaderSize:]
 }
 
 // Start connects to a ZMQ PUB socket as a SUB, receives messages,
@@ -203,14 +225,23 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			continue
 		}
 
+		restarted := z.hasLastLiveSeq && seq < z.lastLiveSeq
+		if z.snapshotEndpoint != "" {
+			if id := batchPublisherID(payload); id != nil && !bytes.Equal(id, z.publisherID) {
+				restarted = restarted || z.publisherID != nil
+				z.publisherID = bytes.Clone(id)
+			}
+		}
+
 		replayAttempted := false
-		if z.hasLastLiveSeq && seq < z.lastLiveSeq {
-			logger.Info("Detected event sequence reset, rebuilding index",
+		if restarted {
+			logger.Info("Detected publisher restart, rebuilding index",
 				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
 			z.resetForSource(topic)
 			z.lastSeq = 0
 			z.hasLastSeq = false
+			z.hasLastLiveSeq = false
 			z.lastReplayFailure = time.Time{}
 			replayAttempted = true
 			z.rebuild(ctx, topic)
@@ -376,7 +407,10 @@ func (z *zmqSubscriber) rebuild(ctx context.Context, topic string) bool {
 func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool {
 	logger := log.FromContext(ctx).WithName("zmq-snapshot")
 	started := time.Now()
-	cut, batches, err := z.fetchSnapshot(ctx)
+	cut, publisherID, batches, err := z.fetchSnapshot(ctx)
+	if err == nil && z.publisherID != nil && !bytes.Equal(publisherID, z.publisherID) {
+		err = fmt.Errorf("snapshot from publisher %x while the live stream is from %x", publisherID, z.publisherID)
+	}
 	if err != nil {
 		z.lastReplayFailure = time.Now()
 		metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "snapshot").Inc()
@@ -385,6 +419,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	}
 	// The snapshot replaces events indexed while no snapshot was available.
 	z.resetForSource(topic)
+	z.publisherID = bytes.Clone(publisherID)
 	for _, batch := range batches {
 		z.addTask(ctx, topic, 0, batch)
 	}
@@ -400,36 +435,38 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 }
 
 // fetchSnapshot requests the snapshot. The reply frames are an 8-byte signed
-// sequence cut, a 16-byte stream id and the event batches; a cut below -1
-// means the publisher cannot serve one.
-func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, [][]byte, error) {
+// sequence cut, the 16-byte publisher identity and the event batches; a cut
+// below -1 means the publisher cannot serve one.
+//
+//nolint:gocritic // unnamedResult conflicts with nonamedreturns
+func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, []byte, [][]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()
 	if err := processReplayLimiter.Acquire(ctx, 1); err != nil {
-		return 0, nil, fmt.Errorf("waiting for capacity: %w", err)
+		return 0, nil, nil, fmt.Errorf("waiting for capacity: %w", err)
 	}
 	defer processReplayLimiter.Release(1)
 
 	req := zmq4.NewReq(ctx, zmq4.WithTimeout(snapshotTimeout), zmq4.WithDialerMaxRetries(0))
 	defer req.Close()
 	if err := req.Dial(z.snapshotEndpoint); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if err := req.Send(zmq4.NewMsgString("snapshot")); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	msg, err := req.Recv()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	if len(msg.Frames) < 2 || len(msg.Frames[0]) != 8 {
-		return 0, nil, fmt.Errorf("malformed snapshot reply with %d frames", len(msg.Frames))
+	if len(msg.Frames) < 2 || len(msg.Frames[0]) != 8 || len(msg.Frames[1]) != publisherIDSize {
+		return 0, nil, nil, fmt.Errorf("malformed snapshot reply with %d frames", len(msg.Frames))
 	}
 	cut := int64(binary.BigEndian.Uint64(msg.Frames[0])) //nolint:gosec // signed on the wire
 	if cut < -1 {
-		return 0, nil, fmt.Errorf("snapshot unavailable")
+		return 0, nil, nil, fmt.Errorf("snapshot unavailable")
 	}
-	return cut, msg.Frames[2:], nil
+	return cut, msg.Frames[1], msg.Frames[2:], nil
 }
 
 // requestReplay requests buffered events starting from startSeq.
