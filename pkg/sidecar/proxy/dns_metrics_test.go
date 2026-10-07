@@ -21,12 +21,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +38,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
@@ -63,6 +68,9 @@ func reserveListener(t *testing.T) net.Listener {
 }
 
 func TestServeMetrics_PlainHTTP(t *testing.T) {
+	metrics.RecordToolCallingFieldStatuses([]toolcalling.FieldStatus{
+		{Field: toolcalling.FieldTools, Status: toolcalling.FieldStatusPreserved, Observed: true},
+	})
 	ln := reserveListener(t)
 	s := &Server{logger: logr.Discard(), MetricsListener: ln}
 
@@ -79,11 +87,32 @@ func TestServeMetrics_PlainHTTP(t *testing.T) {
 			return false
 		}
 		defer resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
+		body, err := io.ReadAll(resp.Body)
+		return err == nil && resp.StatusCode == http.StatusOK && strings.Contains(string(body),
+			`llm_d_disagg_sidecar_tool_calling_field_status_total{component="routing_sidecar",direction="request",field="tools",status="preserved"} `)
 	}, 2*time.Second, 20*time.Millisecond, "expected plaintext /metrics on the reserved listener")
 
 	cancel()
 	require.NoError(t, <-errCh)
+}
+
+func TestDataPlaneMetricsForwardsToModelServer(t *testing.T) {
+	const modelMetrics = "vllm_test_requests_total 1\n"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, modelMetrics)
+	}))
+	defer backend.Close()
+	decoderURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	s := NewProxy(Config{DecoderURL: decoderURL})
+	rw := httptest.NewRecorder()
+	s.createRoutes().ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rw.Code)
+	require.Equal(t, modelMetrics, rw.Body.String())
 }
 
 // TestServeMetrics_BindsMetricsPort covers the nil MetricsListener path.
