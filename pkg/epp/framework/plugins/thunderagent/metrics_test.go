@@ -28,8 +28,8 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// The ledger gauges are computed at scrape time: with no request after the
-// idle TTL, a scrape evicts the session and drops the stale endpoint.
+// The ledger gauges are computed at scrape time, so they follow the sweep with
+// no request in between.
 func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 	a := newTestAgent(testConfig())
 	reg := prometheus.NewPedanticRegistry()
@@ -46,8 +46,8 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 	a.mgr.mu.Lock()
 	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
 	a.mgr.endpoints["default/pod-a"].updatedAt = time.Now().Add(-2 * endpointStaleAfter)
-	a.mgr.lastMaintenance = time.Time{}
 	a.mgr.mu.Unlock()
+	a.mgr.sweep(time.Now())
 
 	require.Equal(t, map[string]float64{
 		`sessions{state="idle"}`:    0,

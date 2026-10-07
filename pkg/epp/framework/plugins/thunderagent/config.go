@@ -28,12 +28,15 @@ type Config struct {
 	// EvictionTTLSeconds is how long a session with no in-flight request and
 	// no activity is kept before its state is dropped.
 	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
+	// EvictionSweepSeconds is how often idle sessions are swept.
+	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		CapacityTokens:     4194304,
-		EvictionTTLSeconds: 3600,
+		CapacityTokens:       4194304,
+		EvictionTTLSeconds:   3600,
+		EvictionSweepSeconds: 10,
 	}
 }
 
@@ -43,6 +46,9 @@ func (c Config) validate() error {
 	}
 	if c.EvictionTTLSeconds <= 0 {
 		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
+	}
+	if c.EvictionSweepSeconds <= 0 {
+		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
 	}
 	return nil
 }

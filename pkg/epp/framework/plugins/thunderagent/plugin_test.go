@@ -18,13 +18,17 @@ package thunderagent
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/test/utils"
 )
 
 // Agent identity is a required input, so configuration loading fails without
@@ -38,4 +42,25 @@ func TestAgentIdentityIsARequiredDependency(t *testing.T) {
 		map[string]string{}, map[string]fwkplugin.FactoryFunc{}, handle)
 	require.ErrorIs(t, err, eppdatalayer.ErrNoDefaultProducer)
 	require.ErrorContains(t, err, agentidentity.AgentIdentityKey.String())
+}
+
+// Factory starts the idle session sweep for the handle's lifetime.
+func TestFactoryStartsSweep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01}`))
+	p, err := Factory("thunder", params, utils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	a := p.(*ThunderAgent)
+
+	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+	require.Eventually(t, func() bool {
+		_, ok := sessionOf(a, "s1")
+		return !ok
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestFactoryRejectsInvalidSweepInterval(t *testing.T) {
+	_, err := Factory("thunder", json.NewDecoder(strings.NewReader(`{"evictionSweepSeconds": 0}`)), nil)
+	require.ErrorContains(t, err, "evictionSweepSeconds")
 }

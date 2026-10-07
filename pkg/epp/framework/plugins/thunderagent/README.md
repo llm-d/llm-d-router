@@ -31,4 +31,5 @@ placement scorer build on this ledger in follow-up changes.
   parameters:
     capacityTokens: 4194304        # fallback when cache_config_info is absent
     evictionTtlSeconds: 3600       # idle session state retention; the only release path
+    evictionSweepSeconds: 10       # how often idle sessions are swept
 ```

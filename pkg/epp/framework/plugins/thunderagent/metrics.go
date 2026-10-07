@@ -18,7 +18,6 @@ package thunderagent
 
 import (
 	"errors"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
@@ -89,7 +88,7 @@ func (c *ledgerCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *ledgerCollector) Collect(ch chan<- prometheus.Metric) {
-	snap := c.mgr.snapshot(time.Now())
+	snap := c.mgr.snapshot()
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.running), "running")
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.idle), "idle")
 	for endpoint, g := range snap.endpoints {

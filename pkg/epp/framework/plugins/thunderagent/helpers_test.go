@@ -19,7 +19,6 @@ package thunderagent
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -114,12 +113,4 @@ func endpointTokens(a *ThunderAgent, id string) float64 {
 		return -1
 	}
 	return p.undecayedTokens()
-}
-
-// forceMaintenance backdates the rate limiter so the next hook call runs the
-// full-table maintenance.
-func forceMaintenance(a *ThunderAgent) {
-	a.mgr.mu.Lock()
-	a.mgr.lastMaintenance = time.Time{}
-	a.mgr.mu.Unlock()
 }

@@ -25,10 +25,6 @@ import (
 // count.
 const bytesPerToken = 4.0
 
-// maintenanceInterval bounds how often the full-table maintenance (TTL
-// eviction, stale endpoint cleanup) runs.
-const maintenanceInterval = time.Second
-
 // endpointStaleAfter drops a pod entry that holds no sessions and has not been
 // seen for this long.
 const endpointStaleAfter = 5 * time.Second
@@ -86,8 +82,7 @@ type sessionManager struct {
 	sessions  map[string]*session
 	endpoints map[string]*endpointState
 
-	ttl             time.Duration
-	lastMaintenance time.Time
+	ttl time.Duration
 }
 
 func newSessionManager(cfg Config) *sessionManager {
@@ -161,15 +156,11 @@ type endpointGauge struct {
 	capacity  float64
 }
 
-// maintainLocked is the housekeeping pass, run at most once per
-// maintenanceInterval by whichever hook holds the lock: drop sessions idle
-// past the TTL and drop empty stale endpoints.
-func (m *sessionManager) maintainLocked(now time.Time) {
-	if now.Sub(m.lastMaintenance) < maintenanceInterval {
-		return
-	}
-	m.lastMaintenance = now
-
+// sweep drops sessions with no turn in flight that have been idle past the
+// TTL, and empty endpoints not seen for endpointStaleAfter.
+func (m *sessionManager) sweep(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for id, s := range m.sessions {
 		if s.inflightTokens > 0 {
 			continue
@@ -186,12 +177,10 @@ func (m *sessionManager) maintainLocked(now time.Time) {
 	}
 }
 
-// snapshot runs due maintenance, so a scrape keeps the ledger current without
-// traffic, and returns the values to report.
-func (m *sessionManager) snapshot(now time.Time) gaugeSnapshot {
+// snapshot returns the values to report.
+func (m *sessionManager) snapshot() gaugeSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.maintainLocked(now)
 
 	snap := gaugeSnapshot{endpoints: make(map[string]endpointGauge, len(m.endpoints))}
 	for _, s := range m.sessions {

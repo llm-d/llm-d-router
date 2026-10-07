@@ -31,8 +31,10 @@ limitations under the License.
 package thunderagent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -65,8 +67,8 @@ type ThunderAgent struct {
 	metrics *thunderMetrics
 }
 
-// Factory builds a ThunderAgent from raw plugin parameters and registers its
-// metrics.
+// Factory builds a ThunderAgent from raw plugin parameters, registers its
+// metrics and starts the idle session sweep for the plugin's lifetime.
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := defaultConfig()
 	if rawParameters != nil {
@@ -85,8 +87,24 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 				return nil, fmt.Errorf("failed to register metrics of the '%s' plugin: %w", ThunderAgentPluginType, err)
 			}
 		}
+		sweepInterval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
+		go a.runSweep(handle.Context(), sweepInterval)
 	}
 	return a, nil
+}
+
+// runSweep runs the idle session sweep every interval until ctx is cancelled.
+func (a *ThunderAgent) runSweep(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.mgr.sweep(time.Now())
+		}
+	}
 }
 
 func newThunderAgent(name string, cfg Config) *ThunderAgent {

@@ -48,7 +48,6 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	now := time.Now()
 	m := a.mgr
 	m.mu.Lock()
-	m.maintainLocked(now)
 	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
 	// At least one token, so inflightTokens is nonzero exactly while a turn
 	// is in flight.
@@ -81,7 +80,6 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 	now := time.Now()
 	m := a.mgr
 	m.mu.Lock()
-	m.maintainLocked(now)
 	s, ok := m.sessions[id]
 	if !ok {
 		m.mu.Unlock()

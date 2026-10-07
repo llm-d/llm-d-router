@@ -103,7 +103,7 @@ func TestEmptyRequestStillInFlight(t *testing.T) {
 	require.Equal(t, int64(1), s.inflightTokens)
 }
 
-// Idle sessions past the TTL are dropped by maintenance, and a pod that then
+// Idle sessions past the TTL are dropped by the sweep, and a pod that then
 // holds nothing is dropped too. Fresh sessions and pods stay.
 func TestTTLEviction(t *testing.T) {
 	cfg := testConfig()
@@ -115,9 +115,9 @@ func TestTTLEviction(t *testing.T) {
 	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
 	a.mgr.endpoints["default/pod-a"].updatedAt = time.Now().Add(-2 * endpointStaleAfter)
 	a.mgr.mu.Unlock()
-	forceMaintenance(a)
+	runTurn(t, a, "s2", schedEndpoint("pod-b", 0, 0), 4, 1)
 
-	runTurn(t, a, "s2", schedEndpoint("pod-b", 0, 0), 4, 1) // any hook triggers maintenance
+	a.mgr.sweep(time.Now())
 	_, ok := sessionOf(a, "s1")
 	require.False(t, ok)
 	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
@@ -136,9 +136,8 @@ func TestTTLKeepsInflightSessions(t *testing.T) {
 	a.mgr.mu.Lock()
 	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
 	a.mgr.mu.Unlock()
-	forceMaintenance(a)
-	runTurn(t, a, "s2", ep, 4, 1)
 
+	a.mgr.sweep(time.Now())
 	_, ok := sessionOf(a, "s1")
 	require.True(t, ok)
 }
