@@ -74,6 +74,27 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 			expectedPrefillHostPorts: []string{"a"},
 		},
 		{
+			// An EPP that predates the rename sends only the legacy spelling.
+			name: "legacy prefill header still routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that writes both: the canonical spelling wins.
+			name: "both spellings present prefers the canonical one",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"a"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"b"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
 			name:     "sample from comma delimited header",
 			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,b"}}},
 			sampling: true,
@@ -178,8 +199,11 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 					}
 				}
 				if capturedReq != nil {
-					if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
-						t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
+					// Both spellings must go, or a worker sees a routing header.
+					for _, name := range routing.HeaderNames(routing.PrefillEndpointHeader) {
+						if v := capturedReq.Header.Get(name); v != "" {
+							t.Errorf("%s should be stripped before forwarding, got %q", name, v)
+						}
 					}
 				}
 			})

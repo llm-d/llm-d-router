@@ -239,7 +239,7 @@ func (c Config) String() string {
 }
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
-// validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
+// validated x-llm-d-kv-cache-source-host-port peer to pull cached prefix from ("" when
 // absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 

@@ -369,13 +369,8 @@ func NewRequestBufferedResponse(
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: setHeaders,
-						RemoveHeaders: []string{
-							routing.PrefillEndpointHeader,
-							routing.EncoderEndpointsHeader,
-							routing.DataParallelEndpointHeader,
-							routing.KVCacheSourceHeader,
-						},
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaderNames(),
 					},
 				},
 			},
@@ -696,4 +691,20 @@ func makeDestinationMetadata(endpoint string) *structpb.Struct {
 			},
 		},
 	}
+}
+
+// unsetRoutingHeaderNames lists every spelling of the internal routing headers
+// Envoy is told to strip when no plugin set them, deprecated aliases included.
+func unsetRoutingHeaderNames() []string {
+	canonical := []string{
+		routing.PrefillEndpointHeader,
+		routing.EncoderEndpointsHeader,
+		routing.DataParallelEndpointHeader,
+		routing.KVCacheSourceHeader,
+	}
+	names := make([]string, 0, 2*len(canonical))
+	for _, h := range canonical {
+		names = append(names, routing.HeaderNames(h)...)
+	}
+	return names
 }

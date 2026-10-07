@@ -428,11 +428,17 @@ func TestGenerateRequestHeaderResponse_EndpointScores(t *testing.T) {
 func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) {
 	t.Parallel()
 
-	allRoutingHeaders := []string{
+	// Every spelling Envoy must strip, deprecated aliases included: a client
+	// supplying either name must not reach the sidecar.
+	canonical := []string{
 		routing.PrefillEndpointHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 		routing.KVCacheSourceHeader,
+	}
+	allRoutingHeaders := make([]string, 0, 2*len(canonical))
+	for _, h := range canonical {
+		allRoutingHeaders = append(allRoutingHeaders, routing.HeaderNames(h)...)
 	}
 
 	tests := []struct {
@@ -447,13 +453,38 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			wantRemoved: allRoutingHeaders,
 		},
 		{
-			name:    "prefill selected sets prefill and removes the rest",
-			headers: map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:8000"},
-			wantSet: map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:8000"},
+			// The disagg handler writes both spellings (routing.SetRoutingHeader), so
+			// a sidecar on either side of the rename reads a prefill target.
+			name: "prefill selected sets both spellings and removes the rest",
+			headers: map[string]string{
+				routing.PrefillEndpointHeader:       "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000",
+			},
+			wantSet: map[string]string{
+				routing.PrefillEndpointHeader:       "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000",
+			},
 			wantRemoved: []string{
 				routing.EncoderEndpointsHeader,
+				routing.LegacyEncoderEndpointsHeader,
 				routing.DataParallelEndpointHeader,
 				routing.KVCacheSourceHeader,
+				routing.LegacyKVCacheSourceHeader,
+			},
+		},
+		{
+			// An older EPP in a mixed fleet, or a hand-set legacy value: the canonical
+			// spelling is unset and must still be stripped.
+			name:    "legacy spelling only still strips the canonical name",
+			headers: map[string]string{routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000"},
+			wantSet: map[string]string{routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000"},
+			wantRemoved: []string{
+				routing.PrefillEndpointHeader,
+				routing.EncoderEndpointsHeader,
+				routing.LegacyEncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+				routing.LegacyKVCacheSourceHeader,
 			},
 		},
 	}

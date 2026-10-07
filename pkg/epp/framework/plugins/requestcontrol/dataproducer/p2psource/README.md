@@ -3,7 +3,7 @@
 **Type:** `p2p-source-producer`
 
 Selects a peer that can supply the most cached prompt prefix and sets the
-`x-kv-cache-source-host-port` header so the routing sidecar can pull that
+`x-llm-d-kv-cache-source-host-port` header so the routing sidecar can pull that
 prefix instead of recomputing it. Source selection runs in the `DataProducer`
 phase before scheduling; the header is emitted in `PreRequest` after the
 computing endpoint is known.

@@ -79,8 +79,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			openAIAPIAttr(apiType),
 		)
 
-		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
-		r.Header.Del(routing.PrefillEndpointHeader)
+		prefillHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.PrefillEndpointHeader)
 
 		if len(prefillHostPorts) == 1 {
 			prefillHostPorts = strings.Split(prefillHostPorts[0], ",")
@@ -128,8 +127,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
-		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
-		r.Header.Del(routing.KVCacheSourceHeader)
+		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))
 		if kvCacheSource != "" {
 			switch {
 			case !s.p2pPullAvailable():
@@ -149,8 +147,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(kvCacheSource))
 		}
 
-		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
-		r.Header.Del(routing.EncoderEndpointsHeader)
+		encoderHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.EncoderEndpointsHeader)
 		if len(encoderHostPorts) == 1 {
 			encoderHostPorts = strings.Split(encoderHostPorts[0], ",")
 		}

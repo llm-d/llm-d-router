@@ -52,7 +52,7 @@ and makes one separate scheduling call per profile.
 | Profiles per request | Exactly one, ever | Decode always, plus encode/prefill when their decider approves -- up to three |
 | Scheduling calls per request | One per profile (caller drives the cascade) | One cycle picks every stage the request needs |
 | Primary profile | Whichever profile the header named | Always decode |
-| `requestcontrol.PreRequest` | Not implemented -- nothing downstream reads pod addresses from headers | Implemented: stamps `x-prefiller-host-port` / `x-encoder-hosts-ports` for the decode sidecar |
+| `requestcontrol.PreRequest` | Not implemented -- nothing downstream reads pod addresses from headers | Implemented: stamps `x-llm-d-prefiller-host-port` / `x-llm-d-encoder-hosts-ports` for the decode sidecar |
 | Fits | The coordinator model, which tracks cross-profile state itself | The sidecar model (llm-d-router), where the decode sidecar orchestrates the remaining hops |
 
 ## Configuration
