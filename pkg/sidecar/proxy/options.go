@@ -85,11 +85,18 @@ const (
 	metricsPort               = "metrics-port"
 	metricsCertDir            = "metrics-cert-dir"
 
+	enableBidirectionalKVXfer  = "enable-bidirectional-kv-xfer"
+	bidirectionalSessionHeader = "bidirectional-session-header"
+	bidirectionalCacheSize     = "bidirectional-cache-size"
+	bidirectionalCacheTTL      = "bidirectional-cache-ttl"
+
 	// Environment variables
 	envInferencePool           = "INFERENCE_POOL"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
 	envP2PConnectorPort        = "P2P_CONNECTOR_PORT"
+	envPodName                 = "POD_NAME"
+	envPodNamespace            = "POD_NAMESPACE"
 
 	// Defaults
 	defaultPort                  = "8000"
@@ -97,6 +104,14 @@ const (
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
 	defaultP2PConnectorPort      = 7777
+
+	// defaultBidirectionalSessionHeader is the EPP session-affinity plugin's default header.
+	defaultBidirectionalSessionHeader = routing.SessionTokenHeader
+	defaultBidirectionalCacheSize     = 4096
+	// defaultBidirectionalCacheTTL leaves 30 seconds below vLLM's default
+	// decoder_kv_blocks_ttl (480 seconds), which starts when the decode request
+	// finishes, before the sidecar stores the entry.
+	defaultBidirectionalCacheTTL = 450 * time.Second
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
 	// dispatch: it bounds how long the decode request waits on the prefill outcome
@@ -140,6 +155,11 @@ type yamlConfiguration struct {
 	Tracing                 *bool    `json:"tracing,omitempty"`
 	MetricsPort             int      `json:"metrics-port,omitempty"`
 	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
+
+	EnableBidirectionalKVXfer  *bool  `json:"enable-bidirectional-kv-xfer,omitempty"`
+	BidirectionalSessionHeader string `json:"bidirectional-session-header,omitempty"`
+	BidirectionalCacheSize     int    `json:"bidirectional-cache-size,omitempty"`
+	BidirectionalCacheTTL      string `json:"bidirectional-cache-ttl,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -252,6 +272,12 @@ func NewOptions() *Options {
 			MoRIIORemoteHosts: nil,
 			MoRIIODPSizeLocal: 0,
 			MoRIIODecodeHosts: nil,
+
+			BidirectionalSessionHeader: defaultBidirectionalSessionHeader,
+			BidirectionalCacheSize:     defaultBidirectionalCacheSize,
+			BidirectionalCacheTTL:      defaultBidirectionalCacheTTL,
+			PodName:                    os.Getenv(envPodName),
+			PodNamespace:               os.Getenv(envPodNamespace),
 		},
 		vllmPort:      defaultVLLMPort,
 		inferencePool: os.Getenv(envInferencePool),
@@ -296,6 +322,17 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
+
+	fs.BoolVar(&opts.BidirectionalKVXfer, enableBidirectionalKVXfer, opts.BidirectionalKVXfer,
+		"let the prefill engine read a conversation's KV blocks from the decode engine that served its previous turn instead of recomputing the history. "+
+			"Applies to Chat Completions with --kv-connector=nixlv2 against engines running NIXL with bidirectional_kv_xfer. "+
+			"Requires POD_NAME and POD_NAMESPACE (downward API) and the EPP session-affinity encoded-endpoint token on requests. See docs/disaggregation.md.")
+	fs.StringVar(&opts.BidirectionalSessionHeader, bidirectionalSessionHeader, opts.BidirectionalSessionHeader,
+		"request header carrying the EPP session token; must match the session-affinity plugin's header (only used with --enable-bidirectional-kv-xfer)")
+	fs.IntVar(&opts.BidirectionalCacheSize, bidirectionalCacheSize, opts.BidirectionalCacheSize,
+		"maximum number of conversation turns whose decode-side KV blocks are kept for a follow-up request (only used with --enable-bidirectional-kv-xfer)")
+	fs.DurationVar(&opts.BidirectionalCacheTTL, bidirectionalCacheTTL, opts.BidirectionalCacheTTL,
+		"how long a conversation turn's decode-side KV blocks stay usable; must stay below the engine's decoder_kv_blocks_ttl (only used with --enable-bidirectional-kv-xfer)")
 
 	// MoRI-IO WRITE-mode flags. Only meaningful with --kv-connector=nixlv2
 	// against vLLM engines running MoRI-IO in WRITE mode.
@@ -737,6 +774,30 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--enable-p2p-pull requires --kv-connector=%s (got %q)", constants.KVConnectorNIXLV2, opts.KVConnector)
 	}
 
+	if opts.BidirectionalKVXfer {
+		if opts.KVConnector != constants.KVConnectorNIXLV2 {
+			return fmt.Errorf("--%s requires --%s=%s (got %q)", enableBidirectionalKVXfer, kvConnector, constants.KVConnectorNIXLV2, opts.KVConnector)
+		}
+		if opts.MoRIIOWriteMode {
+			return fmt.Errorf("--%s is not supported with --moriio-write-mode", enableBidirectionalKVXfer)
+		}
+		if opts.DecodeChunkSize > 0 {
+			return fmt.Errorf("--%s is not supported with --%s", enableBidirectionalKVXfer, decodeChunkSize)
+		}
+		if opts.PodName == "" || opts.PodNamespace == "" {
+			return fmt.Errorf("--%s requires the %s and %s environment variables (Kubernetes downward API)", enableBidirectionalKVXfer, envPodName, envPodNamespace)
+		}
+		if opts.BidirectionalSessionHeader == "" {
+			return fmt.Errorf("--%s must not be empty", bidirectionalSessionHeader)
+		}
+		if opts.BidirectionalCacheSize <= 0 {
+			return fmt.Errorf("--%s must be positive, got %d", bidirectionalCacheSize, opts.BidirectionalCacheSize)
+		}
+		if opts.BidirectionalCacheTTL <= 0 {
+			return fmt.Errorf("--%s must be positive, got %v", bidirectionalCacheTTL, opts.BidirectionalCacheTTL)
+		}
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -906,6 +967,24 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing
+	}
+	if cfg.EnableBidirectionalKVXfer != nil && !opts.isFlagSet(enableBidirectionalKVXfer) {
+		opts.BidirectionalKVXfer = *cfg.EnableBidirectionalKVXfer
+	}
+	if cfg.BidirectionalSessionHeader != "" && !opts.isFlagSet(bidirectionalSessionHeader) {
+		opts.BidirectionalSessionHeader = cfg.BidirectionalSessionHeader
+	}
+	if cfg.BidirectionalCacheSize != 0 && !opts.isFlagSet(bidirectionalCacheSize) {
+		opts.BidirectionalCacheSize = cfg.BidirectionalCacheSize
+	}
+	if cfg.BidirectionalCacheTTL != "" && !opts.isFlagSet(bidirectionalCacheTTL) {
+		d, err := time.ParseDuration(cfg.BidirectionalCacheTTL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: ignoring invalid %s value %q: %v; using default %v\n",
+				bidirectionalCacheTTL, cfg.BidirectionalCacheTTL, err, opts.BidirectionalCacheTTL)
+		} else {
+			opts.BidirectionalCacheTTL = d
+		}
 	}
 }
 

@@ -173,3 +173,33 @@ func TestHasPreference(t *testing.T) {
 		})
 	}
 }
+
+func TestEndpointName(t *testing.T) {
+	tests := []struct {
+		pod  string
+		rank int
+		want string
+	}{
+		{"decode-0", 0, "decode-0-rank-0"},
+		{"decode-0", 7, "decode-0-rank-7"},
+		{"a-rank-1-b", 2, "a-rank-1-b-rank-2"},
+	}
+	for _, tc := range tests {
+		got := EndpointName(tc.pod, tc.rank)
+		if got != tc.want {
+			t.Errorf("EndpointName(%q, %d) = %q, want %q", tc.pod, tc.rank, got, tc.want)
+		}
+		pod, rank, ok := ParseEndpointName(got)
+		if !ok || pod != tc.pod || rank != tc.rank {
+			t.Errorf("ParseEndpointName(%q) = (%q, %d, %v), want (%q, %d, true)", got, pod, rank, ok, tc.pod, tc.rank)
+		}
+	}
+}
+
+func TestParseEndpointNameRejectsMalformedNames(t *testing.T) {
+	for _, name := range []string{"", "decode-0", "decode-0-rank-", "decode-0-rank-x", "decode-0-rank--1", "decode-0-rank-01", "-rank-0"} {
+		if pod, rank, ok := ParseEndpointName(name); ok {
+			t.Errorf("ParseEndpointName(%q) = (%q, %d, true), want ok=false", name, pod, rank)
+		}
+	}
+}

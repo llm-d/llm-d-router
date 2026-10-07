@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -210,6 +211,27 @@ type Config struct {
 	MoRIIORemoteHostSpecs []string
 	MoRIIODecodeHostSpecs []string
 	MoRIIODecodePodIPSpec string
+
+	// BidirectionalKVXfer lets the prefill engine read a conversation's KV blocks
+	// from the decode engine that served the previous turn, instead of recomputing
+	// the history. Only meaningful with --kv-connector=nixlv2 and Chat Completions.
+	BidirectionalKVXfer bool
+	// BidirectionalSessionHeader is the request header carrying the EPP session
+	// token, which must name an endpoint of this pod for a request to receive a replay.
+	BidirectionalSessionHeader string
+	// BidirectionalCacheSize is the maximum number of cached decode-side
+	// kv_transfer_params entries, one per conversation turn awaiting its follow-up.
+	BidirectionalCacheSize int
+	// BidirectionalCacheTTL is how long an entry stays usable. It must stay below
+	// the engine's decoder KV block TTL, after which the blocks are released: the
+	// engine starts its timer when the request finishes and the sidecar when the
+	// response has been delivered.
+	BidirectionalCacheTTL time.Duration
+	// PodName and PodNamespace identify this pod, matched against the endpoint
+	// the EPP encodes in the session token. Populated from POD_NAME and
+	// POD_NAMESPACE.
+	PodName      string
+	PodNamespace string
 }
 
 // MarshalJSON implements json.Marshaler for Config.
@@ -266,6 +288,11 @@ type Server struct {
 
 	prefillSamplerFn func(n int) int        // allow test override
 	nixlRequestIDFn  func() (string, error) // allow test override
+
+	// kvReuseCache holds decode-side kv_transfer_params awaiting the conversation's
+	// next request (see bidirectional_kv.go). Shared by data-parallel rank clones.
+	// Nil unless config.BidirectionalKVXfer.
+	kvReuseCache *expirable.LRU[string, *kvReuseEntry]
 
 	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
 	// (data_parallel.go), so rank derivation from a routed endpoint's port
@@ -378,6 +405,7 @@ func NewProxy(config Config) *Server {
 		forwardDataParallel: true,
 		prefillSamplerFn:    rand.IntN,
 		nixlRequestIDFn:     newNIXLV2RequestID,
+		kvReuseCache:        newKVReuseCache(config),
 	}
 	if basePort, err := strconv.Atoi(config.Port); err == nil {
 		server.dpBasePort = basePort
@@ -462,6 +490,7 @@ func (s *Server) Clone() *Server {
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
 		nixlRequestIDFn:     s.nixlRequestIDFn,
+		kvReuseCache:        s.kvReuseCache,
 		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}

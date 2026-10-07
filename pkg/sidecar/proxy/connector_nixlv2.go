@@ -136,7 +136,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemoteDPRankOverride: true,
 			requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 			requestFieldTransferID:           transferID,
-			"tp_size":                        s.config.MoRIIOTPSize,
+			requestFieldTPSize:               s.config.MoRIIOTPSize,
 			"remote_dp_size":                 s.config.MoRIIODPSize,
 		}
 		// Wide-EP fan-out (prefill request, serial path): remote_hosts must be the
@@ -161,6 +161,21 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			reqcommon.FieldRemoteBlockIDs:  nil,
 			reqcommon.FieldRemoteHost:      nil,
 			reqcommon.FieldRemotePort:      nil,
+		}
+	}
+
+	// Bidirectional KV transfer: replay the decode-side blocks of this
+	// conversation's previous turn so the prefill engine can read them instead of
+	// recomputing the history. The P2P source below stays on the request: the
+	// engine's MultiConnector takes the first connector that reports a hit and
+	// applies kv_recompute_threshold to the NIXL read itself.
+	reuse := s.newKVReuse(r, body, apiType)
+	replayed := false
+	if reuse != nil {
+		if cached := reuse.take(); cached != nil {
+			replayed = true
+			injectBidirectionalKVParams(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), cached)
+			s.logger.V(logging.DEBUG).Info("replaying decode-side kv_transfer_params", "request_id", uuidStr)
 		}
 	}
 
@@ -202,6 +217,14 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	var pw *bufferedResponseWriter
 retryLoop:
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 && replayed {
+			// The failed attempt may have read and released the decode-side blocks.
+			dropBidirectionalKVParams(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any))
+			if b, err := json.Marshal(prefillRequest); err == nil {
+				pbody = b
+			}
+			replayed = false
+		}
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
@@ -406,7 +429,12 @@ retryLoop:
 		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
+	responseWriter := statusWriter
+	var capture *decodeCapture
+	if reuse != nil {
+		responseWriter, capture = newDecodeCapture(statusWriter)
+	}
+	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(responseWriter, pCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
@@ -431,6 +459,8 @@ retryLoop:
 	if decodeStatus.failed() {
 		metrics.RecordError(metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	} else if capture != nil && reuse.store(capture) {
+		s.logger.V(logging.DEBUG).Info("stored decode-side kv_transfer_params for the next turn", "request_id", uuidStr)
 	}
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
 
@@ -512,7 +542,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 		requestFieldTransferID:           transferID,
-		"tp_size":                        s.config.MoRIIOTPSize,
+		requestFieldTPSize:               s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
 	// Wide-EP fan-out (prefill request): remote_hosts must be the DECODE-side pod
@@ -567,7 +597,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIOPrefillHandshakePort,
 		requestFieldTransferID:           transferID,
-		"tp_size":                        s.config.MoRIIOTPSize,
+		requestFieldTPSize:               s.config.MoRIIOTPSize,
 		"remote_dp_size":                 dpLocal,
 		"is_request_leader":              true,
 	}

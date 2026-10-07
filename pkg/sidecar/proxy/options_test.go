@@ -1700,3 +1700,85 @@ func TestWideEPScenarios(t *testing.T) {
 		require.Contains(t, err.Error(), "dp-size-local")
 	})
 }
+
+func TestValidateBidirectionalKVXfer(t *testing.T) {
+	newOptions := func(t *testing.T) *Options {
+		t.Helper()
+		opts := NewOptions()
+		opts.KVConnector = constants.KVConnectorNIXLV2
+		opts.BidirectionalKVXfer = true
+		opts.PodName = "decode-0"
+		opts.PodNamespace = "default"
+		require.NoError(t, opts.Complete())
+		return opts
+	}
+
+	t.Run("is off by default", func(t *testing.T) {
+		require.False(t, NewOptions().BidirectionalKVXfer)
+	})
+
+	t.Run("accepts a complete configuration", func(t *testing.T) {
+		require.NoError(t, newOptions(t).Validate())
+	})
+
+	t.Run("binds the flags", func(t *testing.T) {
+		opts := NewOptions()
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		opts.AddFlags(fs)
+		require.NoError(t, fs.Parse([]string{
+			"--enable-bidirectional-kv-xfer",
+			"--bidirectional-session-header=x-conversation",
+			"--bidirectional-cache-size=7",
+			"--bidirectional-cache-ttl=90s",
+		}))
+		require.True(t, opts.BidirectionalKVXfer)
+		require.Equal(t, "x-conversation", opts.BidirectionalSessionHeader)
+		require.Equal(t, 7, opts.BidirectionalCacheSize)
+		require.Equal(t, 90*time.Second, opts.BidirectionalCacheTTL)
+	})
+
+	rejects := map[string]struct {
+		mutate func(*Options)
+		want   string
+	}{
+		"a connector other than NIXLv2": {
+			func(o *Options) { o.KVConnector = constants.KVConnectorSharedStorage },
+			"--enable-bidirectional-kv-xfer requires --kv-connector=nixlv2",
+		},
+		"MoRI-IO write mode": {
+			func(o *Options) { o.MoRIIOWriteMode = true },
+			"not supported with --moriio-write-mode",
+		},
+		"chunked decode": {
+			func(o *Options) { o.DecodeChunkSize = 128 },
+			"not supported with --decode-chunk-size",
+		},
+		"an unknown pod name": {
+			func(o *Options) { o.PodName = "" },
+			"POD_NAME and POD_NAMESPACE",
+		},
+		"an unknown pod namespace": {
+			func(o *Options) { o.PodNamespace = "" },
+			"POD_NAME and POD_NAMESPACE",
+		},
+		"an empty session header": {
+			func(o *Options) { o.BidirectionalSessionHeader = "" },
+			"--bidirectional-session-header must not be empty",
+		},
+		"a non-positive cache size": {
+			func(o *Options) { o.BidirectionalCacheSize = 0 },
+			"--bidirectional-cache-size must be positive",
+		},
+		"a non-positive cache TTL": {
+			func(o *Options) { o.BidirectionalCacheTTL = 0 },
+			"--bidirectional-cache-ttl must be positive",
+		},
+	}
+	for name, tc := range rejects {
+		t.Run("rejects "+name, func(t *testing.T) {
+			opts := newOptions(t)
+			tc.mutate(opts)
+			require.ErrorContains(t, opts.Validate(), tc.want)
+		})
+	}
+}

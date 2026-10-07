@@ -676,6 +676,62 @@ With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
 compensated; `data_parallel_index` and the global rank carried in KV-event
 batches are unchanged.
 
+### Bidirectional KV Transfer (`nixlv2`)
+
+With `--enable-bidirectional-kv-xfer`, the prefill engine reads the KV blocks
+the decode engine still holds from the previous turn of a conversation instead
+of recomputing the history. The decode response carries the blocks' location in
+`kv_transfer_params`. The sidecar keeps it until the conversation's next request
+and replays it on that request's prefill leg.
+
+Requirements:
+
+- The engines run NIXL with `"bidirectional_kv_xfer": true` in
+  `kv_connector_extra_config`. The decode engine releases its blocks after
+  `decoder_kv_blocks_ttl` (default 480 seconds), counted from the end of the
+  decode request. `--bidirectional-cache-ttl` (default 450 seconds) must stay
+  below it, because the sidecar's timer starts once the response has been
+  delivered.
+- The EPP runs the session-affinity plugin with the encoded-endpoint strategy,
+  so a follow-up returns to the same decode pod and carries the pod's session
+  token (`x-session-token` by default; `--bidirectional-session-header` renames
+  it). The EPP issues the token on a response, so the first turn of a
+  conversation has none: the sidecar caches every eligible turn, and replays only
+  to a request whose token names an endpoint of its own pod. `POD_NAME` and
+  `POD_NAMESPACE` must be set from the downward API for that comparison. Any
+  client can construct a token, so it marks a routed follow-up and does not
+  authenticate the caller.
+- Requests are Chat Completions with a single choice and no
+  `truncate_prompt_tokens`. Requests that differ (other APIs, `n` greater than 1,
+  prompt truncation) run the ordinary P/D flow. The sidecar refuses to start
+  with MoRI-IO write mode or chunked decode (`--decode-chunk-size`).
+- The decoder returns no reasoning output for the turn. A response that carries
+  reasoning text is not cached, because a chat template may render it
+  differently on the next turn.
+
+The prefill engine copies the replayed blocks over the leading blocks of the new
+prompt without comparing token contents. The sidecar therefore addresses each
+cached entry by a digest of the request fields that determine the prompt tokens
+(`model`, `cache_salt`, `tools`, `tool_choice`, `reasoning_effort`,
+`chat_template`, `chat_template_kwargs`, and similar) and of the full message history, including the reply the decoder
+generated. A follow-up gets an entry only when its messages extend the turn that
+produced it field for field. A different conversation or tenant, an edited
+message or reply, or a changed tool set misses, and prefill recomputes as usual.
+An entry is used once, because the prefill engine's read releases the
+decode-side blocks, and expires after `--bidirectional-cache-ttl`.
+
+When `--enable-p2p-pull` is also set, the prefill request carries both the NIXL
+read of the decode-side blocks and the `remote_kv_source` pull. The engine's
+`MultiConnector` takes the first connector that reports a hit and applies
+`kv_recompute_threshold` to the NIXL read, so the sidecar has no threshold of
+its own.
+
+The history is matched on message text, so reuse is correct only for models
+whose chat template renders earlier turns the way the decoder generated them.
+A template that drops reasoning from earlier assistant turns, or a reply that
+re-tokenizes differently from the generated tokens, goes undetected by the
+sidecar.
+
 ### General Sidecar Flags
 
 The sidecar's serving TLS flags are shared with the EPP and the coordinator and are
@@ -741,6 +797,10 @@ Enabling the flag requires:
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+| `nixlv2` | `--enable-bidirectional-kv-xfer` | — | `false` | Let the prefill engine read a conversation's KV blocks from the decode engine that served its previous turn. See [Bidirectional KV Transfer](#bidirectional-kv-transfer-nixlv2). Requires `POD_NAME` and `POD_NAMESPACE`. |
+| `nixlv2` | `--bidirectional-session-header` | — | `x-session-token` | Request header carrying the EPP session token. Must match the session-affinity plugin's header. |
+| `nixlv2` | `--bidirectional-cache-size` | — | `4096` | Maximum number of conversation turns whose decode-side KV blocks are kept for a follow-up request. |
+| `nixlv2` | `--bidirectional-cache-ttl` | — | `450s` | How long a turn's decode-side KV blocks stay usable. Must stay below the engine's `decoder_kv_blocks_ttl`. |
 
 ---
 

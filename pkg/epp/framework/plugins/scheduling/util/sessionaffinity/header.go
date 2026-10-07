@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -33,7 +34,7 @@ import (
 
 // DefaultHeader is the default request/response header carrying the session
 // token.
-const DefaultHeader = "x-session-token"
+const DefaultHeader = routing.SessionTokenHeader
 
 // EncodedEndpointHeaderConfig configures the encoded_endpoint_header strategy.
 type EncodedEndpointHeaderConfig struct {

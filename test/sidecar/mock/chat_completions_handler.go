@@ -50,7 +50,11 @@ type ChatCompletionHandler struct {
 	// non-nil remote_host / remote_notify_port / transfer_id fields that the
 	// sidecar populates when --moriio-write-mode is enabled.  Standard NIXLv2
 	// READ-mode validation (everything nil) still applies when this is false.
-	MoRIIOWriteMode     bool
+	MoRIIOWriteMode bool
+	// BidirectionalKVMode lets a NIXLv2 prefill request carry the decode-side
+	// remote_engine_id, remote_block_ids, remote_host and remote_port that
+	// bidirectional KV transfer replays from the previous turn.
+	BidirectionalKVMode bool
 	RequestCount        atomic.Int32
 	CompletionRequests  []map[string]any
 	CompletionRawBodies [][]byte
@@ -155,12 +159,12 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 				w.Write([]byte("expected do_remote_prefill:false")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 				return
 			}
-			if v, ok := kvTransferParamsMap["remote_engine_id"]; !ok || v != nil {
+			if v, ok := kvTransferParamsMap["remote_engine_id"]; !cc.BidirectionalKVMode && (!ok || v != nil) {
 				w.WriteHeader(http.StatusBadRequest)
 				w.Write([]byte("expected remote_engine_id:null")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 				return
 			}
-			if v, ok := kvTransferParamsMap["remote_block_ids"]; !ok || v != nil {
+			if v, ok := kvTransferParamsMap["remote_block_ids"]; !cc.BidirectionalKVMode && (!ok || v != nil) {
 				w.WriteHeader(http.StatusBadRequest)
 				w.Write([]byte("expected remote_block_ids:null")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 				return
@@ -198,14 +202,14 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 					w.Write([]byte("expected transfer_id to be a non-empty string in WRITE mode")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 					return
 				}
-			} else {
+			} else if !cc.BidirectionalKVMode {
 				if v, ok := kvTransferParamsMap["remote_host"]; !ok || v != nil {
 					w.WriteHeader(http.StatusBadRequest)
 					w.Write([]byte("expected remote_host:null")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 					return
 				}
 			}
-			if v, ok := kvTransferParamsMap["remote_port"]; !ok || v != nil {
+			if v, ok := kvTransferParamsMap["remote_port"]; !cc.BidirectionalKVMode && (!ok || v != nil) {
 				w.WriteHeader(http.StatusBadRequest)
 				w.Write([]byte("expected remote_port:null")) //nolint:errcheck,gosec // G104: error not actionable on test handler response
 				return
