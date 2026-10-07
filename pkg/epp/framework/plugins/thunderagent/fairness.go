@@ -56,6 +56,8 @@ type candidate struct {
 // Unlike the original ThunderAgent, which restores a paused session onto any
 // pod with room, a paused session waits for its own pod, so its warm prefix
 // is kept. The wait is bounded by headWaitStarvationMs.
+// TODO(#3221): add an option to restore a paused session onto another pod
+// with room when its own pod stays full.
 //
 // Order among the sessions allowed to dispatch:
 // waited past headWaitStarvationMs (oldest first) ->
