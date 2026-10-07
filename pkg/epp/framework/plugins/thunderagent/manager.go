@@ -35,8 +35,8 @@ type session struct {
 	endpoint *endpointState
 	// committedTokens is usage.total_tokens of the last completed turn.
 	committedTokens int64
-	// inflightTokens is the sum of the estimates of the session's turns
-	// currently being processed.
+	// inflightTokens is the sum of the estimates of the session's turns in
+	// flight.
 	inflightTokens int64
 	lastActivity   time.Time
 }

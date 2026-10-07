@@ -14,17 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package thunderagent provides session level admission control for agentic
-// workloads, a minimal implementation of ThunderAgent (arXiv 2602.13692).
+// Package thunderagent tracks the KV cache footprint of agentic sessions on
+// each pod, based on ThunderAgent (arXiv 2602.13692).
 //
 // A session (an agent trajectory identified by the session id the
-// agent-identity plugin publishes) is bound to one pod and its KV token footprint is tracked from usage reports
-// plus in-flight estimates. The engine's own KV utilization cannot serve this
-// purpose: a session waiting on a tool call still owns its context in the
-// prefix cache, but those blocks sit on the free list and are reported as
-// unused, so on an agentic workload the reported utilization stays low while
-// the cache is in fact full. The ledger tracked here counts idle sessions,
-// which is the quantity that decides whether one more session fits.
+// agent-identity plugin publishes) is bound to one pod, and its KV token
+// footprint is tracked from usage reports plus in-flight estimates. The
+// engine's own KV utilization cannot serve this purpose: a session waiting on a
+// tool call still owns its context in the prefix cache, but those blocks sit on
+// the free list and are reported as unused, so on an agentic workload the
+// reported utilization stays low while the cache is in fact full. The ledger
+// counts idle sessions too.
 //
 // This file wires the plugin; the ledger lives in manager.go and the request
 // hooks in accounting.go.
