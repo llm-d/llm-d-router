@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	dto "github.com/prometheus/client_model/go"
 	"google.golang.org/protobuf/proto"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -45,9 +46,11 @@ vllm:num_requests_waiting{engine="0",model_name="m"} 1.0
 vllm:num_requests_waiting_by_reason{engine="0",model_name="m",reason="capacity"} 1.0
 # a free-form comment
 
-# HELP vllm:prompt_tokens Number of prefill tokens processed.
-# TYPE vllm:prompt_tokens counter
+# HELP vllm:prompt_tokens_total Number of prefill tokens processed.
+# TYPE vllm:prompt_tokens_total counter
 vllm:prompt_tokens_total{engine="0",model_name="m"} 1234.0
+# HELP vllm:prompt_tokens_created Number of prefill tokens processed.
+# TYPE vllm:prompt_tokens_created gauge
 vllm:prompt_tokens_created{engine="0",model_name="m"} 1.7e+09
 # HELP vllm:e2e_request_latency_seconds Histogram of e2e request latency in seconds.
 # TYPE vllm:e2e_request_latency_seconds histogram
@@ -55,6 +58,9 @@ vllm:e2e_request_latency_seconds_bucket{engine="0",le="1.0",model_name="m"} 2.0
 vllm:e2e_request_latency_seconds_bucket{engine="0",le="+Inf",model_name="m"} 5.0
 vllm:e2e_request_latency_seconds_count{engine="0",model_name="m"} 5.0
 vllm:e2e_request_latency_seconds_sum{engine="0",model_name="m"} 9.5
+# HELP vllm:e2e_request_latency_seconds_created Histogram of e2e request latency in seconds.
+# TYPE vllm:e2e_request_latency_seconds_created gauge
+vllm:e2e_request_latency_seconds_created{engine="0",model_name="m"} 1.7e+09
 # HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
 # TYPE vllm:cache_config_info gauge
 vllm:cache_config_info{block_size="64",engine="0",num_gpu_blocks="5330"} 1.0`
@@ -75,7 +81,7 @@ func TestFamilyFilterParsesOnlyListedFamilies(t *testing.T) {
 		t.Fatalf("parse full page: %v", err)
 	}
 	listed := []string{
-		"vllm:num_requests_running", "vllm:num_requests_waiting", "vllm:prompt_tokens",
+		"vllm:num_requests_running", "vllm:num_requests_waiting", "vllm:prompt_tokens_total",
 		"vllm:e2e_request_latency_seconds", "vllm:cache_config_info", "vllm:not_exposed",
 	}
 	got, err := newFamilyFilter(listed).parse(strings.NewReader(familyFilterPage))
@@ -83,10 +89,9 @@ func TestFamilyFilterParsesOnlyListedFamilies(t *testing.T) {
 		t.Fatalf("parse filtered page: %v", err)
 	}
 
-	// The text parser files counter samples under their sample names (_total, _created).
 	want := []string{
 		"vllm:cache_config_info", "vllm:e2e_request_latency_seconds", "vllm:num_requests_running",
-		"vllm:num_requests_waiting", "vllm:prompt_tokens_created", "vllm:prompt_tokens_total",
+		"vllm:num_requests_waiting", "vllm:prompt_tokens_total",
 	}
 	if keys := sortedKeys(got); strings.Join(keys, ",") != strings.Join(want, ",") {
 		t.Fatalf("families = %v, want %v", keys, want)
@@ -95,6 +100,31 @@ func TestFamilyFilterParsesOnlyListedFamilies(t *testing.T) {
 		if !proto.Equal(got[name], full[name]) {
 			t.Errorf("family %s differs from the unfiltered parse:\n got  %v\n want %v", name, got[name], full[name])
 		}
+	}
+}
+
+func TestFamilyFilterNamesCountersByTheirTotalFamily(t *testing.T) {
+	page := "# HELP requests_total Requests served.\n# TYPE requests_total counter\nrequests_total 7\n" +
+		"# HELP requests_created Requests served.\n# TYPE requests_created gauge\nrequests_created 1.7e+09\n"
+
+	byBase, err := newFamilyFilter([]string{"requests"}).parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("parse by base name: %v", err)
+	}
+	if len(byBase) != 0 {
+		t.Fatalf("base name kept %v, want nothing", sortedKeys(byBase))
+	}
+
+	byTotal, err := newFamilyFilter([]string{"requests_total"}).parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("parse by _total name: %v", err)
+	}
+	if keys := sortedKeys(byTotal); len(keys) != 1 || keys[0] != "requests_total" {
+		t.Fatalf("families = %v, want [requests_total]", keys)
+	}
+	family := byTotal["requests_total"]
+	if family.GetType() != dto.MetricType_COUNTER || family.GetMetric()[0].GetCounter().GetValue() != 7 {
+		t.Fatalf("requests_total = %v, want counter 7", family)
 	}
 }
 
@@ -182,8 +212,10 @@ func TestMetricsDataSourceParsesFamiliesOfBoundExtractors(t *testing.T) {
 			familyExtractor{"x", []string{"a"}}, familyExtractor{"y", []string{"b"}}}, want: "a,b"},
 		{name: "an extractor without families keeps the whole response", extractors: []fwkplugin.Plugin{
 			familyExtractor{"x", []string{"a"}}, noopExtractor{}, familyExtractor{"y", []string{"b"}}}, want: "a,b,c"},
-		{name: "configured families win", params: `{"families":["c"]}`, extractors: []fwkplugin.Plugin{
-			familyExtractor{"x", []string{"a"}}}, want: "c"},
+		{name: "configured families join the declared ones", params: `{"families":["c"]}`, extractors: []fwkplugin.Plugin{
+			familyExtractor{"x", []string{"a"}}}, want: "a,c"},
+		{name: "configured families cover an extractor without families", params: `{"families":["c"]}`,
+			extractors: []fwkplugin.Plugin{familyExtractor{"x", []string{"a"}}, noopExtractor{}}, want: "a,c"},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(boundFamiliesPage))

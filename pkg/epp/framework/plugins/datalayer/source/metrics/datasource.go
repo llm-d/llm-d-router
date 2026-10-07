@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -67,12 +68,10 @@ type metricsDatasourceParams struct {
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
-	// Families, when set, keeps only these metric families from each scrape and drops every
-	// other line before parsing. Model servers expose far more families than the extractors
-	// read, so parsing only the listed ones cuts the scrape's CPU and allocations. The list must
-	// cover every family the source's extractors read; the rest are invisible to them.
-	// When omitted, the source keeps the families its extractors declare (FamilyReader), and
-	// parses the whole response if any bound extractor does not declare them.
+	// Families lists metric families to keep in addition to the ones the source's extractors
+	// declare (FamilyReader). Every other line of a scrape is dropped before parsing. The list
+	// must cover the families of extractors that do not declare theirs; when it is empty and
+	// such an extractor is bound, the source parses the whole response.
 	Families []string `json:"families,omitempty"`
 }
 
@@ -142,17 +141,17 @@ type FamilyReader interface {
 }
 
 // newMetricsParser returns the source's parser and the option that feeds it the bound
-// extractors. Configured families are used as given. Without them the parser keeps the
-// families the bound extractors declare, and parses the whole response while any bound
-// extractor is not a FamilyReader. A positive maxBytes caps the bytes read from a response.
+// extractors. The parser keeps the configured families and those the bound extractors declare.
+// Without configured families, it parses the whole response while any bound extractor is not a
+// FamilyReader. A positive maxBytes caps the bytes read from a response.
 func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
 	var (
 		filter   atomic.Pointer[familyFilter]
-		declared []string
+		declared = slices.Clone(families)
 		opaque   bool
 	)
-	if len(families) > 0 {
-		filter.Store(newFamilyFilter(families))
+	if len(declared) > 0 {
+		filter.Store(newFamilyFilter(declared))
 	}
 	parser := func(data io.Reader) (PrometheusMetricMap, error) {
 		if maxBytes > 0 {
@@ -165,13 +164,12 @@ func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (Prome
 	}
 	// AppendExtractor serializes the observer calls.
 	observer := func(ext fwkplugin.Plugin) {
-		if len(families) > 0 {
-			return
-		}
 		reader, ok := ext.(FamilyReader)
 		if !ok {
-			opaque = true
-			filter.Store(nil)
+			if len(families) == 0 {
+				opaque = true
+				filter.Store(nil)
+			}
 			return
 		}
 		declared = append(declared, reader.MetricFamilies()...)
@@ -182,8 +180,9 @@ func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (Prome
 	return parser, http.WithExtractorObserver(observer)
 }
 
-// sampleSuffixes are the sample-name suffixes a family's samples may carry in the text format.
-var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count"), []byte("_total"), []byte("_created")}
+// sampleSuffixes are the suffixes of histogram and summary samples, which the text parser files
+// under the base family. Counters are declared under their _total name and need no suffix.
+var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count")}
 
 // familyFilter parses only the lines of the listed metric families.
 type familyFilter struct {
