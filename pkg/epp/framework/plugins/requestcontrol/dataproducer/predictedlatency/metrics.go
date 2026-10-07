@@ -118,6 +118,15 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "type"},
 	)
+
+	llmdRequestPredictionFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_prediction_failures_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of latency prediction failures by plugin and reason.", compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name", "plugin_type", "reason"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -131,6 +140,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		llmdRequestPredictedTPOT,
 		llmdRequestTPOTPredictionDuration,
 		llmdSloViolationCounter,
+		llmdRequestPredictionFailures,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -141,6 +151,17 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		}
 	}
 	return nil
+}
+
+func (pl *PredictedLatency) recordPredictionFailure(ctx context.Context, err error, endpointCount int) {
+	reason := predictionFailureReasonForError(err)
+	llmdRequestPredictionFailures.WithLabelValues(pl.typedName.Name, pl.typedName.Type, reason).Inc()
+
+	if pl.predictionFailureLogLimiter == nil || pl.predictionFailureLogLimiter.Allow() {
+		log.FromContext(ctx).Error(err, "Latency prediction failed",
+			"reason", reason,
+			"endpoint_count", endpointCount)
+	}
 }
 
 func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, tpot float64) bool {

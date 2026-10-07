@@ -19,8 +19,10 @@ package predictedlatency
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,7 +30,120 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 )
+
+type fixedBulkPredictor struct {
+	*mockPredictor
+	response *latencypredictorclient.BulkPredictionResponse
+	err      error
+}
+
+func (p *fixedBulkPredictor) PredictBulkStrict(_ context.Context, _ []latencypredictorclient.PredictionRequest) (*latencypredictorclient.BulkPredictionResponse, error) {
+	return p.response, p.err
+}
+
+func TestProducePredictionFailureObservability(t *testing.T) {
+	tests := []struct {
+		name       string
+		predictor  *fixedBulkPredictor
+		wantReason string
+	}{
+		{
+			name:       "predictor error",
+			predictor:  &fixedBulkPredictor{mockPredictor: &mockPredictor{}, err: errors.New("predictor unavailable")},
+			wantReason: predictionFailureReasonPredictorError,
+		},
+		{
+			name:       "nil response",
+			predictor:  &fixedBulkPredictor{mockPredictor: &mockPredictor{}},
+			wantReason: predictionFailureReasonNilResponse,
+		},
+		{
+			name: "short response",
+			predictor: &fixedBulkPredictor{mockPredictor: &mockPredictor{}, response: &latencypredictorclient.BulkPredictionResponse{
+				Predictions: []latencypredictorclient.PredictionResponse{},
+			}},
+			wantReason: predictionFailureReasonLengthMismatch,
+		},
+		{
+			name: "long response",
+			predictor: &fixedBulkPredictor{mockPredictor: &mockPredictor{}, response: &latencypredictorclient.BulkPredictionResponse{
+				Predictions: []latencypredictorclient.PredictionResponse{{}, {}},
+			}},
+			wantReason: predictionFailureReasonLengthMismatch,
+		},
+		{
+			name: "reported failed prediction",
+			predictor: &fixedBulkPredictor{mockPredictor: &mockPredictor{}, response: &latencypredictorclient.BulkPredictionResponse{
+				Predictions:       []latencypredictorclient.PredictionResponse{{}},
+				FailedPredictions: 1,
+			}},
+			wantReason: predictionFailureReasonPredictorError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetMetrics()
+			t.Cleanup(resetMetrics)
+			pl := NewPredictedLatency("test-plugin", DefaultConfig, tt.predictor)
+			request := createTestInferenceRequest(tt.name, 0, 0)
+			endpoint := createTestEndpoint("pod-a", 0.5, 0, 0)
+
+			require.NoError(t, pl.Produce(t.Context(), request, []fwksched.Endpoint{endpoint}))
+			_, hasPrediction := endpoint.Get(pl.latencyPredictionInfoDataKey)
+			assert.False(t, hasPrediction)
+			assert.Equal(t, float64(1), testutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(
+				"test-plugin", LatencyDataProviderPluginType, tt.wantReason)))
+		})
+	}
+}
+
+func TestProducePredictionSuccessAndDisabledDoNotCountFailure(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+	endpoint := createTestEndpoint("pod-a", 0.5, 0, 0)
+	predictor := &fixedBulkPredictor{mockPredictor: &mockPredictor{}, response: &latencypredictorclient.BulkPredictionResponse{
+		Predictions: []latencypredictorclient.PredictionResponse{{TTFT: 1, TPOT: 0.1}},
+	}}
+	pl := NewPredictedLatency("test-plugin", DefaultConfig, predictor)
+	require.NoError(t, pl.Produce(t.Context(), createTestInferenceRequest("success", 0, 0), []fwksched.Endpoint{endpoint}))
+	_, hasPrediction := endpoint.Get(pl.latencyPredictionInfoDataKey)
+	assert.True(t, hasPrediction)
+
+	disabledConfig := DefaultConfig
+	disabledConfig.PredictInProduce = false
+	disabled := NewPredictedLatency("test-plugin", disabledConfig, &fixedBulkPredictor{
+		mockPredictor: &mockPredictor{}, err: errors.New("must not be called"),
+	})
+	require.NoError(t, disabled.Produce(t.Context(), createTestInferenceRequest("disabled", 0, 0), []fwksched.Endpoint{endpoint}))
+	for _, reason := range []string{
+		predictionFailureReasonRequestError,
+		predictionFailureReasonPredictorError,
+		predictionFailureReasonNilResponse,
+		predictionFailureReasonLengthMismatch,
+	} {
+		assert.Equal(t, float64(0), testutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(
+			"test-plugin", LatencyDataProviderPluginType, reason)))
+	}
+}
+
+func TestProduceCancelledRequestDoesNotCountPredictionFailure(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pl := NewPredictedLatency("test-plugin", DefaultConfig, &fixedBulkPredictor{
+		mockPredictor: &mockPredictor{}, err: context.Canceled,
+	})
+	err := pl.Produce(ctx, createTestInferenceRequest("cancelled", 0, 0), []fwksched.Endpoint{
+		createTestEndpoint("pod-a", 0.5, 0, 0),
+	})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, float64(0), testutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(
+		"test-plugin", LatencyDataProviderPluginType, predictionFailureReasonPredictorError)))
+}
 
 func TestProducesConsumes(t *testing.T) {
 	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, nil)

@@ -40,6 +40,7 @@ func TestRegisterMetrics(t *testing.T) {
 	require.True(t, recordRequestPredictedTPOT(t.Context(), "test-plugin", "test-type", "model", "target", 0.04))
 	require.True(t, recordRequestTPOTPredictionDuration(t.Context(), "test-plugin", "test-type", "model", "target", 0.2))
 	require.True(t, recordRequestTPOTWithSLO(t.Context(), "test-plugin", "test-type", "model", "target", 3, 1))
+	llmdRequestPredictionFailures.WithLabelValues("test-plugin", "test-type", predictionFailureReasonPredictorError).Add(0)
 
 	families, err := registry.Gather()
 	require.NoError(t, err)
@@ -50,6 +51,7 @@ func TestRegisterMetrics(t *testing.T) {
 		"llm_d_epp_request_predicted_tpot_seconds":           false,
 		"llm_d_epp_request_tpot_prediction_duration_seconds": false,
 		"llm_d_epp_request_slo_violation_total":              false,
+		"llm_d_epp_request_prediction_failures_total":        false,
 	}
 	for _, family := range families {
 		require.NotContains(t, family.GetName(), "inference_objective_")
@@ -140,4 +142,5 @@ func resetMetrics() {
 	llmdRequestPredictedTPOT.Reset()
 	llmdRequestTPOTPredictionDuration.Reset()
 	llmdSloViolationCounter.Reset()
+	llmdRequestPredictionFailures.Reset()
 }

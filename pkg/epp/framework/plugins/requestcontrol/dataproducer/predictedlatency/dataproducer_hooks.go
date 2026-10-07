@@ -19,6 +19,8 @@ package predictedlatency
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -81,7 +83,18 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	}
 
 	predictions, err := pl.generatePredictions(ctx, predictedLatencyCtx, endpoints)
-	if err == nil && len(predictions) == len(endpoints) {
+	if err == nil && len(predictions) != len(endpoints) {
+		err = newPredictionFailure(predictionFailureReasonLengthMismatch, fmt.Errorf(
+			"generated %d predictions for %d endpoints", len(predictions), len(endpoints)))
+	}
+	if err != nil {
+		// A caller that explicitly cancels the request no longer needs a
+		// prediction. Producer deadlines still represent an unavailable
+		// prediction and must remain observable.
+		if !errors.Is(err, context.Canceled) {
+			pl.recordPredictionFailure(ctx, err, len(endpoints))
+		}
+	} else {
 		pl.updateRequestContextWithPredictions(predictedLatencyCtx, predictions)
 
 		// Store predictions in endpoint attributes
