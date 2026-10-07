@@ -78,7 +78,7 @@ func getHashAsUint64(raw any) (uint64, error) {
 }
 
 // decodeEvent decodes a single msgpack event, extracts the tag, and dispatches to the appropriate converter.
-// Used by SGLang adapter. The vLLM adapter uses its own single-pass []any decoder.
+// The SGLang converters decode the positional event fields.
 func decodeEvent(
 	rawEventBytes []byte,
 	converters map[string]func([]byte) (kvevents.GenericEvent, error),

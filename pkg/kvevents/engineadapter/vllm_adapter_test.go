@@ -37,18 +37,42 @@ func TestVLLMShardingKey(t *testing.T) {
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
 }
 
-func TestVLLMRejectsOutOfRangeTokenIDs(t *testing.T) {
-	for name, token := range map[string]any{
-		"negative": int64(-1),
-		"overflow": uint64(math.MaxUint32) + 1,
+func TestVLLMClampsOutOfRangeTokenIDs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		token any
+		want  uint32
+	}{
+		"negative":       {int64(-1), 0},
+		"minimum signed": {int64(math.MinInt64), 0},
+		"overflow":       {uint64(math.MaxUint32) + 1, math.MaxUint32},
+		"maximum uint32": {uint64(math.MaxUint32), math.MaxUint32},
+		"maximum signed": {int64(math.MaxInt64), math.MaxUint32},
 	} {
-		t.Run(name, func(t *testing.T) {
-			payload, err := msgpack.Marshal([]any{"BlockStored", []uint64{1}, nil, []any{token}, 1})
-			require.NoError(t, err)
-
-			_, err = NewVLLMAdapter().decodeVLLMEvent(payload)
-			require.ErrorContains(t, err, "token_ids[0]")
-		})
+		for _, encoding := range []string{"array", "map tag first", "map tag last"} {
+			t.Run(name+"/"+encoding, func(t *testing.T) {
+				var payload bytes.Buffer
+				enc := msgpack.NewEncoder(&payload)
+				if encoding == "array" {
+					require.NoError(t, enc.Encode([]any{"BlockStored", []uint64{1}, nil, []any{tc.token}, 1}))
+				} else {
+					require.NoError(t, enc.EncodeMapLen(4))
+					if encoding == "map tag first" {
+						require.NoError(t, enc.EncodeString("type"))
+						require.NoError(t, enc.EncodeString("BlockStored"))
+					}
+					for _, field := range []any{"block_hashes", []uint64{1}, "token_ids", []any{tc.token}, "block_size", 1} {
+						require.NoError(t, enc.Encode(field))
+					}
+					if encoding == "map tag last" {
+						require.NoError(t, enc.EncodeString("type"))
+						require.NoError(t, enc.EncodeString("BlockStored"))
+					}
+				}
+				event, err := decodeVLLMEvent(payload.Bytes())
+				require.NoError(t, err)
+				require.Equal(t, []uint32{tc.want}, event.(*kvevents.BlockStoredEvent).Tokens)
+			})
+		}
 	}
 }
 
@@ -1031,6 +1055,175 @@ func TestDecodeVLLMEvent_ByteHashes(t *testing.T) {
 			stored, ok := event.(*kvevents.BlockStoredEvent)
 			require.True(t, ok)
 			assert.Equal(t, []uint64{tt.want}, stored.BlockHashes)
+		})
+	}
+}
+
+func TestVLLMParseMessage_OrderedMapErrors(t *testing.T) {
+	for name, fields := range map[string][]any{
+		"duplicate tag":             {"type", "AllBlocksCleared", "type", "AllBlocksCleared"},
+		"invalid tokens before tag": {"token_ids", []any{"invalid"}, "type", "BlockStored"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var payload bytes.Buffer
+			enc := msgpack.NewEncoder(&payload)
+			require.NoError(t, enc.EncodeArrayLen(2))
+			require.NoError(t, enc.EncodeFloat64(0))
+			require.NoError(t, enc.EncodeArrayLen(1))
+			require.NoError(t, enc.EncodeMapLen(len(fields)/2))
+			for _, field := range fields {
+				require.NoError(t, enc.Encode(field))
+			}
+			_, _, _, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload.Bytes()})
+			if name == "duplicate tag" {
+				require.ErrorContains(t, err, "more than one")
+			} else {
+				require.ErrorContains(t, err, `map-encoded event field "token_ids"`)
+				require.ErrorContains(t, err, "token_ids[0]")
+			}
+		})
+	}
+}
+
+func TestDecodeVLLMEvent_NilRequiredArrays(t *testing.T) {
+	for _, field := range []string{"block_hashes", "token_ids"} {
+		for _, encoding := range []string{"array", "map"} {
+			t.Run(field+"/"+encoding, func(t *testing.T) {
+				hashes, tokens := any([]uint64{1}), any([]uint32{1})
+				if field == "block_hashes" {
+					hashes = nil
+				} else {
+					tokens = nil
+				}
+				var event any = []any{"BlockStored", hashes, nil, tokens, 1}
+				if encoding == "map" {
+					event = map[string]any{"type": "BlockStored", "block_hashes": hashes, "token_ids": tokens, "block_size": 1}
+				}
+				payload, err := msgpack.Marshal(event)
+				require.NoError(t, err)
+				_, err = decodeVLLMEvent(payload)
+				require.ErrorContains(t, err, field+" is not an array: <nil>")
+			})
+		}
+	}
+}
+
+func TestDecodeVLLMEvent_ExtraKeyValues(t *testing.T) {
+	values := []any{nil, true, false, float32(1.5), float64(2.5), []byte{1, 2}, []any{"nested", int16(-7)}, map[string]any{"nested": uint64(9)}}
+	for _, tagFirst := range []bool{true, false} {
+		t.Run(fmt.Sprint(tagFirst), func(t *testing.T) {
+			var payload bytes.Buffer
+			enc := msgpack.NewEncoder(&payload)
+			require.NoError(t, enc.EncodeMapLen(5))
+			if tagFirst {
+				require.NoError(t, enc.EncodeString("type"))
+				require.NoError(t, enc.EncodeString("BlockStored"))
+			}
+			for _, field := range []any{"block_hashes", []uint64{1}, "token_ids", []uint32{1}, "block_size", 1, "extra_keys", [][]any{values}} {
+				require.NoError(t, enc.Encode(field))
+			}
+			if !tagFirst {
+				require.NoError(t, enc.EncodeString("type"))
+				require.NoError(t, enc.EncodeString("BlockStored"))
+			}
+			event, err := decodeVLLMEvent(payload.Bytes())
+			require.NoError(t, err)
+			stored, ok := event.(*kvevents.BlockStoredEvent)
+			require.True(t, ok)
+			require.Equal(t, [][]any{values}, stored.ExtraKeys)
+		})
+	}
+}
+
+func TestDecodeVLLMEvent_NestingLimit(t *testing.T) {
+	var nested any = true
+	for range 64 {
+		nested = []any{nested}
+	}
+	for name, event := range map[string]any{
+		"extra keys":        []any{"BlockStored", []uint64{1}, nil, []uint32{1}, 1, nil, nil, nil, [][]any{{nested}}},
+		"trailing field":    []any{"AllBlocksCleared", nested},
+		"unknown map field": map[string]any{"type": "AllBlocksCleared", "future": nested},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := msgpack.Marshal(event)
+			require.NoError(t, err)
+			_, err = decodeVLLMEvent(payload)
+			require.ErrorContains(t, err, "maximum nesting depth")
+		})
+	}
+}
+
+func TestDecodeVLLMEvent_HashLengthLimit(t *testing.T) {
+	for _, length := range []int{64, 65} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			payload, err := msgpack.Marshal([]any{"BlockRemoved", []any{bytes.Repeat([]byte{1}, length)}})
+			require.NoError(t, err)
+			event, err := decodeVLLMEvent(payload)
+			if length == 65 {
+				require.ErrorContains(t, err, "hash byte slice exceeds")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, []uint64{0x0101010101010101}, event.(*kvevents.BlockRemovedEvent).BlockHashes)
+			}
+		})
+	}
+}
+
+func TestDecodeVLLMEvent_ExtraKeyNestingOrder(t *testing.T) {
+	for _, depth := range []int{61, 62, 63, 64} {
+		for _, tagFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("depth=%d/tag-first=%t", depth, tagFirst), func(t *testing.T) {
+				var nested any = true
+				for range depth {
+					nested = []any{nested}
+				}
+				var payload bytes.Buffer
+				enc := msgpack.NewEncoder(&payload)
+				require.NoError(t, enc.EncodeMapLen(5))
+				if tagFirst {
+					require.NoError(t, enc.EncodeString("type"))
+					require.NoError(t, enc.EncodeString("BlockStored"))
+				}
+				for _, field := range []any{"block_hashes", []uint64{1}, "token_ids", []uint32{1}, "block_size", 1, "extra_keys", [][]any{{nested}}} {
+					require.NoError(t, enc.Encode(field))
+				}
+				if !tagFirst {
+					require.NoError(t, enc.EncodeString("type"))
+					require.NoError(t, enc.EncodeString("BlockStored"))
+				}
+				_, err := decodeVLLMEvent(payload.Bytes())
+				if depth < 64 {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, "maximum nesting depth")
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeVLLMEvent_LargeExtraKeyOrder(t *testing.T) {
+	value := bytes.Repeat([]byte{1}, (1<<20)+1)
+	for _, tagFirst := range []bool{true, false} {
+		t.Run(fmt.Sprint(tagFirst), func(t *testing.T) {
+			var payload bytes.Buffer
+			enc := msgpack.NewEncoder(&payload)
+			require.NoError(t, enc.EncodeMapLen(5))
+			if tagFirst {
+				require.NoError(t, enc.EncodeString("type"))
+				require.NoError(t, enc.EncodeString("BlockStored"))
+			}
+			for _, field := range []any{"block_hashes", []uint64{1}, "token_ids", []uint32{1}, "block_size", 1, "extra_keys", [][]any{{value}}} {
+				require.NoError(t, enc.Encode(field))
+			}
+			if !tagFirst {
+				require.NoError(t, enc.EncodeString("type"))
+				require.NoError(t, enc.EncodeString("BlockStored"))
+			}
+			event, err := decodeVLLMEvent(payload.Bytes())
+			require.NoError(t, err)
+			require.Equal(t, [][]any{{value}}, event.(*kvevents.BlockStoredEvent).ExtraKeys)
 		})
 	}
 }

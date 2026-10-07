@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -34,6 +35,9 @@ const maxDecodePreallocate = 1024
 
 // Limit recursive values in extra_keys to protect the goroutine stack.
 const maxDecodeDepth = 64
+
+// Limit hash processing because only the final bytes contribute to the hash.
+const maxDecodeHashBytes = 64
 
 type msgpackVLLMEventBatch struct {
 	timestamp        float64
@@ -149,45 +153,65 @@ func decodeArrayVLLMEvent(dec *msgpack.Decoder) (kvevents.GenericEvent, error) {
 	}
 }
 
+type vllmFieldDecoder struct {
+	name   string
+	decode func(*msgpack.Decoder, *vllmEventFields) error
+}
+
+var blockStoredFieldDecoders = []vllmFieldDecoder{
+	{"block_hashes", decodeHashesField},
+	{"parent_block_hash", decodeParentHashField},
+	{"token_ids", decodeTokensField},
+	{"block_size", decodeBlockSizeField},
+	{"lora_id", decodeLoraID},
+	{"medium", decodeMedium},
+	{"lora_name", decodeLoraName},
+	{"extra_keys", decodeExtraKeysField},
+	{"group_idx", decodeGroupIdx},
+	{"kv_cache_spec_kind", decodeKVCacheSpecKind},
+	{"kv_cache_spec_sliding_window", decodeSlidingWindow},
+}
+
+var blockRemovedFieldDecoders = []vllmFieldDecoder{
+	blockStoredFieldDecoders[0],
+	blockStoredFieldDecoders[5],
+	blockStoredFieldDecoders[8],
+}
+
+func vllmFieldDecoders(tag string) []vllmFieldDecoder {
+	switch tag {
+	case eventTagBlockStored:
+		return blockStoredFieldDecoders
+	case eventTagBlockRemoved:
+		return blockRemovedFieldDecoders
+	default:
+		return nil
+	}
+}
+
+func decodeArrayFields(dec *msgpack.Decoder, fieldCount int, tag string) (*vllmEventFields, error) {
+	fields := &vllmEventFields{}
+	schema := vllmFieldDecoders(tag)
+	knownCount := min(fieldCount-1, len(schema))
+	for _, field := range schema[:knownCount] {
+		if err := field.decode(dec, fields); err != nil {
+			return nil, fmt.Errorf("%s: %w", tag, err)
+		}
+	}
+	if err := skipFields(dec, fieldCount-1-knownCount); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
 func decodeArrayBlockStored(dec *msgpack.Decoder, fieldCount int) (kvevents.GenericEvent, error) {
 	if fieldCount < 5 {
 		return nil, fmt.Errorf("BlockStored: need at least 5 fields, got %d", fieldCount)
 	}
-
-	fields := vllmEventFields{}
-	var err error
-	if fields.blockHashes, err = decodeBlockHashes(dec); err != nil {
+	fields, err := decodeArrayFields(dec, fieldCount, eventTagBlockStored)
+	if err != nil {
 		return nil, err
 	}
-	if fields.parentHash, err = decodeNullableHash(dec); err != nil {
-		return nil, fmt.Errorf("failed to parse parent hash: %w", err)
-	}
-	if fields.tokens, err = decodeTokenIDs(dec); err != nil {
-		return nil, fmt.Errorf("BlockStored: %w", err)
-	}
-	if fields.blockSize, err = decodeInt(dec); err != nil {
-		return nil, fmt.Errorf("BlockStored: block_size: %w", err)
-	}
-
-	optionalDecoders := []func(*msgpack.Decoder, *vllmEventFields) error{
-		decodeLoraID,
-		decodeMedium,
-		decodeLoraName,
-		decodeExtraKeysField,
-		decodeGroupIdx,
-		decodeKVCacheSpecKind,
-		decodeSlidingWindow,
-	}
-	optionalCount := min(fieldCount-5, len(optionalDecoders))
-	for i := range optionalCount {
-		if err := optionalDecoders[i](dec, &fields); err != nil {
-			return nil, fmt.Errorf("BlockStored: %w", err)
-		}
-	}
-	if err := skipFields(dec, fieldCount-5-optionalCount); err != nil {
-		return nil, err
-	}
-
 	return fields.blockStoredEvent(), nil
 }
 
@@ -195,28 +219,44 @@ func decodeArrayBlockRemoved(dec *msgpack.Decoder, fieldCount int) (kvevents.Gen
 	if fieldCount < 2 {
 		return nil, fmt.Errorf("BlockRemoved: need at least 2 fields, got %d", fieldCount)
 	}
-
-	fields := vllmEventFields{}
-	var err error
-	if fields.blockHashes, err = decodeBlockHashes(dec); err != nil {
+	fields, err := decodeArrayFields(dec, fieldCount, eventTagBlockRemoved)
+	if err != nil {
 		return nil, err
 	}
-
-	optionalDecoders := []func(*msgpack.Decoder, *vllmEventFields) error{
-		decodeMedium,
-		decodeGroupIdx,
-	}
-	optionalCount := min(fieldCount-2, len(optionalDecoders))
-	for i := range optionalCount {
-		if err := optionalDecoders[i](dec, &fields); err != nil {
-			return nil, fmt.Errorf("BlockRemoved: %w", err)
-		}
-	}
-	if err := skipFields(dec, fieldCount-2-optionalCount); err != nil {
-		return nil, err
-	}
-
 	return fields.blockRemovedEvent(), nil
+}
+
+func decodeHashesField(dec *msgpack.Decoder, fields *vllmEventFields) error {
+	var err error
+	fields.blockHashes, err = decodeBlockHashes(dec)
+	fields.hasHashes = err == nil
+	return err
+}
+
+func decodeParentHashField(dec *msgpack.Decoder, fields *vllmEventFields) error {
+	var err error
+	fields.parentHash, err = decodeNullableHash(dec)
+	if err != nil {
+		return fmt.Errorf("failed to parse parent hash: %w", err)
+	}
+	return nil
+}
+
+func decodeTokensField(dec *msgpack.Decoder, fields *vllmEventFields) error {
+	var err error
+	fields.tokens, err = decodeTokenIDs(dec)
+	fields.hasTokens = err == nil
+	return err
+}
+
+func decodeBlockSizeField(dec *msgpack.Decoder, fields *vllmEventFields) error {
+	var err error
+	fields.blockSize, err = decodeInt(dec)
+	fields.hasBlockSize = err == nil
+	if err != nil {
+		return fmt.Errorf("block_size: %w", err)
+	}
+	return nil
 }
 
 type vllmEventFields struct {
@@ -238,57 +278,56 @@ type vllmEventFields struct {
 	slidingWindow *int
 }
 
-type deferredVLLMMapField struct {
+type rawVLLMMapField struct {
 	name  string
-	value any
+	value []byte
 }
 
-type deferredMapEntry struct {
-	key   any
-	value any
+// Record bytes during the bounded skip because DecodeRaw uses recursive Skip.
+type recordingReader struct {
+	reader  io.Reader
+	scanner io.ByteScanner
+	data    []byte
 }
 
-type deferredMap []deferredMapEntry
+func (r *recordingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.data = append(r.data, p[:n]...)
+	return n, err
+}
 
-func (m deferredMap) EncodeMsgpack(enc *msgpack.Encoder) error {
-	if err := enc.EncodeMapLen(len(m)); err != nil {
+func (r *recordingReader) ReadByte() (byte, error) {
+	value, err := r.scanner.ReadByte()
+	if err == nil {
+		r.data = append(r.data, value)
+	}
+	return value, err
+}
+
+func (r *recordingReader) UnreadByte() error {
+	if err := r.scanner.UnreadByte(); err != nil {
 		return err
 	}
-	for _, entry := range m {
-		if err := enc.Encode(entry.key); err != nil {
-			return err
-		}
-		if err := enc.Encode(entry.value); err != nil {
-			return err
-		}
-	}
+	r.data = r.data[:len(r.data)-1]
 	return nil
 }
 
-type deferredExtension struct {
-	id   int8
-	data []byte
-}
-
-func (e deferredExtension) EncodeMsgpack(enc *msgpack.Encoder) error {
-	if err := enc.EncodeExtHeader(e.id, len(e.data)); err != nil {
-		return err
+func decodeBoundedRaw(dec *msgpack.Decoder, name string) ([]byte, error) {
+	reader := dec.Buffered()
+	scanner, ok := reader.(io.ByteScanner)
+	if !ok {
+		return nil, fmt.Errorf("MessagePack reader does not support byte scanning")
 	}
-	written, err := enc.Writer().Write(e.data)
-	if err == nil && written != len(e.data) {
-		return io.ErrShortWrite
+	recording := &recordingReader{reader: reader, scanner: scanner}
+	dec.ResetReader(recording)
+	limit := maxDecodeDepth
+	// Typed extra keys use the depth limit after the outer and item arrays.
+	if name == "extra_keys" {
+		limit += 2
 	}
-	return err
-}
-
-type msgpackVLLMMapField struct {
-	name   string
-	tag    string
-	fields *vllmEventFields
-}
-
-func (f *msgpackVLLMMapField) DecodeMsgpack(dec *msgpack.Decoder) error {
-	return decodeVLLMMapField(dec, f.name, f.tag, f.fields)
+	err := skipValueWithDepth(dec, limit)
+	dec.ResetReader(reader)
+	return recording.data, err
 }
 
 func decodeMapVLLMEvent(dec *msgpack.Decoder) (kvevents.GenericEvent, error) {
@@ -299,7 +338,7 @@ func decodeMapVLLMEvent(dec *msgpack.Decoder) (kvevents.GenericEvent, error) {
 
 	fields := vllmEventFields{}
 	// Buffer fields before the tag because the tag defines their schema.
-	var deferred []deferredVLLMMapField
+	var deferred []rawVLLMMapField
 	for range fieldCount {
 		name, err := dec.DecodeString()
 		if err != nil {
@@ -315,25 +354,29 @@ func decodeMapVLLMEvent(dec *msgpack.Decoder) (kvevents.GenericEvent, error) {
 			fields.hasTag = err == nil
 			if err == nil && isKnownVLLMEventTag(fields.tag) {
 				for _, field := range deferred {
-					payload, marshalErr := msgpack.Marshal(field.value)
-					if marshalErr != nil {
-						return nil, fmt.Errorf("map-encoded event field %q: %w", field.name, marshalErr)
-					}
-					wrapped := msgpackVLLMMapField{
-						name: field.name, tag: fields.tag, fields: &fields,
-					}
-					if err := msgpack.Unmarshal(payload, &wrapped); err != nil {
+					if err := decodeVLLMMapField(msgpack.NewDecoder(bytes.NewReader(field.value)), field.name, fields.tag, &fields); err != nil {
 						return nil, fmt.Errorf("map-encoded event field %q: %w", field.name, err)
 					}
 				}
 			}
 			deferred = nil
 		case !fields.hasTag:
-			value, decodeErr := decodeDeferredAny(dec, 0)
+			knownField := false
+			for _, field := range blockStoredFieldDecoders {
+				if field.name == name {
+					knownField = true
+					break
+				}
+			}
+			if !knownField {
+				err = skipValue(dec)
+				break
+			}
+			value, decodeErr := decodeBoundedRaw(dec, name)
 			if decodeErr != nil {
 				return nil, fmt.Errorf("map-encoded event field %q: %w", name, decodeErr)
 			}
-			deferred = append(deferred, deferredVLLMMapField{name: name, value: value})
+			deferred = append(deferred, rawVLLMMapField{name: name, value: value})
 		case isKnownVLLMEventTag(fields.tag):
 			err = decodeVLLMMapField(dec, name, fields.tag, &fields)
 		default:
@@ -372,56 +415,12 @@ func decodeVLLMMapField(
 	tag string,
 	fields *vllmEventFields,
 ) error {
-	if !isVLLMMapFieldForTag(name, tag) {
-		return skipValue(dec)
-	}
-
-	var err error
-	switch name {
-	case "block_hashes":
-		fields.blockHashes, err = decodeBlockHashes(dec)
-		fields.hasHashes = err == nil
-	case "parent_block_hash":
-		fields.parentHash, err = decodeNullableHash(dec)
-	case "token_ids":
-		fields.tokens, err = decodeTokenIDs(dec)
-		fields.hasTokens = err == nil
-	case "block_size":
-		fields.blockSize, err = decodeInt(dec)
-		fields.hasBlockSize = err == nil
-	case "lora_id":
-		err = decodeLoraID(dec, fields)
-	case "medium":
-		err = decodeMedium(dec, fields)
-	case "lora_name":
-		err = decodeLoraName(dec, fields)
-	case "extra_keys":
-		err = decodeExtraKeysField(dec, fields)
-	case "group_idx":
-		err = decodeGroupIdx(dec, fields)
-	case "kv_cache_spec_kind":
-		err = decodeKVCacheSpecKind(dec, fields)
-	case "kv_cache_spec_sliding_window":
-		err = decodeSlidingWindow(dec, fields)
-	default:
-		err = skipValue(dec)
-	}
-	return err
-}
-
-func isVLLMMapFieldForTag(name, tag string) bool {
-	switch tag {
-	case eventTagBlockStored:
-		switch name {
-		case "block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id",
-			"medium", "lora_name", "extra_keys", "group_idx", "kv_cache_spec_kind",
-			"kv_cache_spec_sliding_window":
-			return true
+	for _, field := range vllmFieldDecoders(tag) {
+		if field.name == name {
+			return field.decode(dec, fields)
 		}
-	case eventTagBlockRemoved:
-		return name == "block_hashes" || name == "medium" || name == "group_idx"
 	}
-	return false
+	return skipValue(dec)
 }
 
 func isKnownVLLMEventTag(tag string) bool {
@@ -539,6 +538,10 @@ func decodeHash(dec *msgpack.Decoder) (uint64, error) {
 			return 0, fmt.Errorf("hash byte slice is empty")
 		}
 
+		if length > maxDecodeHashBytes {
+			return 0, fmt.Errorf("hash byte slice exceeds the maximum length of %d", maxDecodeHashBytes)
+		}
+
 		// Only the final eight bytes contribute to the router hash.
 		var discard [64]byte
 		for remaining := length - min(length, 8); remaining > 0; {
@@ -581,13 +584,20 @@ func decodeTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
 		if !isIntegerCode(code) {
 			return nil, fmt.Errorf("token_ids[%d]: unsupported numeric type: MessagePack code %#x", i, code)
 		}
-		value, err := dec.DecodeUint64()
+		var value uint64
+		if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
+			signed, decodeErr := dec.DecodeInt64()
+			err = decodeErr
+			if signed > 0 {
+				value = uint64(signed)
+			}
+		} else {
+			value, err = dec.DecodeUint64()
+		}
 		if err != nil {
 			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		if value > math.MaxUint32 {
-			return nil, fmt.Errorf("token_ids[%d]: value %d exceeds uint32", i, value)
-		}
+		value = min(value, uint64(math.MaxUint32))
 		tokens = append(tokens, uint32(value))
 	}
 	return tokens, nil
@@ -817,77 +827,6 @@ func decodeAny(dec *msgpack.Decoder, depth int) (any, error) {
 	}
 }
 
-func decodeDeferredAny(dec *msgpack.Decoder, depth int) (any, error) {
-	if depth >= maxDecodeDepth {
-		return nil, fmt.Errorf("MessagePack value exceeds the maximum nesting depth of %d", maxDecodeDepth)
-	}
-
-	code, err := dec.PeekCode()
-	if err != nil {
-		return nil, err
-	}
-	switch {
-	case msgpcode.IsFixedArray(code) || code == msgpcode.Array16 || code == msgpcode.Array32:
-		count, err := dec.DecodeArrayLen()
-		if err != nil || count < 0 {
-			return nil, err
-		}
-		values := make([]any, 0, min(count, maxDecodePreallocate))
-		for range count {
-			value, err := decodeDeferredAny(dec, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, value)
-		}
-		return values, nil
-	case msgpcode.IsFixedMap(code) || code == msgpcode.Map16 || code == msgpcode.Map32:
-		count, err := dec.DecodeMapLen()
-		if err != nil || count < 0 {
-			return nil, err
-		}
-		values := make(deferredMap, 0, min(count, maxDecodePreallocate))
-		for range count {
-			key, err := decodeDeferredAny(dec, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			value, err := decodeDeferredAny(dec, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, deferredMapEntry{key: key, value: value})
-		}
-		return values, nil
-	case msgpcode.IsExt(code):
-		return decodeDeferredExtension(dec)
-	default:
-		return decodeAny(dec, depth)
-	}
-}
-
-func decodeDeferredExtension(dec *msgpack.Decoder) (any, error) {
-	id, length, err := dec.DecodeExtHeader()
-	if err != nil {
-		return nil, err
-	}
-	if length < 0 {
-		return nil, fmt.Errorf("MessagePack extension has invalid length %d", length)
-	}
-
-	data := make([]byte, 0, min(length, maxDecodePreallocate))
-	var chunkBuffer [maxDecodePreallocate]byte
-	for remaining := length; remaining > 0; {
-		chunkLength := min(remaining, len(chunkBuffer))
-		if err := dec.ReadFull(chunkBuffer[:chunkLength]); err != nil {
-			return nil, err
-		}
-		data = append(data, chunkBuffer[:chunkLength]...)
-		remaining -= chunkLength
-	}
-	return deferredExtension{id: id, data: data}, nil
-}
-
 func decodeAnyArray(dec *msgpack.Decoder, depth int) ([]any, error) {
 	count, err := dec.DecodeArrayLen()
 	if err != nil || count < 0 {
@@ -944,7 +883,12 @@ func skipFields(dec *msgpack.Decoder, count int) error {
 	return nil
 }
 
+// Use an explicit stack because Decoder.Skip has no nesting limit.
 func skipValue(dec *msgpack.Decoder) error {
+	return skipValueWithDepth(dec, maxDecodeDepth)
+}
+
+func skipValueWithDepth(dec *msgpack.Decoder, limit int) error {
 	remaining := []int{1}
 	for len(remaining) > 0 {
 		level := len(remaining) - 1
@@ -968,6 +912,18 @@ func skipValue(dec *msgpack.Decoder) error {
 				return fmt.Errorf("MessagePack map has too many fields: %d", childCount)
 			}
 			childCount *= 2
+		case msgpcode.IsBin(code) || msgpcode.IsString(code):
+			var length int
+			length, err = dec.DecodeBytesLen()
+			if err == nil {
+				err = discardBytes(dec, length)
+			}
+		case msgpcode.IsExt(code):
+			var length int
+			_, length, err = dec.DecodeExtHeader()
+			if err == nil {
+				err = discardBytes(dec, length)
+			}
 		default:
 			err = dec.Skip()
 		}
@@ -975,11 +931,23 @@ func skipValue(dec *msgpack.Decoder) error {
 			return err
 		}
 		if childCount > 0 {
-			if len(remaining) >= maxDecodeDepth {
+			if len(remaining) >= limit {
 				return fmt.Errorf("MessagePack value exceeds the maximum nesting depth of %d", maxDecodeDepth)
 			}
 			remaining = append(remaining, childCount)
 		}
+	}
+	return nil
+}
+
+func discardBytes(dec *msgpack.Decoder, length int) error {
+	var buffer [maxDecodePreallocate]byte
+	for length > 0 {
+		chunk := min(length, len(buffer))
+		if err := dec.ReadFull(buffer[:chunk]); err != nil {
+			return err
+		}
+		length -= chunk
 	}
 	return nil
 }
