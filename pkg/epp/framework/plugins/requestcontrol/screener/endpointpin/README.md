@@ -30,6 +30,14 @@ filter on a decode pod, which also gives `503`.
 EPP removes `x-llm-d-pin-host-port` from the request it forwards to the model
 server.
 
+A pinned request is scheduled, counted, and observed as a normal request. The
+scheduling profile runs on the one candidate, so scorers cannot change the
+outcome, but data producers and PreRequest plugins still run and record their
+effects on the pinned endpoint for the request's lifetime. The request counts in
+`request_total` and the other request metrics like any other request. The `503`
+for a missing pinned endpoint carries the `rejected-no-endpoints` dropped
+reason, the same as a request for which no endpoint exists at all.
+
 ## Inputs consumed
 
 - The `x-llm-d-pin-host-port` request header.
