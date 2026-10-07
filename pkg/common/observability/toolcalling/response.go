@@ -32,7 +32,7 @@ const (
 	ResponseAttributeForwardedToolCallPresent     = "llm_d.tool_calling.response.forwarded_present"
 	ResponseAttributeUpstreamDetectionIncomplete  = "llm_d.tool_calling.response.upstream_detection_incomplete"
 	ResponseAttributeForwardedDetectionIncomplete = "llm_d.tool_calling.response.forwarded_detection_incomplete"
-	maxResponseSSELineBytes                       = 1 << 20
+	maxResponseSSEEventBytes                      = 1 << 20
 )
 
 // ResponseSummary contains only bounded presence information. It deliberately
@@ -61,15 +61,18 @@ func (summary ResponseSummary) SpanAttributes() []attribute.KeyValue {
 }
 
 // ResponseDetector observes one response body. For SSE responses it accepts
-// arbitrarily chunked input and keeps only the incomplete current line between
-// calls; completed lines are parsed immediately and cleared.
+// arbitrarily chunked input and buffers only the current line and event data.
+// Completed events are parsed and cleared.
 type ResponseDetector struct {
 	surface             reqcommon.APIType
 	eventStream         bool
 	toolCallPresent     bool
 	detectionIncomplete bool
 	discardingLine      bool
+	discardingEvent     bool
+	afterCR             bool
 	line                []byte
+	eventData           []byte
 	finished            bool
 }
 
@@ -83,7 +86,8 @@ func NewResponseDetector(surface reqcommon.APIType, eventStream bool) (*Response
 
 // Observe adds a body chunk and returns whether a tool call has been observed.
 // Non-streaming responses are parsed once at endOfStream; streaming responses
-// are parsed one completed SSE data line at a time.
+// are parsed one completed SSE event at a time. A final unterminated payload
+// is also inspected at endOfStream.
 func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	if detector == nil {
 		return false
@@ -100,8 +104,11 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 
 	if detector.eventStream {
 		detector.observeSSE(chunk)
-		if endOfStream && !detector.toolCallPresent && !detector.discardingLine {
+		if endOfStream && !detector.toolCallPresent && !detector.discardingEvent {
 			detector.processSSELine()
+			if !detector.toolCallPresent && !detector.discardingEvent {
+				detector.processSSEEvent()
+			}
 		}
 	} else if endOfStream {
 		detector.toolCallPresent = detectToolCallJSON(detector.surface, chunk)
@@ -113,12 +120,12 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	return detector.toolCallPresent
 }
 
-// DetectionIncomplete reports whether an oversized SSE line was discarded.
+// DetectionIncomplete reports whether an oversized SSE event was discarded.
 func (detector *ResponseDetector) DetectionIncomplete() bool {
 	return detector != nil && detector.detectionIncomplete
 }
 
-// Close clears any incomplete SSE line and prevents further observation.
+// Close clears buffered SSE data and prevents further observation.
 // Process calls it when the response lifecycle ends, including cancellation
 // or errors before the stream reaches end-of-stream.
 func (detector *ResponseDetector) Close() {
@@ -126,31 +133,37 @@ func (detector *ResponseDetector) Close() {
 		return
 	}
 	detector.clearLine()
+	detector.clearEventData()
 	detector.discardingLine = false
+	detector.discardingEvent = false
+	detector.afterCR = false
 	detector.finished = true
 }
 
 func (detector *ResponseDetector) observeSSE(chunk []byte) {
 	for _, b := range chunk {
-		if detector.discardingLine {
+		// Treat CRLF as one boundary even when it spans two body chunks.
+		if detector.afterCR {
+			detector.afterCR = false
 			if b == '\n' {
-				detector.discardingLine = false
+				continue
 			}
-			continue
 		}
-		if b == '\n' {
+		if b == '\n' || b == '\r' {
+			detector.afterCR = b == '\r'
 			detector.processSSELine()
 			if detector.toolCallPresent {
-				detector.clearLine()
 				return
 			}
 			continue
 		}
-		if len(detector.line) == maxResponseSSELineBytes {
-			detector.clearLine()
-			detector.line = nil
+		if detector.discardingEvent {
 			detector.discardingLine = true
-			detector.detectionIncomplete = true
+			continue
+		}
+		if len(detector.line)+len(detector.eventData) == maxResponseSSEEventBytes {
+			detector.discardSSEEvent()
+			detector.discardingLine = true
 			continue
 		}
 		detector.line = append(detector.line, b)
@@ -158,15 +171,56 @@ func (detector *ResponseDetector) observeSSE(chunk []byte) {
 }
 
 func (detector *ResponseDetector) processSSELine() {
-	line := bytes.TrimSuffix(detector.line, []byte{'\r'})
-	if bytes.HasPrefix(line, []byte("data:")) {
-		payload := bytes.TrimPrefix(line, []byte("data:"))
+	if detector.discardingEvent {
+		// Discard the entire event so its remaining lines cannot report presence.
+		if !detector.discardingLine {
+			detector.discardingEvent = false
+		}
+		detector.discardingLine = false
+		return
+	}
+	if len(detector.line) == 0 {
+		detector.processSSEEvent()
+		return
+	}
+	payload, isData := bytes.CutPrefix(detector.line, []byte("data:"))
+	if isData || bytes.Equal(detector.line, []byte("data")) {
+		if !isData {
+			payload = nil
+		}
 		payload = bytes.TrimPrefix(payload, []byte{' '})
+		if len(detector.eventData)+len(payload)+1 > maxResponseSSEEventBytes {
+			detector.discardSSEEvent()
+		} else {
+			detector.eventData = append(detector.eventData, payload...)
+			detector.eventData = append(detector.eventData, '\n')
+		}
+	}
+	detector.clearLine()
+}
+
+func (detector *ResponseDetector) processSSEEvent() {
+	if len(detector.eventData) > 0 {
+		payload := detector.eventData[:len(detector.eventData)-1]
 		if !bytes.Equal(payload, []byte("[DONE]")) {
 			detector.toolCallPresent = detectToolCallJSON(detector.surface, payload)
 		}
 	}
+	detector.clearEventData()
+}
+
+func (detector *ResponseDetector) discardSSEEvent() {
 	detector.clearLine()
+	detector.clearEventData()
+	detector.line = nil
+	detector.eventData = nil
+	detector.discardingEvent = true
+	detector.detectionIncomplete = true
+}
+
+func (detector *ResponseDetector) clearEventData() {
+	clear(detector.eventData)
+	detector.eventData = detector.eventData[:0]
 }
 
 func (detector *ResponseDetector) clearLine() {
