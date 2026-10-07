@@ -9,6 +9,13 @@ imagePullSecrets: []
 epp:
   replicas: 1
 
+  # Pod-level securityContext, inherited by every container in the EPP pod. The
+  # latency predictor images declare no user and run as root unless runAsUser is
+  # set here.
+  podSecurityContext: {}
+  # Container-level securityContext for the EPP container.
+  securityContext: {}
+
   # Overrides the EPP Deployment's spec.strategy. Unset means `type: Recreate`,
   # which is the recommended default for the stateful single-active-replica pattern.
   #
@@ -197,6 +204,7 @@ latencyPredictor:
   enabled: false
   # Training Server Configuration
   trainingServer:
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-training-server-dev
@@ -238,6 +246,7 @@ latencyPredictor:
   predictionServers:
     count: 1
     startPort: 8001
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
       repository: llm-d-latency-predictor-prediction-server-dev

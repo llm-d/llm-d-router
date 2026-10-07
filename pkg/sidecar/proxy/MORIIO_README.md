@@ -11,7 +11,7 @@ disaggregation topologies to the llm-d sidecar. The feature enables:
 
 - **MoRI-IO WRITE-mode**: Prefill RDMA-writes KV cache directly to decode pods
 - **Serial and parallel dispatch**: two WRITE-mode dispatch strategies (see below)
-- **Wide-EP DP-rank pinning**: Deterministic routing of P/D pairs to the same DP rank
+- **Wide-EP DP-rank routing**: Deterministic dispatch and prefill-rank propagation
 - **Multi-pod fan-out (2P2D)**: Support for DP=EP=16 across 2 prefill + 2 decode pods
 - **DNS hostname resolution**: Use hostnames (e.g., LWS pod names) instead of hardcoded IPs
 
@@ -23,22 +23,29 @@ MoRI-IO is **off by default** (the sidecar keeps its standard NIXLv2 behavior). 
 
 | Mode | Flags | Dispatch | How the decode DP rank is chosen |
 |------|-------|----------|----------------------------------|
-| Serial WRITE (default) | `--moriio-write-mode` | Prefill first, await its response, then decode | **Propagated** from `remote_dp_rank` returned in the prefill response (the rank prefill actually ran on); falls back to a stable hash only if the response omits it |
+| Serial WRITE (default) | `--moriio-write-mode` | Prefill first, await its response, then decode | Prefill response, with a selected-pod fallback |
 | Parallel WRITE | `--moriio-write-mode --moriio-parallel-dispatch` | Prefill and decode dispatched **concurrently** | **Pinned up front** from config/hash with `remote_dp_rank_override=true` (prefill has not returned yet), so both requests agree without waiting |
 
-**Router-authoritative routing.** In both modes the sidecar and the vLLM MoRI-IO
-connector agree on a single DP rank without each side independently hashing:
+**Router-authoritative routing.** The sidecar supplies DP routing information to
+the vLLM MoRI-IO connector:
 
-- **Serial**: the vLLM prefill connector returns the rank it ran on
-  (`remote_dp_rank`, `remote_dp_rank_override=true`); the sidecar copies it onto the
-  decode request's `x-data-parallel-rank` header.
+- **Serial**: the prefill response's global `remote_dp_rank` is retained in decode
+  KV metadata. The decode HTTP header uses its pod-local equivalent. A missing or
+  invalid rank uses the selected prefill pod's position in `--moriio-remote-hosts`
+  and the local rank sent to prefill: `pod_index * dp_size_local + local_rank`.
+  Single-pod deployments use the request-ID hash fallback. Multi-pod requests fail
+  with HTTP 502 if the fallback cannot identify the selected prefill pod.
+  `is_request_leader=true` allows the selected decode worker to notify prefill
+  when their global ranks differ.
 - **Parallel**: the sidecar pins the rank itself and sets `remote_dp_rank_override=true`;
   the connector honors that pin on both requests.
 
+READ-mode prefill HTTP headers also use pod-local ranks. READ decode requests
+forward prefill transfer metadata without injecting rank overrides or leader flags.
+
 **Which to use?** Serial is the **shipped default and the SLA-safe path**: parallel
 dispatch is **OFF unless you explicitly pass `--moriio-parallel-dispatch`**, so with
-defaults the sidecar always takes the serial `handleNIXLV2` path. Serial gives the
-tightest correctness guarantee (decode is pinned to the rank prefill truly used).
+defaults the sidecar always takes the serial `handleNIXLV2` path.
 
 Parallel dispatch is an **opt-in latency optimization** that overlaps the two requests.
 Because prefill and decode are issued concurrently, it now includes explicit
@@ -143,7 +150,7 @@ only consulted when `--metrics-port` is unset.
 The endpoint serves plain HTTP by default. Set **`--metrics-cert-dir`** to a
 directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
 There is no self-signed fallback. This flag is independent of
-`--secure-proxy`/`--cert-path`, which secure the data-plane listener. If
+`--secure-serving`/`--cert-path`, which secure the data-plane listener. If
 either file is missing or invalid, the sidecar fails at startup; it does not
 fall back to HTTP.
 

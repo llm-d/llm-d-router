@@ -147,7 +147,7 @@ func TestServeMetricsHTTPS(t *testing.T) {
 
 	client := &http.Client{
 		Timeout:   2 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // test certificate
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //#nosec -- test certificate
 	}
 	require.Eventually(t, func() bool {
 		resp, err := client.Get("https://127.0.0.1:" + strconv.Itoa(port) + "/metrics")
@@ -268,7 +268,7 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 	// Bind the wildcard the same way serveMetrics does so the collision is
 	// guaranteed on macOS as well as Linux. fwknet.ReserveListener binds only
 	// 127.0.0.1, which does not shadow [::]:<port> on macOS.
-	blocker, err := net.Listen("tcp", ":0")
+	blocker, err := net.Listen("tcp", ":0") //#nosec -- 0.0.0.0 needed for multi-NIC test
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blocker.Close() })
 	blockedPort := blocker.Addr().(*net.TCPAddr).Port

@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -121,7 +122,7 @@ func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 		rng := rand.New(rand.NewSource(1))
 		zipf := rand.NewZipf(rng, 1.1, 1.0, uint64(numFlows-1))
 		for i := 0; i < zipfSize; i++ {
-			zipfIndices[i] = int(zipf.Uint64())
+			zipfIndices[i] = clamp.Int(zipf.Uint64())
 		}
 	}
 
@@ -136,7 +137,7 @@ func runMatrixCoordinate(b *testing.B, m benchMatrix) {
 		// Offset the starting index per thread to prevent identical striding over the array.
 		// Multiply by a prime to guarantee threads start at different offsets.
 		threadID := globalThreadID.Add(1)
-		localIdx := int(threadID) * 9973
+		localIdx := clamp.Int(threadID) * 9973
 
 		for pb.Next() {
 			localIdx++
@@ -214,7 +215,7 @@ func BenchmarkFlowController_TopologyChurn(b *testing.B) {
 
 		// Multiply by a prime to guarantee threads start at different modulo offsets, avoiding lockstep
 		// contention on the exact same Registry keys.
-		localID := int(globalThreadID.Add(1)) * 9973
+		localID := clamp.Int(globalThreadID.Add(1)) * 9973
 
 		for pb.Next() {
 			localID++
@@ -329,7 +330,7 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 		for pb.Next() {
 			id := globalReqID.Add(1)
 			reqID := fmt.Sprintf("req-%d", id)
-			priority := int(id) % numPriorities
+			priority := clamp.Int(id) % numPriorities
 
 			// 1. Admission: FlowController gates the request.
 			fcReq := &benchRequest{

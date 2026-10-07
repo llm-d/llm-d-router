@@ -76,6 +76,27 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestVLLMParseMessage_BatchExtraTrailingFields tests a batch from a publisher
+// that serves snapshots, which appends its publisher_id to every batch.
+func TestVLLMParseMessage_BatchExtraTrailingFields(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	batch := []any{
+		1234567890.0,
+		[]any{[]any{"AllBlocksCleared"}},
+		nil,
+		make([]byte, 16), // publisher_id
+	}
+	payload, err := msgpack.Marshal(batch)
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{Topic: "kv@pod-1@model", Payload: payload})
+	require.NoError(t, err)
+	assert.Nil(t, eventBatch.DataParallelRank)
+	require.Len(t, eventBatch.Events, 1)
+	assert.IsType(t, &kvevents.AllBlocksClearedEvent{}, eventBatch.Events[0])
+}
+
 // TestVLLMParseMessage_InvalidPayload tests error handling for invalid msgpack data.
 func TestVLLMParseMessage_InvalidPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()
@@ -108,7 +129,7 @@ func TestVLLMBlockStored(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -121,6 +142,33 @@ func TestVLLMBlockStored(t *testing.T) {
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.LoraName)
 	assert.Nil(t, blockStored.ExtraKeys)
+}
+
+// TestVLLMBlockStoredSmallIntegerHash verifies that a MessagePack fixed
+// integer hash is accepted by the vLLM event decoder.
+func TestVLLMBlockStoredSmallIntegerHash(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	// MessagePack: ["BlockStored", [100], nil, [1], 1, nil, "gpu", nil, nil].
+	rawEvent := []byte{
+		0x99, // array of 9
+		0xab, 'B', 'l', 'o', 'c', 'k', 'S', 't', 'o', 'r', 'e', 'd',
+		0x91, 0x64, // block_hashes: [100] (positive fixint)
+		0xc0,       // parent_block_hash: nil
+		0x91, 0x01, // token_ids: [1]
+		0x01, // block_size: 1
+		0xc0, // lora_id: nil
+		0xa3, 'g', 'p', 'u',
+		0xc0, // lora_name: nil
+		0xc0, // extra_keys: nil
+	}
+
+	event, err := decodeEvent(rawEvent, mapEventToFields, adapter.eventConverters)
+	require.NoError(t, err)
+
+	blockStored, ok := event.(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint64{100}, blockStored.BlockHashes)
 }
 
 // TestVLLMBlockStoredWithLora tests decoding a valid BlockStored event with LoRA.
@@ -142,7 +190,7 @@ func TestVLLMBlockStoredWithLora(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -181,7 +229,7 @@ func TestVLLMBlockStoredWithHMAMetadata(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -255,7 +303,7 @@ func TestDecodeVLLMEvent_BlockStoredMissingTrailingFields(t *testing.T) {
 			rawBytes, err := msgpack.Marshal(tt.event)
 			require.NoError(t, err)
 
-			event, err := adapter.decodeVLLMEvent(rawBytes)
+			event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 			require.NoError(t, err)
 
 			blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -292,7 +340,7 @@ func TestDecodeVLLMEvent_BlockStoredExtraTrailingFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -326,7 +374,7 @@ func TestDecodeVLLMEvent_BlockRemovedExtraTrailingFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockRemoved, ok := event.(*kvevents.BlockRemovedEvent)
@@ -349,7 +397,7 @@ func TestDecodeVLLMEvent_BlockRemovedMissingMedium(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 
 	blockRemoved, ok := event.(*kvevents.BlockRemovedEvent)
@@ -425,7 +473,7 @@ func TestDecodeVLLMEvent_BlockStoredInvalidHMAMetadata(t *testing.T) {
 			rawBytes, err := msgpack.Marshal(tt.event)
 			require.NoError(t, err)
 
-			_, err = adapter.decodeVLLMEvent(rawBytes)
+			_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
@@ -445,7 +493,7 @@ func TestDecodeVLLMEvent_BlockRemovedInvalidGroupIdx(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	_, err = adapter.decodeVLLMEvent(rawBytes)
+	_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "group_idx")
 }
@@ -473,7 +521,7 @@ func TestVLLMBlockStoredInvalidExtraKeys(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	_, err = adapter.decodeVLLMEvent(rawBytes)
+	_, err = decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "extra_keys[0] has invalid type")
 }
@@ -492,7 +540,7 @@ func TestVLLMBlockRemoved(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -511,7 +559,7 @@ func TestVLLMAllBlocksCleared(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -528,10 +576,10 @@ func TestVLLMUnknownTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
-	assert.Contains(t, err.Error(), "unknown vLLM event tag")
+	assert.Contains(t, err.Error(), "unknown event tag")
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -540,7 +588,7 @@ func TestVLLMMalformedPayload(t *testing.T) {
 
 	rawBytes := []byte{0xFF, 0xFF, 0xFF}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
@@ -551,7 +599,7 @@ func TestVLLMEmptyPayload(t *testing.T) {
 
 	rawBytes := []byte{}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
@@ -565,7 +613,7 @@ func TestVLLMMissingTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, mapEventToFields, adapter.eventConverters)
 	assert.Error(t, err)
 	assert.Nil(t, event)
 	assert.Contains(t, err.Error(), "malformed tagged union")
@@ -705,7 +753,7 @@ func TestVLLMParseMessage_MapEncodedErrors(t *testing.T) {
 	}{
 		"unknown tag": {
 			event:   map[string]any{"type": "SomethingNew"},
-			wantErr: "unknown vLLM event tag: SomethingNew",
+			wantErr: "unknown event tag: SomethingNew",
 		},
 		"missing tag": {
 			event:   map[string]any{"block_hashes": []any{uint64(1)}},

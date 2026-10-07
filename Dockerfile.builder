@@ -1,18 +1,18 @@
-FROM golang:1.26.8
+FROM golang:1.27.1
 
 RUN mkdir /app
 WORKDIR /app
 
 ARG TYPOS_VERSION=v1.34.0
-ARG KIND_VERSION=v0.27.0
-ARG GOLANGCI_LINT_VERSION=v2.10.0
-ARG KUBECTL_VERSION=v1.35.3
-ARG KUSTOMIZE_VERSION=v5.6.0
-ARG DOCKER_VERSION=29.3.0
-ARG DOCKER_BUILDX_VERSION=v0.32.1
-ARG ENVTEST_VERSION=release-0.23
-ARG ENVTEST_K8S_VERSION=1.35.0
-ARG GOVULNCHECK_VERSION=v1.3.0
+ARG KIND_VERSION=v0.33.0
+ARG GOLANGCI_LINT_VERSION=v2.13.2
+ARG KUBECTL_VERSION=v1.35.9
+ARG KUSTOMIZE_VERSION=v5.8.1
+ARG DOCKER_VERSION=29.8.1
+ARG DOCKER_BUILDX_VERSION=v0.37.1
+ARG ENVTEST_VERSION=release-0.25
+ARG ENVTEST_K8S_VERSION=1.36.2
+ARG GOVULNCHECK_VERSION=v1.8.0
 
 RUN apt-get update && apt-get install -y podman && apt-get clean all
 
@@ -66,10 +66,10 @@ RUN GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCH
 # Install the ginkgo CLI. Build-time install ensures runtime invocations under
 # --userns=keep-id / -u <uid> can use the binary without writing to root-owned
 # /usr/local/bin.
-RUN GOBIN=/usr/local/bin go install github.com/onsi/ginkgo/v2/ginkgo@v2.28.3
+RUN GOBIN=/usr/local/bin go install github.com/onsi/ginkgo/v2/ginkgo@v2.33.0
 
 # Install Helm for rendering the E2E standalone chart.
-ARG HELM_VERSION=v3.17.1
+ARG HELM_VERSION=v4.3.0
 RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
     cd /tmp && \
     curl -sSfLO "https://get.helm.sh/helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" && \

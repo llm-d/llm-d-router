@@ -220,3 +220,17 @@ func TestDecodeStep_UnknownConnectorRejected(t *testing.T) {
 		t.Fatal("expected error for unknown connector")
 	}
 }
+
+func TestDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false}); err == nil {
+		t.Fatal("expected error overriding use_openai_format")
+	}
+}
+
+func TestConditionalDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewConditionalDecodeStep(gwClient, map[string]any{"use_openai_format": true}); err == nil {
+		t.Fatal("expected error overriding use_openai_format")
+	}
+}

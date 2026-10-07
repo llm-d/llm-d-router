@@ -63,6 +63,11 @@ const (
 	VideoDurationHeaderKey = "x-llm-d-video-duration-seconds"
 	// VideoResolutionHeaderKey is the header key used to specify a request's video frame resolution as "WIDTHxHEIGHT".
 	VideoResolutionHeaderKey = "x-llm-d-video-resolution"
+	// AudioDurationHeaderKey is the header key used to specify a request's audio length in seconds.
+	AudioDurationHeaderKey = "x-llm-d-audio-duration-seconds"
+	// AudioBytesPerSecondHeaderKey is the header key used to specify the byte rate of a request's
+	// audio payload, from which its length is derived when the payload does not declare one.
+	AudioBytesPerSecondHeaderKey = "x-llm-d-audio-bytes-per-second"
 	// FlowQueueDurationHeaderKey is the response header carrying the time a request spent in flow control admission,
 	// as integer milliseconds. It is absent when flow control did not process the request.
 	FlowQueueDurationHeaderKey = "x-llm-d-flow-queue-duration-ms"

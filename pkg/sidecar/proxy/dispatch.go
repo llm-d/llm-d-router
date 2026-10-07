@@ -28,10 +28,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // contextKey is a custom type for context keys to avoid collisions
@@ -48,6 +50,7 @@ func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
+		metrics.RecordRequest(apiType.String())
 		tracer := tracing.Tracer(tracerScope)
 		ctx, span := tracer.Start(r.Context(), "forward_request",
 			trace.WithSpanKind(trace.SpanKindServer),
@@ -180,6 +183,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
 				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
+			if len(prefillHostPort) > 0 {
+				metrics.RecordDisagg(metricsutil.DisaggPathEncodePrefillDecode)
+			} else {
+				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
+			}
 			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
 			return
 		}
@@ -195,11 +203,23 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 
 		if len(prefillHostPort) > 0 {
 			logger.V(logging.DEBUG).Info("using P/D protocol")
+			metrics.RecordDisagg(metricsutil.DisaggPathPrefillDecode)
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
+		// dataParallelHandler and the decoder passthrough forward r unread, so
+		// the guard in readJSONBody would never run on those branches.
+		// decodeWithP2PSource reads the body itself and re-runs it.
+		// readJSONBody consumes r.Body, so r is rebuilt over the same bytes.
+		if apiType == reqcommon.APITypeResponses {
+			raw, _, ok := s.readJSONBody(r, w)
+			if !ok {
+				return
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)

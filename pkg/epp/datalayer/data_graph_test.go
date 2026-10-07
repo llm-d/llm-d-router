@@ -109,6 +109,13 @@ func TestOptionalDataDependencyOrder(t *testing.T) {
 		assert.ErrorContains(t, err, "but the producer declared type")
 	})
 
+	t.Run("nil consumer witness accepts any produced type", func(t *testing.T) {
+		untyped := &mockDataProducerP{name: "untyped", optional: map[fwkplugin.DataKey]any{key: nil}}
+		ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{cache, untyped})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"cache/mock", "untyped/mock"}, ordered)
+	})
+
 	t.Run("optional dependency respects execution layers", func(t *testing.T) {
 		consumer := &MockConsumerFairnessPolicy{optional: map[fwkplugin.DataKey]any{key: int(0)}}
 		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{cache, consumer})

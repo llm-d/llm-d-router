@@ -21,21 +21,25 @@ package multimodal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 )
@@ -51,22 +55,35 @@ const (
 
 	// bytesPerImage is the assumed memory per tracked image.
 	bytesPerImage = 2 * 1024 * 1024
+
+	// experimentalDefaultEncodeProfile is the hardcoded scheduling profile that
+	// selects encode-stage endpoints. In E/PD disaggregation the encode and
+	// decode stages run as separate profiles; this matches the
+	// disagg-profile-handler default. Hardcoded until plugins can identify
+	// profile roles canonically (see https://github.com/llm-d/llm-d-router/issues/1091).
+	experimentalDefaultEncodeProfile = "encode"
 )
 
 var (
 	// ProducedKey is the data key emitted by this producer.
 	ProducedKey = attrmm.EncoderCacheMatchInfoKey
 
-	_ requestcontrol.DataProducer = &Producer{}
-	_ requestcontrol.PreRequest   = &Producer{}
-	_ fwkdl.EndpointExtractor     = &Producer{}
-	_ plugin.StateDumper          = &Producer{}
+	_ requestcontrol.DataProducer          = &Producer{}
+	_ requestcontrol.PreRequest            = &Producer{}
+	_ requestcontrol.ResponseBodyProcessor = &Producer{}
+	_ fwkdl.EndpointExtractor              = &Producer{}
+	_ fwkdl.Registrant                     = &Producer{}
+	_ plugin.ConsumerPlugin                = &Producer{}
+	_ plugin.StateDumper                   = &Producer{}
 )
 
 // Parameters configures the multimodal encoder-cache data producer.
 type Parameters struct {
 	// CacheSizeInMBPerServer is the per-endpoint LRU memory budget in mebibytes (MiB).
 	CacheSizeInMBPerServer int `json:"cacheSizeInMBPerServer"`
+	// CacheSizeInEmbeddingsPerServer is the per-endpoint encoder-cache capacity
+	// measured in encoder output embeddings, matching vLLM's encoder cache unit.
+	CacheSizeInEmbeddingsPerServer int `json:"cacheSizeInEmbeddingsPerServer"`
 }
 
 // lruCapacityFromCacheSizeMB converts a MiB budget to a maximum LRU entry count.
@@ -97,17 +114,17 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 }
 
 // Producer tracks multimodal content hashes and the pods that likely hold their
-// encoder-cache entries. Each pod has its own LRU cache of hashes, so eviction
-// is scoped per endpoint rather than global.
+// encoder-cache entries. Each pod has its own capacity and request references,
+// so allocation and eviction are scoped per endpoint rather than global.
 type Producer struct {
 	typedName   plugin.TypedName
 	dk          plugin.DataKey
-	caches      map[string]*lru.Cache[string, struct{}]
+	caches      map[string]*podCache
 	cacheSize   int
+	useItemSize bool
 	pluginState *plugin.PluginState
 	podList     func() []k8stypes.NamespacedName
 	mutex       sync.RWMutex
-	wg          sync.WaitGroup
 }
 
 type requestState struct {
@@ -124,18 +141,28 @@ func (s *requestState) Clone() plugin.StateData {
 // New creates a Producer.
 func New(ctx context.Context, name string, params *Parameters, podList func() []k8stypes.NamespacedName) (*Producer, error) {
 	cacheSizeMB := 0
+	cacheSizeEmbeddings := 0
 	if params != nil {
 		cacheSizeMB = params.CacheSizeInMBPerServer
+		cacheSizeEmbeddings = params.CacheSizeInEmbeddingsPerServer
 	}
-	cacheSize := lruCapacityFromCacheSizeMB(cacheSizeMB)
+	if cacheSizeMB > 0 && cacheSizeEmbeddings > 0 {
+		return nil, errors.New("cacheSizeInMBPerServer and cacheSizeInEmbeddingsPerServer cannot both be set")
+	}
+	cacheSize := cacheSizeEmbeddings
+	useItemSize := cacheSizeEmbeddings > 0
+	if !useItemSize {
+		cacheSize = lruCapacityFromCacheSizeMB(cacheSizeMB)
+	}
 
 	registerEncoderCacheMetrics()
 
 	p := &Producer{
 		typedName:   plugin.TypedName{Type: ProducerType, Name: name},
 		dk:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(name),
-		caches:      make(map[string]*lru.Cache[string, struct{}]),
+		caches:      make(map[string]*podCache),
 		cacheSize:   cacheSize,
+		useItemSize: useItemSize,
 		pluginState: plugin.NewPluginState(ctx),
 		podList:     podList,
 	}
@@ -145,13 +172,13 @@ func New(ctx context.Context, name string, params *Parameters, podList func() []
 	return p, nil
 }
 
-// getOrCreatePodCache returns the LRU cache for the given pod, creating one if absent.
+// getOrCreatePodCache returns the encoder cache for the given pod, creating one if absent.
 // Must be called with p.mutex held for write.
-func (p *Producer) getOrCreatePodCache(pod string) *lru.Cache[string, struct{}] {
+func (p *Producer) getOrCreatePodCache(pod string) *podCache {
 	if c, ok := p.caches[pod]; ok {
 		return c
 	}
-	c, _ := lru.New[string, struct{}](p.cacheSize)
+	c := newPodCache(p.cacheSize)
 	p.caches[pod] = c
 	return c
 }
@@ -228,7 +255,7 @@ func (p *Producer) DumpState() (json.RawMessage, error) {
 	}
 	pods := make([]podItemCount, 0, len(p.caches))
 	for pod, cache := range p.caches {
-		pods = append(pods, podItemCount{Pod: pod, Items: cache.Len()})
+		pods = append(pods, podItemCount{Pod: pod, Items: cache.len()})
 	}
 	p.mutex.RUnlock()
 
@@ -250,12 +277,13 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{p.dk: attrmm.EncoderCacheMatchInfo{}}
 }
 
-// Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
-// the token-producer before this producer runs and auto-creates one when none
-// is configured; multimodal features come from the tokenizer output.
+// Consumes declares TokenizedRequest as an optional dependency. When
+// token-producer is configured, the data-layer DAG orders it before this
+// producer; when it is absent, no producer is auto-created and unit-weight
+// fallback extraction is used.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
+		Optional: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
 	}
 }
 
@@ -295,26 +323,113 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 }
 
 // ExtractMMItems returns deterministic, unique multimodal encoder-cache items
-// derived from the tokenized prompt's multimodal features.
+// for a request. Tokenized multimodal features are preferred because they carry
+// placeholder lengths; if unavailable, typed structured media blocks or generate
+// feature hashes are used with unit weight.
 func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	return extractMMItems(request)
+}
+
+func extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
+	if request == nil || request.Body == nil {
 		return nil
 	}
 
-	itemsByHash := map[string]attrmm.MatchItem{}
-	for _, p := range request.Body.TokenizedRequest.Prompts {
-		for _, feature := range p.MultiModalFeatures {
-			if feature.Hash == "" {
-				continue
-			}
-			addItem(itemsByHash, feature.Hash, string(feature.Modality))
+	if request.Body.TokenizedRequest != nil {
+		var features []fwkrh.MultiModalFeature
+		for _, prompt := range request.Body.TokenizedRequest.Prompts {
+			features = append(features, prompt.MultiModalFeatures...)
+		}
+		if len(features) > 0 {
+			return itemsFromTokenizedFeatures(features)
 		}
 	}
-	return itemSlice(itemsByHash)
+
+	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {
+		return itemsFromGenerateFeatures(g.Features.MMHashes)
+	}
+
+	if request.Body.ChatCompletions != nil {
+		return itemsFromChat(request.Body.ChatCompletions)
+	}
+
+	return nil
 }
 
-func addItem(itemsByHash map[string]attrmm.MatchItem, hash, modality string) {
-	itemsByHash[hash] = attrmm.MatchItem{Hash: hash, Size: 1, Modality: modality}
+func itemsFromGenerateFeatures(mmHashes map[string][]string) []attrmm.MatchItem {
+	collector := newItemCollector()
+	modalities := make([]string, 0, len(mmHashes))
+	for modality := range mmHashes {
+		modalities = append(modalities, modality)
+	}
+	sort.Strings(modalities)
+	for _, modality := range modalities {
+		hashes := mmHashes[modality]
+		for _, hash := range hashes {
+			collector.add(hash, modality, 1)
+		}
+	}
+	return collector.items
+}
+
+func itemsFromTokenizedFeatures(features []fwkrh.MultiModalFeature) []attrmm.MatchItem {
+	collector := newItemCollector()
+	for _, feature := range features {
+		weight := feature.Length
+		if weight < 1 {
+			weight = 1
+		}
+		collector.add(feature.Hash, string(feature.Modality), weight)
+	}
+	return collector.items
+}
+
+func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
+	collector := newItemCollector()
+	for _, message := range request.Messages {
+		for _, block := range message.Content.Structured {
+			addBlockItem(collector, block)
+		}
+	}
+	return collector.items
+}
+
+func addBlockItem(collector *itemCollector, block fwkrh.ContentBlock) {
+	switch {
+	case block.ImageURL.URL != "":
+		collector.add(contentHash("image_url", block.ImageURL.URL), string(fwkrh.ModalityImage), 1)
+	case block.VideoURL.URL != "":
+		collector.add(contentHash("video_url", block.VideoURL.URL), string(fwkrh.ModalityVideo), 1)
+	case block.AudioURL.URL != "":
+		collector.add(contentHash("audio_url", block.AudioURL.URL), string(fwkrh.ModalityAudio), 1)
+	case block.InputAudio.Data != "":
+		collector.add(contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), string(fwkrh.ModalityAudio), 1)
+	}
+}
+
+func contentHash(kind, identifier string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + identifier))
+	return hex.EncodeToString(sum[:])
+}
+
+type itemCollector struct {
+	items []attrmm.MatchItem
+	seen  map[string]struct{}
+}
+
+func newItemCollector() *itemCollector {
+	return &itemCollector{seen: make(map[string]struct{})}
+}
+
+func (c *itemCollector) add(hash, modality string, size int) {
+	if hash == "" {
+		return
+	}
+	if _, exists := c.seen[hash]; exists {
+		return
+	}
+	c.seen[hash] = struct{}{}
+	c.items = append(c.items, attrmm.MatchItem{Hash: hash, Size: size, Modality: modality})
 }
 
 func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
@@ -329,8 +444,7 @@ func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 }
 
 // recordItemLookups increments the queries counter for each item and, for every
-// endpoint whose LRU contains the hash, increments that endpoint's hits counter.
-// Contains is used instead of Get to avoid altering recency during a read-only path.
+// endpoint whose cache contains the hash, increments that endpoint's hits counter.
 func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
@@ -338,7 +452,7 @@ func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	for _, item := range items {
 		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, item.Modality).Inc()
 		for pod, podCache := range p.caches {
-			if podCache.Contains(item.Hash) {
+			if podCache.contains(item.Hash) {
 				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, item.Modality).Inc()
 			}
 		}
@@ -346,7 +460,7 @@ func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 }
 
 // recordHitRatio observes the fraction of a request's multimodal items that
-// matched a single endpoint's LRU. A zero total is not a meaningful ratio and
+// matched a single endpoint's cache. A zero total is not a meaningful ratio and
 // is not observed.
 func (p *Producer) recordHitRatio(matchedItems, totalItems int) {
 	if totalItems == 0 {
@@ -365,7 +479,7 @@ func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchIte
 	}
 	matchedItemsByHash := map[string]attrmm.MatchItem{}
 	for _, item := range requestItems {
-		if podCache.Contains(item.Hash) {
+		if podCache.contains(item.Hash) {
 			matchedItemsByHash[item.Hash] = item
 		}
 	}
@@ -385,17 +499,37 @@ func (p *Producer) removeStalePods() {
 		validPods[pod.String()] = struct{}{}
 	}
 
+	var removed []string
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
 	for pod := range p.caches {
 		if _, ok := validPods[pod]; !ok {
 			delete(p.caches, pod)
+			removed = append(removed, pod)
 		}
+	}
+	p.mutex.Unlock()
+	for _, pod := range removed {
+		p.deletePodMetrics(pod)
 	}
 }
 
+// RegisterDependencies subscribes the producer to endpoint lifecycle events so
+// deleted endpoints are removed without waiting for the periodic sweep. The
+// source is auto-created when the config omits it.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType,
+			sourcenotifications.EndpointNotificationSourceType,
+		),
+	})
+}
+
 // Extract removes deleted endpoints from the best-effort multimodal
-// cache-affinity state when endpoint lifecycle events are wired through the data layer.
+// cache-affinity state.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	if event.Type != fwkdl.EventDelete || event.Endpoint == nil {
 		return nil
@@ -412,6 +546,7 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 func (p *Producer) removePod(pod string) {
 	p.mutex.Lock()
-	defer p.mutex.Unlock()
 	delete(p.caches, pod)
+	p.mutex.Unlock()
+	p.deletePodMetrics(pod)
 }

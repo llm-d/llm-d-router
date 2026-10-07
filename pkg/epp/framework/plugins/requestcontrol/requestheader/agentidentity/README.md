@@ -1,7 +1,7 @@
 # Agent Identity
 
 **Type:** `agent-identity`
-**Interfaces:** `requestcontrol.RequestHeaderProcessor`
+**Interfaces:** `requestcontrol.RequestHeaderProcessor`, `plugin.ProducerPlugin`
 
 Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then derives `FairnessID` from this attribute when no explicit fairness header is present, so every turn of an agent session lands in the same flow-control fairness queue.
 

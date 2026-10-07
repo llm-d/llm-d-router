@@ -37,6 +37,7 @@ import (
 	"k8s.io/utils/clock"
 	testclock "k8s.io/utils/clock/testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
@@ -44,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
@@ -115,12 +117,13 @@ func newUnitHarness(
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              harnessOpts.clock,
-		ProcessorFactory:   mockProcessorFactory.new,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               harnessOpts.clock,
+		ProcessorFactory:    mockProcessorFactory.new,
 	})
 	h := &testHarness{
 		fc:                   fc,
@@ -154,11 +157,12 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              mockClock,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               mockClock,
 	})
 
 	h := &testHarness{
@@ -281,6 +285,7 @@ func (f *mockProcessorFactory) new(
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,
+	_ flowcontrol.BandSelectionPolicy,
 	_ clock.WithTicker,
 	_ time.Duration,
 	_ time.Duration,
@@ -1073,13 +1078,14 @@ func setupRegistryForConcurrency(t *testing.T, flowKey flowcontrol.FlowKey) *moc
 		},
 		// Configure capacity reporting based on the live state of the mock queues.
 		CapacitySnapshotFunc: func(int) (contracts.CapacitySnapshot, error) {
+			queueLen := clamp.Uint64(currentQueue.Len())
 			return contracts.CapacitySnapshot{
 				Global: contracts.CapacityDimension{
-					Len:      uint64(currentQueue.Len()),
+					Len:      queueLen,
 					ByteSize: currentQueue.ByteSize(),
 				},
 				Band: contracts.CapacityDimension{
-					Len:           uint64(currentQueue.Len()),
+					Len:           queueLen,
 					ByteSize:      currentQueue.ByteSize(),
 					CapacityBytes: 1e9, // Effectively unlimited capacity to ensure dispatch success.
 				},

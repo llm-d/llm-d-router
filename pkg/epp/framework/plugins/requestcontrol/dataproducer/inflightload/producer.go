@@ -749,14 +749,16 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 // configured; without it the input-token estimate silently reads zero.
 // PrefixCacheMatchInfo is optional -- used to discount the already-cached prompt
 // prefix from the prefix producer selected by prefixMatchInfoProducerName
-// (approximate by default, or a precise-prefix-cache producer).
+// (approximate by default, or a precise-prefix-cache producer). The outlen
+// bucket is optional too: without it the output estimate falls back to UNKNOWN.
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
 			tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{},
 		},
 		Optional: map[fwkplugin.DataKey]any{
-			p.prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfo{},
+			p.prefixMatchInfoDK:       attrprefix.PrefixCacheMatchInfo{},
+			outlenbucket.AttributeKey: outlenbucket.Bucket(0),
 		},
 	}
 }

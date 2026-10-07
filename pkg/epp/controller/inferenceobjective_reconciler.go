@@ -20,9 +20,9 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -60,12 +60,6 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 		notFound = true
 	}
 
-	// Keep compatibility while surfacing migration guidance for legacy group users.
-	if strings.HasPrefix(infObjective.APIVersion, "inference.networking.x-k8s.io/") {
-		logger.Info("DEPRECATION: apiVersion inference.networking.x-k8s.io/v1alpha2/InferenceObjective is deprecated",
-			"replacement", "llm-d.ai/v1alpha2/InferenceObjective")
-	}
-
 	if notFound || !infObjective.DeletionTimestamp.IsZero() || infObjective.Spec.PoolRef.Name != v1alpha2.ObjectName(c.PoolGKNN.Name) || infObjective.Spec.PoolRef.Group != v1alpha2.Group(c.PoolGKNN.Group) {
 		// InferenceObjective object got deleted or changed the referenced inferencePool.
 		c.Datastore.ObjectiveDelete(req.NamespacedName)
@@ -75,6 +69,10 @@ func (c *InferenceObjectiveReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Add or update if the InferenceObjective instance has a creation timestamp older than the existing entry of the model.
 	logger = logger.WithValues("poolRef", infObjective.Spec.PoolRef)
+	if infObjective.Spec.Priority == nil {
+		// The API defines an unset priority as 0.
+		infObjective.Spec.Priority = ptr.To(int32(0))
+	}
 	c.Datastore.ObjectiveSet(infObjective)
 	c.syncPriorityBands()
 	logger.Info("Added/Updated InferenceObjective")

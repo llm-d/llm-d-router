@@ -51,6 +51,7 @@ type tokenizer interface {
 	Render(ctx context.Context, payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error)
 	RenderChat(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 	RenderMessages(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
+	RenderResponses(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error)
 }
 
 const (
@@ -88,13 +89,40 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image and video
-// estimation are the only tunables; an empty config uses built-in defaults.
+// estimateConfig configures the estimation backend. Multimodal image, video,
+// and audio estimation are the only tunables; an empty config uses built-in defaults.
 type estimateConfig struct {
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
 	// Video tunes multimodal video placeholder-token estimation.
 	Video *videoEstimateConfig `json:"video,omitempty"`
+	// Audio tunes multimodal audio placeholder-token estimation.
+	Audio *audioEstimateConfig `json:"audio,omitempty"`
+}
+
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated:
+// min(durationSeconds*tokensPerSecond, maxAudioTokens) + overheadTokens. Clip
+// duration is resolved per clip rather than configured: the
+// x-llm-d-audio-duration-seconds header wins, then the payload itself, then
+// defaultDuration.
+type audioEstimateConfig struct {
+	// TokensPerSecond is the placeholder tokens per second of audio, 25 for
+	// gemma4 and 13 for Qwen3-Omni.
+	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
+	// OverheadTokens is the fixed prompt template + text token overhead added
+	// to every audio estimate.
+	OverheadTokens int `json:"overheadTokens,omitempty"`
+	// DefaultBytesPerSecond converts a payload length to seconds when the clip is
+	// not PCM WAV, whose own header carries an exact byte rate, and the request
+	// does not carry an x-llm-d-audio-bytes-per-second header either.
+	DefaultBytesPerSecond int `json:"defaultBytesPerSecond,omitempty"`
+	// DefaultDuration is the clip length in seconds used when neither the header
+	// nor the payload provides one, as for a clip referenced by URL.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
+	// MaxAudioTokens caps the audio tower's tokens for a clip, before the
+	// overhead is added, so it matches the model's own limit (750 for gemma4).
+	// Zero means uncapped.
+	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -270,18 +298,28 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
+		renderer.pluginName = name
+		registerRenderMetrics()
 		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
 		if err != nil {
 			return nil, err
 		}
-		backend = renderBackend{tk: renderer, modelName: config.ModelName, legacyMessages: legacyMessages, warmupAuth: vllmWarmupAuthHeader()}
+		legacyResponses, err := configureLegacyResponses(ctx, name, cfg.ResponsesRenderMode)
+		if err != nil {
+			return nil, err
+		}
+		backend = renderBackend{
+			tk: renderer, modelName: config.ModelName,
+			legacyMessages: legacyMessages, legacyResponses: legacyResponses,
+			warmupAuth: vllmWarmupAuthHeader(),
+		}
 		backendName = backendVLLM
 		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate)}
+		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
 		backendName = backendEstimate
 	}
 

@@ -30,9 +30,16 @@ epp_IMAGE         = $(EPP_IMAGE)
 export IMAGE_REGISTRY COORDINATOR_TAG VLLM_SIMULATOR_TAG EPP_TAG
 export COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT
 
-BUILDER_TAG ?= dev
+# A locally edited Dockerfile.builder hashes to a tag that
+# was never published, so image-build-builder misses the pull and falls back
+# to a local build instead of running against a stale published image.
+BUILDER_TAG ?= $(shell git hash-object Dockerfile.builder 2>/dev/null || echo dev)
 BUILDER_TAG_BASE ?= $(IMAGE_REGISTRY)/$(BUILDER_IMAGE_NAME)
 export BUILDER_IMAGE ?= $(BUILDER_TAG_BASE):$(BUILDER_TAG)
+# Set BUILDER_PULL=false to skip pulling the published tag, for testing
+# local Dockerfile.builder changes or working offline. A local image under
+# the current tag is still reused ahead of both the pull and a build.
+BUILDER_PULL ?= true
 
 CONTAINER_RUNTIME := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
 export CONTAINER_RUNTIME
@@ -113,9 +120,13 @@ else
 BUILDER_E2E_KUBECONFIG_FLAGS =
 endif
 
-# Env vars forwarded into the e2e test container.
+E2E_NUM_PROCS ?= 5
+
+# Env vars forwarded into the e2e test container. E2E_NUM_PROCS reaches both
+# `ginkgo --procs` (via the runner script) and the suite's numProcesses; the
+# suite fails fast if the two disagree.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
-               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
+               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE E2E_NUM_PROCS EXISTS_TIMEOUT \
                E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
@@ -125,8 +136,6 @@ endif
 # E2e tests create their own kind cluster, need host network (for NodePort access)
 # and the container socket (for kind), but not the host kubeconfig.
 BUILDER_E2E_FLAGS = --network=host $(BUILDER_SOCK_FLAGS) $(BUILDER_E2E_ENV_FLAGS) $(BUILDER_E2E_KUBECONFIG_FLAGS)
-
-BUILDER_STAMP = build/.builder.stamp
 
 .PHONY: help
 help: ## Print help
@@ -173,7 +182,7 @@ tidy: image-build-builder ## Tidy go modules
 
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
-	rm -rf bin build $(BUILDER_STAMP)
+	rm -rf bin build
 	-$(BUILDER_RUN) 'go clean -testcache -cache'
 
 .PHONY: format
@@ -251,18 +260,22 @@ image-build-%: check-container-tool ## Build container image using $(CONTAINER_R
 		-t $($*_IMAGE) -f Dockerfile.$* .
 
 .PHONY: image-build-builder
-image-build-builder: check-container-tool ## Build builder image if missing locally, stamp missing, or Dockerfile.builder newer than stamp
-	@if ! $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1 || \
-	    [ ! -f $(BUILDER_STAMP) ] || \
-	    [ Dockerfile.builder -nt $(BUILDER_STAMP) ]; then \
-		printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
-		$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .; \
-		mkdir -p $(dir $(BUILDER_STAMP)); \
-		touch $(BUILDER_STAMP); \
-	fi
+image-build-builder: check-container-tool ## Use local builder image, else pull the published tag, else build locally
+	@if $(CONTAINER_RUNTIME) image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	if [ "$(BUILDER_PULL)" = "true" ] && $(CONTAINER_RUNTIME) pull --platform linux/$(TARGETARCH) $(BUILDER_IMAGE) >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	printf "\033[33;1m==== Building image $(BUILDER_IMAGE) ====\033[0m\n"; \
+	$(CONTAINER_RUNTIME) build -f Dockerfile.builder -t $(BUILDER_IMAGE) .
 
 .PHONY: image-pull
 image-pull: check-container-tool ## Pull all related images using $(CONTAINER_RUNTIME)
 	@printf "\033[33;1m==== Pulling Container images ====\033[0m\n"
 	PULL_EPP_IMAGE=false PULL_SIDECAR_IMAGE=false ./scripts/pull_images.sh
+
+.PHONY: print-builder-tag
+print-builder-tag: ## Print the builder image tag (content hash of Dockerfile.builder)
+	@echo "$(BUILDER_TAG)"
 

@@ -34,6 +34,19 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+)
+
+// OffloadingConnector kv_transfer_params fields. The role is encoded by the
+// nesting key, named for the remote party it describes: "remote_decoder" on
+// the prefill request, "remote_prefiller" on the decode request, "remote_kv_source"
+// for a symmetric cached-prefix pull.
+const (
+	requestFieldRemoteDecoder   = "remote_decoder"
+	requestFieldRemotePrefiller = "remote_prefiller"
+	requestFieldRemoteKVSource  = "remote_kv_source"
+	requestFieldKVRequestID     = "kv_request_id"
 )
 
 // handleP2P implements the vLLM OffloadingConnector P2P orchestration contract. The
@@ -63,7 +76,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		},
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
-	prefillData[requestFieldKVTransferParams] = prefillKVParams
+	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
@@ -80,11 +93,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
 	decodeData := maps.Clone(requestData)
-	decodeData[requestFieldKVTransferParams] = map[string]any{
+	decodeData[reqcommon.FieldKVTransferParams] = map[string]any{
 		requestFieldRemotePrefiller: map[string]any{
-			requestFieldKVRequestID: kvRequestID,
-			requestFieldRemoteHost:  extractHost(prefillPodHostPort),
-			requestFieldRemotePort:  prefillP2PPort,
+			requestFieldKVRequestID:   kvRequestID,
+			reqcommon.FieldRemoteHost: extractHost(prefillPodHostPort),
+			reqcommon.FieldRemotePort: prefillP2PPort,
 		},
 	}
 
@@ -130,7 +143,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillTarget(prefillHost),
-		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorOffloading),
 		semconv.LLMDPDProxyPrefillAsync(false),
 	)
 	prefillStart := time.Now()
@@ -138,6 +151,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	pw := &bufferedResponseWriter{}
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
+	metrics.RecordPrefillDuration(prefillDuration)
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
@@ -145,6 +159,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
+		metrics.RecordError(metrics.StagePrefill)
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
@@ -177,14 +192,23 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorOffloading),
 		semconv.LLMDPDProxyDecodeConcurrentWithPrefill(false),
 	)
 	decodeStart := time.Now()
 
-	s.decoderProxy.ServeHTTP(w, cloneRequestWithBody(decodeCtx, r, decodeBody))
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
+	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
+	metrics.RecordDecodeDuration(decodeDuration)
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	}
 	decodeSpan.SetAttributes(
 		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
 		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
@@ -214,8 +238,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 // other connector --enable-p2p-pull has no effect, since no MultiConnector
 // routes the remote_kv_source params to an OffloadingConnector.
 func (s *Server) p2pPullAvailable() bool {
-	return s.config.KVConnector == KVConnectorOffloading ||
-		(s.config.EnableP2PPull && s.config.KVConnector == KVConnectorNIXLV2)
+	return s.config.KVConnector == constants.KVConnectorOffloading ||
+		(s.config.EnableP2PPull && s.config.KVConnector == constants.KVConnectorNIXLV2)
 }
 
 // addP2PPullToPrefill adds the OffloadingConnector P2P pull block to a prefill
@@ -261,9 +285,9 @@ func normalizeEndpoint(s string) string {
 // own fresh UUID: in P2P mode it is consumer-side only.
 func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 	return map[string]any{
-		requestFieldKVRequestID: newUUID(),
-		requestFieldRemoteHost:  extractHost(sourceHostPort),
-		requestFieldRemotePort:  s.p2pPortFor(sourceHostPort),
+		requestFieldKVRequestID:   newUUID(),
+		reqcommon.FieldRemoteHost: extractHost(sourceHostPort),
+		reqcommon.FieldRemotePort: s.p2pPortFor(sourceHostPort),
 	}
 }
 
@@ -334,12 +358,12 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	p2pParams := s.p2pSourceParams(source)
 	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
 	// client-supplied keys are dropped rather than forwarded to vLLM.
-	requestData[requestFieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
+	requestData[reqcommon.FieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
 	s.logger.Info("running P2P source protocol",
 		"source_host", extractHost(source),
 		"kv_request_id", p2pParams[requestFieldKVRequestID],
-		"p2p_connector_port", p2pParams[requestFieldRemotePort])
+		"p2p_connector_port", p2pParams[reqcommon.FieldRemotePort])
 
 	newBody, err := json.Marshal(requestData)
 	if err != nil {

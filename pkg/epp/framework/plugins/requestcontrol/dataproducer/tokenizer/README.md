@@ -22,13 +22,15 @@ Backend selection:
   config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
   P/D routing) without declaring a `token-producer`.
 - **`vllm`** (or `modelName`): forwards requests to vLLM's native
-  `/v1/completions/render`, `/v1/chat/completions/render`, and
-  `/v1/messages/render` endpoints over HTTP or HTTPS. Messages endpoint selection
-  is controlled by `vllm.messagesRenderMode`. TLS is driven by the URL
-  scheme (`https://`). For in-cluster endpoints using self-signed or private CA
-  certificates, configure `vllm.caCertPath` to trust the CA, and optionally
-  `vllm.clientCertPath`/`vllm.clientKeyPath` for mTLS. The HTTP renderer uses
-  either one configured URL or endpoints supplied by data-layer discovery.
+  `/v1/completions/render`, `/v1/chat/completions/render`,
+  `/v1/messages/render`, and `/v1/responses/render` endpoints over HTTP or
+  HTTPS. Messages and Responses endpoint selection are controlled by
+  `vllm.messagesRenderMode` and `vllm.responsesRenderMode` respectively. TLS
+  is driven by the URL scheme (`https://`). For in-cluster endpoints using
+  self-signed or private CA certificates, configure `vllm.caCertPath` to
+  trust the CA, and optionally `vllm.clientCertPath`/`vllm.clientKeyPath` for
+  mTLS. The HTTP renderer uses either one configured URL or endpoints
+  supplied by data-layer discovery.
 
 ## Messages rendering
 
@@ -57,10 +59,45 @@ The native rendering and token production implementations do not use
 legacy conversion helpers or wire types. Helpers required by estimation are
 owned by `estimate.go`.
 
+## Responses rendering
+
+`vllm.responsesRenderMode: auto` probes `/v1/responses/render` with a small
+text request using `modelName`. A successful probe selects native
+pass-through. A 404, 405, or 501 selects legacy conversion only if the same
+probe succeeds at `/v1/chat/completions/render`; vLLM answers a registered
+route with no Responses render handler for the model with 501, not 404/405.
+Other discovery errors leave the mode unresolved. Discovery runs during
+warmup and, if unresolved, on the next Responses request using its
+Authorization header. User-request errors do not change the mode.
+
+The selection is cached for the plugin lifetime. The configured renderer URL
+must serve a consistent vLLM version and accept `modelName`. Restart EPP to
+rediscover capabilities after a renderer upgrade. Explicit `native` and
+`legacy` modes bypass discovery. Neither mode uses `/tokenize` or falls back
+to estimation when rendering fails.
+
+Legacy conversion uses the configured `modelName` and logs a deprecation
+warning once per plugin instance. It reshapes string Input, Input items that
+are simple `{role, content}` messages, and Instructions as a leading system
+message; `input_text`/`output_text` and `input_image` content parts convert,
+the latter carrying its URL as a bare string rather than chat completions'
+nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
+cannot represent this way — for example `function_call`,
+`function_call_output`, `reasoning`, or `input_audio` — fails the conversion
+rather than tokenizing a prompt shorter than the one vLLM serves. The
+forwarded request is unchanged.
+
+The compatibility implementation and tests are contained in `responses.go`
+and `responses_test.go`. Its integration points are the
+`ResponsesRenderMode` configuration field, `configureLegacyResponses` in the
+plugin constructor, and `legacyResponses` in warmup and Responses dispatch.
+The native rendering and token production implementations do not use legacy
+conversion helpers or wire types.
+
 ## Native render contract
 
-Completions and Chat Completions use native rendering. Messages uses this
-contract when native rendering is selected.
+Completions and Chat Completions use native rendering. Messages and
+Responses use this contract when native rendering is selected.
 
 The renderer sends the original HTTP JSON body when EPP has not mutated it.
 It does not substitute the model, translate protocols, rewrite messages or
@@ -89,7 +126,7 @@ not establish native gRPC token parity. Pretokenized gRPC requests use their
 parser-provided tokens without rendering. This exception does not apply to
 HTTP requests or the HTTP JSON embedded in Vertex AI gRPC requests.
 
-Chat and Messages requests use the larger of `vllm.timeout` and
+Chat, Messages, and Responses requests use the larger of `vllm.timeout` and
 `vllm.mmTimeout`, including text-only requests. The default is 30 seconds.
 The renderer does not inspect content to select a timeout. Set both values
 to `5s` for a five-second render budget on all endpoints; multimodal requests
@@ -112,8 +149,9 @@ EPP contract does not establish parity for them.
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
-| `modelName`                | - (required for `vllm`) | Model for startup probes, model-limit discovery, native gRPC text, and legacy Messages conversion. Native HTTP rendering retains the effective request model. |
+| `modelName`                | - (required for `vllm`) | Model for startup probes, model-limit discovery, native gRPC text, and legacy Messages/Responses conversion. Native HTTP rendering retains the effective request model. |
 | `vllm.messagesRenderMode`  | `auto`                 | Discover Messages rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
+| `vllm.responsesRenderMode` | `auto`                 | Discover Responses rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.url`                 | `http://localhost:8000` | Base URL of one vLLM render endpoint. Mutually exclusive with `endpointDiscovery`. |
 | `vllm.endpointDiscovery`   | unset                   | Use endpoints published by data-layer discovery.                              |
 | `vllm.endpointDiscovery.portRules` | empty             | Optional render port mappings; see [Endpoint discovery](#endpoint-discovery). |
@@ -123,8 +161,8 @@ EPP contract does not establish parity for them.
 | `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
 | `vllm.endpointDiscovery.contextLimitLabel` | unset | Label supplying a positive context capacity, optionally bounded by probes. |
 | `vllm.prefillOnly` | `false` | Use a one-token output budget only for rendering; see [Render-only output budget](#render-only-output-budget). |
-| `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages timeout.                      |
-| `vllm.mmTimeout`           | `30s`                   | Chat/Messages timeout budget, including multimodal processing.               |
+| `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages/Responses timeout.            |
+| `vllm.mmTimeout`           | `30s`                   | Chat/Messages/Responses timeout budget, including multimodal processing.     |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
 | `vllm.clientCertPath`      | –                       | Client certificate for mTLS with the render endpoint; requires `clientKeyPath`. |
 | `vllm.clientKeyPath`       | –                       | Client private key for mTLS; requires `clientCertPath`.                      |
@@ -171,6 +209,31 @@ apply to every video in the request.
 | `estimate.video.defaultDuration`      | `10`      | Video length in seconds for frame counting; fallback for the `x-llm-d-video-duration-seconds` header.                                                       |
 | `estimate.video.maxVideoTokens`       | –         | Overall placeholder cap for a video (0 = uncapped).                                                                                                         |
 
+Audio estimation is `min(duration × tokensPerSecond, maxAudioTokens) +
+overheadTokens`. Audio towers turn a clip into encoder frames at a fixed rate and
+pool them into tokens, so the count follows the clip's length rather than its
+payload size. Duration is resolved per clip: the `x-llm-d-audio-duration-seconds`
+header wins, then the payload itself — exact for PCM WAV, whose header declares a
+byte rate, and payload bytes ÷ the byte rate for anything else — then
+`defaultDuration`, which is what a clip carried by reference falls back to.
+The rate is the one knob a new tower needs: gemma4's mel front end emits a token
+per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
+(`tokensPerSecond: 13`), and both wrap a clip in begin/end markers
+(`overheadTokens: 2`).
+
+| Request header                    | Format        | Description                                                                          |
+| --------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `x-llm-d-audio-duration-seconds`  | float seconds | Clip length; overrides the payload and `defaultDuration`.                             |
+| `x-llm-d-audio-bytes-per-second`  | integer       | Byte rate of this clip's payload; overrides `defaultBytesPerSecond`. Ignored when the payload is PCM WAV or the duration header is set. |
+
+| Parameter                                       | Default   | Description                                                                  |
+| ----------------------------------------------- | --------- | ---------------------------------------------------------------------------- |
+| `estimate.audio.tokensPerSecond`                | `13`      | The audio tower's placeholder tokens per second of audio.                     |
+| `estimate.audio.overheadTokens`                 | `14`      | Constant added to every clip, modeling the prompt template and per-clip markers. |
+| `estimate.audio.defaultBytesPerSecond`          | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
+| `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
+| `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which logs and continues;
@@ -182,7 +245,8 @@ Neither Messages mode falls back to the other mode or to estimation.
 
 Use a vLLM build exposing the render endpoints selected by the configuration.
 Native Messages rendering requires [native `/v1/messages/render` support](https://github.com/vllm-project/vllm/pull/45803).
-The deprecated `legacy` mode uses `/v1/chat/completions/render` for Messages.
+Native Responses rendering requires [native `/v1/responses/render` support](https://github.com/vllm-project/vllm/pull/50195).
+The deprecated `legacy` mode uses `/v1/chat/completions/render` for Messages and Responses.
 `vllm launch render <model>` exposes render endpoints without a GPU.
 The standalone Rust renderer `vllm-rs render <model>` exposes Completions
 and Chat Completions rendering.

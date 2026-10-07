@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	contractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
@@ -42,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictionordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -390,7 +392,7 @@ func TestFairnessRoundRobin(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().Global.Len == uint64(total)
+		return h.reg.Stats().Global.Len == clamp.Uint64(total)
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -1399,10 +1401,11 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 		ExpiryCleanupInterval:    50 * time.Millisecond,
 		EnqueueChannelBufferSize: 200,
 	}, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: &contractmocks.MockEndpointCandidates{},
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  &contractmocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	time.Sleep(10 * time.Millisecond)

@@ -51,16 +51,25 @@ import (
 // Scrapes are short; a small budget is enough and keeps process exit prompt.
 const metricsShutdownTimeout = 5 * time.Second
 
+// tracingShutdownTimeout bounds the final flush of buffered spans so an
+// unreachable collector cannot hold up process exit.
+const tracingShutdownTimeout = 5 * time.Second
+
+// tracingServiceName is the OTel service.name reported for coordinator spans
+// when OTEL_SERVICE_NAME is unset.
+const tracingServiceName = "llm-d-coordinator"
+
 var errMetricsTLS = errors.New("metrics TLS")
 
 func main() {
 	configPath := pflag.String("config", "config/coordinator/coordinator.yaml", "path to configuration file")
 	metricsPort := pflag.Int("metrics-port", 0, "port for the Prometheus /metrics endpoint. Non-positive disables the endpoint. Overrides server.metrics_port (default 9090).")
-	metricsCertDir := pflag.String("metrics-cert-dir", "", "directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over HTTP. Overrides server.metrics_cert_dir.")
-	secureCoordinator := pflag.Bool("secure-coordinator", true, "serve the inference listener over TLS. Overrides server.secure_coordinator (default true).")
-	certPath := pflag.String("cert-path", "", "directory with tls.crt and tls.key for the inference listener. Empty generates a self-signed certificate, which is only suitable for testing. Overrides server.cert_path.")
-	tlsMinVersion := pflag.String("tls-min-version", "", "minimum TLS version for the inference listener (e.g. VersionTLS12, VersionTLS13). Empty uses VersionTLS12. Overrides server.tls_min_version.")
-	tlsCipherSuites := pflag.StringSlice("tls-cipher-suites", nil, "TLS cipher suites for the inference listener (Go crypto/tls names). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below. Overrides server.tls_cipher_suites.")
+	metricsCertDir := pflag.String("metrics-cert-dir", "", "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener. Overrides server.metrics_cert_dir.")
+	secureServing := pflag.Bool("secure-serving", true, "Serve the listener over TLS. Overrides server.secure_serving.")
+	certPath := pflag.String("cert-path", "", "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing. Overrides server.cert_path.")
+	tlsMinVersion := pflag.String("tls-min-version", "", "Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12. Overrides server.tls_min_version.")
+	tlsCipherSuites := pflag.StringSlice("tls-cipher-suites", nil, "Comma-separated list of TLS cipher suites for secure serving (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. Overrides server.tls_cipher_suites.")
+	tracingEnabled := pflag.Bool("tracing", false, "Export OpenTelemetry spans. Exporter, sampler, and endpoint come from the standard OTEL_* environment variables. Overrides tracing.")
 
 	logOpts := logutil.NewOptions()
 	logOpts.AddFlags(pflag.CommandLine)
@@ -90,8 +99,8 @@ func main() {
 	if f := pflag.CommandLine.Lookup("metrics-cert-dir"); f != nil && f.Changed {
 		cfg.Server.MetricsCertDir = *metricsCertDir
 	}
-	if f := pflag.CommandLine.Lookup("secure-coordinator"); f != nil && f.Changed {
-		cfg.Server.SecureCoordinator = *secureCoordinator
+	if f := pflag.CommandLine.Lookup("secure-serving"); f != nil && f.Changed {
+		cfg.Server.SecureServing = *secureServing
 	}
 	if f := pflag.CommandLine.Lookup("cert-path"); f != nil && f.Changed {
 		cfg.Server.CertPath = *certPath
@@ -101,6 +110,9 @@ func main() {
 	}
 	if f := pflag.CommandLine.Lookup("tls-cipher-suites"); f != nil && f.Changed {
 		cfg.Server.TLSCipherSuites = *tlsCipherSuites
+	}
+	if f := pflag.CommandLine.Lookup("tracing"); f != nil && f.Changed {
+		cfg.Tracing = *tracingEnabled
 	}
 	if err := logOpts.Validate(); err != nil {
 		log.Error(err, "invalid logging options")
@@ -146,16 +158,36 @@ func main() {
 		"addr", cfg.Server.ListenAddr,
 		"metrics_port", cfg.Server.MetricsPort,
 		"metrics_tls", cfg.Server.MetricsCertDir != "",
-		"tls", cfg.Server.SecureCoordinator,
-		"cert_path", cfg.Server.CertPath)
+		"tracing", cfg.Tracing)
+	log.Info("server TLS", "tls", cfg.Server.SecureServing, "cert_path", cfg.Server.CertPath)
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
 	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	var shutdownTracing func(context.Context) error
+	if cfg.Tracing {
+		// Span export is optional: a collector that cannot be reached must not
+		// stop the coordinator from serving requests.
+		shutdown, traceErr := tracing.InitTracing(ctx, log, tracingServiceName)
+		if traceErr != nil {
+			log.Error(traceErr, "failed to initialize tracing")
+		} else {
+			shutdownTracing = shutdown
+		}
+	}
+
 	err = run(ctx, srv, cfg.Server, nil)
 	stop()
+	if shutdownTracing != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), tracingShutdownTimeout)
+		if flushErr := shutdownTracing(flushCtx); flushErr != nil {
+			log.Error(flushErr, "failed to shut down tracing")
+		}
+		cancel()
+	}
 	if err != nil {
 		log.Error(err, "server error")
 		os.Exit(1)

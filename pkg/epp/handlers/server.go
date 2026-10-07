@@ -216,12 +216,11 @@ type recvResult struct {
 	err error
 }
 
-func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *RequestContext) (fwkrh.Parser, error) {
+func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Parser, error) {
 	if reqCtx.Parser != nil {
 		return reqCtx.Parser, nil
 	}
 
-	logger := log.FromContext(ctx)
 	var headers map[string]string
 	if reqCtx.Request != nil {
 		headers = reqCtx.Request.Headers
@@ -229,7 +228,6 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 	path := fwkrequest.GetRequestPath(headers)
 	parser, err := s.parserRegistry.Resolve(path)
 	if err != nil {
-		logger.Error(err, "Error resolving parser for path", "path", path)
 		return nil, err
 	}
 
@@ -511,10 +509,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.RequestSize = buf.Len()
 				buf.Reset()
 
-				parser, resolveErr := s.getOrResolveParser(ctx, reqCtx)
+				parser, resolveErr := s.getOrResolveParser(reqCtx)
 				if resolveErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: resolveErr.Error()}
-					logger.Error(err, "Error resolving parser for request body")
 					break
 				}
 				before := time.Now()
@@ -522,7 +519,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				metrics.RecordPluginProcessingLatency(fwkrh.RequestParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
-					logger.Error(err, "Error parsing request")
 					break
 				}
 
@@ -530,7 +526,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// The Director may resolve agent identity after this request span opened.
 				tracing.AttributeRequest(ctx, span)
 				if err != nil {
-					logger.Error(err, "Error handling request")
 					break
 				}
 
@@ -577,7 +572,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				if header.Key == "status" && string(header.RawValue) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
-				} else if header.Key == "content-type" && strings.Contains(string(header.RawValue), "text/event-stream") {
+				} else if header.Key == fwkrequest.HeaderContentType && strings.Contains(string(header.RawValue), fwkrequest.MediaTypeEventStream) {
 					reqCtx.modelServerStreaming = true
 					if traceEnabled {
 						loggerTrace.Info("model server is streaming response")

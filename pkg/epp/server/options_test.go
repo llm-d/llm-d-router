@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
@@ -530,10 +531,10 @@ func TestCompleteMetricsCertFiles(t *testing.T) {
 
 func TestTLSMinVersionFlag(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		wantVersion uint16
-		wantErr     bool
+		name            string
+		args            []string
+		wantVersion     uint16
+		wantErrContains string
 	}{
 		{
 			name:        "VersionTLS12",
@@ -551,9 +552,19 @@ func TestTLSMinVersionFlag(t *testing.T) {
 			wantVersion: 0,
 		},
 		{
-			name:    "invalid version",
-			args:    []string{"--tls-min-version", "TLS1.2"},
-			wantErr: true,
+			name:            "TLS1.2",
+			args:            []string{"--tls-min-version", "TLS1.2"},
+			wantErrContains: "unknown TLS version",
+		},
+		{
+			name:            "VersionTLS10",
+			args:            []string{"--tls-min-version", "VersionTLS10"},
+			wantErrContains: "below the TLS 1.2 minimum",
+		},
+		{
+			name:            "VersionTLS11",
+			args:            []string{"--tls-min-version", "VersionTLS11"},
+			wantErrContains: "below the TLS 1.2 minimum",
 		},
 	}
 	for _, tt := range tests {
@@ -566,8 +577,8 @@ func TestTLSMinVersionFlag(t *testing.T) {
 			require.NoError(t, fs.Parse(argv))
 
 			err := opts.Complete()
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErrContains != "" {
+				require.ErrorContains(t, err, tt.wantErrContains)
 				return
 			}
 			require.NoError(t, err)
@@ -652,4 +663,155 @@ func TestParseCipherSuites(t *testing.T) {
 
 	_, err = parseCipherSuites([]string{"BOGUS"})
 	require.Error(t, err)
+}
+
+func TestValidatePoolGroupFlag(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = "inference.networking.k8s.io/v1"
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for PoolGroup %q recommended by the flag help text, but it succeeded", opts.PoolGroup)
+	} else if !strings.Contains(err.Error(), "pool-group") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = ""
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for empty PoolGroup, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.PoolGroup = "inference.networking.x-k8s.io"
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to accept the deprecated PoolGroup, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to accept the default PoolGroup, got: %v", err)
+	}
+}
+
+// TestLeaderElectionFlags covers the lease name and timing flags: defaults, explicit values, the
+// validation that mirrors client-go's leader elector, and the manager option override.
+func TestLeaderElectionFlags(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantLeaseName string
+		wantDuration  time.Duration
+		wantRenew     time.Duration
+		wantRetry     time.Duration
+		expectError   bool
+	}{
+		{
+			name:         "defaults",
+			args:         []string{"--ha-enable-leader-election"},
+			wantDuration: DefaultLeaseDuration,
+			wantRenew:    DefaultRenewDeadline,
+			wantRetry:    DefaultRetryPeriod,
+		},
+		{
+			name: "explicit values",
+			args: []string{
+				"--ha-enable-leader-election", "--ha-lease-name", "epp-replacement",
+				"--ha-lease-duration", "40s", "--ha-renew-deadline", "30s", "--ha-retry-period", "3s",
+			},
+			wantLeaseName: "epp-replacement",
+			wantDuration:  40 * time.Second,
+			wantRenew:     30 * time.Second,
+			wantRetry:     3 * time.Second,
+		},
+		{
+			name:        "renew deadline not shorter than lease duration",
+			args:        []string{"--ha-enable-leader-election", "--ha-lease-duration", "30s", "--ha-renew-deadline", "30s"},
+			expectError: true,
+		},
+		{
+			name:        "renew deadline within the retry jitter",
+			args:        []string{"--ha-enable-leader-election", "--ha-renew-deadline", "2s", "--ha-retry-period", "2s"},
+			expectError: true,
+		},
+		{
+			name:        "non-positive retry period",
+			args:        []string{"--ha-enable-leader-election", "--ha-retry-period", "0s"},
+			expectError: true,
+		},
+		{
+			name:         "timings are not validated without leader election",
+			args:         []string{"--ha-lease-duration", "5s", "--ha-renew-deadline", "30s"},
+			wantDuration: 5 * time.Second,
+			wantRenew:    30 * time.Second,
+			wantRetry:    DefaultRetryPeriod,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			if err := fs.Parse(argv); err != nil {
+				t.Fatalf("Failed to parse flags: %v", err)
+			}
+			err := opts.Complete()
+			if err == nil {
+				err = opts.Validate()
+			}
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected Complete() or Validate() to fail, but it succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Complete/Validate failed unexpectedly with error: %v", err)
+			}
+			if opts.LeaseName != tt.wantLeaseName || opts.LeaseDuration != tt.wantDuration ||
+				opts.RenewDeadline != tt.wantRenew || opts.RetryPeriod != tt.wantRetry {
+				t.Errorf("got name=%q duration=%s renew=%s retry=%s, want name=%q duration=%s renew=%s retry=%s",
+					opts.LeaseName, opts.LeaseDuration, opts.RenewDeadline, opts.RetryPeriod,
+					tt.wantLeaseName, tt.wantDuration, tt.wantRenew, tt.wantRetry)
+			}
+		})
+	}
+}
+
+func TestLeaderElectionOverride(t *testing.T) {
+	opts := NewOptions()
+	opts.LeaseName = "epp-replacement"
+	opts.LeaseDuration, opts.RenewDeadline, opts.RetryPeriod = 40*time.Second, 30*time.Second, 3*time.Second
+
+	enabled := ctrl.Options{LeaderElection: true, LeaderElectionID: "epp-ns-pool.llm-d.ai"}
+	opts.LeaderElectionOverride()(&enabled)
+	if enabled.LeaderElectionID != "epp-replacement" {
+		t.Errorf("LeaderElectionID = %q, want %q", enabled.LeaderElectionID, "epp-replacement")
+	}
+	if enabled.LeaseDuration == nil || *enabled.LeaseDuration != 40*time.Second ||
+		enabled.RenewDeadline == nil || *enabled.RenewDeadline != 30*time.Second ||
+		enabled.RetryPeriod == nil || *enabled.RetryPeriod != 3*time.Second {
+		t.Errorf("lease timings not applied: %v %v %v", enabled.LeaseDuration, enabled.RenewDeadline, enabled.RetryPeriod)
+	}
+
+	opts.LeaseName = ""
+	derived := ctrl.Options{LeaderElection: true, LeaderElectionID: "epp-ns-pool.llm-d.ai"}
+	opts.LeaderElectionOverride()(&derived)
+	if derived.LeaderElectionID != "epp-ns-pool.llm-d.ai" {
+		t.Errorf("empty lease name changed LeaderElectionID to %q", derived.LeaderElectionID)
+	}
+
+	disabled := ctrl.Options{}
+	opts.LeaderElectionOverride()(&disabled)
+	if disabled.LeaseDuration != nil || disabled.LeaderElectionID != "" {
+		t.Errorf("override changed manager options with leader election disabled: %+v", disabled)
+	}
 }

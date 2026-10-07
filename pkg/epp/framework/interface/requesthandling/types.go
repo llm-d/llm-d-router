@@ -18,6 +18,7 @@ limitations under the License.
 package requesthandling
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -749,14 +750,19 @@ type Content struct {
 }
 
 type ContentBlock struct {
-	Type       string     `json:"type"`
-	Text       string     `json:"text,omitempty"`
-	ImageURL   ImageBlock `json:"image_url"`
-	InputAudio AudioBlock `json:"input_audio"`
-	VideoURL   VideoBlock `json:"video_url"`
+	Type       string        `json:"type"`
+	Text       string        `json:"text,omitempty"`
+	ImageURL   ImageBlock    `json:"image_url"`
+	AudioURL   AudioURLBlock `json:"audio_url"`
+	InputAudio AudioBlock    `json:"input_audio"`
+	VideoURL   VideoBlock    `json:"video_url"`
 }
 
 type ImageBlock struct {
+	URL string `json:"url,omitempty"`
+}
+
+type AudioURLBlock struct {
 	URL string `json:"url,omitempty"`
 }
 
@@ -769,23 +775,25 @@ type VideoBlock struct {
 	URL string `json:"url,omitempty"`
 }
 
-// UnmarshalJSON allow use both format
+// UnmarshalJSON accepts either a string or an array of content blocks. The first
+// byte selects the format because each json.Unmarshal rescans the whole value,
+// which is costly for content blocks carrying base64 media.
 func (mc *Content) UnmarshalJSON(data []byte) error {
-	// Raw format
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		mc.Raw = str
-		return nil
-	}
-
-	// Block format
-	var blocks []ContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var blocks []ContentBlock
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			return errors.New("content format not supported")
+		}
 		mc.Structured = blocks
 		return nil
 	}
 
-	return errors.New("content format not supported")
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return errors.New("content format not supported")
+	}
+	mc.Raw = str
+	return nil
 }
 
 func (mc Content) MarshalJSON() ([]byte, error) {

@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -118,6 +120,22 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		inflightModel = model
 	}
 
+	// DetectAPIType gates this so the check follows the same classification
+	// every pipeline step uses. Any other path it reads as Responses reaches
+	// the passthrough catch-all, which never parses a body. Which paths and
+	// methods each API serves is settled in
+	// https://github.com/llm-d/llm-d-router/issues/3091.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		// The router serves only stateless Responses requests, disaggregated
+		// or not; the rest is resolved upstream of it. err names a field from
+		// a fixed list, so echoing it reflects no client-controlled content.
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	requestID := r.Header.Get(reqcommon.RequestIDHeaderKey)
 	clientRequestID := requestID
 	requestIDReplaced := !validRequestID.MatchString(requestID)
@@ -140,6 +158,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
+	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
 
 	if requestIDReplaced && clientRequestID != "" {
 		// Log the rejected length, never the raw value, to avoid reflecting

@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/leaderelection"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -42,9 +43,13 @@ import (
 )
 
 const (
-	DefaultGrpcPort           = 9002
-	DefaultPoolNamespace      = "default"        // default when pool namespace is empty (CLI flag default is empty)
-	DefaultDrainTimeout       = 30 * time.Second // graceful shutdown drain window
+	DefaultGrpcPort      = 9002
+	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
+	// Leader election timings; these are the controller-runtime defaults.
+	DefaultLeaseDuration      = 15 * time.Second
+	DefaultRenewDeadline      = 10 * time.Second
+	DefaultRetryPeriod        = 2 * time.Second
 	MinRefreshMetricsInterval = 50 * time.Millisecond
 )
 
@@ -71,6 +76,10 @@ type Options struct {
 	//
 	GRPCPort              uint16        // gRPC port used for communicating with Envoy proxy.
 	EnableLeaderElection  bool          // Enables leader election for high availability
+	LeaseName             string        // Leader election Lease name; empty derives epp-<pool-namespace>-<pool-name>.llm-d.ai.
+	LeaseDuration         time.Duration // How long a standby waits after the last renewal before it takes the lease.
+	RenewDeadline         time.Duration // How long the leader retries a failed renewal before it gives up leadership.
+	RetryPeriod           time.Duration // Wait between attempts to acquire or renew the lease.
 	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
 	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
 	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
@@ -147,6 +156,9 @@ func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
 		DrainTimeout:                     DefaultDrainTimeout,
+		LeaseDuration:                    DefaultLeaseDuration,
+		RenewDeadline:                    DefaultRenewDeadline,
+		RetryPeriod:                      DefaultRetryPeriod,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
@@ -180,6 +192,16 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Uint16Var(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.StringVar(&opts.LeaseName, "ha-lease-name", opts.LeaseName,
+		"Leader election: name of the Lease in the pool namespace. Defaults to epp-<pool-namespace>-<pool-name>.llm-d.ai. "+
+			"A second EPP deployment for the same pool with its own lease can hold leadership while traffic moves to it.")
+	fs.DurationVar(&opts.LeaseDuration, "ha-lease-duration", opts.LeaseDuration,
+		"Leader election: how long a standby waits after the leader's last renewal before it takes the lease.")
+	fs.DurationVar(&opts.RenewDeadline, "ha-renew-deadline", opts.RenewDeadline,
+		"Leader election: how long the leader retries a failed lease renewal, for example against a slow API server, "+
+			"before it gives up leadership. Must be shorter than ha-lease-duration.")
+	fs.DurationVar(&opts.RetryPeriod, "ha-retry-period", opts.RetryPeriod,
+		"Leader election: wait between attempts to acquire or renew the lease.")
 	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
 		"Graceful shutdown drain window. On SIGTERM the EPP goes NotServing and releases its leader lease "+
 			"immediately, then keeps serving ext_proc for this duration so in-flight and pre-DNS-refresh requests "+
@@ -187,7 +209,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
-		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. Only `inference.networking.k8s.io/v1` is currently supported.")
+		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. "+
+			"Only `inference.networking.k8s.io` is currently supported (`inference.networking.x-k8s.io` is deprecated but still accepted).")
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
@@ -236,9 +259,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
-		"The path to the certificate for secure serving. The certificate and private key files "+
-			"are assumed to be named tls.crt and tls.key, respectively. If not set, and secureServing is enabled, "+
-			"then a self-signed certificate is used.")
+		"Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableCertReload, "enable-cert-reload", opts.EnableCertReload,
 		"Enables certificate reloading of the certificates specified in --cert-path.")
 	fs.BoolVar(&opts.EnableGRPCStreamMetrics, "enable-grpc-stream-metrics", opts.EnableGRPCStreamMetrics,
@@ -246,17 +267,17 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
 		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
 			"single overflow series, and 0 collapses all of them. Bounds metric cardinality with many distinct fairness IDs.")
-	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Enables secure serving.")
+	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Serve the listener over TLS.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,
-		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).")
+		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12.")
 	fs.StringSliceVar(&opts.TLSCipherSuites, "tls-cipher-suites", opts.TLSCipherSuites,
-		"Comma-separated list of TLS cipher suites for secure serving (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.")
+		"Comma-separated list of TLS cipher suites for secure serving (Go crypto/tls names, e.g., TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). Empty uses the crypto/tls default. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.")
 	fs.BoolVar(&opts.MetricsEndpointAuth, "metrics-endpoint-auth", opts.MetricsEndpointAuth,
 		"Enables authentication and authorization of the metrics endpoint.")
 	fs.StringVar(&opts.MetricsClientCAFile, "metrics-client-ca-file", opts.MetricsClientCAFile,
 		"PEM CA for metrics mTLS: require verified client certs.")
 	fs.StringVar(&opts.MetricsCertDir, "metrics-cert-dir", opts.MetricsCertDir,
-		"Directory with the metrics server certificates. Enables TLS on the metrics endpoint.")
+		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
@@ -334,6 +355,9 @@ func (opts *Options) Complete() error {
 		if err != nil {
 			return fmt.Errorf("invalid tls-min-version %q: %w", opts.TLSMinVersion, err)
 		}
+		if v < tls.VersionTLS12 {
+			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
+		}
 		opts.tlsMinVersionValue = v
 	}
 	if len(opts.TLSCipherSuites) > 0 {
@@ -351,7 +375,7 @@ func (opts *Options) Complete() error {
 var (
 	errMetricsClientCARequiresCertDir = errors.New(`"metrics-client-ca-file" requires "metrics-cert-dir"`)
 	errMetricsTLSWithoutAuth          = errors.New(`"metrics-cert-dir" enables metrics TLS without authentication; set "metrics-client-ca-file" or "metrics-endpoint-auth"`)
-	errMetricsCertUnreadable          = errors.New("metrics TLS cert file unreadable")
+	errMetricsCertUnreadable          = errors.New("metrics TLS: cert file unreadable")
 	errReadMetricsClientCA            = errors.New("reading metrics client CA")
 	errNoValidMetricsCA               = errors.New("no valid CA certs in metrics client CA file")
 )
@@ -417,6 +441,20 @@ func (opts *Options) Validate() error {
 			"requested", opts.RefreshMetricsInterval, "effective", MinRefreshMetricsInterval)
 		opts.RefreshMetricsInterval = MinRefreshMetricsInterval
 	}
+	// client-go's leader elector rejects these at startup; report them as flag errors instead.
+	if opts.EnableLeaderElection {
+		if opts.RetryPeriod <= 0 {
+			return fmt.Errorf("ha-retry-period must be positive, got %s", opts.RetryPeriod)
+		}
+		if opts.RenewDeadline <= time.Duration(leaderelection.JitterFactor*float64(opts.RetryPeriod)) {
+			return fmt.Errorf("ha-renew-deadline (%s) must be greater than %.1f x ha-retry-period (%s)",
+				opts.RenewDeadline, leaderelection.JitterFactor, opts.RetryPeriod)
+		}
+		if opts.LeaseDuration <= opts.RenewDeadline {
+			return fmt.Errorf("ha-lease-duration (%s) must be greater than ha-renew-deadline (%s)",
+				opts.LeaseDuration, opts.RenewDeadline)
+		}
+	}
 	if opts.RefreshPrometheusMetricsInterval <= 0 {
 		return fmt.Errorf("refresh-prometheus-metrics-interval must be positive, got %v", opts.RefreshPrometheusMetricsInterval)
 	}
@@ -432,6 +470,9 @@ func (opts *Options) Validate() error {
 
 	if opts.PluginStateStalenessThreshold <= 0 {
 		return fmt.Errorf("plugin-state-staleness-threshold must be positive, got %v", opts.PluginStateStalenessThreshold)
+	}
+	if opts.PoolGroup != routing.InferencePoolAPIGroup && opts.PoolGroup != "inference.networking.x-k8s.io" {
+		return fmt.Errorf("pool-group must be %q or the deprecated %q, got %q", routing.InferencePoolAPIGroup, "inference.networking.x-k8s.io", opts.PoolGroup)
 	}
 	if opts.MetricsStalenessThreshold <= 0 {
 		return fmt.Errorf("metrics-staleness-threshold must be positive, got %v", opts.MetricsStalenessThreshold)
@@ -490,7 +531,7 @@ func parseTLSVersion(s string) (uint16, error) {
 	if v, ok := tlsVersions[s]; ok {
 		return v, nil
 	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", s)
+	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s)
 }
 
 func parseCipherSuites(names []string) ([]uint16, error) {
@@ -514,4 +555,19 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// LeaderElectionOverride returns a controller manager option override that applies the lease
+// name and timings. It is a no-op on the manager options when leader election is disabled.
+func (opts *Options) LeaderElectionOverride() func(*ctrl.Options) {
+	return func(o *ctrl.Options) {
+		if !o.LeaderElection {
+			return
+		}
+		if opts.LeaseName != "" {
+			o.LeaderElectionID = opts.LeaseName
+		}
+		leaseDuration, renewDeadline, retryPeriod := opts.LeaseDuration, opts.RenewDeadline, opts.RetryPeriod
+		o.LeaseDuration, o.RenewDeadline, o.RetryPeriod = &leaseDuration, &renewDeadline, &retryPeriod
+	}
 }

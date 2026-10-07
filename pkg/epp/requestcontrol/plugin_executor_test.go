@@ -187,6 +187,34 @@ func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
 	assert.Equal(t, 1, value)
 }
 
+// The director assigns request fields once the timeout path returns, while the
+// abandoned producer goroutine may still be running. Scoping copies the request,
+// so it must happen before the goroutine starts; -race reports the overlap
+// otherwise.
+func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
+	request := &fwksched.InferenceRequest{}
+	plugin := &lateAttributePlugin{
+		key:     fwkplugin.NewDataKey("late", "mock"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+
+	err := dataProducerPluginsWithTimeout(
+		context.Background(),
+		20*time.Millisecond,
+		[]fwkrc.DataProducer{plugin},
+		request,
+		nil,
+	)
+	require.Error(t, err)
+	request.SchedulingResult = &fwksched.SchedulingResult{}
+
+	<-plugin.started
+	close(plugin.release)
+	<-plugin.done
+}
+
 func TestDataProducerPluginsWithTimeout(t *testing.T) {
 	testCases := []struct {
 		name          string

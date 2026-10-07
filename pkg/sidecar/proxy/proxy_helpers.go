@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -35,8 +36,10 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -82,16 +85,16 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if s.config.SecureServing {
 		var tempCert tls.Certificate
 		if s.config.CertPath != "" {
-			certFile := s.config.CertPath + "/tls.crt"
-			keyFile := s.config.CertPath + "/tls.key"
+			certFile := filepath.Join(s.config.CertPath, "tls.crt")
+			keyFile := filepath.Join(s.config.CertPath, "tls.key")
 			tempCert, err = tls.LoadX509KeyPair(certFile, keyFile)
 			if err != nil {
-				return fmt.Errorf("failed to load TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+				return fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 			}
 		} else {
-			tempCert, err = CreateSelfSignedTLSCertificate()
+			tempCert, err = tlsutil.CreateSelfSignedTLSCertificate(s.logger)
 			if err != nil {
-				return fmt.Errorf("failed to generate self-signed TLS certificate: %w", err)
+				return fmt.Errorf("create self-signed certificate: %w", err)
 			}
 		}
 		cert = &tempCert
@@ -104,35 +107,28 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		if s.config.CertPath != "" {
 			reloader, err := common.NewCertReloader(ctx, s.config.CertPath, cert)
 			if err != nil {
-				return fmt.Errorf("failed to start reloader: %w", err)
+				return fmt.Errorf("start certificate reloader: %w", err)
 			}
 			getCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return reloader.Get(), nil
 			}
 		}
 
-		minVersion := s.config.TLSMinVersion
-		if minVersion == 0 {
-			minVersion = tls.VersionTLS12
-		}
-		cipherSuites := s.config.TLSCipherSuites
-		if len(cipherSuites) == 0 {
-			cipherSuites = []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			}
+		// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+		// Options.Complete already rejects a configured version below TLS 1.2.
+		// An empty suite list leaves CipherSuites nil, which selects the
+		// crypto/tls default, matching the coordinator and EPP.
+		minVersion := uint16(tls.VersionTLS12)
+		if s.config.TLSMinVersion > tls.VersionTLS12 {
+			minVersion = s.config.TLSMinVersion
 		}
 		server.TLSConfig = &tls.Config{
 			MinVersion:     minVersion,
-			CipherSuites:   cipherSuites,
+			CipherSuites:   s.config.TLSCipherSuites,
 			GetCertificate: getCertificate,
 		}
-		s.logger.Info("server TLS configured")
 	}
+	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
 	// Setup graceful termination (not strictly needed for sidecars)
 	go func() {
@@ -177,6 +173,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.Is(err, syscall.ECONNREFUSED):
 			s.logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
+			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 
@@ -193,7 +190,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 }
 
 func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
-	defer func() { _ = r.Body.Close() }()
+	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
@@ -212,18 +209,18 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	requestFieldKVTransferParams:     {},
-	requestFieldECTransferParams:     {},
-	requestFieldMaxTokens:            {},
-	requestFieldMaxCompletionTokens:  {},
-	requestFieldMaxOutputTokens:      {},
-	requestFieldMinTokens:            {},
-	requestFieldSamplingParams:       {},
-	requestFieldStream:               {},
-	requestFieldStreamOptions:        {},
-	requestFieldCacheHitThreshold:    {},
-	requestFieldContinueFinalMessage: {},
-	requestFieldAddGenerationPrompt:  {},
+	reqcommon.FieldKVTransferParams:     {},
+	reqcommon.FieldECTransferParams:     {},
+	reqcommon.FieldMaxTokens:            {},
+	reqcommon.FieldMaxCompletionTokens:  {},
+	reqcommon.FieldMaxOutputTokens:      {},
+	reqcommon.FieldMinTokens:            {},
+	reqcommon.FieldSamplingParams:       {},
+	reqcommon.FieldStream:               {},
+	reqcommon.FieldStreamOptions:        {},
+	reqcommon.FieldCacheHitThreshold:    {},
+	reqcommon.FieldContinueFinalMessage: {},
+	reqcommon.FieldAddGenerationPrompt:  {},
 }
 
 // requestMessages returns the request's messages, decoding the array on first
@@ -231,7 +228,7 @@ var inspectedRequestFields = map[string]struct{}{
 // preserves the key order inside every message. An absent field yields a nil
 // slice and no error.
 func requestMessages(req map[string]any) ([]json.RawMessage, error) {
-	switch v := req[requestFieldMessages].(type) {
+	switch v := req[reqcommon.FieldMessages].(type) {
 	case nil:
 		return nil, nil
 	case []json.RawMessage:
@@ -280,6 +277,23 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 		return nil, nil, false
 	}
+	// createRoutes registers one route per path in DetectAPIType's mapping and
+	// derives each route's apiType from the same call, so a path added to that
+	// list is guarded here without a second edit. Those paths are the API
+	// surface the router serves, and coverage stops there: a request on any
+	// other path, including PathResponses with a trailing slash or an extra
+	// segment, reaches the decoder proxy through the catch-all and its body is
+	// never read. Guarding those would put a body read on the catch-all, which
+	// serves every unrouted path for every API.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+				s.logger.Error(writeErr, "failed to send error response to client")
+			}
+			return nil, nil, false
+		}
+	}
 	return raw, parsed, true
 }
 
@@ -327,4 +341,10 @@ func isRetryableStatus(statusCode int) bool {
 	return statusCode == http.StatusBadGateway ||
 		statusCode == http.StatusServiceUnavailable ||
 		statusCode == http.StatusGatewayTimeout
+}
+
+// WriteAll writes b to w, discarding the error. The caller has already sent
+// headers and status, so there is no recovery action for a write failure.
+func WriteAll(w io.Writer, b []byte) {
+	_, _ = w.Write(b)
 }

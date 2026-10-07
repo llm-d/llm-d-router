@@ -808,19 +808,10 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 			want:     "vllm",
 		},
 		{
-			name:     "legacy GAIE label key fallback",
-			labels:   map[string]string{legacyGAIEEngineTypeLabelKey: "sglang"},
+			name:     "legacy GAIE label key is ignored",
+			labels:   map[string]string{"inference.networking.k8s.io/engine-type": "sglang"},
 			labelKey: DefaultEngineTypeLabelKey,
-			want:     "sglang",
-		},
-		{
-			name: "new label key takes precedence over legacy GAIE key",
-			labels: map[string]string{
-				DefaultEngineTypeLabelKey:    "vllm",
-				legacyGAIEEngineTypeLabelKey: "sglang",
-			},
-			labelKey: DefaultEngineTypeLabelKey,
-			want:     "vllm",
+			want:     DefaultEngineType,
 		},
 		{
 			name:     "no labels returns default",
@@ -844,5 +835,30 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 				t.Errorf("getEngineTypeFromEndpoint() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
+	ext, err := newCoreMetricsExtractorPlugin(context.Background(), "core", nil)
+	if err != nil {
+		t.Fatalf("new extractor: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, name := range ext.MetricFamilies() {
+		declared[name] = true
+	}
+	for _, engine := range defaultEngineConfigs {
+		for _, raw := range []string{
+			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
+			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+		} {
+			spec, err := parseStringToSpec(raw)
+			if err != nil {
+				t.Fatalf("engine %s spec %q: %v", engine.Name, raw, err)
+			}
+			if spec != nil && !declared[spec.Name] {
+				t.Errorf("engine %s reads %s, which MetricFamilies does not declare", engine.Name, spec.Name)
+			}
+		}
 	}
 }

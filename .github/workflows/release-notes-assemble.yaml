@@ -13,6 +13,15 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      # Removes HTML comments from the body so text hidden in the rendered view
+      # is not parsed. Fenced code blocks are kept.
+      STRIP_HTML_COMMENTS: |
+        s{
+          ( ^[ ]{0,3}(`{3,}|~{3,}) .*? (?:\n[ ]{0,3}\2|\z) )  # fenced code block: keep
+          | ^[ ]{0,3}<!-- (?:-?>|.*?(?:-->|\z))               # comment block: ends at --> or end of body
+          | <!-- (?:-?>|(?:(?!\n[ \t]*\n|<!--).)*?-->)       # inline comment: must close before a blank line
+        }{$1 // ""}gmsex
     steps:
       - name: Generate App token
         id: app-token
@@ -78,7 +87,7 @@ jobs:
             merged_at=$(printf '%s' "$json" | jq -r '.mergedAt')
             url=$(printf '%s' "$json" | jq -r '.url')
 
-            note=$(printf '%s' "$body" | tr -d '\r' | \
+            note=$(printf '%s' "$body" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | \
               sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | \
               tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
 

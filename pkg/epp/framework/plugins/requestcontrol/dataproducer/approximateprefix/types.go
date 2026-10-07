@@ -64,6 +64,11 @@ type SchedulingContextState struct {
 	PerPromptHashes [][]blockHash
 	// A map of server to its longest prefix cache match length in blocks.
 	PrefixCacheServers map[ServerID]int
+	// A map of server to the prompt tokens it is expected to serve from cache.
+	// Blocks are converted to tokens during Produce, which holds both the block
+	// size the hashes were derived at and each prompt's length; the conversion
+	// is bounded per prompt because a prompt's final block may be partial.
+	PredictedCachedTokens map[ServerID]int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -77,10 +82,15 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 	for key, value := range s.PrefixCacheServers {
 		prefixCacheServers[key] = value
 	}
+	predictedCachedTokens := make(map[ServerID]int, len(s.PredictedCachedTokens))
+	for key, value := range s.PredictedCachedTokens {
+		predictedCachedTokens[key] = value
+	}
 
 	return &SchedulingContextState{
-		PerPromptHashes:    perPromptHashes,
-		PrefixCacheServers: prefixCacheServers,
+		PerPromptHashes:       perPromptHashes,
+		PrefixCacheServers:    prefixCacheServers,
+		PredictedCachedTokens: predictedCachedTokens,
 	}
 }
 
@@ -97,8 +107,10 @@ const (
 	// podActiveCheckInterval is the interval at which we check if pods are still active.
 	podActiveCheckInterval = 2 * time.Minute
 
-	// defaultBlockSizeTokens is the default token block size (vLLM default is 16).
-	defaultBlockSizeTokens = 16
+	// defaultBlockSizeTokens is the default token block size. It equals
+	// minBlockSizeTokens so an unset value does not trigger the below-minimum
+	// override and its startup warning.
+	defaultBlockSizeTokens = 64
 
 	// defaultMaxPrefixBlocks is the fallback block cap, consulted only when
 	// MaxPrefixTokensToMatch is 0 and MaxPrefixBlocksToMatch is non-zero; the

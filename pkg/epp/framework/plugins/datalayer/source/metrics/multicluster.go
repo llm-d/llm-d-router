@@ -18,7 +18,6 @@ package metrics
 
 import (
 	"encoding/json"
-	"io"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
@@ -38,16 +37,12 @@ const (
 	defaultMultiClusterScheme = "https"
 )
 
-// parseBoundedMetrics parses the metrics payload under maxResponseBytes.
-func parseBoundedMetrics(r io.Reader) (PrometheusMetricMap, error) {
-	return parseMetrics(io.LimitReader(r, maxResponseBytes))
-}
-
 // NewHTTPMultiClusterMetricsDataSource constructs the source with the given scheme and path.
 // Use directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMultiClusterMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
+	parser, observer := newMetricsParser(nil, maxResponseBytes)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{},
-		MultiClusterMetricsDataSourceType, name, parseBoundedMetrics)
+		MultiClusterMetricsDataSourceType, name, parser, observer)
 }
 
 // MultiClusterMetricsDataSourceFactory instantiates the source. Unlike the pod source it
@@ -67,6 +62,7 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 	if err != nil {
 		return nil, err
 	}
+	parser, observer := newMetricsParser(cfg.Families, maxResponseBytes)
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{
@@ -75,5 +71,5 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 			ClientCertPath: cfg.ClientCertPath,
 			ClientKeyPath:  cfg.ClientKeyPath,
 		},
-		MultiClusterMetricsDataSourceType, name, parseBoundedMetrics, intervalOpt)
+		MultiClusterMetricsDataSourceType, name, parser, intervalOpt, observer)
 }

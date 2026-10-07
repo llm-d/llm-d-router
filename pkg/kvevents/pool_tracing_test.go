@@ -247,7 +247,7 @@ func TestPool_NoEventSpansUnlessConfigured(t *testing.T) {
 
 	pool, err := NewPool(DefaultConfig(), idx, tp, &sourceEndpointAdapter{})
 	require.NoError(t, err)
-	z := newZMQSubscriber(pool, "pod-1", "", "tcp://x", "", "kv@", false)
+	z := newZMQSubscriber(pool, "pod-1", "", "tcp://x", "", "", "kv@", false)
 
 	z.addTask(context.Background(), "kv@10.0.0.1:8000@test-model", 1, []byte{1})
 	pool.processRawMessage(ctx, drainOne(t, pool))

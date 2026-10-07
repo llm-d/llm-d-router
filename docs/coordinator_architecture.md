@@ -2,8 +2,8 @@
 
 The coordinator is a Go service that accepts inference requests and drives them through
 a configurable pipeline of steps. It currently supports the OpenAI-compatible API
-(`/v1/chat/completions`, `/v1/completions`), and the entry layer is designed to be
-extended to other inference protocols. Each step performs one unit of
+(`/v1/chat/completions`, `/v1/completions`, `/v1/responses`), and the entry layer is
+designed to be extended to other inference protocols. Each step performs one unit of
 work (download media, tokenize, encode, prefill, decode). The pre-processing steps call
 side services directly (media download, and the render service for tokenization); the
 encode, prefill, and decode steps forward sub-requests to vLLM worker pools through an
@@ -221,7 +221,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_coordinator` is false. Accepts `/v1/chat/completions`, `/v1/completions` and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
@@ -286,9 +286,10 @@ so client-provided values are not sent upstream.
 
 Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
 `decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
-[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
-original OpenAI path or the internal `/inference/v1/generate` path, depending on
-`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
+[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). For encode and prefill, the request
+path is either the client's original OpenAI path or the internal `/inference/v1/generate` path, depending on
+`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)); decode and conditional-decode
+always forward on the client's original path regardless of that setting. Other
 paths can be added later as new protocols are supported.
 
 ## EPP integration
@@ -672,7 +673,7 @@ commented with their defaults. The loader is [pkg/coordinator/config/config.go](
 ```yaml
 log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v overrides
 
-server:               # inbound listener; TLS unless secure_coordinator is false
+server:               # inbound listener; TLS unless secure_serving is false
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
@@ -724,13 +725,13 @@ single step may override the default in its own `params` (`kv_connector:` /
 always forward on the client's original OpenAI path and are unaffected by this setting:
 
 - `true` (default): forward the client's original OpenAI path (`/v1/chat/completions`,
-  `/v1/completions`).
+  `/v1/completions`, `/v1/responses`).
 - `false`: the tokens-in format. Rewrite to the internal `/inference/v1/generate`
   token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
   directly in the body.
 
-A step can override the global with `use_openai_format:` in its own `params`. The
-exact bodies per format are in [communication.md](communication.md).
+`encode` and `prefill` can each override the global with `use_openai_format:` in
+their own `params`. The exact bodies per format are in [communication.md](communication.md).
 
 `false` requires a `render` step in the pipeline: render produces the token IDs the
 tokens-in format sends, so the coordinator fails to start when `false` is set without a
@@ -785,7 +786,7 @@ only the request carrier differs.
 | `type` | Purpose | Key params |
 | :---- | :---- | :---- |
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
-| `replace-media-urls` | Download `image_url` references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
+| `replace-media-urls` | Download `image_url` (chat completions) or `input_image` (Responses) references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and per-image hash/placeholder/kwargs. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |

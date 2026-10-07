@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -63,6 +64,10 @@ type AdmissionController interface {
 // waiting for an admission outcome.
 type flowController interface {
 	EnqueueAndWait(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, error)
+}
+
+type dispatchReservationReleaser interface {
+	ReleaseDispatchReservation(requestID string)
 }
 
 // rejectIfSheddableAndSaturated checks if a request should be immediately rejected.
@@ -180,7 +185,7 @@ func (fcac *FlowControlAdmissionController) Admit(
 	fcReq := &flowControlRequest{
 		fairnessID:          reqCtx.SchedulingRequest.FairnessID,
 		priority:            priority,
-		requestByteSize:     uint64(reqCtx.RequestSize),
+		requestByteSize:     clamp.Uint64(reqCtx.RequestSize),
 		inferenceRequest:    reqCtx.SchedulingRequest,
 		receivedTimestamp:   reqCtx.RequestReceivedTimestamp,
 		reqMetadata:         reqCtx.Request.Metadata,
@@ -206,6 +211,14 @@ func (fcac *FlowControlAdmissionController) Admit(
 	// mapping consults it: a TTL expiry whose regime is not already established by ErrNoEndpoints.
 	poolEmpty := func() bool { return len(fcac.endpointCandidates.Locate(ctx, nil)) == 0 }
 	return translateFlowControlError(err, poolEmpty)
+}
+
+// ReleaseDispatchReservation forwards completion of the post-admission accounting window when
+// the configured flow controller supports dispatch reservations.
+func (fcac *FlowControlAdmissionController) ReleaseDispatchReservation(requestID string) {
+	if releaser, ok := fcac.flowController.(dispatchReservationReleaser); ok {
+		releaser.ReleaseDispatchReservation(requestID)
+	}
 }
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.

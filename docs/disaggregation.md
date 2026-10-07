@@ -678,14 +678,60 @@ batches are unchanged.
 
 ### General Sidecar Flags
 
+The sidecar's serving TLS flags are shared with the EPP and the coordinator and are
+documented in [TLS](tls.md). `--enable-tls` and `--tls-insecure-skip-verify` configure
+the sidecar's outbound connections to the encode, prefill and decode stages.
+
 | Flag | Env var | Values | Default | Description |
 |---|---|---|---|---|
 | `--enable-tls` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Enable TLS for the specified stages. Example: `--enable-tls=prefiller,decoder` |
 | `--tls-insecure-skip-verify` | — | `prefiller`, `decoder`, `encoder` (comma-separated or repeated) | none | Skip TLS certificate verification for the specified stages. Example: `--tls-insecure-skip-verify=prefiller` |
-| `--tls-min-version` | — | `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | Set the minimum TLS version accepted by the sidecar's secure proxy. |
-| `--tls-cipher-suites` | — | Go `crypto/tls` cipher suite names (comma-separated or repeated) | existing secure suite set | Set the TLS cipher suites accepted by the sidecar's secure proxy. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-prefiller-sampling` | `ENABLE_PREFILLER_SAMPLING` | `true` / `false` | `false` | If true, the prefill instance is selected randomly from the provided prefill host values. |
-| `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. |
+| `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. See [SSRF Protection](#ssrf-protection). |
+
+### SSRF Protection
+
+The sidecar connects to the addresses in the `x-prefiller-host-port` and
+`x-encoder-hosts-ports` request headers, and tells vLLM to pull cached KV blocks
+from the address in `x-kv-cache-source-host-port`. With
+`--enable-ssrf-protection=false` the sidecar does not check these addresses and
+logs a warning at startup. A client that can set the headers chooses the target.
+That includes any client that reaches the sidecar port without going through
+the EPP.
+
+Set `--enable-ssrf-protection=true` in deployments reachable by untrusted
+clients. The sidecar then accepts a target only when its host is the IP or name
+of a pod selected by the InferencePool. The port is not checked. A request with
+a disallowed prefill target is rejected with `403`, and disallowed encoder
+targets are dropped from the request.
+
+Enabling the flag requires:
+
+- `--inference-pool=<namespace>/<name>`, or the `INFERENCE_POOL` environment
+  variable. A value without a namespace refers to the `default` namespace. The
+  sidecar does not start when the pool is not set.
+- `--pool-group`, when the InferencePool is not in the default
+  `inference.networking.k8s.io` API group.
+- `list` and `watch` permissions on `inferencepools` and on `pods` in the
+  InferencePool's namespace, granted to the service account of the decode pods:
+
+  ```yaml
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: pd-sidecar-ssrf-protection
+  rules:
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
+  ```
+
+  Without the `inferencepools` permissions the sidecar does not start serving.
+  Without the `pods` permissions the allowlist stays empty and every request
+  with a prefill target is rejected.
 
 ### Connector-Specific Flags
 

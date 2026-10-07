@@ -50,7 +50,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	}
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
-		reqCtx.Request.Headers[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
+		key := strings.ToLower(header.Key)
+		if request.InternalRoutingHeaders.Has(key) {
+			continue
+		}
+		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
 	}
 
 	reqCtx.ObjectiveKey, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ObjectiveKey)
@@ -96,7 +100,8 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateHeaders(ctx, reqCtx),
+						SetHeaders:    s.generateHeaders(ctx, reqCtx),
+						RemoveHeaders: unsetRoutingHeaders(reqCtx),
 					},
 				},
 			},
@@ -152,6 +157,18 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 	return headers
+}
+
+// unsetRoutingHeaders lists the routing headers no plugin set, so Envoy removes
+// any client-supplied value before forwarding.
+func unsetRoutingHeaders(reqCtx *RequestContext) []string {
+	var remove []string
+	for key := range request.InternalRoutingHeaders {
+		if _, ok := reqCtx.Request.Headers[key]; !ok {
+			remove = append(remove, key)
+		}
+	}
+	return remove
 }
 
 func (s *StreamingServer) generateMetadata(endpoint string, endpointScores map[string]float64) *structpb.Struct {

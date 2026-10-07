@@ -1,5 +1,4 @@
 /*
-Copyright 2025 The Kubernetes Authors.
 Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxy
+package tokenizerbench
 
-// tracerScope is the OTel instrumentation scope for the sidecar proxy.
-const tracerScope = "llm-d-router/pkg/sidecar/proxy"
+import (
+	"testing"
+	"unicode/utf8"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestLongPromptMatchesIssueScale(t *testing.T) {
+	require.Len(t, longPrompt, longPromptBytes)
+	require.True(t, utf8.ValidString(longPrompt))
+}
+
+func TestRepeatPromptToSizeEmptyParagraph(t *testing.T) {
+	require.Empty(t, repeatPromptToSize("", 16))
+}

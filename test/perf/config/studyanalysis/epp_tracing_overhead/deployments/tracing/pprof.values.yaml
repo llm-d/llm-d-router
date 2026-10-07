@@ -1,0 +1,4 @@
+router:
+  epp:
+    flags:
+      enable-pprof: true

@@ -38,6 +38,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -131,6 +132,7 @@ func TestHandleRequestHeaders(t *testing.T) {
 		name          string
 		headers       []*configPb.HeaderValue
 		wantHeaders   map[string]string
+		wantAbsent    []string
 		wantObjective string
 		wantTarget    string
 	}{
@@ -159,6 +161,23 @@ func TestHandleRequestHeaders(t *testing.T) {
 			wantObjective: "new-objective",
 			wantTarget:    "new-model",
 		},
+		{
+			name: "Drops client-supplied routing headers",
+			headers: []*configPb.HeaderValue{
+				{Key: "X-Prefiller-Host-Port", Value: "10.0.0.1:9090"},
+				{Key: routing.EncoderEndpointsHeader, Value: "10.0.0.2:9090"},
+				{Key: routing.DataParallelEndpointHeader, Value: "10.0.0.3:9090"},
+				{Key: routing.KVCacheSourceHeader, Value: "10.0.0.4:9090"},
+				{Key: "x-test", Value: "val"},
+			},
+			wantHeaders: map[string]string{"x-test": "val"},
+			wantAbsent: []string{
+				routing.PrefillEndpointHeader,
+				routing.EncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -183,6 +202,9 @@ func TestHandleRequestHeaders(t *testing.T) {
 				for k, v := range tc.wantHeaders {
 					assert.Equal(t, v, reqCtx.Request.Headers[k], "Header %q should match expected value", k)
 				}
+			}
+			for _, k := range tc.wantAbsent {
+				assert.NotContains(t, reqCtx.Request.Headers, k)
 			}
 		})
 	}
@@ -402,6 +424,63 @@ func TestGenerateRequestHeaderResponse_EndpointScores(t *testing.T) {
 				gotScores[endpoint] = score.GetNumberValue()
 			}
 			assert.Equal(t, tc.wantScores, gotScores, "Unexpected values for DestinationEndpointScoresKey")
+		})
+	}
+}
+
+func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) {
+	t.Parallel()
+
+	allRoutingHeaders := []string{
+		routing.PrefillEndpointHeader,
+		routing.EncoderEndpointsHeader,
+		routing.DataParallelEndpointHeader,
+		routing.KVCacheSourceHeader,
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		wantSet     map[string]string
+		wantRemoved []string
+	}{
+		{
+			name:        "decode-only removes every routing header",
+			headers:     map[string]string{},
+			wantRemoved: allRoutingHeaders,
+		},
+		{
+			name:    "prefill selected sets prefill and removes the rest",
+			headers: map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:8000"},
+			wantSet: map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:8000"},
+			wantRemoved: []string{
+				routing.EncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request:        &Request{Headers: tc.headers},
+				Response:       &Response{},
+			}
+
+			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = string(h.Header.RawValue)
+			}
+			for k, v := range tc.wantSet {
+				assert.Equal(t, v, gotSet[k])
+			}
+			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
 }

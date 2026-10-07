@@ -18,9 +18,11 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -141,6 +143,15 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 				recorder := httptest.NewRecorder()
 				recorder.Code = 0
 				req := tt.r.Clone(tt.r.Context())
+				if req.URL == nil {
+					// A server never hands a handler a nil URL or Body; the
+					// decoder-only passthrough for a Responses request reads
+					// both to check for unsupported stateful fields.
+					req.URL = &url.URL{Path: apiType.Path()}
+				}
+				if req.Body == nil {
+					req.Body = io.NopCloser(strings.NewReader("{}"))
+				}
 				s.disaggregatedPrefillHandler(apiType)(recorder, req)
 
 				resp := recorder.Result()
@@ -182,6 +193,127 @@ func TestServer_chatCompletionsHandler(t *testing.T) {
 
 func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
+}
+
+// The plain decoder passthrough: no prefill, encoder, P2P or data-parallel
+// header, so nothing downstream reads the body.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// Reading the body to run the guard consumes it, so the decoder has to be handed
+// a request whose body is still readable. Nothing else asserts this: every other
+// decoder-only spec either expects a refusal, or installs a proxy that does not
+// read what it is given.
+func TestServer_ResponsesDecoderOnlyPassthroughForwardsTheBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	const body = `{"model":"m","input":"hi","max_output_tokens":20}`
+	var forwarded []byte
+	var contentLength int64
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		forwarded, _ = io.ReadAll(r.Body)
+		contentLength = r.ContentLength
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected the request to be forwarded, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if string(forwarded) != body {
+		t.Errorf("decoder received %q, want %q", forwarded, body)
+	}
+	if contentLength != int64(len(body)) {
+		t.Errorf("ContentLength = %d, want %d", contentLength, len(body))
+	}
+}
+
+// dataParallelHandler forwards straight to another rank and never reads the
+// body, so it depends entirely on the caller having refused the request.
+func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+
+	var dispatched bool
+	const dpHostPort = "10.0.0.5:8001"
+	s.dataParallelProxies = map[string]http.Handler{
+		dpHostPort: http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			dispatched = true
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	req.Header.Set(routing.DataParallelEndpointHeader, dpHostPort)
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// decodeWithP2PSource reads the body itself, so this path checks twice.
+func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:9000")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// The decoder-only branch's body read fails closed: a client that drops the
+// connection mid-body is refused rather than forwarded unchecked.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, errReader{})
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if dispatched {
+		t.Errorf("expected decoder proxy not to be invoked on an unreadable body")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d", http.StatusBadRequest, recorder.Code)
+	}
 }
 
 func TestServer_encoderEndpointRouting(t *testing.T) {

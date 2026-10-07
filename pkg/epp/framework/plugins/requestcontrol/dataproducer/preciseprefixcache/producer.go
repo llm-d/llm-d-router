@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
@@ -73,7 +74,7 @@ var (
 type subscriberManager interface {
 	EnsureSubscriber(
 		ctx context.Context,
-		podIdentifier, sourceEndpoint, endpoint, replayEndpoint, topicFilter string,
+		podIdentifier, sourceEndpoint, endpoint, replayEndpoint, snapshotEndpoint, topicFilter string,
 		remoteSocket bool,
 	) error
 	RemoveSubscriber(ctx context.Context, podIdentifier string) bool
@@ -189,7 +190,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
-			config.KVEventsConfig.ZMQEndpoint, "", config.KVEventsConfig.TopicFilter, false); err != nil {
+			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
 		}
 	}
@@ -198,6 +199,8 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if err != nil {
 		return nil, err
 	}
+
+	prefixmetrics.Register()
 
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
@@ -321,7 +324,7 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	perPromptKeys, mmBlockIndices, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
+	perPromptKeys, perPromptMMBlockIndices, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("failed to compute block keys: %w", err)
@@ -331,28 +334,44 @@ func (p *Producer) Produce(ctx context.Context,
 		return nil
 	}
 
-	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys, mmBlockIndices)
+	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys, perPromptMMBlockIndices)
 }
 
+// produceFromBlockKeys matches the per-prompt block keys against the index and
+// publishes per-endpoint PrefixCacheMatchInfo. perPromptKeys and
+// perPromptMMBlockIndices are computeBlockKeys' aligned return values.
 func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
-	perPromptKeys [][]kvblock.BlockHash, mmBlockIndices []int,
+	perPromptKeys [][]kvblock.BlockHash, perPromptMMBlockIndices [][]int,
 ) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
 
 	// A multi-prompt request scores as the sum of its prompts' matches. The
 	// first prompt's result is the aggregate, so single-prompt requests copy
-	// nothing.
+	// nothing. MM block indices are prompt-relative while the pod match
+	// aggregates across prompts, so each prompt's indices are counted against
+	// that prompt's match length and the counts summed per pod.
 	var matches map[string]kvcache.PodMatch
+	var mmMatches map[string]int
+	mmTracked := false
 	totalBlocks := 0
-	for _, blockKeys := range perPromptKeys {
+	for i, blockKeys := range perPromptKeys {
 		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, endpointSet)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to match block keys: %w", err)
 		}
 		totalBlocks += len(blockKeys)
+		if mmIdx := perPromptMMBlockIndices[i]; len(mmIdx) > 0 {
+			mmTracked = true
+			if mmMatches == nil {
+				mmMatches = map[string]int{}
+			}
+			for pod, m := range promptMatches {
+				mmMatches[pod] += countMMMatchedBlocks(mmIdx, m.MatchedBlocks)
+			}
+		}
 		if matches == nil {
 			matches = promptMatches
 			continue
@@ -372,7 +391,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if md == nil {
 			continue
 		}
-		match := matches[fmt.Sprintf("%s:%s", md.Address, md.Port)]
+		podKey := fmt.Sprintf("%s:%s", md.Address, md.Port)
+		match := matches[podKey]
 		if match.BlocksByTier == nil {
 			match.BlocksByTier = map[string]int{} // no match: consumers still read a map
 		}
@@ -384,8 +404,8 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			WithCachedBlockCount(match.MatchedBlocks).
 			WithConfirmedCachedBlockCount(match.ConfirmedBlocks).
 			WithCachedBlocksByTier(match.BlocksByTier)
-		if len(mmBlockIndices) > 0 {
-			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: countMMMatchedBlocks(mmBlockIndices, match.MatchedBlocks)})
+		if mmTracked {
+			info.WithMM(attrprefix.MMMatchInfo{MatchBlocks: mmMatches[podKey]})
 		}
 		results = append(results, endpointResult{endpoint: ep, info: info})
 	}

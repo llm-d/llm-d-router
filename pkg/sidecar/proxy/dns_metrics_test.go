@@ -34,13 +34,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
 func writeSelfSignedCert(t *testing.T, dir string) {
 	t.Helper()
 
-	cert, err := CreateSelfSignedTLSCertificate()
+	cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
 	require.NoError(t, err)
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
@@ -117,7 +118,7 @@ func TestServeMetrics_BindsMetricsPort(t *testing.T) {
 }
 
 func TestServeMetrics_ListenError(t *testing.T) {
-	held, err := net.Listen("tcp", ":0")
+	held, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = held.Close() })
 
@@ -147,7 +148,7 @@ func TestServeMetrics_TLS(t *testing.T) {
 	addr := ln.Addr().String()
 	client := &http.Client{
 		Timeout:   2 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // self-signed test cert
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //#nosec -- self-signed test cert
 	}
 	require.Eventually(t, func() bool {
 		resp, err := client.Get("https://" + addr + "/metrics")
@@ -187,7 +188,7 @@ func TestServeMetrics_TLSMissingCert(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			certDir := t.TempDir()
 			if tt.writeCert || tt.writeKey {
-				cert, err := CreateSelfSignedTLSCertificate()
+				cert, err := tlsutil.CreateSelfSignedTLSCertificate(logr.Discard())
 				require.NoError(t, err)
 				if tt.writeCert {
 					certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
