@@ -95,7 +95,7 @@ func TestProcessAnswersWithoutForwarding(t *testing.T) {
 			wantStatus:      envoyTypePb.StatusCode_PreconditionFailed,
 			wantBody:        "inference error: PreconditionFailed - answered",
 			wantErrorSeries: 1,
-			wantLogs:        []string{"ERROR", "Error handling request", "Failed to process request"},
+			wantLogs:        []string{"ERROR", "Failed to process request"},
 			wantNoLogs:      []string{"Answered request without forwarding"},
 		},
 	}
