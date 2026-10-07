@@ -250,6 +250,7 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 		wantErr      bool
 		nonTool      bool
 		skipResponse bool
+		unreadable   bool
 	}{
 		{name: "SSE EOF after tool call", eventStream: true, body: toolEvent, terminalErr: io.EOF, wantPresent: true},
 		{name: "SSE cancelled after tool call", eventStream: true, body: toolEvent, terminalErr: status.Error(codes.Canceled, "cancelled"), wantPresent: true},
@@ -259,6 +260,8 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 		{name: "response headers only", terminalErr: io.EOF},
 		{name: "completed SSE", eventStream: true, body: toolEvent, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
 		{name: "completed JSON", body: toolJSON, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
+		{name: "malformed SSE at EOS", eventStream: true, body: "data: {invalid json}\n\n", endOfStream: true, terminalErr: io.EOF, unreadable: true},
+		{name: "truncated JSON at EOS", body: `{"choices":[`, endOfStream: true, terminalErr: io.EOF, unreadable: true},
 		{name: "non-tool request", body: `{"choices":[]}`, terminalErr: io.EOF, nonTool: true},
 		{name: "request phase only", terminalErr: io.EOF, skipResponse: true},
 	} {
@@ -318,8 +321,8 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 			for key, want := range map[string]bool{
 				toolcalling.ResponseAttributeUpstreamToolCallPresent:      tt.wantPresent,
 				toolcalling.ResponseAttributeForwardedToolCallPresent:     tt.wantPresent,
-				toolcalling.ResponseAttributeUpstreamDetectionIncomplete:  !tt.endOfStream,
-				toolcalling.ResponseAttributeForwardedDetectionIncomplete: !tt.endOfStream,
+				toolcalling.ResponseAttributeUpstreamDetectionIncomplete:  !tt.endOfStream || tt.unreadable,
+				toolcalling.ResponseAttributeForwardedDetectionIncomplete: !tt.endOfStream || tt.unreadable,
 			} {
 				if tt.nonTool || tt.skipResponse {
 					require.NotContains(t, attributes, key)
