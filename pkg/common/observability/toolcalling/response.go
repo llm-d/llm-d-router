@@ -111,7 +111,7 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 			}
 		}
 	} else if endOfStream {
-		detector.toolCallPresent = detectToolCallJSON(detector.surface, chunk)
+		detector.observeJSON(chunk)
 	}
 
 	if endOfStream {
@@ -120,7 +120,7 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	return detector.toolCallPresent
 }
 
-// DetectionIncomplete reports whether an oversized SSE event was discarded.
+// DetectionIncomplete reports whether a payload could not be fully inspected.
 func (detector *ResponseDetector) DetectionIncomplete() bool {
 	return detector != nil && detector.detectionIncomplete
 }
@@ -202,8 +202,8 @@ func (detector *ResponseDetector) processSSELine() {
 func (detector *ResponseDetector) processSSEEvent() {
 	if len(detector.eventData) > 0 {
 		payload := detector.eventData[:len(detector.eventData)-1]
-		if !bytes.Equal(payload, []byte("[DONE]")) {
-			detector.toolCallPresent = detectToolCallJSON(detector.surface, payload)
+		if len(bytes.TrimSpace(payload)) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+			detector.observeJSON(payload)
 		}
 	}
 	detector.clearEventData()
@@ -240,20 +240,24 @@ const (
 	responseJSONContentBlock
 )
 
-func detectToolCallJSON(surface reqcommon.APIType, body []byte) bool {
+func (detector *ResponseDetector) observeJSON(body []byte) {
 	if !json.Valid(body) {
-		return false
+		detector.detectionIncomplete = true
+		return
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(body))
-	found, err := scanResponseJSONValue(decoder, responseJSONRoot, surface)
+	decoder.UseNumber()
+	found, err := scanResponseJSONValue(decoder, responseJSONRoot, detector.surface)
 	if err != nil {
-		return false
+		detector.detectionIncomplete = true
+		return
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return false
+		detector.detectionIncomplete = true
+		return
 	}
-	return found
+	detector.toolCallPresent = found
 }
 
 func scanResponseJSONValue(decoder *json.Decoder, context responseJSONContext, surface reqcommon.APIType) (bool, error) {

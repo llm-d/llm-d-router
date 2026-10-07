@@ -100,6 +100,53 @@ func TestResponseDetectorJSON(t *testing.T) {
 	}
 }
 
+func TestResponseDetectorReportsUnreadablePayload(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		eventStream    bool
+		body           string
+		wantIncomplete bool
+	}{
+		{name: "malformed JSON", body: `{invalid json}`, wantIncomplete: true},
+		{name: "truncated JSON", body: `{"choices":[`, wantIncomplete: true},
+		{name: "empty JSON body", wantIncomplete: true},
+		{name: "valid JSON without tools", body: `{"choices":[{"message":{"content":"hello"}}]}`},
+		{name: "malformed SSE event", eventStream: true, body: "data: {invalid json}\n\n", wantIncomplete: true},
+		{name: "truncated SSE event", eventStream: true, body: `data: {"choices":[`, wantIncomplete: true},
+		{name: "valid SSE without tools", eventStream: true, body: `data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"},
+		{name: "SSE control events", eventStream: true, body: strings.Join([]string{": keepalive", "data:", "data: [DONE]"}, "\n\n") + "\n\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, tt.eventStream)
+			require.NoError(t, err)
+			require.False(t, detector.Observe([]byte(tt.body), true))
+			require.Equal(t, tt.wantIncomplete, detector.DetectionIncomplete())
+		})
+	}
+}
+
+func TestResponseDetectorRetainsIncompleteStatusAfterLaterToolCall(t *testing.T) {
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
+	require.NoError(t, err)
+	require.False(t, detector.Observe([]byte("data: {invalid json}\n\n"), false))
+	require.True(t, detector.DetectionIncomplete())
+	require.True(t, detector.Observe([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`+"\n\n"), true))
+	require.True(t, detector.DetectionIncomplete())
+}
+
+func TestResponseDetectorPreservesValidJSONNumbers(t *testing.T) {
+	for _, eventStream := range []bool{false, true} {
+		payload := `{"usage":{"total_tokens":1e400},"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`
+		if eventStream {
+			payload = "data: " + payload + "\n\n"
+		}
+		detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, eventStream)
+		require.NoError(t, err)
+		require.True(t, detector.Observe([]byte(payload), true))
+		require.False(t, detector.DetectionIncomplete())
+	}
+}
+
 func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -151,16 +198,16 @@ func TestResponseDetectorSSEEventFraming(t *testing.T) {
 	} {
 		for _, tt := range []struct {
 			name    string
-			surface APISurface
+			surface reqcommon.APIType
 			lines   []string
 		}{
-			{name: "chat", surface: APISurfaceChatCompletions, lines: []string{
+			{name: "chat", surface: reqcommon.APITypeChatCompletions, lines: []string{
 				`data: {"choices":[{"delta":`,
 				": keepalive",
 				"data",
 				`data:{"tool_calls":[{"index":0}]}}]}`,
 			}},
-			{name: "messages", surface: APISurfaceMessages, lines: []string{
+			{name: "messages", surface: reqcommon.APITypeMessages, lines: []string{
 				"event: content_block_start",
 				`data: {"type":"content_block_start",`,
 				`data: "content_block":{"type":"tool_use","name":"sentinel_name"}}`,
@@ -183,18 +230,18 @@ func TestResponseDetectorSSEEventFraming(t *testing.T) {
 
 func TestResponseDetectorWaitsForSSEEventBoundary(t *testing.T) {
 	payload := `data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}` + "\n"
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	require.False(t, detector.Observe([]byte(payload), false))
 	require.True(t, detector.Observe([]byte("\n"), false))
 
-	detector, err = NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err = NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	require.False(t, detector.Observe([]byte(payload+"data: invalid\n\n"), false), "all data lines belong to the same JSON payload")
 }
 
 func TestResponseDetectorBoundsMultilineSSEEvent(t *testing.T) {
-	detector, err := NewResponseDetector(APISurfaceChatCompletions, true)
+	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
 	require.NoError(t, err)
 	line := "data: " + strings.Repeat("x", 1024) + "\n"
 	for i := 0; i <= maxResponseSSEEventBytes/1024; i++ {
