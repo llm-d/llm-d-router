@@ -71,10 +71,9 @@ type candidate struct {
 // processor tries again on its next dispatch cycle.
 //
 // Room is capacity * utilThreshold minus the working set. When the picked
-// session does not fit, idle sessions give up their room, longest idle first,
-// and are paused: for a paused or new session only those idle past
-// idleLeaseSeconds, for an admitted session's turn that pushes its pod over
-// the ceiling any idle session. Sessions with a turn queued are never paused,
+// session does not fit, or an admitted session's turn pushes its pod over the
+// ceiling, sessions idle past idleLeaseSeconds give up their room, longest
+// idle first, and are paused. Sessions with a turn queued are never paused,
 // and nothing is paused until a session is picked.
 func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor) (fwkfc.FlowQueueAccessor, error) {
 	if band == nil {
@@ -117,7 +116,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	spare := make(map[*endpointState]float64, len(m.endpoints))
 	for _, p := range m.endpoints {
 		rooms[p] = p.capacity*a.utilThreshold - p.occupancy(now)
-		spare[p] = p.reclaimableTokens(now, a.idleLease, queued)
+		spare[p] = m.reclaimableTokensLocked(p, now, queued)
 	}
 
 	var best *candidate
@@ -232,9 +231,9 @@ func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, rooms map[*en
 			return 0 // anonymous traffic
 		}
 		// Its current size is already counted; only the turn's growth is new.
-		paused = s.endpoint.reclaim(now, 0, queued, rooms[s.endpoint], max(best.tokens-s.size(), 0))
+		paused = m.reclaimLocked(s.endpoint, now, queued, rooms[s.endpoint], max(best.tokens-s.size(), 0))
 	case best.fitPod != nil:
-		paused = best.fitPod.reclaim(now, a.idleLease, queued, rooms[best.fitPod], a.fitTokens(best.fitPod, best.tokens))
+		paused = m.reclaimLocked(best.fitPod, now, queued, rooms[best.fitPod], a.fitTokens(best.fitPod, best.tokens))
 		s = m.bindLocked(best.id, best.fitPod)
 	case s == nil:
 		// A force-admitted new session that fits no pod: the scheduler

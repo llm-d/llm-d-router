@@ -72,7 +72,6 @@ type ThunderAgent struct {
 
 	capacityTokens       float64
 	utilThreshold        float64
-	idleLease            time.Duration
 	headWaitStarvationMs float64
 
 	mgr     *sessionManager
@@ -125,7 +124,6 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
 		capacityTokens:       float64(cfg.CapacityTokens),
 		utilThreshold:        cfg.UtilThreshold,
-		idleLease:            time.Duration(cfg.IdleLeaseSeconds * float64(time.Second)),
 		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
 		mgr:                  mgr,
 		metrics:              newThunderMetrics(mgr),

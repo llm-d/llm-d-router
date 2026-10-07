@@ -155,27 +155,31 @@ func TestFootprint(t *testing.T) {
 }
 
 // Only an admitted session with no turn in flight and no live reservation,
-// idle for at least minIdle, can give up its room.
+// idle for at least the idle lease, can give up its room.
 func TestReclaimable(t *testing.T) {
+	m := newSessionManager(testConfig())
 	idle := func() *session {
 		return &session{committedTokens: 300, turnCount: 1, lastResponseAt: t0}
 	}
 	later := t0.Add(time.Minute)
-	require.True(t, idle().reclaimable(later, time.Minute))
-	require.False(t, idle().reclaimable(later, 2*time.Minute), "inside the lease")
+	m.idleLease = time.Minute
+	require.True(t, m.reclaimableLocked(idle(), later))
+	m.idleLease = 2 * time.Minute
+	require.False(t, m.reclaimableLocked(idle(), later), "inside the lease")
 
+	m.idleLease = 0
 	s := idle()
 	s.inflightTokens = 100
-	require.False(t, s.reclaimable(later, 0), "turn in flight")
+	require.False(t, m.reclaimableLocked(s, later), "turn in flight")
 	s = idle()
 	s.paused = true
-	require.False(t, s.reclaimable(later, 0), "already paused")
+	require.False(t, m.reclaimableLocked(s, later), "already paused")
 	s = idle()
 	s.reservedUntil = later.Add(time.Second)
-	require.False(t, s.reclaimable(later, 0), "live reservation")
+	require.False(t, m.reclaimableLocked(s, later), "live reservation")
 	s = idle()
 	s.turnCount = 0
-	require.False(t, s.reclaimable(later, 0), "never dispatched")
+	require.False(t, m.reclaimableLocked(s, later), "never dispatched")
 }
 
 // A session with a turn queued is never offered for reclaim, and the
@@ -189,12 +193,12 @@ func TestIdleSessionsSkipQueued(t *testing.T) {
 	}
 	later := t0.Add(time.Minute)
 
-	require.Len(t, ep.idleSessions(later, 0, nil), 2)
+	require.Len(t, m.idleSessionsLocked(ep, later, nil), 2)
 	queued := map[string]bool{"s1": true}
-	idle := ep.idleSessions(later, 0, queued)
+	idle := m.idleSessionsLocked(ep, later, queued)
 	require.Len(t, idle, 1)
 	require.Same(t, m.sessions["s2"], idle[0])
-	require.Equal(t, float64(200), ep.reclaimableTokens(later, 0, queued))
+	require.Equal(t, float64(200), m.reclaimableTokensLocked(ep, later, queued))
 }
 
 // Reclaim pauses the longest-idle sessions first and stops as soon as the
@@ -208,8 +212,8 @@ func TestReclaimLongestIdleFirst(t *testing.T) {
 		s.lastResponseAt = t0.Add(-idleFor)
 	}
 
-	require.Equal(t, 0, ep.reclaim(t0, 0, nil, 400, 350))
-	require.Equal(t, 2, ep.reclaim(t0, 0, nil, 100, 650))
+	require.Equal(t, 0, m.reclaimLocked(ep, t0, nil, 400, 350))
+	require.Equal(t, 2, m.reclaimLocked(ep, t0, nil, 100, 650))
 	require.True(t, m.sessions["old"].paused)
 	require.True(t, m.sessions["mid"].paused)
 	require.False(t, m.sessions["new"].paused)

@@ -120,14 +120,6 @@ func (s *session) footprint(now time.Time) float64 {
 	return s.size()
 }
 
-// reclaimable reports whether the session's room can be taken for another
-// turn: it is admitted and counted in full, has no turn in flight, and has
-// been idle for at least minIdle since its last response.
-func (s *session) reclaimable(now time.Time, minIdle time.Duration) bool {
-	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
-		now.Sub(s.lastResponseAt) >= minIdle
-}
-
 // endpointState is the plugin's own record of one endpoint.
 type endpointState struct {
 	id       string
@@ -147,35 +139,42 @@ func (p *endpointState) occupancy(now time.Time) float64 {
 	return total
 }
 
-// idleSessions returns the endpoint's sessions whose room can be reclaimed.
-// Sessions with a turn queued are skipped: they are about to be active.
-func (p *endpointState) idleSessions(now time.Time, minIdle time.Duration, queued map[string]bool) []*session {
+// reclaimableLocked reports whether the session's room can be taken for
+// another turn: it is admitted and counted in full, has no turn in flight,
+// and has been idle for at least the idle lease since its last response.
+func (m *sessionManager) reclaimableLocked(s *session, now time.Time) bool {
+	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
+		now.Sub(s.lastResponseAt) >= m.idleLease
+}
+
+// idleSessionsLocked returns the endpoint's sessions whose room can be
+// reclaimed. Sessions with a turn queued are skipped: they are about to be
+// active.
+func (m *sessionManager) idleSessionsLocked(p *endpointState, now time.Time, queued map[string]bool) []*session {
 	var idle []*session
 	for id, s := range p.sessions {
-		if s.reclaimable(now, minIdle) && !queued[id] {
+		if m.reclaimableLocked(s, now) && !queued[id] {
 			idle = append(idle, s)
 		}
 	}
 	return idle
 }
 
-// reclaimableTokens sums the footprints reclaim could free with the same
-// arguments.
-func (p *endpointState) reclaimableTokens(now time.Time, minIdle time.Duration, queued map[string]bool) float64 {
+func (m *sessionManager) reclaimableTokensLocked(p *endpointState, now time.Time, queued map[string]bool) float64 {
 	var total float64
-	for _, s := range p.idleSessions(now, minIdle, queued) {
+	for _, s := range m.idleSessionsLocked(p, now, queued) {
 		total += s.size()
 	}
 	return total
 }
 
-// reclaim pauses the endpoint's reclaimable sessions, longest idle first,
-// until room covers need, and returns how many it paused.
-func (p *endpointState) reclaim(now time.Time, minIdle time.Duration, queued map[string]bool, room, need float64) int {
+// reclaimLocked pauses the endpoint's reclaimable sessions, longest idle
+// first, until room covers need, and returns how many it paused.
+func (m *sessionManager) reclaimLocked(p *endpointState, now time.Time, queued map[string]bool, room, need float64) int {
 	if room >= need {
 		return 0
 	}
-	idle := p.idleSessions(now, minIdle, queued)
+	idle := m.idleSessionsLocked(p, now, queued)
 	sort.Slice(idle, func(i, j int) bool { return idle[i].lastResponseAt.Before(idle[j].lastResponseAt) })
 	paused := 0
 	for _, s := range idle {
@@ -199,6 +198,8 @@ type sessionManager struct {
 	endpoints map[string]*endpointState
 
 	ttl time.Duration
+	// idleLease is how long a session keeps its room after its last response.
+	idleLease time.Duration
 }
 
 func newSessionManager(cfg Config) *sessionManager {
@@ -206,6 +207,7 @@ func newSessionManager(cfg Config) *sessionManager {
 		sessions:  make(map[string]*session),
 		endpoints: make(map[string]*endpointState),
 		ttl:       time.Duration(cfg.EvictionTTLSeconds * float64(time.Second)),
+		idleLease: time.Duration(cfg.IdleLeaseSeconds * float64(time.Second)),
 	}
 }
 

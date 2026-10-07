@@ -116,22 +116,36 @@ func TestNewSessionPrefersPodWithoutReclaim(t *testing.T) {
 	require.Equal(t, "default/pod-b", s.endpoint.id)
 }
 
-// An admitted session's turn that pushes its pod over the ceiling pauses idle
-// sessions, longest idle first, even inside the lease.
-func TestAdmittedGrowthReclaimsAnyIdle(t *testing.T) {
+// An admitted session's turn that pushes its pod over the ceiling pauses
+// sessions idle past the lease, longest idle first. A session that just
+// finished a turn keeps its room.
+func TestAdmittedGrowthReclaimsPastLease(t *testing.T) {
 	a := newTestAgent(testConfig())
 	seed(t, a, "s1", "pod-a", 300)
 	seed(t, a, "s2", "pod-a", 250)
 	seed(t, a, "s3", "pod-a", 450) // pod full
 	idleFor(a, "s1", time.Second)
-	idleFor(a, "s2", 2*time.Second)
+	idleFor(a, "s2", time.Minute)
 	primeFitView(a, dlEndpoint("pod-a"))
 
-	// Estimate 650 grows s3 by 200: pausing s2 (250) covers the growth, so s1
-	// keeps its room although s3's whole size would need both.
+	// Estimate 650 grows s3 by 200: pausing s2 (250) covers the growth.
 	q := makeQueue("s3", time.Now(), 2600)
 	require.Equal(t, q, pick(t, a, q))
 	require.True(t, isPaused(a, "s2"))
+	require.False(t, isPaused(a, "s1"))
+}
+
+// When every idle session is inside the lease, an admitted session's turn
+// still dispatches and pauses nobody; the pod stays over its ceiling.
+func TestAdmittedGrowthKeepsSessionsInsideLease(t *testing.T) {
+	a := newTestAgent(testConfig())
+	seed(t, a, "s1", "pod-a", 550)
+	seed(t, a, "s2", "pod-a", 450) // pod full
+	idleFor(a, "s1", time.Second)
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	q := makeQueue("s2", time.Now(), 2600) // grows s2 by 200
+	require.Equal(t, q, pick(t, a, q))
 	require.False(t, isPaused(a, "s1"))
 }
 

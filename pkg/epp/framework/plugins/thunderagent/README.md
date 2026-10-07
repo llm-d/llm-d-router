@@ -59,11 +59,12 @@ take room a larger paused one waits for. Any head waiting past
 reserved until its request reaches the pod.
 
 Idle sessions give up their room on demand, when a session is picked,
-longest idle first. A paused or new session may take the room of sessions
-idle past `idleLeaseSeconds`; a new session prefers a pod it fits without
-pausing anyone. An admitted session's turn that pushes its pod over the
-ceiling may take the room of any idle session. A session that gives up its
-room is paused: it stops counting against the pod and its next turn must fit
+longest idle first. A paused or new session that does not fit, and an
+admitted session's turn that pushes its pod over the ceiling, may take the
+room of sessions idle past `idleLeaseSeconds`; a session that just finished a
+turn keeps its room, so the pod can stay over the ceiling until one passes
+the lease. A new session prefers a pod it fits without pausing anyone. A
+session that gives up its room is paused: it stops counting against the pod and its next turn must fit
 again. Sessions with a turn queued are never paused. Pausing happens only
 when a session is picked; the background sweep only drops sessions idle past
 `evictionTtlSeconds`.
