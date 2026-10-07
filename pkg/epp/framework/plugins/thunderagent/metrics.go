@@ -17,8 +17,6 @@ limitations under the License.
 package thunderagent
 
 import (
-	"errors"
-
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
 
@@ -38,20 +36,7 @@ func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
 }
 
 func (m *thunderMetrics) register(reg prometheus.Registerer) error {
-	return registerReplacing(reg, m.ledger)
-}
-
-// registerReplacing registers c, replacing a collector with the same
-// descriptors left by an earlier instance of the plugin (config reload), so
-// scrapes read the live ledger instead of a discarded one.
-func registerReplacing(reg prometheus.Registerer, c prometheus.Collector) error {
-	err := reg.Register(c)
-	var already prometheus.AlreadyRegisteredError
-	if errors.As(err, &already) {
-		reg.Unregister(already.ExistingCollector)
-		return reg.Register(c)
-	}
-	return err
+	return reg.Register(m.ledger)
 }
 
 // ledgerCollector reports the session ledger at scrape time, so the gauges

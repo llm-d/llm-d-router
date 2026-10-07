@@ -55,17 +55,16 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 	}, gather(t, reg))
 }
 
-// A rebuilt plugin (config reload) replaces the previous ledger collector, so
-// scrapes report the live ledger.
-func TestLedgerCollectorReplacedOnReload(t *testing.T) {
+// A second instance's ledger collector is rejected, and the first instance
+// keeps reporting.
+func TestSecondInstanceRegistrationFails(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
-	old := newTestAgent(testConfig())
-	require.NoError(t, old.metrics.register(reg))
+	first := newTestAgent(testConfig())
+	require.NoError(t, first.metrics.register(reg))
+	runTurn(t, first, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
 
-	live := newTestAgent(testConfig())
-	require.NoError(t, live.metrics.register(reg))
-	runTurn(t, live, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
-
+	second := newTestAgent(testConfig())
+	require.Error(t, second.metrics.register(reg))
 	require.Equal(t, float64(1), gather(t, reg)[`sessions{state="idle"}`])
 }
 
