@@ -40,6 +40,34 @@ type msgpackEventBatch struct {
 	DataParallelRank *int `msgpack:",omitempty"`
 }
 
+// DecodeMsgpack decodes [ts, events, data_parallel_rank] and skips trailing
+// elements, such as the publisher_id a vLLM publisher that serves snapshots
+// appends. Array-encoded struct decoding rejects any other element count.
+func (b *msgpackEventBatch) DecodeMsgpack(dec *msgpack.Decoder) error {
+	n, err := dec.DecodeArrayLen()
+	if err != nil {
+		return err
+	}
+	if n < 3 {
+		return fmt.Errorf("event batch has %d elements, want at least 3", n)
+	}
+	if b.TS, err = dec.DecodeFloat64(); err != nil {
+		return err
+	}
+	if err := dec.Decode(&b.Events); err != nil {
+		return err
+	}
+	if err := dec.Decode(&b.DataParallelRank); err != nil {
+		return err
+	}
+	for range n - 3 {
+		if err := dec.Skip(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // parseTopic extracts pod ID and model name from the topic format "kv@<pod-id>@<model-name>".
 //
 //nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter

@@ -76,6 +76,27 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestVLLMParseMessage_BatchExtraTrailingFields tests a batch from a publisher
+// that serves snapshots, which appends its publisher_id to every batch.
+func TestVLLMParseMessage_BatchExtraTrailingFields(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	batch := []any{
+		1234567890.0,
+		[]any{[]any{"AllBlocksCleared"}},
+		nil,
+		make([]byte, 16), // publisher_id
+	}
+	payload, err := msgpack.Marshal(batch)
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{Topic: "kv@pod-1@model", Payload: payload})
+	require.NoError(t, err)
+	assert.Nil(t, eventBatch.DataParallelRank)
+	require.Len(t, eventBatch.Events, 1)
+	assert.IsType(t, &kvevents.AllBlocksClearedEvent{}, eventBatch.Events[0])
+}
+
 // TestVLLMParseMessage_InvalidPayload tests error handling for invalid msgpack data.
 func TestVLLMParseMessage_InvalidPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()
