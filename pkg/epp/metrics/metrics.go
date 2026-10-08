@@ -211,7 +211,7 @@ const (
 // With EPP tracing off the context still holds the caller's span, which isn't
 // the EPP's, so only trace_id is attached.
 //
-// Exemplars only reach the wire over OpenMetrics; see openMetricsFilterProvider
+// Exemplars only reach the wire over OpenMetrics; see newMetricsServerOptions
 // in cmd/epp/runner.
 func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer, value float64) {
 	exemplarObserver, ok := observer.(prometheus.ExemplarObserver)

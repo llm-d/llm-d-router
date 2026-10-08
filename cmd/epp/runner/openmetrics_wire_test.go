@@ -18,19 +18,18 @@ package runner
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/http/pprof"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr/testr"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/client-go/rest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -82,31 +81,47 @@ func recordingSpan(t *testing.T) (context.Context, trace.Span) {
 	return tp.Tracer("openmetrics-wire-test").Start(context.Background(), "request")
 }
 
-// scrapeMetrics serves the metrics endpoint the runner builds in production and
-// returns the Content-Type and body a scraper sending accept would receive.
-func scrapeMetrics(t *testing.T, accept string) (string, string) {
+// passThroughFilter stands in for the auth filter, which needs an API server to
+// run TokenReviews. OpenMetrics must not depend on whether a filter is set.
+func passThroughFilter(*rest.Config, *http.Client) (metricsserver.Filter, error) {
+	return func(_ logr.Logger, next http.Handler) (http.Handler, error) { return next, nil }, nil
+}
+
+// startMetricsServer runs a metrics server built from opts on a loopback port
+// and returns its address.
+func startMetricsServer(t *testing.T, opts metricsserver.Options) string {
 	t.Helper()
 
-	// Auth off, since that used to skip the filter entirely.
-	provider := openMetricsFilterProvider(false)
-	filter, err := provider(nil, nil)
+	opts.BindAddress = "127.0.0.1:0"
+	// The auth filter needs a rest config to build its API clients. Requests
+	// without a token are rejected before any API call, so the host is never dialed.
+	srv, err := metricsserver.NewServer(opts, &rest.Config{Host: "https://127.0.0.1:1"}, &http.Client{})
 	require.NoError(t, err)
 
-	// Stand-in for the handler controller-runtime builds. The filter should
-	// replace it for /metrics, so seeing this text means the swap didn't happen.
-	handler, err := filter(testr.New(t), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "handler controller-runtime built")
-	}))
-	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan error, 1)
+	go func() {
+		// Start blocks until the context is cancelled.
+		started <- srv.Start(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-started)
+	})
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	req.Header.Set("Accept", accept)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	return waitForBindAddr(t, srv)
+}
 
-	require.Equal(t, http.StatusOK, rec.Code)
+// scrapeMetrics serves the metrics endpoint the runner builds in production and
+// returns the Content-Type and body a scraper sending accept would receive. A
+// non-nil filterProvider builds the options with auth on, then stands in for
+// the auth filter, which needs an API server to run TokenReviews.
+func scrapeMetrics(t *testing.T, filterProvider func(*rest.Config, *http.Client) (metricsserver.Filter, error), accept string) (string, string) {
+	t.Helper()
 
-	return rec.Header().Get("Content-Type"), rec.Body.String()
+	opts := newMetricsServerOptions(0, filterProvider != nil)
+	opts.FilterProvider = filterProvider
+	return get(t, "http://"+startMetricsServer(t, opts)+"/metrics", accept)
 }
 
 // TestMetricsEndpointServesExemplarsOnTheWire checks the exemplar actually makes
@@ -123,17 +138,24 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 		received, received.Add(420*time.Millisecond),
 	))
 
-	contentType, body := scrapeMetrics(t, openMetricsAccept)
+	for name, filterProvider := range map[string]func(*rest.Config, *http.Client) (metricsserver.Filter, error){
+		"auth off": nil,
+		"auth on":  passThroughFilter,
+	} {
+		t.Run(name, func(t *testing.T) {
+			contentType, body := scrapeMetrics(t, filterProvider, openMetricsAccept)
 
-	require.True(t, strings.HasPrefix(contentType, "application/openmetrics-text"),
-		"a scraper asking for OpenMetrics must be served OpenMetrics, got %q", contentType)
+			require.True(t, strings.HasPrefix(contentType, "application/openmetrics-text"),
+				"a scraper asking for OpenMetrics must be served OpenMetrics, got %q", contentType)
 
-	labels, ok := exemplarLabels(body, wireTestModel)
-	require.True(t, ok, "the observation must carry an exemplar on the wire")
-	require.Contains(t, labels, `trace_id="`+span.SpanContext().TraceID().String()+`"`,
-		"the trace ID must reach the wire")
-	require.Contains(t, labels, `span_id="`+span.SpanContext().SpanID().String()+`"`,
-		"the span ID must reach the wire, so a backend can open the span that observed the latency")
+			labels, ok := exemplarLabels(body, wireTestModel)
+			require.True(t, ok, "the observation must carry an exemplar on the wire")
+			require.Contains(t, labels, `trace_id="`+span.SpanContext().TraceID().String()+`"`,
+				"the trace ID must reach the wire")
+			require.Contains(t, labels, `span_id="`+span.SpanContext().SpanID().String()+`"`,
+				"the span ID must reach the wire, so a backend can open the span that observed the latency")
+		})
+	}
 }
 
 // TestMetricsEndpointKeepsClassicFormatForClassicScrapers checks that a scraper
@@ -141,7 +163,7 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 func TestMetricsEndpointKeepsClassicFormatForClassicScrapers(t *testing.T) {
 	eppmetrics.Register()
 
-	contentType, body := scrapeMetrics(t, classicAccept)
+	contentType, body := scrapeMetrics(t, nil, classicAccept)
 
 	require.True(t, strings.HasPrefix(contentType, "text/plain"),
 		"a classic scraper must keep receiving the classic format, got %q", contentType)
@@ -149,40 +171,38 @@ func TestMetricsEndpointKeepsClassicFormatForClassicScrapers(t *testing.T) {
 		"the classic exposition format has no representation for exemplars")
 }
 
-// TestMetricsServerLeavesExtraHandlersAlone checks extra handlers still serve
-// their own content. controller-runtime runs the filter over every handler, not
-// just /metrics, so swapping unconditionally made pprof serve the metrics page.
+// TestMetricsServerLeavesExtraHandlersAlone guards against swapping the /metrics
+// handler inside a filter again: controller-runtime filters every handler, so
+// such a swap made pprof serve the metrics page.
 func TestMetricsServerLeavesExtraHandlersAlone(t *testing.T) {
 	eppmetrics.Register()
 
-	srv, err := metricsserver.NewServer(metricsserver.Options{
-		BindAddress:    "127.0.0.1:0",
-		FilterProvider: openMetricsFilterProvider(false),
-		ExtraHandlers: map[string]http.Handler{
-			"/debug/pprof/cmdline": http.HandlerFunc(pprof.Cmdline),
-		},
-	}, nil, nil)
-	require.NoError(t, err)
+	opts := newMetricsServerOptions(0, false)
+	opts.ExtraHandlers = map[string]http.Handler{
+		"/debug/pprof/cmdline": http.HandlerFunc(pprof.Cmdline),
+	}
+	addr := startMetricsServer(t, opts)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	started := make(chan error, 1)
-	go func() {
-		// Start blocks until the context is cancelled.
-		started <- srv.Start(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		require.NoError(t, <-started)
-	})
-
-	addr := waitForBindAddr(t, srv)
-
-	cmdline := get(t, "http://"+addr+"/debug/pprof/cmdline", classicAccept)
+	_, cmdline := get(t, "http://"+addr+"/debug/pprof/cmdline", classicAccept)
 	require.NotContains(t, cmdline, "# HELP",
 		"the pprof handler must serve its own output, not the metrics page")
 
-	metrics := get(t, "http://"+addr+"/metrics", openMetricsAccept)
+	_, metrics := get(t, "http://"+addr+"/metrics", openMetricsAccept)
 	require.Contains(t, metrics, "# HELP", "the metrics endpoint must still serve metrics")
+}
+
+// TestMetricsEndpointRejectsAnonymousScrapesWithAuth checks that enabling
+// metrics auth actually installs the auth filter.
+func TestMetricsEndpointRejectsAnonymousScrapesWithAuth(t *testing.T) {
+	eppmetrics.Register()
+
+	addr := startMetricsServer(t, newMetricsServerOptions(0, true))
+
+	resp, err := http.Get("http://" + addr + "/metrics")
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"with metrics auth on, a scrape without a token must be rejected")
 }
 
 // waitForBindAddr returns the address the server listened on. It is only set
@@ -200,8 +220,8 @@ func waitForBindAddr(t *testing.T, srv metricsserver.Server) string {
 	return withAddr.GetBindAddr()
 }
 
-// get returns the body served at url for a scraper sending accept.
-func get(t *testing.T, url, accept string) string {
+// get returns the Content-Type and body served at url for a scraper sending accept.
+func get(t *testing.T, url, accept string) (string, string) {
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
@@ -215,5 +235,5 @@ func get(t *testing.T, url, accept string) string {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return string(body)
+	return resp.Header.Get("Content-Type"), string(body)
 }
