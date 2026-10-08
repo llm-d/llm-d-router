@@ -17,7 +17,6 @@ limitations under the License.
 package redis
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -118,25 +117,15 @@ func TestFactoryRejectsUnsafeOrAmbiguousPasswordConfiguration(t *testing.T) {
 	}
 }
 
-func TestFactoryConfiguresACLAndTLS(t *testing.T) {
-	t.Setenv("TEST_REDIS_PASSWORD", "secret")
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
-		`{
-			"address": "redis.internal:6380",
-			"username": "router",
-			"passwordEnv": "TEST_REDIS_PASSWORD",
-			"tls": {"serverName": "cache.internal", "insecureSkipVerify": true}
-		}`,
-	)), nil)
-	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
-
-	options := store.client.Options()
-	require.Equal(t, "router", options.Username)
-	require.Equal(t, "secret", options.Password)
-	require.NotNil(t, options.TLSConfig)
-	require.Equal(t, "cache.internal", options.TLSConfig.ServerName)
-	require.True(t, options.TLSConfig.InsecureSkipVerify)
-	require.Equal(t, uint16(tls.VersionTLS12), options.TLSConfig.MinVersion)
+func TestFactoryRejectsUnsupportedTLSAndACL(t *testing.T) {
+	for _, params := range []string{`{"tls": {}}`, `{"username": "router"}`} {
+		t.Run(params, func(t *testing.T) {
+			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(params)), nil)
+			if plugin != nil {
+				t.Cleanup(func() { require.NoError(t, plugin.(*RedisStateStore).client.Close()) })
+			}
+			require.ErrorContains(t, err, "unknown field")
+			require.Nil(t, plugin)
+		})
+	}
 }

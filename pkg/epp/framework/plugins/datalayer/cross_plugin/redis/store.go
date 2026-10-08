@@ -19,14 +19,11 @@ package redis
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -53,23 +50,13 @@ const (
 var _ fwkdl.CrossReplicaSyncer = (*RedisStateStore)(nil)
 
 type redisConfig struct {
-	Address         string          `json:"address"`
-	Username        string          `json:"username"`
-	Password        string          `json:"password"`
-	PasswordEnv     string          `json:"passwordEnv"`
-	PasswordFile    string          `json:"passwordFile"`
-	DB              int             `json:"db"`
-	StateTTL        string          `json:"stateTTL"`
-	CoordinationTTL string          `json:"coordinationTTL"`
-	TLS             *redisTLSConfig `json:"tls"`
-}
-
-type redisTLSConfig struct {
-	ServerName         string `json:"serverName"`
-	CACertPath         string `json:"caCertPath"`
-	ClientCertPath     string `json:"clientCertPath"`
-	ClientKeyPath      string `json:"clientKeyPath"`
-	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
+	Address         string `json:"address"`
+	Password        string `json:"password"`
+	PasswordEnv     string `json:"passwordEnv"`
+	PasswordFile    string `json:"passwordFile"`
+	DB              int    `json:"db"`
+	StateTTL        string `json:"stateTTL"`
+	CoordinationTTL string `json:"coordinationTTL"`
 }
 
 // RedisStateStore is a CrossReplicaSyncer backed by Redis for cross-replica
@@ -127,47 +114,10 @@ func resolvePassword(cfg redisConfig) (string, error) {
 	return "", nil
 }
 
-func buildTLSConfig(address string, cfg redisTLSConfig) (*tls.Config, error) {
-	serverName := cfg.ServerName
-	if serverName == "" {
-		host, _, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, fmt.Errorf("redis-state-store: derive TLS server name from address %q: %w", address, err)
-		}
-		serverName = host
-	}
-	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		ServerName:         serverName,
-		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // Explicit operator configuration.
-	}
-	if cfg.CACertPath != "" {
-		pem, err := os.ReadFile(cfg.CACertPath)
-		if err != nil {
-			return nil, fmt.Errorf("redis-state-store: read CA certificate %q: %w", cfg.CACertPath, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("redis-state-store: no valid CA certificates in %q", cfg.CACertPath)
-		}
-		tlsConfig.RootCAs = pool
-	}
-	if (cfg.ClientCertPath == "") != (cfg.ClientKeyPath == "") {
-		return nil, errors.New("redis-state-store: clientCertPath and clientKeyPath must be set together")
-	}
-	if cfg.ClientCertPath != "" {
-		certificate, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("redis-state-store: load client certificate: %w", err)
-		}
-		tlsConfig.Certificates = []tls.Certificate{certificate}
-	}
-	return tlsConfig, nil
-}
-
 func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	var cfg redisConfig
 	if params != nil {
+		params.DisallowUnknownFields()
 		if err := params.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("redis-state-store: invalid parameters: %w", err)
 		}
@@ -188,14 +138,6 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 	if err != nil {
 		return nil, err
 	}
-	var tlsConfig *tls.Config
-	if cfg.TLS != nil {
-		tlsConfig, err = buildTLSConfig(cfg.Address, *cfg.TLS)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "unknown"
@@ -203,11 +145,9 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 	replicaID := hostname + "-" + uuid.NewString()
 
 	client := goredis.NewClient(&goredis.Options{
-		Addr:      cfg.Address,
-		Username:  cfg.Username,
-		Password:  password,
-		DB:        cfg.DB,
-		TLSConfig: tlsConfig,
+		Addr:     cfg.Address,
+		Password: password,
+		DB:       cfg.DB,
 	})
 	if handle != nil && handle.Context() != nil {
 		context.AfterFunc(handle.Context(), func() { _ = client.Close() })

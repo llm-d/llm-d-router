@@ -16,13 +16,9 @@ plugins:
     name: redis
     parameters:
       address: my-router-redis:6379
-      username: router
       passwordFile: /var/run/secrets/redis/password
       stateTTL: 2s
       coordinationTTL: 180s
-      tls:
-        serverName: my-router-redis
-        caCertPath: /var/run/secrets/redis/ca.crt
 
 dataLayer:
   crossReplica:
@@ -32,7 +28,6 @@ dataLayer:
 Parameters:
 
 - `address`: Redis address. Defaults to `localhost:6379`.
-- `username`: Optional Redis ACL username.
 - `passwordEnv`: Optional name of an environment variable containing the Redis
   password.
 - `passwordFile`: Optional path to a file containing the Redis password.
@@ -45,14 +40,10 @@ Parameters:
   publications.
 - `coordinationTTL`: Expiration for request-level coordination values. Defaults
   to `180s` and must be at least `1ms`.
-- `tls`: Optional TLS configuration:
-  - `serverName`: Server name used for certificate verification. Defaults to
-    the host in `address`.
-  - `caCertPath`: Optional path to a PEM CA bundle.
-  - `clientCertPath` and `clientKeyPath`: Optional client certificate and key.
-    Configure both for mutual TLS.
-  - `insecureSkipVerify`: Disables certificate verification. Defaults to
-    `false`.
+
+TLS and Redis ACL usernames are not supported. Connections use unencrypted TCP.
+Optional password authentication uses the default Redis user. Managed Redis
+services that require TLS or an ACL username cannot use this plugin.
 
 The configured Redis server must support field expiration and `SET NX GET`.
 Redis 7.4 or newer is required.
