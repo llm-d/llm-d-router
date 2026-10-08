@@ -27,7 +27,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -199,7 +199,7 @@ func (p *Responder) Respond(ctx context.Context, request *fwkrc.RequestLine, end
 
 	return &fwkrc.LocalResponse{
 		StatusCode: http.StatusOK,
-		Headers:    map[string]string{fwkrequest.HeaderContentType: "application/json"},
+		Headers:    map[string]string{reqcommon.HeaderContentType: reqcommon.ContentTypeJSON},
 		Body:       body,
 	}, nil
 }

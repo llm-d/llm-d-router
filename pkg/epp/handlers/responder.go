@@ -52,7 +52,7 @@ func (s *StreamingServer) tryRespondLocally(ctx context.Context, reqCtx *Request
 		Path:   path,
 	}
 
-	var endpoints = s.datastore.PodList(func(_ fwkdl.Endpoint) bool { return true })
+	endpoints := s.datastore.PodList(func(_ fwkdl.Endpoint) bool { return true })
 	for _, responder := range s.responders {
 		resp, err := responder.Respond(ctx, request, endpoints)
 		if err != nil {
