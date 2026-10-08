@@ -72,6 +72,9 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 	}
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	proxyReq.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
+	if reqCtx.PeerTopology != "" {
+		proxyReq.Header.Set(reqcommon.PeerTopologyHeaderKey, reqCtx.PeerTopology)
+	}
 	for k, v := range extraHeaders {
 		proxyReq.Header.Set(k, v)
 	}

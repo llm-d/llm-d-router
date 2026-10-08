@@ -81,7 +81,13 @@ class DeployEPPTests(OfflineTestCase):
                 str(config_path),
                 **kwargs,
             )
-        self.assertEqual(run_cmd.call_count, 2)
+        proxy_mode = ""
+        if isinstance(config.get("router"), dict) and isinstance(
+            config["router"].get("proxy"), dict
+        ):
+            proxy_mode = str(config["router"]["proxy"].get("mode") or "").lower()
+        expected_calls = 3 if proxy_mode == "service" else 2
+        self.assertEqual(run_cmd.call_count, expected_calls)
         helm_command = run_cmd.call_args_list[0].args[0]
         self.assertEqual(
             helm_command[4:8], ["-f", str(config_path), "-f", expected_path]
@@ -320,6 +326,79 @@ class DeployEPPTests(OfflineTestCase):
         )
         self.assertFalse(router["monitoring"]["prometheus"]["auth"]["enabled"])
         self.assertTrue(router["proxy"]["enabled"])
+
+    def test_autoscaling_enabled_omits_static_replicas_override(self):
+        config = {
+            "router": {
+                "epp": {
+                    "autoscaling": {
+                        "enabled": True,
+                        "minReplicas": 1,
+                        "maxReplicas": 4,
+                    }
+                }
+            }
+        }
+        overrides = self.deploy(config, epp_replicas=2)
+        self.assertNotIn("replicas", overrides["router"]["epp"])
+
+    def test_proxy_service_mode_waits_for_proxy_deployment_rollout(self):
+        config = {
+            "router": {
+                "proxy": {
+                    "mode": "service",
+                    "autoscaling": {
+                        "enabled": True,
+                        "minReplicas": 1,
+                        "maxReplicas": 4,
+                    },
+                }
+            }
+        }
+        overrides = self.deploy(config, epp_replicas=1)
+        self.assertEqual(overrides["router"]["epp"]["replicas"], 1)
+        self.assertTrue(overrides["router"]["proxy"]["enabled"])
+
+    def test_run_benchmark_uses_custom_service_name(self):
+        job_path = self.directory / "job.yaml"
+        job_path.write_text(
+            yaml.safe_dump(
+                {
+                    "config": {"server": {"base_url": "http://old:80"}},
+                    "token": {"hfSecret": {"name": "old", "key": "old"}},
+                    "job": {"serviceAccountName": "old"},
+                }
+            )
+        )
+        out_job_path = self.directory / "temp-job-values.yaml"
+        real_open = open
+
+        def local_open(path, *args, **open_kwargs):
+            if os.fspath(path) == "/tmp/temp-job-values.yaml":
+                path = out_job_path
+            return real_open(path, *args, **open_kwargs)
+
+        def fake_run_cmd(cmd, check=True):
+            res = mock.MagicMock()
+            res.returncode = 0
+            res.stdout = "inference-perf-job-abc" if "get pods" in str(cmd) else ""
+            return res
+
+        with (
+            mock.patch.object(perf, "open", local_open, create=True),
+            mock.patch.object(perf, "run_cmd", side_effect=fake_run_cmd),
+        ):
+            perf.run_benchmark(
+                "test-ns",
+                str(job_path),
+                "/chart",
+                "my-release",
+                service_name="my-release-proxy",
+            )
+        rendered = yaml.safe_load(out_job_path.read_text())
+        self.assertEqual(
+            rendered["config"]["server"]["base_url"], "http://my-release-proxy:80"
+        )
 
 
 class PercentileTests(unittest.TestCase):

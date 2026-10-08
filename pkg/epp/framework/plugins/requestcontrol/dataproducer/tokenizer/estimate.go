@@ -210,7 +210,7 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
 	switch {
-	case body.Generate != nil:
+	case body.Generate != nil && len(body.Generate.TokenIDs) > 0:
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
@@ -284,6 +284,8 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
 		return json.Marshal(body.Embeddings.Input)
+	case body.Generate != nil && body.Generate.Text != "":
+		return []byte(body.Generate.Text), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}

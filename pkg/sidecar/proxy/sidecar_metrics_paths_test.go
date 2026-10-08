@@ -232,6 +232,7 @@ func TestHandleNIXLV2ChunkedDecodeMetrics(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		stream     bool
 		secondCode int
 		wantCode   int
 		wantDelta  stageMetrics
@@ -246,6 +247,20 @@ func TestHandleNIXLV2ChunkedDecodeMetrics(t *testing.T) {
 			name:       "failing chunk records one decode error",
 			secondCode: http.StatusInternalServerError,
 			wantCode:   http.StatusInternalServerError,
+			wantDelta:  stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
+		},
+		{
+			name:       "streaming all chunks succeed records one decode sample",
+			stream:     true,
+			secondCode: http.StatusOK,
+			wantCode:   http.StatusOK,
+			wantDelta:  stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			name:       "streaming failing chunk records one decode error",
+			stream:     true,
+			secondCode: http.StatusInternalServerError,
+			wantCode:   http.StatusOK,
 			wantDelta:  stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
 		},
 	}
@@ -270,6 +285,9 @@ func TestHandleNIXLV2ChunkedDecodeMetrics(t *testing.T) {
 
 			body := textChatBody()
 			body[reqcommon.FieldMaxTokens] = 10
+			if tt.stream {
+				body[reqcommon.FieldStream] = true
+			}
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()

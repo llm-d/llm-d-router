@@ -29,6 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
 )
@@ -37,6 +38,7 @@ const (
 	defaultSpeculativeTTL      = 2 * time.Second
 	experimentalPrefillProfile = "prefill"
 	blockKeysStateKey          = plugin.StateKey("precise-prefix-cache-producer.block-keys")
+	bestAvailableStateKey      = plugin.StateKey("precise-prefix-cache-producer.best-available")
 )
 
 var _ requestcontrol.PreRequest = &Producer{}
@@ -66,31 +68,85 @@ func (s *blockKeysState) Clone() plugin.StateData {
 	return &blockKeysState{perPromptKeys: cp}
 }
 
-// recordPrediction reports the prompt tokens the index expects the endpoint
-// chosen by prefixmetrics.PredictionTarget to serve from its prefix cache. It
-// reads the unweighted cached-block count rather than the tier-weighted match
-// score, so a RAM-tier hit contributes its full token count, and it counts
-// speculative entries because those are part of what the router acted on. The
-// token processor drops a prompt's trailing partial block, so the block-to-token
-// conversion cannot exceed the prompt length.
-func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	endpoint, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalPrefillProfile)
-	if endpoint == nil {
-		return
-	}
+// bestAvailableState carries the highest prediction across the request's
+// candidate endpoints from Produce to PreRequest. Produce is the only stage
+// that sees those candidates before the scheduler's filters narrow them.
+type bestAvailableState struct {
+	cachedTokens int
+}
+
+// Clone implements plugin.StateData.
+func (s *bestAvailableState) Clone() plugin.StateData {
+	cp := *s
+	return &cp
+}
+
+// predictedCachedTokens converts a match into the prompt tokens the index
+// expects the endpoint to serve from its prefix cache. It reads the unweighted
+// cached-block count rather than the tier-weighted match score, so a RAM-tier
+// hit contributes its full token count, and it counts speculative entries
+// because those are part of what the router acted on. The token processor drops
+// a prompt's trailing partial block, so the conversion cannot exceed the prompt
+// length.
+func predictedCachedTokens(info *attrprefix.PrefixCacheMatchInfo) int {
+	return info.CachedBlockCount() * info.BlockSizeTokens()
+}
+
+// matchInfo reads the match the producer attached to an endpoint.
+func (p *Producer) matchInfo(endpoint scheduling.Endpoint) (*attrprefix.PrefixCacheMatchInfo, bool) {
 	raw, ok := endpoint.Get(p.dk)
 	if !ok {
-		return
+		return nil, false
 	}
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	return info, ok
+}
+
+// recordPrediction reports the prediction for the endpoint chosen by
+// prefixmetrics.PredictionTarget against the best its profile's picker could
+// have chosen and the best any candidate held before filtering, so the reuse a
+// routing decision left behind is separable from the reuse filtering put out of
+// reach.
+func (p *Producer) recordPrediction(request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
+	profile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalPrefillProfile)
+	if profile == nil {
+		return
+	}
+	info, ok := p.matchInfo(profile.TargetEndpoints[0])
 	if !ok {
 		return
 	}
 	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
 		return
 	}
-	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role,
-		info.CachedBlockCount()*info.BlockSizeTokens(), request.Body.TokenizedRequest.TokenCount())
+
+	selected := predictedCachedTokens(info)
+	// A profile that reports no scored candidates leaves only the chosen
+	// endpoint to go on, so selected stands in for both maxima. That keeps the
+	// histograms on the same requests, at the cost of reading as a perfect
+	// routing decision.
+	bestPredicted := selected
+	for _, candidate := range profile.ScoredCandidates {
+		if candidateInfo, ok := p.matchInfo(candidate.Endpoint); ok {
+			bestPredicted = max(bestPredicted, predictedCachedTokens(candidateInfo))
+		}
+	}
+
+	bestAvailable := bestPredicted
+	if len(profile.ScoredCandidates) > 0 {
+		if state, err := plugin.ReadPluginStateKey[*bestAvailableState](
+			p.pluginState, request.RequestID, bestAvailableStateKey); err == nil {
+			bestAvailable = max(bestAvailable, state.cachedTokens)
+		}
+	}
+
+	modality, _ := mmobs.Summary(request)
+	prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role, modality, prefixmetrics.Prediction{
+		Selected:      selected,
+		BestPredicted: bestPredicted,
+		BestAvailable: bestAvailable,
+		PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
+	})
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
@@ -157,6 +213,10 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 func (p *Producer) PreRequest(ctx context.Context,
 	request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult,
 ) error {
+	// Produce writes state on every request, so the cleanup cannot sit behind
+	// the speculative-indexing gate.
+	defer p.pluginState.Delete(request.RequestID)
+
 	p.recordPrediction(request, schedulingResult)
 
 	if !p.speculativeEnabled {
@@ -172,7 +232,6 @@ func (p *Producer) PreRequest(ctx context.Context,
 			"requestID", request.RequestID)
 		return nil
 	}
-	p.pluginState.Delete(request.RequestID)
 
 	hasKeys := false
 	for _, pk := range state.perPromptKeys {

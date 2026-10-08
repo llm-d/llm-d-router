@@ -167,7 +167,7 @@ func (s *Server) serveMetrics(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			s.logger.Error(err, "failed to gracefully shut down metrics server")

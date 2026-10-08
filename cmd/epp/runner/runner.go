@@ -114,6 +114,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responsereceived/topologystamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/endpointpin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/selectivekv"
@@ -626,6 +627,10 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
 	fwkplugin.Register(endpointpin.PluginType, fwkplugin.StabilityAlpha, endpointpin.Factory)
+
+	// request control response-received handlers
+	// Alpha
+	fwkplugin.Register(topologystamp.PluginType, fwkplugin.StabilityAlpha, topologystamp.Factory)
 
 	// bylabel role filters
 	// Stable
@@ -1327,7 +1332,7 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), metricsShutdownTimeout)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()

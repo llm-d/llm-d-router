@@ -65,6 +65,18 @@ func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
 	assert.Equal(t, in, tp.Prompts[0].TokenIDs)
 }
 
+// TestEstimateBackend_GenerateTextEstimatesPseudoTokens asserts text generate
+// input is byte-estimated into pseudo-tokens.
+func TestEstimateBackend_GenerateTextEstimatesPseudoTokens(t *testing.T) {
+	prompt := "hello world"
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		Generate: &fwkrh.GenerateRequest{Text: prompt},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+}
+
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
 // input is passed through as real tokens, not byte-estimated.
 func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {

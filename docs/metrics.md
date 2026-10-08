@@ -227,19 +227,37 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
-| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the prediction was measured against. |
+| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the endpoints the scheduler selected from. |
+| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the request's candidate endpoints before filtering. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Prompt tokens the predictions were measured against. |
 
 For a request disaggregated into prefill and decode stages, the prediction is recorded for the
 `prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
 KV connector returns the prefiller's cached-token count. For every other request it is recorded for
 the primary profile's endpoint, and `endpoint_role` is `decode`.
 
-The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
-by `llm_d_epp_prefix_prompt_tokens_sum`. Both are observed in one call, so the ratio divides counts
-taken over the same requests. The rate the model server delivered is a separate ratio,
-`llm_d_epp_request_cached_tokens_sum` divided by `llm_d_epp_request_input_tokens_sum`.
+The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`
+for text-only), the same value as the `mm.modality` span attribute. Each request is observed once,
+so summing over `modality` keeps every ratio below exact.
 
-Comparing the two ratios is what the prediction metrics are for, subject to three limits.
+The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
+by `llm_d_epp_prefix_prompt_tokens_sum`. All four metrics are observed in one call, so any ratio
+among them divides counts taken over the same requests. The rate the model server delivered is a
+separate ratio, `llm_d_epp_request_cached_tokens_sum` divided by
+`llm_d_epp_request_input_tokens_sum`.
+
+The two maxima locate a shortfall in the prediction. Their endpoint sets narrow into each other:
+every candidate the request could have reached, those that survived the scheduler's filters and
+reached the picker, and the one the picker chose. Dividing
+`llm_d_epp_prefix_predicted_cached_tokens_sum` by `llm_d_epp_prefix_best_predicted_cached_tokens_sum`
+gives the share of the reachable reuse the routing decision captured, which is a scoring and picking
+question. Dividing `llm_d_epp_prefix_best_predicted_cached_tokens_sum` by
+`llm_d_epp_prefix_best_available_cached_tokens_sum` gives the share that survived filtering, which a
+filter may be right to reduce when it is shedding load away from a saturated endpoint holding the
+prefix. A profile that reports no scored candidates leaves only the chosen endpoint to go on, so both
+maxima fall back to the prediction for it and the ratios read as 1.
+
+Comparing these ratios is what the prediction metrics are for, subject to the limits below.
 
 The request cohorts differ. A prediction is recorded before the request is forwarded, while the
 request token metrics come from the model server's response, so a request that fails or returns no
@@ -251,13 +269,22 @@ The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-st
 request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
 describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
 
+The two maxima are scoped differently from each other for a disaggregated request.
+`llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
+while `llm_d_epp_prefix_best_available_cached_tokens` is taken before the role filters run and so
+spans prefill and decode pods together. A decode pod holding the prefix raises the available maximum
+while being unreachable by the prefill decision. Read the ratio between the two maxima as a filtering
+signal only where prefill and decode are served by the same pods. The decode profile's routing
+decision is not measured for a disaggregated request.
+
 Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
 server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
 zero-config default, packs bytes into four-byte pseudo-tokens: the predicted rate stays
 self-consistent, but CJK, code, and chat-template-heavy inputs shift it against the server's figure.
 
-`llm_d_epp_kv_cache_index_lookup_hits_total` answers a different question: it counts the best
-candidate rather than the chosen one, which bounds the reuse available to any routing decision.
+`llm_d_epp_kv_cache_index_lookup_hits_total` also reports a best candidate, but not on terms that
+compare with these metrics: it counts blocks rather than tokens, only the precise producer feeds it,
+and it accumulates once per prompt rather than once per request.
 
 ### Token producer render
 

@@ -31,6 +31,11 @@ const (
 	// image). The coordinator must give every subrequest the same value so they
 	// use the same revision.
 	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
+	// PeerTopologyHeaderKey carries the prefill endpoint's encoded topology
+	// from the prefill EPP's response, through the coordinator, to the decode
+	// EPP's request, for topology-affinity-filter and topology-affinity-scorer
+	// running in coordinator deployments.
+	PeerTopologyHeaderKey = "x-peer-topology"
 
 	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
 	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control

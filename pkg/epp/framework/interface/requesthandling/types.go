@@ -607,7 +607,9 @@ func (i *ImagesGenerationsRequest) String() string {
 // This struct includes fields usable for plugins and scheduling decisions.
 type GenerateRequest struct {
 	// TokenIDs are the pre-tokenized input token IDs.
-	TokenIDs []uint32 `json:"token_ids"`
+	TokenIDs []uint32 `json:"token_ids,omitempty"`
+	// Text is the prompt text when pre-tokenized token IDs are not provided.
+	Text string `json:"text,omitempty"`
 	// Features carries multimodal metadata (per-modality content hashes and
 	// placeholder ranges) parsed out of the wire `features` block. Populated
 	// by UnmarshalJSON; not itself a JSON-tagged field.
@@ -829,6 +831,8 @@ type Usage struct {
 }
 
 type PromptTokenDetails struct {
+	// CachedTokens is the prompt-cache read count, counted inside PromptTokens
+	// rather than added to it.
 	CachedTokens int `json:"cached_tokens"`
 }
 

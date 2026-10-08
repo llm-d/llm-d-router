@@ -71,6 +71,10 @@ type SchedulingContextState struct {
 	// size the hashes were derived at and each prompt's length; the conversion
 	// is bounded per prompt because a prompt's final block may be partial.
 	PredictedCachedTokens map[ServerID]int
+	// The highest PredictedCachedTokens across the request's candidate
+	// endpoints. Taken during Produce, the only stage that sees the candidates
+	// as they were before the scheduler's filters narrowed them.
+	BestAvailableCachedTokens int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -90,9 +94,10 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 	}
 
 	return &SchedulingContextState{
-		PerPromptHashes:       perPromptHashes,
-		PrefixCacheServers:    prefixCacheServers,
-		PredictedCachedTokens: predictedCachedTokens,
+		PerPromptHashes:           perPromptHashes,
+		PrefixCacheServers:        prefixCacheServers,
+		PredictedCachedTokens:     predictedCachedTokens,
+		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
 }
 

@@ -42,11 +42,23 @@ var hopByHopHeaders = map[string]bool{
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
+	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
 }
 
 func isForwardableHeader(name string) bool {
 	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+}
+
+// StripInternalHeaders removes headers the coordinator alone injects into
+// requests it forwards (e.g. x-peer-topology, copied from the prefill
+// response onto the decode request). Call this on a client request's headers
+// as soon as they are received, so a client-supplied value is never mistaken
+// for one the coordinator generated itself.
+func StripInternalHeaders(headers http.Header) {
+	for key := range internalForwardingHeaders {
+		headers.Del(key)
+	}
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
@@ -150,7 +162,15 @@ type RequestContext struct {
 	// KVTransferParams carries the prefill pod's KV-cache transfer hints to the
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
-	KVTransferParams       map[string]any
+	KVTransferParams map[string]any
+	// PeerTopology carries the prefill endpoint's encoded topology from the
+	// prefill response to the decode request, for topology-affinity-filter
+	// and topology-affinity-scorer running in the decode EPP's profile.
+	// Populated by PrefillStep from the x-peer-topology response header;
+	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
+	// the prefill EPP's config has no topology-stamp-handler.
+	PeerTopology string
+
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
 

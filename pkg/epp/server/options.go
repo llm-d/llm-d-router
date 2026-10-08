@@ -539,9 +539,6 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 	for _, cs := range tls.CipherSuites() {
 		byName[cs.Name] = cs.ID
 	}
-	for _, cs := range tls.InsecureCipherSuites() {
-		byName[cs.Name] = cs.ID
-	}
 	ids := make([]uint16, 0, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)

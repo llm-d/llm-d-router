@@ -232,8 +232,16 @@ func openAIErrorBody(code envoyTypePb.StatusCode, msg string) string {
 	case envoyTypePb.StatusCode_TooManyRequests:
 		errType = "rate_limit_error"
 	}
-	quotedMsg, _ := json.Marshal(msg)
-	return fmt.Sprintf(`{"error":{"message":%s,"type":%q,"code":%d}}`, quotedMsg, errType, code)
+	body, _ := json.Marshal(struct {
+		Error openAIErrorFields `json:"error"`
+	}{Error: openAIErrorFields{Message: msg, Type: errType, Code: int(code)}})
+	return string(body)
+}
+
+type openAIErrorFields struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
 }
 
 // ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
@@ -247,8 +255,16 @@ func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
 	if code == envoyTypePb.StatusCode_BadRequest {
 		errType = "invalid_request_error"
 	}
-	quotedMsg, _ := json.Marshal(msg)
-	return fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%s}}`, errType, quotedMsg)
+	body, _ := json.Marshal(struct {
+		Type  string             `json:"type"`
+		Error anthropicErrFields `json:"error"`
+	}{Type: "error", Error: anthropicErrFields{Type: errType, Message: msg}})
+	return string(body)
+}
+
+type anthropicErrFields struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {

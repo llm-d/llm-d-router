@@ -132,6 +132,22 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "basic text prompt",
+			headers: map[string]string{":path": "/generate"},
+			body:    map[string]any{"text": "hello world"},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{Text: "hello world"},
+			},
+		},
+		{
+			name:    "text prompt with extra_key mapped to CacheSalt",
+			headers: map[string]string{":path": "/generate"},
+			body:    map[string]any{"text": "hello world", "extra_key": "salt-abc"},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{Text: "hello world", CacheSalt: "salt-abc"},
+			},
+		},
+		{
 			name:    "extra_key mapped to CacheSalt",
 			headers: map[string]string{":path": "/generate"},
 			body:    map[string]any{"input_ids": []any{10, 20}, "extra_key": "salt-abc"},
@@ -268,12 +284,17 @@ func TestSGLangHTTPParser_ParseRequest_ErrorPaths(t *testing.T) {
 		{
 			name:        "input embeds without input ids",
 			body:        `{"input_embeds":[[0.1,0.2]]}`,
-			errContains: "input_ids must be provided",
+			errContains: "input_ids or text must be provided",
 		},
 		{
-			name:        "text without input ids",
-			body:        `{"text":"hello"}`,
-			errContains: "input_ids must be provided",
+			name:        "empty text without input ids",
+			body:        `{"text":""}`,
+			errContains: "text cannot be empty",
+		},
+		{
+			name:        "non-string text without input ids",
+			body:        `{"text":123}`,
+			errContains: "text must be a string",
 		},
 		{
 			name:        "batched input_ids are rejected",

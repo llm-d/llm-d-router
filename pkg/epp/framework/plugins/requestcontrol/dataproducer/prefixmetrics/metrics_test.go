@@ -27,6 +27,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 )
 
 // Every producer instance calls Register, so repeated calls must not panic.
@@ -39,51 +40,67 @@ func TestRegisterIsIdempotent(t *testing.T) {
 
 // A zero prediction is a real observation: the router expected no cache hit,
 // and the request still contributes its prompt tokens to the denominator.
+// Every field lands on its own histogram, and all four carry a sample per
+// call under the call's role so their sums stay divisible by one another.
+// The two maxima are also split by the call's modality.
 func TestRecordPrediction(t *testing.T) {
-	predictedCachedTokens.Reset()
-	promptTokens.Reset()
-	t.Cleanup(func() {
-		predictedCachedTokens.Reset()
-		promptTokens.Reset()
+	resetPredictionMetrics()
+	t.Cleanup(resetPredictionMetrics)
+
+	RecordPrediction("test-plugin", "test-type", RoleDecode, mmobs.ModalityNone, Prediction{
+		Selected: 512, BestPredicted: 768, BestAvailable: 896, PromptTokens: 1024,
+	})
+	RecordPrediction("test-plugin", "test-type", RoleDecode, mmobs.ModalityNone, Prediction{
+		Selected: 0, BestPredicted: 0, BestAvailable: 0, PromptTokens: 256,
+	})
+	RecordPrediction("test-plugin", "test-type", RolePrefill, "audio,image", Prediction{
+		Selected: 64, BestPredicted: 96, BestAvailable: 112, PromptTokens: 128,
 	})
 
-	RecordPrediction("test-plugin", "test-type", RoleDecode, 512, 1024)
-	RecordPrediction("test-plugin", "test-type", RoleDecode, 0, 256)
-	RecordPrediction("test-plugin", "test-type", RolePrefill, 64, 128)
+	for _, tc := range []struct {
+		name   string
+		vec    *prometheus.HistogramVec
+		labels []string
+		count  uint64
+		sum    float64
+	}{
+		{"decode selected", predictedCachedTokens, []string{RoleDecode}, 2, 512},
+		{"decode best predicted", bestPredictedCachedTokens, []string{RoleDecode, mmobs.ModalityNone}, 2, 768},
+		{"decode best available", bestAvailableCachedTokens, []string{RoleDecode, mmobs.ModalityNone}, 2, 896},
+		{"decode prompt", promptTokens, []string{RoleDecode}, 2, 1280},
+		{"prefill selected", predictedCachedTokens, []string{RolePrefill}, 1, 64},
+		{"prefill best predicted", bestPredictedCachedTokens, []string{RolePrefill, "audio,image"}, 1, 96},
+		{"prefill best available", bestAvailableCachedTokens, []string{RolePrefill, "audio,image"}, 1, 112},
+		{"prefill prompt", promptTokens, []string{RolePrefill}, 1, 128},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			histogram, err := histogramFor(tc.vec, append([]string{"test-plugin", "test-type"}, tc.labels...)...)
+			require.NoError(t, err)
+			assert.Equal(t, tc.count, histogram.GetSampleCount())
+			assert.Equal(t, tc.sum, histogram.GetSampleSum())
+		})
+	}
+}
 
-	predicted, err := histogramFor(predictedCachedTokens, "test-plugin", "test-type", RoleDecode)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), predicted.GetSampleCount())
-	assert.Equal(t, float64(512), predicted.GetSampleSum())
-
-	prompt, err := histogramFor(promptTokens, "test-plugin", "test-type", RoleDecode)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), prompt.GetSampleCount())
-	assert.Equal(t, float64(1280), prompt.GetSampleSum())
-
-	predicted, err = histogramFor(predictedCachedTokens, "test-plugin", "test-type", RolePrefill)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1), predicted.GetSampleCount())
-	assert.Equal(t, float64(64), predicted.GetSampleSum())
-
-	prompt, err = histogramFor(promptTokens, "test-plugin", "test-type", RolePrefill)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1), prompt.GetSampleCount())
-	assert.Equal(t, float64(128), prompt.GetSampleSum())
+func resetPredictionMetrics() {
+	predictedCachedTokens.Reset()
+	bestPredictedCachedTokens.Reset()
+	bestAvailableCachedTokens.Reset()
+	promptTokens.Reset()
 }
 
 // Under P/D the sidecar reports the prefill stage's cached tokens, so the
-// prediction follows the prefill target when the request was disaggregated and
-// the primary target otherwise.
+// prediction follows the prefill profile when the request was disaggregated and
+// the primary profile otherwise.
 func TestPredictionTarget(t *testing.T) {
-	decode := endpointNamed("decode-pod")
-	prefill := endpointNamed("prefill-pod")
+	decodeProfile := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{endpointNamed("decode-pod")}}
+	prefillProfile := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{endpointNamed("prefill-pod")}}
 
 	tests := []struct {
-		name         string
-		result       *fwksched.SchedulingResult
-		wantEndpoint fwksched.Endpoint
-		wantRole     string
+		name        string
+		result      *fwksched.SchedulingResult
+		wantProfile *fwksched.ProfileRunResult
+		wantRole    string
 	}{
 		{
 			name:     "nil result",
@@ -95,35 +112,35 @@ func TestPredictionTarget(t *testing.T) {
 			result: &fwksched.SchedulingResult{
 				PrimaryProfileName: "decode",
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
-					"decode": {TargetEndpoints: []fwksched.Endpoint{decode}},
+					"decode": decodeProfile,
 				},
 			},
-			wantEndpoint: decode,
-			wantRole:     RoleDecode,
+			wantProfile: decodeProfile,
+			wantRole:    RoleDecode,
 		},
 		{
 			name: "disaggregated",
 			result: &fwksched.SchedulingResult{
 				PrimaryProfileName: "decode",
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
-					"decode":  {TargetEndpoints: []fwksched.Endpoint{decode}},
-					"prefill": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+					"decode":  decodeProfile,
+					"prefill": prefillProfile,
 				},
 			},
-			wantEndpoint: prefill,
-			wantRole:     RolePrefill,
+			wantProfile: prefillProfile,
+			wantRole:    RolePrefill,
 		},
 		{
 			name: "prefill profile ran without a target",
 			result: &fwksched.SchedulingResult{
 				PrimaryProfileName: "decode",
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
-					"decode":  {TargetEndpoints: []fwksched.Endpoint{decode}},
+					"decode":  decodeProfile,
 					"prefill": nil,
 				},
 			},
-			wantEndpoint: decode,
-			wantRole:     RoleDecode,
+			wantProfile: decodeProfile,
+			wantRole:    RoleDecode,
 		},
 		{
 			name: "no primary target",
@@ -136,8 +153,8 @@ func TestPredictionTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			endpoint, role := PredictionTarget(tt.result, "prefill")
-			assert.Equal(t, tt.wantEndpoint, endpoint)
+			profile, role := PredictionTarget(tt.result, "prefill")
+			assert.Same(t, tt.wantProfile, profile)
 			assert.Equal(t, tt.wantRole, role)
 		})
 	}
