@@ -131,7 +131,11 @@ func (m *sessionManager) removeLocked(id string) {
 	delete(m.sessions, id)
 }
 
-// estimateTokens converts a request body size to a token estimate.
+// estimateTokens converts a request body size to a token estimate. The body
+// also holds the JSON envelope, tool schemas and images, so the estimate is
+// above the prompt token count.
+// TODO(#3221): use the request's token count once it is available before flow
+// control.
 func estimateTokens(sizeBytes int) int64 {
 	if sizeBytes <= 0 {
 		return 0
