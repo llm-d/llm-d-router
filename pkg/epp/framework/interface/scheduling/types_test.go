@@ -199,3 +199,48 @@ func TestModalityAliases(t *testing.T) {
 	// These aliases exist for ergonomic re-export. Confirm the values line up.
 	assert.Equal(t, fwkrh.ModalityImage, ModalityImage)
 }
+
+func TestProfileRunResult_FirstEndpoint(t *testing.T) {
+	first := NewEndpoint(newTestMetadata("first"), newTestMetrics(), nil)
+	second := NewEndpoint(newTestMetadata("second"), newTestMetrics(), nil)
+
+	tests := []struct {
+		name   string
+		result *ProfileRunResult
+		want   Endpoint
+	}{
+		{name: "nil result"},
+		{name: "no targets", result: &ProfileRunResult{}},
+		{name: "nil first target is returned as stored", result: &ProfileRunResult{TargetEndpoints: []Endpoint{nil, first}}},
+		{name: "first of several", result: &ProfileRunResult{TargetEndpoints: []Endpoint{first, second}}, want: first},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.result.FirstEndpoint())
+		})
+	}
+}
+
+func TestSchedulingResult_PrimaryEndpoint(t *testing.T) {
+	first := NewEndpoint(newTestMetadata("first"), newTestMetrics(), nil)
+	second := NewEndpoint(newTestMetadata("second"), newTestMetrics(), nil)
+
+	tests := []struct {
+		name   string
+		result *SchedulingResult
+		want   Endpoint
+	}{
+		{name: "nil result"},
+		{name: "no profile results", result: &SchedulingResult{PrimaryProfileName: "p"}},
+		{name: "empty primary profile name", result: &SchedulingResult{ProfileResults: map[string]*ProfileRunResult{"": {TargetEndpoints: []Endpoint{first}}}}},
+		{name: "primary profile absent", result: &SchedulingResult{PrimaryProfileName: "p", ProfileResults: map[string]*ProfileRunResult{"other": {TargetEndpoints: []Endpoint{first}}}}},
+		{name: "primary profile nil", result: &SchedulingResult{PrimaryProfileName: "p", ProfileResults: map[string]*ProfileRunResult{"p": nil}}},
+		{name: "primary profile picked none", result: &SchedulingResult{PrimaryProfileName: "p", ProfileResults: map[string]*ProfileRunResult{"p": {}}}},
+		{name: "first target of the primary profile", result: &SchedulingResult{PrimaryProfileName: "p", ProfileResults: map[string]*ProfileRunResult{"p": {TargetEndpoints: []Endpoint{first, second}}, "other": {TargetEndpoints: []Endpoint{second}}}}, want: first},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.result.PrimaryEndpoint())
+		})
+	}
+}
