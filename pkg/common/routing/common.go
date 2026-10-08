@@ -52,6 +52,22 @@ const (
 	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
+
+	// PreferReserveEndpoint is the preference token the coordinator sets to ask
+	// which endpoint EPP would pick for a request without sending the request
+	// there. EPP answers 204 with the picked <ip:port> on ReservedEndpointHeader
+	// and forwards nothing.
+	PreferReserveEndpoint = "reserve-endpoint"
+
+	// PreferenceAppliedHeader is the standard RFC 7240 response header that names
+	// the Prefer tokens the server applied.
+	PreferenceAppliedHeader = "preference-applied"
+
+	// ReservedEndpointHeader is the response header that carries the <ip:port>
+	// EPP picked on a "Prefer: reserve-endpoint" request. The header name is the
+	// same for every scheduling profile, since a per-phase EPP runs its only
+	// profile under a name of its own.
+	ReservedEndpointHeader = "x-llm-d-reserved-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
@@ -65,7 +81,13 @@ func StripScheme(endpoint string) string {
 }
 
 // HasPreference reports whether the request headers carry the given Prefer
-// token.
+// token. See HasPreferenceToken.
+func HasPreference(headers map[string]string, want string) bool {
+	return HasPreferenceToken(headers[PreferHeader], want)
+}
+
+// HasPreferenceToken reports whether the Prefer header value prefer carries
+// the given token.
 //
 // Per RFC 7240 the Prefer header value is a comma-separated list of
 // preferences. Each preference is a token with an optional "=" value and
@@ -75,8 +97,7 @@ func StripScheme(endpoint string) string {
 // it. For example, "return=minimal" matches the token "return". A want that is
 // empty or only whitespace always returns false. Quoted-string values that
 // contain "," or ";" are not supported.
-func HasPreference(headers map[string]string, want string) bool {
-	prefer := headers[PreferHeader]
+func HasPreferenceToken(prefer, want string) bool {
 	want = strings.TrimSpace(want)
 	if prefer == "" || want == "" {
 		return false

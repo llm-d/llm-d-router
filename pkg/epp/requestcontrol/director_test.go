@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -62,6 +64,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/reserveendpoint"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
@@ -282,6 +285,16 @@ func (m *mockPreRequestPlugin) PreRequest(ctx context.Context, request *fwksched
 
 type mockProducedDataType struct {
 	value int
+}
+
+// singleEndpointResult is a scheduling result whose primary profile picked md.
+func singleEndpointResult(profile string, md *fwkdl.EndpointMetadata) *fwksched.SchedulingResult {
+	return &fwksched.SchedulingResult{
+		PrimaryProfileName: profile,
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			profile: {TargetEndpoints: []fwksched.Endpoint{fwksched.NewEndpoint(md, nil, nil)}},
+		},
+	}
 }
 
 // Clone implements types.Cloneable.
@@ -2484,6 +2497,120 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			var e errcommon.Error
 			require.ErrorAs(t, err, &e)
 			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
+}
+
+// TestPrepareRequest_ReserveEndpoint pins the director's handling of
+// "Prefer: reserve-endpoint": the endpoint the plugin recorded becomes the
+// answer, with the internal routing headers the PreRequest plugins set, and a
+// request that no plugin handled is rejected with 500 so it never reaches a
+// model server.
+func TestPrepareRequest_ReserveEndpoint(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	result := singleEndpointResult("prefill", &fwkdl.EndpointMetadata{
+		Address: "10.0.3.7",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	})
+	reserve := map[string]string{routing.PreferHeader: routing.PreferReserveEndpoint}
+	// setHeaders is a PreRequest plugin that writes request headers, as
+	// p2p-source-producer and the disaggregation profile handler do.
+	setHeaders := func(headers map[string]string) *mockPreRequestPlugin {
+		return &mockPreRequestPlugin{name: "set-headers", modifyFn: func(request *fwksched.InferenceRequest) {
+			for k, v := range headers {
+				request.Headers[k] = v
+			}
+		}}
+	}
+	answer := map[string]string{
+		routing.ReservedEndpointHeader:  "10.0.3.7:8000",
+		routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		plugins     []fwkrc.PreRequest
+		wantErrCode string
+		wantAnswer  map[string]string
+	}{
+		{
+			name:    "no Prefer header is forwarded",
+			headers: map[string]string{},
+			plugins: []fwkrc.PreRequest{reserveendpoint.New()},
+		},
+		{
+			name:        "reserve-endpoint with no plugin is rejected",
+			headers:     reserve,
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:        "reserve-endpoint with a plugin that does not handle it is rejected",
+			headers:     reserve,
+			plugins:     []fwkrc.PreRequest{&mockPreRequestPlugin{name: "noop"}},
+			wantErrCode: errcommon.Internal,
+		},
+		{
+			name:       "reserve-endpoint is answered with the recorded endpoint",
+			headers:    reserve,
+			plugins:    []fwkrc.PreRequest{reserveendpoint.New()},
+			wantAnswer: answer,
+		},
+		{
+			name:    "internal routing headers set by PreRequest plugins travel on the answer",
+			headers: reserve,
+			plugins: []fwkrc.PreRequest{reserveendpoint.New(), setHeaders(map[string]string{
+				routing.KVCacheSourceHeader:   "10.0.3.9:8000",
+				routing.PrefillEndpointHeader: "10.0.3.7:8000",
+				"x-not-a-routing-header":      "dropped",
+				reqcommon.RequestIDHeaderKey:  "dropped",
+			})},
+			wantAnswer: map[string]string{
+				routing.ReservedEndpointHeader:  "10.0.3.7:8000",
+				routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+				routing.KVCacheSourceHeader:     "10.0.3.9:8000",
+				routing.PrefillEndpointHeader:   "10.0.3.7:8000",
+			},
+		},
+		{
+			name:    "plugin order does not matter for the headers on the answer",
+			headers: reserve,
+			plugins: []fwkrc.PreRequest{setHeaders(map[string]string{routing.KVCacheSourceHeader: "10.0.3.9:8000"}), reserveendpoint.New()},
+			wantAnswer: map[string]string{
+				routing.ReservedEndpointHeader:  "10.0.3.7:8000",
+				routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+				routing.KVCacheSourceHeader:     "10.0.3.9:8000",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig().WithPreRequestPlugins(tt.plugins...)}
+			headers := maps.Clone(tt.headers)
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req-" + tt.name, Headers: headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, result)
+
+			assert.NotNil(t, got.TargetPod, "TargetPod stays set so the stream-end cleanup releases plugin state")
+			if tt.wantErrCode != "" {
+				var e errcommon.Error
+				require.ErrorAs(t, err, &e)
+				assert.Equal(t, tt.wantErrCode, e.Code)
+				assert.Nil(t, got.Answer)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantAnswer == nil {
+				assert.Nil(t, got.Answer, "a request without the preference is forwarded")
+				return
+			}
+			require.NotNil(t, got.Answer)
+			assert.Equal(t, envoyTypePb.StatusCode_NoContent, got.Answer.Status)
+			assert.Equal(t, tt.wantAnswer, got.Answer.Headers)
 		})
 	}
 }

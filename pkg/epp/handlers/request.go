@@ -33,6 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -42,6 +43,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 
 	// an EoS in the request headers means this request has no body or trailers.
 	if req.RequestHeaders.EndOfStream {
+		// A reservation cannot be scheduled without a body, and the random
+		// fallback would send it to a model server.
+		if routing.HasPreferenceToken(envoy.ExtractHeaderValue(req, routing.PreferHeader), routing.PreferReserveEndpoint) {
+			return errcommon.Error{Code: errcommon.BadRequest, Msg: "reserve-endpoint request has no body"}
+		}
 		// We will route this request to a random endpoint as this is assumed to just be a GET
 		// More context: https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/526
 		// The above PR will address endpoint admission, but currently any request without a body will be
