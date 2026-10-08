@@ -29,6 +29,20 @@ func TestLLMDSemanticConventions(t *testing.T) {
 		wantKey  string
 		wantType attribute.Type
 	}{
+		// EPP Fairness attribution
+		{
+			name:     "LLMDEPPFairnessID",
+			got:      LLMDEPPFairnessID("team-a"),
+			wantKey:  "llm_d.epp.fairness.id",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDEPPFairnessSource",
+			got:      LLMDEPPFairnessSource("header"),
+			wantKey:  "llm_d.epp.fairness.source",
+			wantType: attribute.STRING,
+		},
+
 		// EPP Scheduling
 		{
 			name:     "LLMDEPPProfileName",
@@ -176,6 +190,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			name:     "LLMDEPPProfileHandlerDecodeFailed",
 			got:      LLMDEPPProfileHandlerDecodeFailed(true),
 			wantKey:  "llm_d.epp.profile_handler.decode_failed",
+			wantType: attribute.BOOL,
+		},
+		{
+			name:     "LLMDEPPProfileHandlerPrefillFailed",
+			got:      LLMDEPPProfileHandlerPrefillFailed(true),
+			wantKey:  "llm_d.epp.profile_handler.prefill_failed",
 			wantType: attribute.BOOL,
 		},
 
@@ -519,6 +539,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			got:      LLMDPDProxyPrefillTarget("10.0.0.1:8000"),
 			wantKey:  "llm_d.pd_proxy.prefill_target",
 			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyBootstrapRoom",
+			got:      LLMDPDProxyBootstrapRoom(1790000000000000123),
+			wantKey:  "llm_d.pd_proxy.bootstrap_room",
+			wantType: attribute.INT64,
 		},
 		{
 			name:     "LLMDPDProxyPrefillCandidates",

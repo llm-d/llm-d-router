@@ -17,6 +17,8 @@ In token mode, both numerator and denominator are evaluated in tokens: the aggre
 
 Hybrid mode is the exception: rather than one aggregate fraction, it evaluates each endpoint's saturation as the larger of its request and token ratios and reports the unweighted average across endpoints. This prevents distinct endpoints saturating on different dimensions from being masked by aggregate ratios that each remain low.
 
+**Dispatch reservations:** The detector implements `DispatchReservationTracker`. Flow control reserves a slot when it dispatches a request and the director releases it after the `PreRequest` hooks have published the request's in-flight load, so a burst of dispatches cannot all read the same headroom. Pending reservations are added to the aggregate in-flight request count in `requests` mode. In `hybrid` mode the reported saturation is the larger of the per-endpoint average and the aggregate request ratio including reservations. `tokens` mode does not count reservations. Reservations are pool-wide and local to the EPP replica: a reservation counts against this detector whichever endpoint the request is later scheduled to, and it is not shared with other replicas.
+
 **Heterogeneous Deployments:** Because this detector calculates saturation globally as a single aggregate fraction (in requests and tokens mode), it utilizes an aggregate queueing model. In deployments with heterogeneous compute (e.g., mixing H100 and L4 nodes), this heavily biases the pool saturation metric toward the state of the larger nodes. Contrast this with the Utilization Detector, which evaluates saturation as an unweighted average of individual endpoint scores.
 
 ### Role in Scheduling (The Traffic Shaper)

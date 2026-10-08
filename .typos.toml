@@ -17,6 +17,8 @@ extend-exclude = [
     "go.sum",
     "build/",
     "testdata/",
+    # Generated CRDs; controller-gen embeds upstream Kubernetes API descriptions
+    "config/crd/bases/",
     # Generated protobuf files
     "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/",
 ]

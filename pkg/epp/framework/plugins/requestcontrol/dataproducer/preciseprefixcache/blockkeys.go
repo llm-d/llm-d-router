@@ -37,12 +37,13 @@ type kvCacheIndexer interface {
 }
 
 // computeBlockKeys hashes the request's TokenizedRequest into per-prompt
-// KV-block keys, folding CacheSalt into each prompt's first block. MM features
-// are carried per-prompt; mmBlockIndices (block indices spanned by MM content)
-// is populated only for single-prompt requests for hit attribution.
+// KV-block keys, folding CacheSalt into each prompt's first block. The second
+// return value holds one MM block-index slice per returned prompt (the blocks
+// spanned by that prompt's MM content, nil for text-only prompts), aligned
+// positionally with the keys.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
-) ([][]kvblock.BlockHash, []int, error) {
+) ([][]kvblock.BlockHash, [][]int, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil, nil
 	}
@@ -52,7 +53,7 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	}
 
 	result := make([][]kvblock.BlockHash, 0, len(tp.Prompts))
-	var mmBlockIndices []int
+	mmIndices := make([][]int, 0, len(tp.Prompts))
 	for _, p := range tp.Prompts {
 		if len(p.TokenIDs) == 0 {
 			continue
@@ -65,11 +66,9 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 			continue
 		}
 		result = append(result, keys)
-		if len(tp.Prompts) == 1 {
-			mmBlockIndices = mmIdx
-		}
+		mmIndices = append(mmIndices, mmIdx)
 	}
-	return result, mmBlockIndices, nil
+	return result, mmIndices, nil
 }
 
 func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,

@@ -52,7 +52,7 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
     view) is per replica and not shared. In Active-Active mode, priority and fairness are enforced
     only within each replica's share of the traffic, and per-band capacity limits apply per
     replica, so the fleet-wide queued volume scales with the replica count.
-  - **Warning (Prefix Routing)**: **Active-Active mode should be avoided when using approximate prefix routing.** Because EPP replicas do not share prefix state, each replica only has visibility into the prefix state of the requests it has individually handled. This partition of state significantly degrades prefix cache hit rates, making prefix caching highly inefficient.
+  - **Plugin Compatibility**: EPP replicas do not share routing state. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. Avoid approximate prefix routing in Active-Active mode because replicas do not share prefix state.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
 ### Performance Reference Data
@@ -218,3 +218,45 @@ router:
   proxy:
     failOpen: true
 ```
+
+### Horizontal Pod Autoscaling (HPA)
+
+EPP supports horizontal pod autoscaling through Kubernetes HorizontalPodAutoscaler (HPA v2). When autoscaling is enabled, Helm omits `spec.replicas` on the EPP Deployment, and the HPA controller manages replica counts.
+
+#### Operational Prerequisites and Constraints
+
+- **Active-Active Mode Required**: Autoscaling requires Active-Active EPP operation. Standby replicas in leader-elected setups remain `NotReady` by design, which blocks HPA stabilization. The chart enforces active-active mode when autoscaling is enabled and blocks explicit leader election (`--ha-enable-leader-election`).
+- **Incompatible with StatefulSet Topologies**: Priority routing and GKE preferred backends render EPP as a StatefulSet with fixed ordinal hostnames (`<name>-0`, `<name>-1`) for static Envoy routing. Autoscaling requires a standard Deployment managing a dynamically changing replica set in active-active mode. Enabling autoscaling alongside `router.proxy.priorityRouting.enabled: true` or GKE preferred backends fails chart validation.
+- **RollingUpdate Strategy**: The deployment defaults to `RollingUpdate` strategy (`maxUnavailable: 0`, `maxSurge: 1`) under autoscaling to keep serving capacity during scale events. Setting `router.epp.deploymentStrategy` overrides this default.
+- **Replica Count Configuration**: When autoscaling is enabled, `router.epp.replicas` is ignored. Replica counts are controlled by `autoscaling.minReplicas` and `autoscaling.maxReplicas`.
+- **Plugin Compatibility**: Autoscaling requires active-active compatible plugins; see [Scaling Modes (Active-Active vs. Active-Passive)](#scaling-modes-active-active-vs-active-passive).
+
+#### Target Utilization Guidance
+
+- **Target CPU Utilization**: The recommended starting default is **80%**. This leaves headroom to absorb traffic spikes while new pods initialize and pass readiness probes. Higher utilization leaves less headroom for traffic bursts while new pods start up. Operators should tune this target based on their workload shape, token lengths, and latency SLAs.
+- **Container Sizing**: Set container CPU requests based on expected steady-state per-pod load (refer to the sizing guidelines in Section 1 for CPU core-to-throughput estimates).
+
+#### Helm Configuration
+
+```yaml
+router:
+  epp:
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+    resources:
+      requests:
+        cpu: "8"
+        memory: 16Gi
+      limits:
+        cpu: "8"
+        memory: 16Gi
+```
+
+See `router.epp.autoscaling` in `config/charts/routerlib/values.yaml` for all fields and defaults. Custom metrics can be supplied via `autoscaling.metrics` to replace auto-generated CPU and memory metrics (target percentage fields remain range-validated if defined).
+

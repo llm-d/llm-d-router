@@ -18,6 +18,7 @@ limitations under the License.
 package metrics
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -222,6 +223,15 @@ func TestGetMetric(t *testing.T) {
 			makeMetric(map[string]string{}, 5.0, 3000),
 			makeMetric(map[string]string{}, 6.0, 1000),
 		),
+		"metric_nan": makeMetricFamily("metric_nan",
+			makeMetric(map[string]string{}, math.NaN(), 1000),
+		),
+		"metric_pos_inf": makeMetricFamily("metric_pos_inf",
+			makeMetric(map[string]string{}, math.Inf(1), 1000),
+		),
+		"metric_neg_inf": makeMetricFamily("metric_neg_inf",
+			makeMetric(map[string]string{}, math.Inf(-1), 1000),
+		),
 	}
 
 	tests := []struct {
@@ -309,6 +319,24 @@ func TestGetMetric(t *testing.T) {
 			},
 			expected:  5.0,
 			wantError: false,
+		},
+		{
+			name:      "get NaN metric, rejected",
+			spec:      Spec{Name: "metric_nan"},
+			expected:  -1,
+			wantError: true,
+		},
+		{
+			name:      "get +Inf metric, rejected",
+			spec:      Spec{Name: "metric_pos_inf"},
+			expected:  -1,
+			wantError: true,
+		},
+		{
+			name:      "get -Inf metric, rejected",
+			spec:      Spec{Name: "metric_neg_inf"},
+			expected:  -1,
+			wantError: true,
 		},
 	}
 

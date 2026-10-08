@@ -29,7 +29,6 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/test/integration"
 )
 
@@ -206,20 +205,59 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 	return buildGRPCRouteResponse(endpoint, prompt, method, true)
 }
 
-// ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
+// ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
+// serialized in the OpenAI error envelope.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg)
+	return integration.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader())
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
 func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+	return integration.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
+		&envoyCorev3.HeaderValueOption{
+			Header: &envoyCorev3.HeaderValue{
+				Key:      errcommon.RequestDroppedReasonHeaderKey,
+				RawValue: []byte(reason),
+			},
+		})
+}
+
+// openAIErrorBody is the OpenAI error envelope the EPP answers with for the given status.
+func openAIErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "server_error"
+	switch code {
+	case envoyTypePb.StatusCode_BadRequest:
+		errType = "invalid_request_error"
+	case envoyTypePb.StatusCode_TooManyRequests:
+		errType = "rate_limit_error"
+	}
+	quotedMsg, _ := json.Marshal(msg)
+	return fmt.Sprintf(`{"error":{"message":%s,"type":%q,"code":%d}}`, quotedMsg, errType, code)
+}
+
+// ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
+// given code and message, serialized in the Anthropic error envelope.
+func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
+	return integration.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader())
+}
+
+func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "api_error"
+	if code == envoyTypePb.StatusCode_BadRequest {
+		errType = "invalid_request_error"
+	}
+	quotedMsg, _ := json.Marshal(msg)
+	return fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%s}}`, errType, quotedMsg)
+}
+
+func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {
+	return &envoyCorev3.HeaderValueOption{
 		Header: &envoyCorev3.HeaderValue{
-			Key:      errcommon.RequestDroppedReasonHeaderKey,
-			RawValue: []byte(reason),
+			Key:      reqcommon.HeaderContentType,
+			RawValue: []byte(reqcommon.ContentTypeJSON),
 		},
-	})
+	}
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
@@ -339,7 +377,7 @@ func commonTestCases(prio func(int) int) []testCase {
 			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-				"inference error: Internal - no pods available in datastore"),
+				"no pods available in datastore"),
 		},
 		{
 			name: "request missing model field",
@@ -348,7 +386,7 @@ func commonTestCases(prio func(int) int) []testCase {
 				`{"prompt":"hello world"}`,
 			),
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-				"inference error: BadRequest - model not found in request body"),
+				"model not found in request body"),
 		},
 	}
 }
@@ -383,7 +421,7 @@ func metricReqTotal(model, target string, priority int) string {
     # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
     # TYPE llm_d_epp_request_total counter
     llm_d_epp_request_total{%s} 1
-    `, labelsToString([]label{{"fairness_id", metadata.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    `, labelsToString([]label{{"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {

@@ -127,22 +127,55 @@ func TestResponsesPayloadWire_ArrayContentMultipleTextParts(t *testing.T) {
 	]}`, string(body))
 }
 
-// TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed covers a
-// content part this code cannot represent as text (for example
-// input_image): dropping it would tokenize a prompt shorter than the one
-// vLLM serves, so the conversion fails even when a text part sits alongside
-// it in the same message.
-func TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed(t *testing.T) {
+// TestResponsesPayloadWire_ImageContent covers input_image conversion: its
+// URL is a bare string on the part, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape, and it converts alongside text parts in
+// the same message rather than failing the conversion.
+func TestResponsesPayloadWire_ImageContent(t *testing.T) {
 	r := &fwkrh.ResponsesRequest{
 		Input: []any{
 			map[string]any{"role": "user", "content": []any{
 				map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
 				map[string]any{"type": "input_text", "text": "describe this"},
 			}},
+			// an image-only message converts too, collapsing to Structured
+			// with a single block rather than Raw (Raw only collapses text).
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_image", "image_url": "http://example.com/y.png"},
+			}},
+		},
+	}
+	got, err := responsesPayload(r)
+	require.NoError(t, err)
+	body, err := got.Marshal()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"messages":[
+		{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"http://example.com/x.png"}},
+			{"type":"text","text":"describe this"}
+		]},
+		{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"http://example.com/y.png"}}
+		]}
+	]}`, string(body))
+}
+
+// TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed covers a
+// content part this code cannot represent at all (for example input_audio):
+// dropping it would tokenize a prompt shorter than the one vLLM serves, so
+// the conversion fails even when a text part sits alongside it in the same
+// message.
+func TestResponsesPayloadWire_ArrayContentNonTextPartsFailClosed(t *testing.T) {
+	r := &fwkrh.ResponsesRequest{
+		Input: []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_audio", "data": "AAAA", "format": "wav"},
+				map[string]any{"type": "input_text", "text": "describe this"},
+			}},
 		},
 	}
 	_, err := responsesPayload(r)
-	assert.ErrorContains(t, err, `"input_image"`)
+	assert.ErrorContains(t, err, `"input_audio"`)
 	assert.ErrorContains(t, err, "not supported")
 }
 
@@ -197,10 +230,10 @@ func TestResponsesPayloadWire_EmptyInputErrors(t *testing.T) {
 
 	_, err = responsesPayload(&fwkrh.ResponsesRequest{
 		Input: []any{map[string]any{"role": "user", "content": []any{
-			map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
+			map[string]any{"type": "input_audio", "data": "AAAA", "format": "wav"},
 		}}},
 	})
-	assert.ErrorContains(t, err, `"input_image"`)
+	assert.ErrorContains(t, err, `"input_audio"`)
 }
 
 // legacyResponsesForced forces the legacy chat-completions translation path,

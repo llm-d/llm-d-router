@@ -25,6 +25,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -61,8 +63,9 @@ func ConcurrencyDetectorFactory(
 }
 
 var (
-	_ fwksched.Filter                = &detector{}
-	_ flowcontrol.SaturationDetector = &detector{}
+	_ fwksched.Filter                        = &detector{}
+	_ flowcontrol.SaturationDetector         = &detector{}
+	_ flowcontrol.DispatchReservationTracker = &detector{}
 )
 
 // detector implements a saturation detector and scheduling filter based on active request concurrency.
@@ -71,6 +74,8 @@ type detector struct {
 	typedName                    fwkplugin.TypedName
 	inFlightLoadDataKey          fwkplugin.DataKey
 	uncachedRequestTokensDataKey fwkplugin.DataKey
+	dispatchReservations         sync.Map
+	pendingDispatches            atomic.Int64
 }
 
 // newDetector creates a new instance of the Concurrency Detector.
@@ -129,6 +134,31 @@ func (d *detector) getLoad(m datalayer.AttributeMap) *attrconcurrency.InFlightLo
 	return &attrconcurrency.InFlightLoad{}
 }
 
+// ReserveDispatch accounts for a request in the interval after flow-control dispatch and before
+// the in-flight load producer publishes it through PreRequest.
+func (d *detector) ReserveDispatch(requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	if _, loaded := d.dispatchReservations.LoadOrStore(requestID, struct{}{}); loaded {
+		return false
+	}
+	d.pendingDispatches.Add(1)
+	return true
+}
+
+// ReleaseDispatch removes a dispatch reservation. Duplicate and unknown releases are no-ops.
+func (d *detector) ReleaseDispatch(requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	if _, loaded := d.dispatchReservations.LoadAndDelete(requestID); !loaded {
+		return false
+	}
+	d.pendingDispatches.Add(-1)
+	return true
+}
+
 // getIncomingTokens returns the uncached tokens the current request would add to the endpoint.
 func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 	if val, ok := m.Get(d.uncachedRequestTokensDataKey); ok {
@@ -182,6 +212,7 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 			ratio(load.Tokens, d.config.maxTokenConcurrency),
 		)
 	}
+	pendingDispatches := d.pendingDispatches.Load()
 
 	switch d.config.mode {
 	case modeTokens:
@@ -190,9 +221,12 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 		if endpointCount == 0 {
 			return 1.0
 		}
-		return hybridSatSum / float64(endpointCount)
+		return max(
+			hybridSatSum/float64(endpointCount),
+			ratio(reqInflight+pendingDispatches, reqCapacity),
+		)
 	default:
-		return ratio(reqInflight, reqCapacity)
+		return ratio(reqInflight+pendingDispatches, reqCapacity)
 	}
 }
 

@@ -40,7 +40,7 @@ const (
 	// instead of recomputing them
 	KVCacheSourceHeader = "x-kv-cache-source-host-port"
 
-	// InferencePoolAPIGroup is the default InferencePool API group
+	// InferencePoolAPIGroup is the InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
 
 	// PreferHeader is the standard HTTP "Prefer" header (RFC 7240). EPP

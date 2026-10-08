@@ -111,6 +111,23 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	return produced
 }
 
+var _ sourcemetrics.FamilyReader = &Extractor{}
+
+// MetricFamilies lists the families of every registered engine mapping. An endpoint's engine
+// is known only at extraction time.
+func (ext *Extractor) MetricFamilies() []string {
+	var names []string
+	for _, mapping := range ext.registry.Mappings() {
+		names = append(names, mapping.MetricNames()...)
+		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks} {
+			if spec != nil {
+				names = append(names, spec.Name)
+			}
+		}
+	}
+	return names
+}
+
 // Extract transforms the typed metrics payload into endpoint attributes.
 func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	families := in.Payload

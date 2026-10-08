@@ -22,14 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -93,26 +91,18 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	path := format.Path()
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
-	headers := reqCtx.ForwardedHeaders()
-	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = gateway.PhasePrefill
-
-	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
-	}
-
-	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamPrefill)
-	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
-	call.Done()
+	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+		logMsg:   "request body",
+		step:     PrefillStepName,
+		upstream: coordmetrics.UpstreamPrefill,
+		path:     path,
+		body:     bodyBytes,
+		headers:  gatewayHeaders(reqCtx, gateway.PhasePrefill),
+	})
 	if err != nil {
-		return fmt.Errorf("prefill: request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
-	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {

@@ -16,7 +16,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Stage 4: encode (fan-out, one per image)](#stage-4-encode-fan-out-one-per-image)
 - [Stage 5: prefill](#stage-5-prefill)
 - [Stage 6: decode](#stage-6-decode)
-- [EPP-Profile Header and Routing](#epp-profile-header-and-routing)
+- [x-llm-d-epp-profile Header and Routing](#x-llm-d-epp-profile-header-and-routing)
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Responses Requests (/v1/responses)](#responses-requests-v1responses)
@@ -64,7 +64,7 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /infere
 [decode] - Forwards to decode worker, streams response back to client
 ```
 
-All requests from the coordinator to workers include the `EPP-Profile` HTTP header indicating the pipeline stage (see [EPP-Profile Header and Routing](#epp-profile-header-and-routing)).
+All requests from the coordinator to workers include the `x-llm-d-epp-profile` HTTP header indicating the pipeline stage (see [x-llm-d-epp-profile Header and Routing](#x-llm-d-epp-profile-header-and-routing)).
 
 ---
 
@@ -440,7 +440,7 @@ The `prefix-based-pd-decider` plugin enforces the 412 when configured; deploymen
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 Prefer: if-available
 ```
 
@@ -464,7 +464,7 @@ If the original `prompt` is a string, it is replaced by the `token_ids` from the
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 Prefer: if-available
 ```
 
@@ -495,7 +495,7 @@ The original request body is sent unchanged:
 POST <gateway>/v1/responses
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 Prefer: if-available
 ```
 
@@ -518,7 +518,7 @@ Like chat completions, the body is sent unchanged:
 ```
 
 **Notes:**
-- The `EPP-Profile: decode` header identifies this request as a decode attempt for routing
+- The `x-llm-d-epp-profile: decode` header identifies this request as a decode attempt for routing
 - The `Prefer: if-available` header signals to the decode worker that this is a conditional request - it should only proceed if the KV cache is already available
 - For `/v1/completions`: the original text `prompt` is replaced with the `token_ids` array from the render response, if the render step exists
 - For `/v1/chat/completions` and `/v1/responses`: the original request body is preserved unchanged
@@ -560,7 +560,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 POST <gateway>/inference/v1/generate
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: encode
+x-llm-d-epp-profile: encode
 ```
 
 For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder token):
@@ -610,7 +610,7 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: encode
+x-llm-d-epp-profile: encode
 ```
 
 Each request contains a single image from the original message (without text content); the worker extracts pixel data from the image_url directly and derives its own mm_hash from the image content:
@@ -662,7 +662,7 @@ For image 0:
 POST <gateway>/v1/responses
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: encode
+x-llm-d-epp-profile: encode
 ```
 
 Same single-image fan-out as Option B, in the Responses shape. The client's
@@ -745,7 +745,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 POST <gateway>/inference/v1/generate
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: prefill
+x-llm-d-epp-profile: prefill
 ```
 
 ```json
@@ -806,7 +806,7 @@ EPP-Profile: prefill
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: prefill
+x-llm-d-epp-profile: prefill
 ```
 
 ```json
@@ -864,7 +864,7 @@ For `/v1/completions` requests (no images, no encode stage):
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: prefill
+x-llm-d-epp-profile: prefill
 ```
 
 ```json
@@ -906,7 +906,7 @@ request shape, with the Responses output cap and `store` pinned to `false`:
 POST <gateway>/v1/responses
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: prefill
+x-llm-d-epp-profile: prefill
 ```
 
 ```json
@@ -989,7 +989,7 @@ Forwards the original client request body (enriched with `kv_transfer_params` an
 POST <gateway>/v1/chat/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 ```
 
 ```json
@@ -1036,7 +1036,7 @@ EPP-Profile: decode
 POST <gateway>/v1/responses
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 ```
 
 The `uuid` is stamped onto each `input_image` part, in the order the images were
@@ -1086,7 +1086,7 @@ and `stream` are whatever the client sent.
 POST <gateway>/v1/completions
 Content-Type: application/json
 X-Request-ID: <request_id>
-EPP-Profile: decode
+x-llm-d-epp-profile: decode
 ```
 
 ```json
@@ -1114,7 +1114,7 @@ EPP-Profile: decode
 - `image_url` retains the original base64 data URI from the replace-media-urls step so the decode worker can process images and produce the correct token sequence (matching what prefill computed)
 - `kv_transfer_params` is injected at the top level of the request body for all three endpoints (`/v1/chat/completions`, `/v1/completions`, and `/inference/v1/generate`)
 - `do_remote_decode: false, do_remote_prefill: true` is added by the coordinator to signal the decode worker to fetch KV from the remote prefill worker
-- The `EPP-Profile: decode` header is used for routing (replaces the old `/decode/` path prefix)
+- The `x-llm-d-epp-profile: decode` header is used for routing (replaces the old `/decode/` path prefix)
 
 ### Response (non-streaming)
 
@@ -1163,11 +1163,11 @@ data: [DONE]
 
 ---
 
-## EPP-Profile Header and Routing
+## x-llm-d-epp-profile Header and Routing
 
-The coordinator uses the `EPP-Profile` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway forwards the request to the EPP, which reads the header to run the matching scheduling profile and pick the correct pod.
+The coordinator uses the `x-llm-d-epp-profile` HTTP header to identify the pipeline stage of each request sent to workers through the Inference Gateway. The gateway forwards the request to the EPP, which reads the header to run the matching scheduling profile and pick the correct pod.
 
-| Stage             | EPP-Profile Header Value | Request Path              |
+| Stage             | x-llm-d-epp-profile Header Value | Request Path              |
 |-------------------|----------------------|---------------------------|
 | Encode            | `encode`             | `/v1/chat/completions` |
 | Prefill           | `prefill`            | `/v1/chat/completions`, `/v1/completions`, or `/inference/v1/generate` |
@@ -1210,7 +1210,7 @@ Requests to `/v1/completions` follow a simplified pipeline:
 
 1. **replace-media-urls**: skipped (completions cannot contain multimedia content)
 2. **render**: skipped if `prompt` is already a token array (array of integers); otherwise runs to tokenize the text prompt
-3. **conditional-decode**: runs normally (with `EPP-Profile: decode` header)
+3. **conditional-decode**: runs normally (with `x-llm-d-epp-profile: decode` header)
 4. **encode**: skipped (no images)
 5. **prefill**: sends request with `prompt` field containing the token array
 6. **decode**: sends request with `prompt` field containing the token array + `kv_transfer_params`
@@ -1286,7 +1286,7 @@ A `/inference/v1/generate` client request is already tokenized (`token_ids` in t
 
 1. **replace-media-urls**: no-op (no `messages` array; images arrive as `kwargs_data` tensors keyed by `mm_hashes`, not URLs)
 2. **render**: no upstream call -- parses `token_ids` and `features` from the body, validates `sampling_params` and placeholder bounds, and populates `TokenIDs` + `MultimodalEntries` (see [2.C](#2c-inferencev1generate))
-3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `EPP-Profile: decode` and `Prefer: if-available`
+3. **conditional-decode**: forwards the original body (`token_ids` + `features`) to `/inference/v1/generate` with `x-llm-d-epp-profile: decode` and `Prefer: if-available`
 4. **encode**: skipped entirely. We choose not to use encoder disaggregation (a separate encode stage that produces embeddings and hands them to prefill via EC handoff) for `/inference/v1/generate` due to [vllm-project/vllm#46722](https://github.com/vllm-project/vllm/issues/46722). Instead the prefill worker runs the vision encoder inline from `kwargs_data`, so there is no encode fan-out and no EC handoff, and the preprocessed pixel tensor is shipped once (to prefill) instead of twice (to a separate encoder and then to prefill). That remaining copy still carries the full preprocessed tensor; shrinking it by sending the raw image for prefill to preprocess is proposed in the same issue
 5. **prefill**: sends `token_ids` + `features` (+ `kwargs_data`), with `kv_transfer_params` at the top level. No `ec_transfer_params`, since encode did not run
 6. **decode**: sends `token_ids` with `kv_transfer_params` at the top level

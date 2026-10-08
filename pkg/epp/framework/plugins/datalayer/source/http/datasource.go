@@ -66,6 +66,8 @@ type HTTPDataSource[T any] struct {
 	useNodeAddress bool
 	// interval is the desired scrape period; zero means every base tick.
 	interval time.Duration
+	// onExtractor, when set, observes each extractor bound to the source.
+	onExtractor func(fwkplugin.Plugin)
 
 	client Client
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
@@ -104,6 +106,7 @@ type options struct {
 	portOverride   int
 	useNodeAddress bool
 	interval       time.Duration
+	onExtractor    func(fwkplugin.Plugin)
 }
 
 // WithPortOverride makes the source scrape podIP:port instead of the
@@ -125,6 +128,12 @@ func WithUseNodeAddress() Option {
 // every base tick (the default).
 func WithInterval(d time.Duration) Option {
 	return func(o *options) { o.interval = d }
+}
+
+// WithExtractorObserver calls fn with each extractor bound to the source, so a source can
+// adapt its parser to what the extractors read. fn runs under the source's lock.
+func WithExtractorObserver(fn func(fwkplugin.Plugin)) Option {
+	return func(o *options) { o.onExtractor = fn }
 }
 
 // ParseIntervalOption parses a duration string from plugin parameters and
@@ -192,6 +201,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
 		interval:       cfg.interval,
+		onExtractor:    cfg.onExtractor,
 		client:         cl,
 		parser:         parser,
 	}, nil
@@ -320,6 +330,9 @@ func (s *HTTPDataSource[T]) AppendExtractor(ext fwkplugin.Plugin) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.exts = append(s.exts, typed)
+	if s.onExtractor != nil {
+		s.onExtractor(ext)
+	}
 	return nil
 }
 

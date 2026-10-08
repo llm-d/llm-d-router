@@ -169,7 +169,12 @@ type TrainingEntry struct {
 	NumTokensGenerated int     `json:"num_tokens_generated"`
 	ActualTTFT         float64 `json:"actual_ttft_ms"`
 	ActualTPOT         float64 `json:"actual_tpot_ms"`
-	PrefixCacheScore   float64 `json:"prefix_cache_score"`
+	// PredictedTTFT and PredictedTPOT are the selected-endpoint predictions
+	// paired with the matching actual for live drift detection. Omitted when
+	// no valid selected prediction was available for that sample.
+	PredictedTTFT    *float64 `json:"predicted_ttft_ms,omitempty"`
+	PredictedTPOT    *float64 `json:"predicted_tpot_ms,omitempty"`
+	PrefixCacheScore float64  `json:"prefix_cache_score"`
 	// EncoderInputSize is the total size of the request's multimodal encoder
 	// items; EncoderMatchedSize is the portion likely present in the target
 	// pod's encoder cache. Both are 0 for text-only requests.

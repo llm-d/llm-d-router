@@ -2,6 +2,7 @@
 {{ include "llm-d-router.validations.standalone" . }}
 {{ include "llm-d-epp.config" . }}
 {{ include "llm-d-epp.deployment" . }}
+{{ include "llm-d-epp.hpa" . }}
 {{ include "llm-d-epp.proxy-deployment" . }}
 {{ include "llm-d-epp.proxy-service" . }}
 {{ include "llm-d-router.gke" . }}

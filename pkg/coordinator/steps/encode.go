@@ -29,7 +29,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -143,52 +142,49 @@ func (s *EncodeStep) executeOne(
 	format reqcommon.APIType,
 	imageParts []imagePart,
 ) (map[string]any, http.Header, error) {
+	logger = logger.WithValues("index", index)
+
 	body, err := s.buildEncodeBody(reqCtx, entry, format, imageParts)
 	if err != nil {
 		err = fmt.Errorf("encode[%d]: %w", index, err)
-		logger.Error(err, "encode fanout build body", "index", index)
+		logger.Error(err, "encode fanout build body")
 		return nil, nil, err
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		err = fmt.Errorf("encode[%d]: marshal: %w", index, err)
-		logger.Error(err, "encode fanout marshal", "index", index)
+		logger.Error(err, "encode fanout marshal")
 		return nil, nil, err
 	}
 
 	path := format.Path()
-	logger.V(logutil.DEFAULT).Info("sending sub-request", "index", index, "path", path)
-	headers := reqCtx.ForwardedHeaders()
-	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = gateway.PhaseEncode
-	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("sub-request body", "index", index, "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
-	}
-
-	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamEncode)
-	resp, err := s.gwClient.Post(ctx, path, bodyBytes, headers)
-	call.Done()
+	logger.V(logutil.DEFAULT).Info("sending sub-request", "path", path)
+	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+		logMsg:   "sub-request body",
+		step:     fmt.Sprintf("%s[%d]", EncodeStepName, index),
+		upstream: coordmetrics.UpstreamEncode,
+		path:     path,
+		body:     bodyBytes,
+		headers:  gatewayHeaders(reqCtx, gateway.PhaseEncode),
+	})
 	if err != nil {
-		err = fmt.Errorf("encode[%d]: request: %w", index, err)
-		logger.Error(err, "encode fanout request", "index", index, "path", path)
+		var upstream *pipeline.UpstreamError
+		if errors.As(err, &upstream) {
+			logger.Error(err, "encode fanout status", "status", upstream.StatusCode)
+		} else {
+			logger.Error(err, "encode fanout request", "path", path)
+		}
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		err := upstreamError(fmt.Sprintf("%s[%d]", EncodeStepName, index), resp.StatusCode, respBody)
-		logger.Error(err, "encode fanout status", "index", index, "status", resp.StatusCode)
-		return nil, nil, err
-	}
-
 	var encResp encodeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
 		err = fmt.Errorf("encode[%d]: decode response: %w", index, err)
-		logger.Error(err, "encode fanout decode", "index", index)
+		logger.Error(err, "encode fanout decode")
 		return nil, nil, err
 	}
-	return coerceParamsMap(logger.WithValues("index", index), encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
+	return coerceParamsMap(logger, encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
 }
 
 func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {

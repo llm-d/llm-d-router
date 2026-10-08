@@ -163,11 +163,12 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		start := time.Now()
 		// Client timeout is far larger than the backstop, so a 504 means the
 		// backstop fired; a client-side timeout error would mean it hung.
-		status, _, _, err := env.send(8 * time.Second)
+		status, hdr, _, err := env.send(8 * time.Second)
 		elapsed := time.Since(start)
 
 		Expect(err).ToNot(HaveOccurred(), "request must return via the backstop, not hang")
 		Expect(status).To(Equal(http.StatusGatewayTimeout))
+		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
 		Expect(elapsed).To(BeNumerically("<", 5*time.Second), "should return shortly after the 300ms backstop")
 	})
 

@@ -20,7 +20,6 @@ linters:
     - fatcontext
     - forbidigo
     - ginkgolinter
-    - goconst
     - gocritic
     - govet
     - ineffassign
@@ -59,7 +58,6 @@ linters:
         linters:
           - revive
           - perfsprint
-          - goconst
           - dupword
           - prealloc
       # The panic ban applies only to pkg/epp/flowcontrol (non-test files); see that package's doc.go.

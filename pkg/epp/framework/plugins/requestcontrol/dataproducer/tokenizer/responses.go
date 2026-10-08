@@ -243,9 +243,10 @@ func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, error) {
 }
 
 // responsesContentTextTypes are the Responses content-part "type" values
-// this code converts to a chat-completions text block. A part of any other
-// type (input_image, refusal, and so on) fails the conversion rather than
-// being guessed at or dropped.
+// this code converts to a chat-completions text block. input_image converts
+// separately (see responsesContentPart); a part of any other type (refusal,
+// input_audio, and so on) fails the conversion rather than being guessed at
+// or dropped.
 var responsesContentTextTypes = map[string]bool{
 	"input_text":  true,
 	"output_text": true,
@@ -254,10 +255,10 @@ var responsesContentTextTypes = map[string]bool{
 
 // responsesContent converts a Responses input item's "content" field into
 // chat-completions Content. A plain string passes through as Raw. An array
-// of parts converts every part; a single resulting text part collapses to
-// Raw, matching the plain-string case. A part this code cannot represent as
-// text fails the conversion: dropping it would tokenize a prompt shorter
-// than the one vLLM serves.
+// of parts converts every part (see responsesContentPart); a single
+// resulting text part collapses to Raw, matching the plain-string case. A
+// part this code cannot represent fails the conversion: dropping it would
+// tokenize a prompt shorter than the one vLLM serves.
 func responsesContent(raw any) (*tokenizerTypes.Content, error) {
 	switch v := raw.(type) {
 	case string:
@@ -272,22 +273,44 @@ func responsesContent(raw any) (*tokenizerTypes.Content, error) {
 			if !ok {
 				return nil, fmt.Errorf("responses content part of type %T is not supported by legacy translation", part)
 			}
-			partType, _ := p["type"].(string)
-			if !responsesContentTextTypes[partType] {
-				return nil, fmt.Errorf("responses content part type %q is not supported by legacy translation", partType)
+			block, err := responsesContentPart(p)
+			if err != nil {
+				return nil, err
 			}
-			text, ok := p["text"].(string)
-			if !ok {
-				return nil, fmt.Errorf("responses content part type %q has no text field", partType)
-			}
-			blocks = append(blocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text})
+			blocks = append(blocks, block)
 		}
-		if len(blocks) == 1 {
+		if len(blocks) == 1 && blocks[0].Type == blockTypeText {
 			return &tokenizerTypes.Content{Raw: blocks[0].Text}, nil
 		}
 		return &tokenizerTypes.Content{Structured: blocks}, nil
 	default:
 		return nil, fmt.Errorf("responses content of type %T is not supported by legacy translation", raw)
+	}
+}
+
+// responsesContentPart converts one content part. input_text/output_text
+// parts convert to a text block using their "text" field. input_image parts
+// convert to an image block using their "image_url" field, which carries
+// the URL as a bare string, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape. Any other type fails the conversion
+// rather than being guessed at or dropped.
+func responsesContentPart(p map[string]any) (tokenizerTypes.ContentBlock, error) {
+	partType, _ := p["type"].(string)
+	switch {
+	case responsesContentTextTypes[partType]:
+		text, ok := p["text"].(string)
+		if !ok {
+			return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q has no text field", partType)
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text}, nil
+	case partType == "input_image":
+		url, ok := p["image_url"].(string)
+		if !ok || url == "" {
+			return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q has no image_url field", partType)
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeImageURL, ImageURL: tokenizerTypes.ImageBlock{URL: url}}, nil
+	default:
+		return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q is not supported by legacy translation", partType)
 	}
 }
 

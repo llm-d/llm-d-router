@@ -53,7 +53,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedPreferHeader = r.Header.Get("Prefer")
-		receivedPhaseHeader = r.Header.Get(gateway.EPPProfileHeader)
+		receivedPhaseHeader = r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
@@ -90,7 +90,7 @@ func TestConditionalDecodeStep_CacheHit(t *testing.T) {
 		t.Fatalf("expected path %s, got %s", testChatCompletionsPath, receivedPath)
 	}
 	if receivedPhaseHeader != gateway.PhaseDecode {
-		t.Fatalf("expected EPP-Profile: %s, got %q", gateway.PhaseDecode, receivedPhaseHeader)
+		t.Fatalf("expected x-llm-d-epp-profile: %s, got %q", gateway.PhaseDecode, receivedPhaseHeader)
 	}
 	if receivedBody["model"] != testModelName {
 		t.Fatalf("expected model %s in request body, got %v", testModelName, receivedBody["model"])
