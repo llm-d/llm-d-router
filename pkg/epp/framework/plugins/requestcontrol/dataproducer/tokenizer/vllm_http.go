@@ -120,6 +120,8 @@ type vllmConfig struct {
 	URL string `json:"url,omitempty"`
 	// PrefillOnly reserves one output token on the render copy, without changing inference.
 	PrefillOnly bool `json:"prefillOnly,omitempty"`
+	// OmitMMKwargs asks vLLM to leave processed multimodal tensors out of render responses.
+	OmitMMKwargs bool `json:"omitMMKwargs,omitempty"`
 	// EndpointDiscovery sends render requests directly to endpoints published
 	// by the configured data-layer discovery provider. Mutually exclusive with URL.
 	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
@@ -153,6 +155,7 @@ type vllmHTTPRenderer struct {
 	mmTimeout      time.Duration
 	attemptTimeout time.Duration
 	prefillOnly    bool
+	omitMMKwargs   bool
 	// pluginName is the plugin_name label on the render metrics.
 	pluginName string
 	failureLog rate.Sometimes
@@ -210,6 +213,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		mmTimeout:      mmTimeout,
 		attemptTimeout: attemptTimeout,
 		prefillOnly:    cfg.PrefillOnly,
+		omitMMKwargs:   cfg.OmitMMKwargs,
 		failureLog:     rate.Sometimes{Interval: renderFailureLogInterval},
 	}, nil
 }
@@ -374,6 +378,11 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 			return fmt.Errorf("apply render-only output budget: %w", err)
 		}
 	}
+	if r.omitMMKwargs {
+		if payload, err = omitMMKwargs(payload); err != nil {
+			return fmt.Errorf("omit multimodal kwargs: %w", err)
+		}
+	}
 
 	start := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -420,6 +429,26 @@ func renderOnlyBudget(payload []byte) ([]byte, error) {
 		envelope["min_tokens"] = json.RawMessage("0")
 	}
 	return json.Marshal(envelope)
+}
+
+var omitMMKwargsField = []byte(`"return_mm_kwargs":false`)
+
+// omitMMKwargs adds "return_mm_kwargs":false before the closing brace of the render copy of a JSON
+// object. It splices instead of decoding, because the body can carry megabytes of base64 images.
+// A later duplicate key wins in vLLM's parser, so a client-sent value cannot override it.
+func omitMMKwargs(payload []byte) ([]byte, error) {
+	end := bytes.LastIndexByte(payload, '}')
+	head := bytes.TrimSpace(payload[:max(end, 0)])
+	if end < 0 || len(head) == 0 || head[0] != '{' || len(bytes.TrimSpace(payload[end+1:])) != 0 {
+		return nil, errors.New("render payload is not a JSON object")
+	}
+	out := make([]byte, 0, len(payload)+len(omitMMKwargsField)+1)
+	out = append(out, payload[:end]...)
+	if head[len(head)-1] != '{' {
+		out = append(out, ',')
+	}
+	out = append(out, omitMMKwargsField...)
+	return append(out, payload[end:]...), nil
 }
 
 // postJSONAttempt sends one render request and reports whether another endpoint may succeed.
