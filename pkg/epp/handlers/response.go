@@ -91,12 +91,10 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
 	}
 	if endOfStream {
-		// Token counts belong to the request, not to the chunk that happened to carry
-		// them: a server reporting cumulative usage on more than one chunk would
-		// otherwise be observed once per chunk. The zero counts of a response that
-		// reported no usage are not observed, since the input and output recorders
-		// drop non-positive values and the cached recorder is reached only when a
-		// usage block carried the detail.
+		// Recorded once here rather than per chunk: a server reporting cumulative
+		// usage on more than one chunk would otherwise be observed once per chunk.
+		// A stream that ends without reaching end of stream records no token counts,
+		// since the abnormal-termination path calls the director directly.
 		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
 		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
 		if reqCtx.Usage.PromptTokenDetails != nil {
@@ -112,11 +110,10 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 }
 
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
-// The Anthropic streaming format splits usage across events that reach the parser in
-// separate chunks: message_start carries the input counts and the cached-token detail,
-// message_delta carries the output count and may repeat the input counts. Each field is
-// therefore taken only from the blocks that report it, with a later block superseding an
-// earlier one. Parsers that emit usage once with every field populated are unaffected.
+// Anthropic streaming reports usage on message_start and again on message_delta, and a
+// block may carry only some of the fields, so a zero is read as "not reported" and
+// leaves the accumulated value alone. Parsers that emit usage once with every field
+// populated are unaffected.
 func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens

@@ -829,6 +829,8 @@ type Usage struct {
 }
 
 type PromptTokenDetails struct {
+	// CachedTokens is the prompt-cache read count, counted inside PromptTokens
+	// rather than added to it.
 	CachedTokens int `json:"cached_tokens"`
 }
 

@@ -105,14 +105,9 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	// count_tokens delegates token counting to the server and passes its response
-	// through, so only the envelope is read: Messages stays nil to keep the token
-	// producers out, while the model still resolves and rewrites. The server
-	// requires model, and a JSON null unmarshals into an envelope with no fields,
-	// so the field is validated here as messages is on the path below.
+	// through, so only the envelope is read: Messages stays nil, while the model
+	// still resolves and rewrites.
 	if countTokens {
-		if result.Model == "" {
-			return nil, errors.New("invalid count_tokens request: must have a model")
-		}
 		return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: true}, nil
 	}
 
@@ -177,37 +172,35 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	usage := fwkrh.Usage{}
 	applyInputTokens(&usage, usg)
-	if v, ok := jsonInt(usg, "output_tokens"); ok {
-		usage.CompletionTokens = v
-	}
+	usage.CompletionTokens = jsonInt(usg, "output_tokens")
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return &usage, nil
 }
 
-// applyInputTokens copies the input counts of an Anthropic usage block into usage.
-// The Messages API reports input across three additive fields, where input_tokens
-// counts only the tokens that were neither read from nor written to the prompt
-// cache, so the input the server processed is their sum. CachedTokens keeps the
-// cache_read_input_tokens subset that Usage documents. A block carrying none of
-// the three leaves usage untouched, so a message_delta reporting only output
-// tokens does not erase what message_start reported.
+// applyInputTokens sums the Messages API input counts into usage.PromptTokens.
+// input_tokens counts only the tokens that were neither read from nor written to
+// the prompt cache, so the input the server processed is input_tokens +
+// cache_read_input_tokens + cache_creation_input_tokens.
+//
+// A block reporting none of the three, or reporting them as zero before any count
+// is known, is left alone rather than zeroing what an earlier block set. A
+// zero-token prompt is unreachable on a path that requires at least one message.
 func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
-	input, inputOK := jsonInt(usg, "input_tokens")
-	read, readOK := jsonInt(usg, "cache_read_input_tokens")
-	creation, creationOK := jsonInt(usg, "cache_creation_input_tokens")
-	if !inputOK && !readOK && !creationOK {
+	read := jsonInt(usg, "cache_read_input_tokens")
+	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
+	if total == 0 {
 		return
 	}
-	usage.PromptTokens = input + read + creation
-	if readOK {
+	usage.PromptTokens = total
+	if read != 0 {
 		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
 	}
 }
 
-func jsonInt(m map[string]any, key string) (int, bool) {
-	v, ok := m[key].(float64)
-	return int(v), ok
+func jsonInt(m map[string]any, key string) int {
+	v, _ := m[key].(float64)
+	return int(v)
 }
 
 // Anthropic SSE streaming format:
@@ -216,7 +209,7 @@ func jsonInt(m map[string]any, key string) (int, bool) {
 //	data: {"type":"message_start","message":{"usage":{"input_tokens":25},...}}
 //
 //	event: message_delta
-//	data: {"type":"message_delta","delta":{...},"usage":{"input_tokens":25,"output_tokens":15}}
+//	data: {"type":"message_delta","delta":{...},"usage":{"input_tokens":30,"output_tokens":15}}
 //
 //	event: message_stop
 //	data: {"type":"message_stop"}
@@ -262,9 +255,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 				}
 				// The delta counts are cumulative and authoritative over message_start.
 				applyInputTokens(result, event.Usage)
-				if v, ok := jsonInt(event.Usage, "output_tokens"); ok {
-					result.CompletionTokens = v
-				}
+				result.CompletionTokens = jsonInt(event.Usage, "output_tokens")
 			}
 		}
 	}

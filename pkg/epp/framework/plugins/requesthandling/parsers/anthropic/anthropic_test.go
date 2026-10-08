@@ -34,8 +34,7 @@ import (
 )
 
 func TestAnthropicParser_NoPriorityRewrite(t *testing.T) {
-	// The Anthropic messages schema has no priority field and ignores extra keys,
-	// so injecting one would cost byte-identical forwarding for nothing.
+	// The Anthropic messages schema has no priority field and ignores extra keys.
 	var parser any = NewAnthropicParser()
 	_, ok := parser.(fwkrh.PriorityRewriter)
 	assert.False(t, ok, "anthropic-parser must not advertise PriorityRewriter")
@@ -814,16 +813,20 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 			},
 		},
 		{
-			name:    "null body",
+			// A body that resolves no model reaches the director, which rejects it
+			// once the payload is marshalable, as it does on /v1/messages.
+			name:    "null body resolves no model",
 			headers: map[string]string{":path": "/v1/messages/count_tokens"},
 			body:    []byte(`null`),
-			wantErr: true,
+			want:    &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap{}},
 		},
 		{
 			name:    "body without model",
 			headers: map[string]string{":path": "/v1/messages/count_tokens"},
 			body:    []byte(`{"messages":[{"role":"user","content":"Hello"}]}`),
-			wantErr: true,
+			want: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.PayloadMap{"messages": json.RawMessage(`[{"role":"user","content":"Hello"}]`)},
+			},
 		},
 		{
 			name:    "empty body",
@@ -851,7 +854,6 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 			if !got.SkipResponseProcessing {
 				t.Errorf("ParseRequest() SkipResponseProcessing = false, want true")
 			}
-			// Messages stays nil so no token producer runs on a count_tokens body.
 			tt.want.RawBody = tt.body
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() body mismatch (-want +got):\n%s", diff)

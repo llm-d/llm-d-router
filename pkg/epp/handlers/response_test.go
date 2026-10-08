@@ -333,6 +333,26 @@ func findHistogramMetric(t *testing.T, name string, labels map[string]string) *d
 	return nil
 }
 
+// histogramSampleCount reports how many observations a histogram holds for the
+// given labels, and zero when the series was never created.
+func histogramSampleCount(t *testing.T, name string, labels map[string]string) uint64 {
+	t.Helper()
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricHasLabels(metric, labels) {
+				return metric.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
 func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
 	got := make(map[string]string, len(metric.GetLabel()))
 	for _, label := range metric.GetLabel() {
@@ -458,8 +478,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
 	}
 
-	// Prompt tokens are the sum of the Messages API input fields: 1000 uncached plus
-	// the 800 read from the cache.
+	// 1000 uncached plus 800 read from the cache.
 	wantUsage := fwkrh.Usage{
 		PromptTokens:       1800,
 		CompletionTokens:   200,
@@ -489,9 +508,8 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	require.Equal(t, float64(200), outputTokens.GetSampleSum())
 }
 
-// vLLM builds the usage block for message_start and message_delta from the same
-// helper, so both events carry the cumulative input and cache counts. The counts
-// belong to one request and must reach the histograms once.
+// Both message_start and message_delta can carry the cumulative input and cache
+// counts. The counts belong to one request and must reach the histograms once.
 func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T) {
 	eppmetrics.Register()
 	eppmetrics.Reset()
@@ -554,6 +572,56 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 	outputTokens := findHistogramMetric(t, "llm_d_epp_request_output_tokens", labels)
 	require.Equal(t, uint64(1), outputTokens.GetSampleCount())
 	require.Equal(t, float64(200), outputTokens.GetSampleSum())
+}
+
+// A stream that never reaches end of stream records no token counts. The usage
+// parsed so far still accumulates on the request context for the response record.
+func TestHandleResponseBodyModelStreaming_IncompleteStreamRecordsNoTokens(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for _, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, false)
+	}
+
+	assert.Equal(t, 1800, reqCtx.Usage.PromptTokens)
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       reqcommon.DefaultFairnessID,
+		"priority":          "0",
+	}
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_input_tokens", labels))
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_cached_tokens", labels))
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_output_tokens", labels))
 }
 
 func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
