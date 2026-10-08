@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
@@ -33,15 +34,15 @@ import (
 
 const nilStr = "<nil>"
 
-// Modality identifies the type of multimodal content in a prompt.
-type Modality string
+// Modality identifies the type of multimodal content in a prompt. The
+// vocabulary is declared in pkg/common/request, which the coordinator and the
+// sidecar key on too, and aliased here so the framework contract names it.
+type Modality = reqcommon.Modality
 
-// Modality values match the model-server's multimodal hash keys so labels agree
-// across backends.
 const (
-	ModalityImage Modality = "image"
-	ModalityAudio Modality = "audio"
-	ModalityVideo Modality = "video"
+	ModalityImage = reqcommon.ModalityImage
+	ModalityAudio = reqcommon.ModalityAudio
+	ModalityVideo = reqcommon.ModalityVideo
 )
 
 // RequestPayload represents a strongly-typed unmarshaled request payload or raw bytes.

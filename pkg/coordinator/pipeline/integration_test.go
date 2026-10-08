@@ -52,9 +52,9 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 					"features": map[string]any{
-						"mm_hashes":       map[string][]string{steps.ModalityImage: {"vllm-hash-img0"}},
-						"mm_placeholders": map[string][]any{steps.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
-						"kwargs_data":     map[string][]string{steps.ModalityImage: {"dGVuc29yLWRhdGE="}},
+						"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-img0"}},
+						"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+						"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWRhdGE="}},
 					},
 				})
 			}))
@@ -73,7 +73,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 					// Generate format: features at top level
 					features, _ := parsed["features"].(map[string]any)
 					mmHashes, _ := features["mm_hashes"].(map[string]any)
-					imageHashes, _ := mmHashes[steps.ModalityImage].([]any)
+					imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 					hash, _ := imageHashes[0].(string)
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"ec_transfer_params": map[string]any{
@@ -192,9 +192,9 @@ func TestFullPipeline_Integration(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{steps.ModalityImage: {"vllm-hash-img0"}},
-				"mm_placeholders": map[string][]any{steps.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
-				"kwargs_data":     map[string][]string{steps.ModalityImage: {"dGVuc29yLWRhdGE="}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-img0"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWRhdGE="}},
 			},
 		})
 	}))
@@ -212,7 +212,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 			_ = json.Unmarshal(body, &parsed)
 			features, _ := parsed["features"].(map[string]any)
 			mmHashes, _ := features["mm_hashes"].(map[string]any)
-			imageHashes, _ := mmHashes[steps.ModalityImage].([]any)
+			imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
@@ -372,12 +372,12 @@ func TestFullPipeline_ResponsesFormat(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 			"features": map[string]any{
-				"mm_hashes": map[string][]string{steps.ModalityImage: {contentHash, outputHash}},
-				"mm_placeholders": map[string][]any{steps.ModalityImage: {
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {contentHash, outputHash}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {
 					map[string]any{"offset": 1, "length": 3},
 					map[string]any{"offset": 4, "length": 3},
 				}},
-				"kwargs_data": map[string][]string{steps.ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
 			},
 		})
 	}))

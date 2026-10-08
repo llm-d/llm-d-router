@@ -29,7 +29,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 )
 
 func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
@@ -42,9 +41,9 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{steps.ModalityImage: {}},
-				"mm_placeholders": map[string][]any{steps.ModalityImage: {}},
-				"kwargs_data":     map[string][]string{steps.ModalityImage: {}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
 			},
 		})
 	}))

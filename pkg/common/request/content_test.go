@@ -17,12 +17,39 @@ limitations under the License.
 package request
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"maps"
 	"reflect"
 	"slices"
 	"testing"
 )
+
+// Base64DecodedLen must be exact, not an estimate: the coordinator bounds an
+// inline media payload with it, so a size read even one byte high would reject
+// a payload of exactly the configured cap. Padding is what makes it exact, so
+// every residue of 3 is covered rather than a sample.
+func TestBase64DecodedLen(t *testing.T) {
+	for n := 0; n < 300; n++ {
+		b64 := base64.StdEncoding.EncodeToString(make([]byte, n))
+		if got := Base64DecodedLen(b64); got != n {
+			t.Fatalf("Base64DecodedLen of %d encoded bytes = %d, want %d", n, got, n)
+		}
+	}
+	// The sizes a cap actually takes: 1 MiB and 10 MiB are both 1 mod 3, the
+	// residue that left the old encoded-length bound 2 bytes slack.
+	for _, n := range []int{1023, 1024, 1 << 20, 10 << 20} {
+		b64 := base64.StdEncoding.EncodeToString(make([]byte, n))
+		if got := Base64DecodedLen(b64); got != n {
+			t.Fatalf("Base64DecodedLen of %d encoded bytes = %d, want %d", n, got, n)
+		}
+	}
+	// A payload with no data is zero rather than negative, and an unpadded one
+	// is measured as the characters it carries.
+	if got := Base64DecodedLen("===="); got != 0 {
+		t.Errorf("all-padding payload = %d, want 0", got)
+	}
+}
 
 func TestMediaPartURL(t *testing.T) {
 	tests := []struct {

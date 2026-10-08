@@ -27,7 +27,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -123,7 +127,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -222,7 +226,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -293,7 +297,7 @@ func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 		Model:        "llama-3",
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz"},
 		Body: map[string]any{
@@ -529,7 +533,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 		Model:        "test",
 		Stream:       true,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": true},
@@ -574,7 +578,7 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 		Model:        "test",
 		Stream:       false,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": false},
@@ -676,6 +680,303 @@ func TestDecodeStep_TransportError(t *testing.T) {
 	}
 }
 
+// ---- injectUUIDs across audio, video, and input_audio ---------------------
+
+// Entry hashes reused across the injectUUIDs tests. Extracted so goconst does
+// not flag their repetition and so a rename lands in one place.
+const (
+	testHashImage = "H-img"
+	testHashAudio = "H-aud"
+	testHashVideo = "H-vid"
+)
+
+// Every recognized media content-part type receives a uuid tag matching its
+// (modality, local index) entry in MultimodalEntries. Non-media parts (text,
+// unknown types) are left alone.
+func TestInjectUUIDs_TagsAllMediaParts(t *testing.T) {
+	step := &DecodeStep{}
+	imagePart := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	audioURLPart := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u-aud"}}
+	inputAudioPart := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d", "format": "wav"}}
+	videoPart := map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u-vid"}}
+	textPart := map[string]any{"type": "text", "text": "hi"}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{textPart, imagePart, audioURLPart, videoPart, inputAudioPart},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: "H-aud-url"},
+			{Modality: reqcommon.ModalityVideo, Hash: "H-vid"},
+			{Modality: reqcommon.ModalityAudio, Hash: "H-input-audio"},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+
+	if got := imagePart["uuid"]; got != testHashImage {
+		t.Errorf("image uuid = %v, want H-img", got)
+	}
+	if got := audioURLPart["uuid"]; got != "H-aud-url" {
+		t.Errorf("audio_url uuid = %v, want H-aud-url", got)
+	}
+	if got := inputAudioPart["uuid"]; got != "H-input-audio" {
+		t.Errorf("input_audio uuid = %v, want H-input-audio", got)
+	}
+	if got := videoPart["uuid"]; got != "H-vid" {
+		t.Errorf("video uuid = %v, want H-vid", got)
+	}
+	if _, ok := textPart["uuid"]; ok {
+		t.Errorf("text part must not be tagged: %+v", textPart)
+	}
+}
+
+// Two audio parts in the same request receive the hashes of the two audio
+// entries, in walker order.
+func TestInjectUUIDs_TagsRepeatedModalityInOrder(t *testing.T) {
+	step := &DecodeStep{}
+	aud0 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u0"}}
+	aud1 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u1"}}
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{aud0, aud1}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityAudio, Hash: "H0"},
+			{Modality: reqcommon.ModalityAudio, Hash: "H1"},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+	if got := aud0["uuid"]; got != "H0" {
+		t.Errorf("audio[0] uuid = %v, want H0", got)
+	}
+	if got := aud1["uuid"]; got != "H1" {
+		t.Errorf("audio[1] uuid = %v, want H1", got)
+	}
+}
+
+// Every media-typed part consumes a slot here, whether or not it still carries
+// usable media. replace-media-urls rejects a part with no payload as it builds
+// the entries (see collectMediaRefs), so a request that reaches decode has one
+// entry per part of its modality, and this walk must count the same parts in
+// the same order. A walk that skipped one would hand every later part of that
+// modality the hash that belongs to its neighbour, which is the mispairing this
+// pins: the part at position 0 gets the position-0 hash even when it is the
+// broken one, and the surplus part is left untagged.
+func TestInjectUUIDs_CountsEveryMediaPart(t *testing.T) {
+	step := &DecodeStep{}
+	brokenImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": nil}}
+	laterImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	brokenInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "", "format": "wav"}}
+	laterInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AA==", "format": "wav"}}
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: testChatCompletionsPath,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{brokenImg, laterImg, brokenInputAudio, laterInputAudio},
+				},
+			},
+		},
+		// One entry per modality against two parts each, so the second part of
+		// each modality is the surplus one.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+
+	if got := brokenImg["uuid"]; got != testHashImage {
+		t.Errorf("image[0] uuid = %v, want %s: a broken part still holds its position", got, testHashImage)
+	}
+	if got, tagged := laterImg["uuid"]; tagged {
+		t.Errorf("image[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+	if got := brokenInputAudio["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want %s: a broken part still holds its position", got, testHashAudio)
+	}
+	if got, tagged := laterInputAudio["uuid"]; tagged {
+		t.Errorf("audio[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+}
+
+// Pins what happens when a modality has more well-formed parts than entries:
+// the surplus part is left without a uuid and the request proceeds.
+//
+// Degrading rather than failing is deliberate, and differs from the encode step
+// on purpose: uuid is only the decode backend's prefix-cache key, so an
+// untagged part still carries its payload and the request stays correct. What
+// it costs is the worker hashing and re-processing that media, which is cheap
+// for an image and is not for audio or video. The encode fanout fails on the
+// same mismatch because it would otherwise pair an entry with another part's
+// bytes.
+//
+// The surplus parts are the trailing ones, so every earlier part keeps the hash
+// it would have received anyway. Asserting the key's absence, rather than a
+// non-matching value, is what makes a "tagged with the wrong hash" regression
+// fail here. The image part is a control: an audio overflow must not shift
+// another modality's positions.
+func TestInjectUUIDs_ExtraPartForModalityStaysUntagged(t *testing.T) {
+	step := &DecodeStep{}
+	imagePart := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	aud0 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u0"}}
+	aud1 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u1"}}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{imagePart, aud0, aud1}},
+			},
+		},
+		// Two audio parts, one audio entry.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	step.injectUUIDs(reqCtx, logr.New(sink))
+
+	if got := aud0["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want H-aud", got)
+	}
+	if got, tagged := aud1["uuid"]; tagged {
+		t.Errorf("audio[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+	if got := imagePart["uuid"]; got != testHashImage {
+		t.Errorf("image uuid = %v, want H-img; an audio overflow must not shift image positions", got)
+	}
+
+	if len(sink.infos) != 1 {
+		t.Fatalf("expected 1 log line for the miss, got %d (errors: %d)", len(sink.infos), len(sink.errors))
+	}
+	if sink.infos[0].level != logutil.DEBUG {
+		t.Errorf("miss logged at V(%d), want V(%d)", sink.infos[0].level, logutil.DEBUG)
+	}
+	if len(sink.errors) != 0 {
+		t.Errorf("a surplus part is not an error condition, got %d error logs", len(sink.errors))
+	}
+}
+
+// The opposite mismatch to the test above, which the stamping walk cannot see:
+// it iterates parts, so an entry with no part to stamp is never visited and
+// used to pass unrecorded. That direction is the worse one. The entry's hash
+// still reaches the prefiller, because PreparePrefillECParams flattens every
+// encode response into ec_transfer_params, so the prefill body ends up
+// describing an EC buffer that no part of the decode body names by uuid.
+//
+// Pinning the level is the point of the test, since the whole branch is a log
+// line: DEBUG, the same as the surplus-part branch, so one verbosity shows
+// both directions of the mismatch. The image entry has no part at all, the
+// audio entry has one of its two, and both must be reported; the single video
+// part is a control that a fully paired modality stays quiet.
+func TestInjectUUIDs_EntryWithNoMediaPartIsLogged(t *testing.T) {
+	step := &DecodeStep{}
+	audioPart := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u-aud"}}
+	videoPart := map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u-vid"}}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{audioPart, videoPart}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			// One image entry and no image part; two audio entries and one
+			// audio part; one video entry and one video part.
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio + "-2"},
+			{Modality: reqcommon.ModalityVideo, Hash: testHashVideo},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	step.injectUUIDs(reqCtx, logr.New(sink))
+
+	if got := audioPart["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want %v; a surplus entry must not stop the parts that do pair", got, testHashAudio)
+	}
+	if got := videoPart["uuid"]; got != testHashVideo {
+		t.Errorf("video uuid = %v, want %v", got, testHashVideo)
+	}
+
+	// Map iteration order is unspecified, so count the lines rather than
+	// indexing them: image and audio each report, video does not.
+	if len(sink.infos) != 2 {
+		t.Fatalf("expected 2 log lines, one per modality with a surplus entry, got %d", len(sink.infos))
+	}
+	for _, got := range sink.infos {
+		if got.msg != "MultimodalEntry with no media part" {
+			t.Errorf("unexpected log line %q", got.msg)
+		}
+		if got.level != logutil.DEBUG {
+			t.Errorf("surplus entry logged at V(%d), want V(%d)", got.level, logutil.DEBUG)
+		}
+	}
+	if len(sink.errors) != 0 {
+		t.Errorf("a surplus entry degrades rather than fails, got %d error logs", len(sink.errors))
+	}
+}
+
+// The decode counterpart of TestPrefillStep_EntryWithoutModalityFails: covers
+// the validateEntryModalities guard at this step's boundary, not the guard
+// itself (utils_test.go does that). Decode proxies straight to the worker, and
+// uuid tagging keys on Modality, so without the guard the response would be
+// built on whichever part the empty label paired with. The upstream handler
+// fails the test if it runs, and nothing may be written to the client: the
+// guard must reject before the proxy takes over the response.
+func TestDecodeStep_EntryWithoutModalityFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("decode must not reach the upstream with an untagged entry")
+	}))
+	defer server.Close()
+
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		ParamKVConnector: kv.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: testChatCompletionsPath,
+		Model:        "test-model",
+		TokenIDs:     []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Hash: "hash-a", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+		Body:             map[string]any{"model": "test-model", "stream": false, "messages": []any{}},
+		ResponseWriter:   recorder,
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected an error for an entry with no modality")
+	}
+	// A coordinator-side invariant break, so a 5xx rather than blaming the client.
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected a non-ErrBadRequest failure, got %v", err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Errorf("expected nothing written to the client, got %q", recorder.Body.String())
+	}
+}
+
 // TestDecodeStep_Responses_StampsFunctionCallOutputImage verifies the uuid
 // stamping walk sees the same image set replace-media-urls built entries from,
 // including an image under a function_call_output's output. An unstamped part
@@ -723,8 +1024,8 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 		Model:        "llama-3",
 		TokenIDs:     []int{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
-			{Index: 1, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz"},
 		Body: map[string]any{
@@ -760,7 +1061,7 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 // it hashes the image itself and never reads the entry primed into the encoder
 // cache. Surplus entries leave mm_hashes naming an image the decode body does
 // not identify.
-func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
+func TestInjectMediaPartUUIDs_CountMismatch(t *testing.T) {
 	newInput := func(parts int) []any {
 		content := make([]any, 0, parts)
 		for i := 0; i < parts; i++ {
@@ -774,7 +1075,7 @@ func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
 	newEntries := func(n int) []pipeline.MultimodalEntry {
 		entries := make([]pipeline.MultimodalEntry, 0, n)
 		for i := 0; i < n; i++ {
-			entries = append(entries, pipeline.MultimodalEntry{Index: i, Hash: fmt.Sprintf("hash-%d", i)})
+			entries = append(entries, pipeline.MultimodalEntry{Modality: reqcommon.ModalityImage, Hash: fmt.Sprintf("hash-%d", i)})
 		}
 		return entries
 	}
@@ -792,7 +1093,7 @@ func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := newInput(tc.parts)
-			injectImagePartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries))
+			injectMediaPartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries), logr.Discard())
 
 			content := input[0].(map[string]any)["content"].([]any)
 			for i, want := range tc.want {

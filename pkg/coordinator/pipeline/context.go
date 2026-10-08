@@ -173,16 +173,22 @@ type RequestContext struct {
 	ResponseWriter http.ResponseWriter
 }
 
-// MultimodalEntry describes one downloaded multimodal item (e.g. an image) and
-// where it sits in the tokenized prompt. Index is its position in the request's
-// multimodal list. Base64Data and ContentType come from the media download;
-// Hash and KwargsData are filled in by the render step; Placeholder marks the
-// span of placeholder tokens the encode step replaces.
+// MultimodalEntry describes one multimodal item in the request and where it
+// sits in the tokenized prompt. Modality names the kind of content the item
+// carries; reqcommon.PartModality derives it from the content-part type
+// for a request that carries parts, and a token-in request's own feature-map
+// key supplies it otherwise. Hash and KwargsData are filled in by the render
+// step; Placeholder marks the span of placeholder tokens the encode step
+// replaces. The bytes stay in the request body (data URI or input_audio.data)
+// rather than on the entry, so a large audio or video payload is not duplicated
+// on reqCtx for the request's lifetime.
+//
+// An entry's position in this slice means nothing on its own: steps pair an
+// entry with its content part by counting entries of the same Modality. See
+// steps.collectMediaParts for the invariant that keeps the two lined up.
 type MultimodalEntry struct {
-	Index       int
+	Modality    reqcommon.Modality
 	Hash        string
-	Base64Data  string
-	ContentType string
 	KwargsData  string
 	Placeholder PlaceholderRange
 }
