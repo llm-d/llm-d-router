@@ -567,3 +567,81 @@ func BenchmarkLabelsMatch(b *testing.B) {
 		}
 	}
 }
+
+// TestAggregateMetric determines how a family exposing one series per engine is folded into one value.
+func TestAggregateMetric(t *testing.T) {
+	engines := makeMetricFamily("vllm:num_requests_waiting",
+		makeMetric(map[string]string{"engine": "0"}, 6, 0),
+		makeMetric(map[string]string{"engine": "1"}, 10, 0),
+		makeMetric(map[string]string{"engine": "2"}, 11, 0),
+		makeMetric(map[string]string{"engine": "3"}, 7, 0),
+	)
+	requestTypes := makeMetricFamily("nv_trt_llm_request_metrics",
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "0"}, 3, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "0"}, 50, 0),
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "1"}, 4, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "1"}, 60, 0),
+	)
+	nonFinite := func(v float64) *dto.MetricFamily {
+		return makeMetricFamily("non_finite",
+			makeMetric(map[string]string{"engine": "0"}, 3, 0),
+			makeMetric(map[string]string{"engine": "1"}, v, 0),
+		)
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"vllm:num_requests_waiting":  engines,
+		"nv_trt_llm_request_metrics": requestTypes,
+		"single":                     makeMetricFamily("single", makeMetric(nil, 5, 0)),
+		"nan":                        nonFinite(math.NaN()),
+		"pos_inf":                    nonFinite(math.Inf(1)),
+		"neg_inf":                    nonFinite(math.Inf(-1)),
+	}
+
+	tests := []struct {
+		name    string
+		spec    *Spec
+		agg     aggregation
+		want    float64
+		wantErr bool
+	}{
+		{name: "sum over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateSum, want: 34},
+		{name: "max over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateMax, want: 11},
+		{
+			name: "sum only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateSum, want: 7,
+		},
+		{
+			name: "max only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateMax, want: 4,
+		},
+		{name: "single series sum", spec: &Spec{Name: "single"}, agg: aggregateSum, want: 5},
+		{name: "single series max", spec: &Spec{Name: "single"}, agg: aggregateMax, want: 5},
+		{
+			name: "no matching series",
+			spec: &Spec{Name: "vllm:num_requests_waiting", Labels: map[string]string{"engine": "9"}},
+			agg:  aggregateSum, wantErr: true,
+		},
+		{name: "family not found", spec: &Spec{Name: "absent"}, agg: aggregateSum, wantErr: true},
+		{name: "nil spec", spec: nil, agg: aggregateSum, wantErr: true},
+		{name: "NaN series sum", spec: &Spec{Name: "nan"}, agg: aggregateSum, wantErr: true},
+		{name: "NaN series max", spec: &Spec{Name: "nan"}, agg: aggregateMax, wantErr: true},
+		{name: "+Inf series sum", spec: &Spec{Name: "pos_inf"}, agg: aggregateSum, wantErr: true},
+		{name: "+Inf series max", spec: &Spec{Name: "pos_inf"}, agg: aggregateMax, wantErr: true},
+		{name: "-Inf series sum", spec: &Spec{Name: "neg_inf"}, agg: aggregateSum, wantErr: true},
+		{name: "-Inf series max", spec: &Spec{Name: "neg_inf"}, agg: aggregateMax, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.spec.aggregateMetric(families, tt.agg)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.InDelta(t, tt.want, got, 1e-9)
+		})
+	}
+}

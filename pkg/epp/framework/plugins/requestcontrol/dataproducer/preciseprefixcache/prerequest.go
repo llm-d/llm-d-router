@@ -117,6 +117,7 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	cache := ttlcache.New[string, *speculativeEntries](
 		ttlcache.WithTTL[string, *speculativeEntries](ttl),
 	)
+	logger := log.FromContext(ctx).WithName(PluginType)
 	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
 		item *ttlcache.Item[string, *speculativeEntries],
 	) {
@@ -124,11 +125,18 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 			return
 		}
 		entries := item.Value()
+		keys := make([]kvblock.BlockHash, 0)
 		for _, promptKeys := range entries.perPromptKeys {
-			for _, reqKey := range promptKeys {
-				//nolint:errcheck // best-effort cleanup on TTL expiry
-				index.Evict(ctx, reqKey, kvblock.RequestKey, entries.podEntries)
-			}
+			keys = append(keys, promptKeys...)
+		}
+		if len(keys) == 0 || len(entries.podEntries) == 0 {
+			return
+		}
+		// On failure the entries stay until the pod's next Clear, or until the same
+		// prefix is routed to the same pod again and that TTL expiry succeeds.
+		if err := index.Evict(ctx, kvblock.RequestKey, keys, entries.podEntries); err != nil {
+			logger.Error(err, "Failed to evict speculative entries on TTL expiry",
+				"requestID", item.Key(), "keys", len(keys))
 		}
 	})
 	go cache.Start()
@@ -177,11 +185,10 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 
-	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
+	targetEndpoint := schedulingResult.PrimaryEndpoint()
+	if targetEndpoint == nil {
 		return nil
 	}
-	targetEndpoint := primary.TargetEndpoints[0]
 	targetMeta := targetEndpoint.GetMetadata()
 	if targetMeta == nil {
 		return nil
@@ -203,8 +210,8 @@ func (p *Producer) PreRequest(ctx context.Context,
 	allPodEntries := []kvblock.PodEntry{speculativePod}
 
 	// P/D disagg: seed the prefill endpoint too.
-	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
-		if prefillMeta := pr.TargetEndpoints[0].GetMetadata(); prefillMeta != nil {
+	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
+		if prefillMeta := prefill.GetMetadata(); prefillMeta != nil {
 			prefillPod := kvblock.PodEntry{
 				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 				Speculative:   true,

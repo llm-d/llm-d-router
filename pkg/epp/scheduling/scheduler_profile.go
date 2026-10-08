@@ -254,7 +254,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 			if debugEnabled {
 				debug.Info("Calculated score", "plugin", typedName, "endpoint", endpoint.GetMetadata().ID, "score", score)
 			}
-			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
+			weightedScorePerEndpoint[datalayer.UnscopeEndpoint(endpoint)] += enforceScoreRange(score) * scorer.Weight()
 		}
 		if debugEnabled {
 			debug.Info("Completed running scorer plugin successfully", "plugin", typedName)
@@ -268,6 +268,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.
+// The returned map is the scorer's own, keyed by scoped endpoints; the caller
+// unwraps each key with datalayer.UnscopeEndpoint.
 // When tracing is active it wraps the call in a scorer.<type> span
 // annotated with the scorer's identity, weight, candidate count, and aggregate
 // score signals; aggregates are derived from the returned score map only, with
@@ -285,7 +287,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 
 	if !tracingActive {
 		before := time.Now()
-		scores := datalayer.UnscopeScores(scorer.Score(ctx, scopedRequest, scoped))
+		scores := scorer.Score(ctx, scopedRequest, scoped)
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 		return scores
 	}
@@ -300,7 +302,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	)
 
 	before := time.Now()
-	scores := datalayer.UnscopeScores(scorer.Score(ctx, scopedRequest, scoped))
+	scores := scorer.Score(ctx, scopedRequest, scoped)
 	metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 
 	if len(scores) > 0 {

@@ -985,8 +985,12 @@ func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
 		NewWeightedScorer(scorer, 1), &fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
 
 	assert.True(t, scorer.reads["ep-1"], "a weighted scorer must still reach the key it declares")
-	assert.Equal(t, map[fwksched.Endpoint]float64{endpoint: 1}, scores,
-		"scores must come back keyed by the original endpoint")
+	assert.Len(t, scores, 1)
+	for scored, score := range scores {
+		assert.Equal(t, endpoint, datalayer.UnscopeEndpoint(scored),
+			"score keys must unwrap to the original endpoint")
+		assert.Equal(t, 1.0, score)
+	}
 }
 
 type testScoreAttr string

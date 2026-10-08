@@ -19,7 +19,8 @@ package parserutil
 import (
 	"encoding/json"
 	"errors"
-	"math"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -108,22 +109,23 @@ func FuzzJSONMapAcceptance(f *testing.F) {
 }
 
 func TestUnmarshalEnvelopeStringAllocations(t *testing.T) {
-	// AllocsPerRun counts allocations process-wide, so other goroutines can inflate a sample. The
-	// minimum over several samples excludes them while growth in the decoder shows in every sample.
+	// Disable GC during measurement so the 240 KiB input does not trigger a GC
+	// cycle that clears encoding/json's sync.Pool mid-sample. Under -race,
+	// sync.Pool.Put still drops 1/4 of pooled decoders at random, so allow a small
+	// constant margin while catching logarithmic buffer growth across input sizes.
 	allocations := func(size int) float64 {
 		data := []byte(`{"model":"m","max_tokens":1,"prompt":"` + strings.Repeat("x", size) + `"}`)
-		least := math.Inf(1)
-		for range 5 {
-			least = min(least, testing.AllocsPerRun(20, func() {
-				if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
-					t.Fatal(err)
-				}
-			}))
-		}
-		return least
+		runtime.GC()
+		prev := debug.SetGCPercent(-1)
+		defer debug.SetGCPercent(prev)
+		return testing.AllocsPerRun(80, func() {
+			if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 	small, large := allocations(1024), allocations(240*1024)
-	if large > small+1 {
+	if large > small+2 {
 		t.Fatalf("string decoding allocations grow with input size: 1 KiB = %.0f, 240 KiB = %.0f", small, large)
 	}
 }

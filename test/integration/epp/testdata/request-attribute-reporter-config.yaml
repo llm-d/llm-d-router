@@ -19,5 +19,6 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source

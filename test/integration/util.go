@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -369,14 +370,8 @@ func NewRequestBufferedResponse(
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: setHeaders,
-						RemoveHeaders: []string{
-							routing.PrefillEndpointHeader,
-							routing.EncoderEndpointsHeader,
-							routing.DataParallelEndpointHeader,
-							routing.KVCacheSourceHeader,
-							routing.EndpointPinHeader,
-						},
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaders,
 					},
 				},
 			},
@@ -679,6 +674,17 @@ func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan 
 // --- Internal Helpers ---
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
+// unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
+// is told to strip when no plugin set them, deprecated aliases included, plus
+// the screening headers it always strips.
+var unsetRoutingHeaders = slices.Concat(
+	routing.HeaderNames(routing.PrefillEndpointHeader),
+	routing.HeaderNames(routing.EncoderEndpointsHeader),
+	routing.HeaderNames(routing.DataParallelEndpointHeader),
+	routing.HeaderNames(routing.KVCacheSourceHeader),
+	[]string{routing.EndpointPinHeader},
+)
+
 func makeDestinationMetadata(endpoint string) *structpb.Struct {
 	return &structpb.Struct{
 		Fields: map[string]*structpb.Value{

@@ -279,7 +279,7 @@ func requestSpreadFraction(requestID string) float64 {
 // minCachedTokenDelta tokens. Any inbound value of the header is removed.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE)
-	delete(request.Headers, routing.KVCacheSourceHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.KVCacheSourceHeader)
 
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
 	if !ok {
@@ -317,7 +317,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
-	request.Headers[routing.KVCacheSourceHeader] = best.hostPort
+	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, best.hostPort)
 	logger.Info("set KV cache source header", "requestID", request.RequestID, "value", best.hostPort)
 	return nil
 }

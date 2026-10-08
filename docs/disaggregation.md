@@ -45,6 +45,40 @@ All topologies are driven by the unified `disagg-profile-handler` plugin, which 
 
 ## Request Lifecycle
 
+### Routing headers
+
+EPP passes its stage decisions to the sidecar in three headers:
+`x-llm-d-prefiller-host-port`, `x-llm-d-encoder-hosts-ports` and
+`x-llm-d-kv-cache-source-host-port`. EPP also sends each under its
+pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
+`x-kv-cache-source-host-port`), so a sidecar that predates the rename still
+routes. The old names are deprecated and will be removed.
+
+The sidecar strips every spelling before forwarding, and EPP drops any value a
+client supplies, so these headers are internal to the EPP-to-sidecar hop and are
+never read from or passed to a model server.
+
+When both spellings are present the sidecar reads the old one, against the usual
+preference for the current name. Sanitization was deployed under the old name,
+so an EPP that predates the rename strips a client-supplied old name but
+forwards the `x-llm-d-` one untouched; preferring the old name keeps a
+client-supplied `x-llm-d-` value from overriding the target that EPP chose. An
+upgraded EPP writes both with the same value, so the order changes nothing once
+EPP is upgraded, and the `x-llm-d-` name is read on its own once the old names
+are removed.
+
+#### Upgrade order
+
+**Upgrade EPP before rolling the decode and sidecar pods.** Until EPP is
+upgraded it does not strip client-supplied `x-llm-d-` routing headers on
+ingress. On a request that EPP leaves undisaggregated there is no old-name value
+to prefer, so a client-supplied `x-llm-d-` header would reach an upgraded
+sidecar as the only stage target. Upgrading EPP first means every inbound
+spelling is rejected at ingress before any sidecar reads it. This matters most
+with `--enable-ssrf-protection=false` (the default), where the sidecar does not
+check a target against the InferencePool; see
+[SSRF Protection](#ssrf-protection).
+
 ### P/D (Prefill/Decode)
 
 1. **User Request** – Sent via OpenAI API to the Envoy Proxy
@@ -52,8 +86,8 @@ All topologies are driven by the unified `disagg-profile-handler` plugin, which 
    1. **Decode**: always runs first, selects a decode pod
    2. **Prefill** (optional): the PD decider evaluates prompt length and prefix-cache hit; if disaggregation is warranted, a prefill pod is selected
 3. **Execution** – Request lands on Decode Worker:
-   - If `x-prefiller-host-port` header doesn't exist → runs both stages locally
-   - If `x-prefiller-host-port` header exists → sidecar sends prefill to the selected Prefill Worker, then runs decode locally
+   - If `x-llm-d-prefiller-host-port` header doesn't exist → runs both stages locally
+   - If `x-llm-d-prefiller-host-port` header exists → sidecar sends prefill to the selected Prefill Worker, then runs decode locally
 4. **Response Flow** – decode sidecar → Envoy → EPP → User
 
 ### E/PD (Encode/Prefill-Decode)
@@ -65,7 +99,7 @@ For multimodal requests (images, video, audio), the encode stage can be disaggre
    1. **Decode**: selects a decode pod
    2. **Encode** (optional): the encode decider checks for multimodal content; if present, an encode pod is selected
 3. **Execution** – Request lands on Decode Worker:
-   - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-encoder-hosts-ports` header
+   - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-llm-d-encoder-hosts-ports` header
    - Encode Worker processes multimodal content and returns encoding metadata (embedding references)
    - Decode Worker reads embeddings via EC_Connector and runs prefill + decode locally
 4. **Response Flow** – decode sidecar → Envoy → EPP → User
@@ -80,9 +114,9 @@ The full three-stage pipeline combines both encode and prefill disaggregation:
    2. **Encode** (optional): if multimodal content is detected, an encode pod is selected
    3. **Prefill** (optional): if the PD decider determines disaggregation is beneficial, a prefill pod is selected
 3. **Execution** – Request lands on Decode Worker:
-   - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-encoder-hosts-ports` header
+   - If encode was scheduled → sidecar sends encoding work to the selected Encode Worker(s) via the `x-llm-d-encoder-hosts-ports` header
    - Encode Worker processes multimodal content and returns encoding metadata (embedding references)
-   - If prefill was scheduled → sidecar sends prefill to Prefill Worker via the `x-prefiller-host-port` header
+   - If prefill was scheduled → sidecar sends prefill to Prefill Worker via the `x-llm-d-prefiller-host-port` header
    - Prefill Worker reads embeddings via EC_Connector and executes prefill operation
    - Decode Worker runs decode locally
 4. **Response Flow** – decode sidecar → Envoy → EPP → User
@@ -125,7 +159,7 @@ sequenceDiagram
   participant D as Decode Worker(vLLM)
 
   C->>I: Multimodal Inference Request
-  I->>DS: Request with x-encoder-hosts-ports header
+  I->>DS: Request with x-llm-d-encoder-hosts-ports header
   DS->>E: Send multimodal content for encoding
   E-->>E: Process images/video/audio
   E->>DS: Encoding metadata (embedding references)
@@ -149,7 +183,7 @@ sequenceDiagram
   participant D as Decode Worker(vLLM)
 
   C->>I: Multimodal Inference Request
-  I->>DS: Request with x-encoder-hosts-ports <br/> and x-prefiller-host-port headers
+  I->>DS: Request with x-llm-d-encoder-hosts-ports <br/> and x-llm-d-prefiller-host-port headers
   DS->>E: Send multimodal content for encoding
   E-->>E: Process images/video/audio
   E->>DS: Encoding metadata (embedding references)
@@ -589,10 +623,10 @@ describes: the prefiller receives `{"remote_decoder": {"kv_request_id": <id>}}`
 (no peer address), and the decoder receives `{"remote_prefiller":
 {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port":
 <p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host
-comes from the `x-prefiller-host-port` header; the port is
+comes from the `x-llm-d-prefiller-host-port` header; the port is
 `--p2p-connector-port`.
 
-When the request also carries the `x-kv-cache-source-host-port` header (set by
+When the request also carries the `x-llm-d-kv-cache-source-host-port` header (set by
 the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
 computing the prefix), the sidecar injects an additional `remote_kv_source` key
 so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
@@ -691,9 +725,9 @@ the sidecar's outbound connections to the encode, prefill and decode stages.
 
 ### SSRF Protection
 
-The sidecar connects to the addresses in the `x-prefiller-host-port` and
-`x-encoder-hosts-ports` request headers, and tells vLLM to pull cached KV blocks
-from the address in `x-kv-cache-source-host-port`. With
+The sidecar connects to the addresses in the `x-llm-d-prefiller-host-port` and
+`x-llm-d-encoder-hosts-ports` request headers, and tells vLLM to pull cached KV blocks
+from the address in `x-llm-d-kv-cache-source-host-port`. With
 `--enable-ssrf-protection=false` the sidecar does not check these addresses and
 logs a warning at startup. A client that can set the headers chooses the target.
 That includes any client that reaches the sidecar port without going through
@@ -740,7 +774,7 @@ Enabling the flag requires:
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
-| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---
 

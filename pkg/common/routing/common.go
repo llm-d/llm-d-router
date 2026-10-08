@@ -21,24 +21,36 @@ limitations under the License.
 package routing
 
 import (
+	"net/http"
 	"net/url"
 	"strings"
 )
 
 const (
 	// PrefillEndpointHeader is the header name used to indicate Prefill worker <ip:port>
-	PrefillEndpointHeader = "x-prefiller-host-port"
+	PrefillEndpointHeader = "x-llm-d-prefiller-host-port"
 
 	// EncoderEndpointsHeader is the header name used to indicate Encoder workers <ip:port> list
-	EncoderEndpointsHeader = "x-encoder-hosts-ports"
+	EncoderEndpointsHeader = "x-llm-d-encoder-hosts-ports"
 
-	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel
+	// DataParallelEndpointHeader is the header name used to indicate the worker <ip:port> for Data Parallel.
+	// Superseded by native data parallel routing in Istio >= 1.28.1, so it keeps its
+	// pre-convention name rather than gaining a second one to remove.
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
 
 	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port> holding
 	// the most cached prefix KV blocks for the request, to pull from over the P2P connector
 	// instead of recomputing them
-	KVCacheSourceHeader = "x-kv-cache-source-host-port"
+	KVCacheSourceHeader = "x-llm-d-kv-cache-source-host-port"
+
+	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
+	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
+
+	// LegacyEncoderEndpointsHeader is the pre-convention name of EncoderEndpointsHeader.
+	LegacyEncoderEndpointsHeader = "x-encoder-hosts-ports"
+
+	// LegacyKVCacheSourceHeader is the pre-convention name of KVCacheSourceHeader.
+	LegacyKVCacheSourceHeader = "x-kv-cache-source-host-port"
 
 	// InferencePoolAPIGroup is the InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
@@ -99,4 +111,80 @@ func HasPreference(headers map[string]string, want string) bool {
 // "Prefer: if-available" preference (see PreferIfAvailable for semantics).
 func IsConditionalDecode(headers map[string]string) bool {
 	return HasPreference(headers, PreferIfAvailable)
+}
+
+// headerAliases maps each disaggregation header to its pre-convention name. EPP
+// writes both spellings with the same value, so a sidecar that predates the
+// rename still routes. Removing an entry here retires its old name: EPP stops
+// writing it and the sidecar starts reading the canonical name (see
+// TakeRoutingHeaderValues). Do that once no supported EPP emits the old names.
+var headerAliases = map[string]string{
+	PrefillEndpointHeader:  LegacyPrefillEndpointHeader,
+	EncoderEndpointsHeader: LegacyEncoderEndpointsHeader,
+	KVCacheSourceHeader:    LegacyKVCacheSourceHeader,
+}
+
+// HeaderNames returns name followed by its deprecated alias, if it has one.
+func HeaderNames(name string) []string {
+	if alias, ok := headerAliases[name]; ok {
+		return []string{name, alias}
+	}
+	return []string{name}
+}
+
+// SetRoutingHeader records value under name and its deprecated alias.
+func SetRoutingHeader(headers map[string]string, name, value string) {
+	for _, n := range HeaderNames(name) {
+		headers[n] = value
+	}
+}
+
+// DeleteRoutingHeader drops name and its deprecated alias, so a client-supplied
+// value cannot survive under either spelling.
+func DeleteRoutingHeader(headers map[string]string, name string) {
+	for _, n := range HeaderNames(name) {
+		delete(headers, n)
+	}
+}
+
+// trustOrder returns the spellings of name in the order their values are
+// trusted: the deprecated alias first, deliberately against the usual
+// preference for the current name. Sanitization was deployed under the old
+// name, so every supported EPP strips a client-supplied alias on ingress, while
+// one that predates the rename forwards the canonical name untouched. Preferring
+// the alias keeps a client-supplied canonical value from overriding the target
+// such an EPP chose (#3087). An upgraded EPP writes both spellings with the same
+// value, so the order changes nothing once EPP is upgraded.
+func trustOrder(name string) []string {
+	if alias, ok := headerAliases[name]; ok {
+		return []string{alias, name}
+	}
+	return []string{name}
+}
+
+// TakeRoutingHeaderValues returns the values of name, preferring its deprecated
+// alias (see trustOrder), and removes every spelling from h. Taking and removing
+// in one step keeps a request from reaching a worker with a routing header still
+// on it.
+func TakeRoutingHeaderValues(h http.Header, name string) []string {
+	var values []string
+	for _, n := range trustOrder(name) {
+		if len(values) == 0 {
+			values = h.Values(n)
+		}
+	}
+
+	for _, n := range HeaderNames(name) {
+		h.Del(n)
+	}
+	return values
+}
+
+// TakeRoutingHeaderValue is TakeRoutingHeaderValues for a single-valued header.
+func TakeRoutingHeaderValue(h http.Header, name string) string {
+	values := TakeRoutingHeaderValues(h, name)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }

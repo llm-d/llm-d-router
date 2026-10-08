@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -239,7 +240,7 @@ func (c Config) String() string {
 }
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
-// validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
+// validated x-llm-d-kv-cache-source-host-port peer to pull cached prefix from ("" when
 // absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
@@ -420,7 +421,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if !s.allowlistValidator.enabled {
 		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
 			"flag", "--"+enableSSRFProtection,
-			"headers", []string{routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader, routing.KVCacheSourceHeader})
+			"headers", slices.Concat(
+				routing.HeaderNames(routing.PrefillEndpointHeader),
+				routing.HeaderNames(routing.EncoderEndpointsHeader),
+				routing.HeaderNames(routing.KVCacheSourceHeader)))
 	}
 
 	// Configure handlers

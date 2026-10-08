@@ -449,12 +449,9 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	// Register metrics handler.
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.1/pkg/metrics/server
+	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
-	metricsServerOptions := metricsserver.Options{
-		BindAddress:    fmt.Sprintf(":%d", opts.MetricsPort),
-		FilterProvider: openMetricsFilterProvider(opts.MetricsEndpointAuth),
-	}
+	metricsServerOptions := newMetricsServerOptions(opts.MetricsPort, opts.MetricsEndpointAuth)
 
 	if err := runserver.ConfigureMetricsTLS(opts, &metricsServerOptions); err != nil {
 		return nil, nil, err
@@ -566,49 +563,19 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 	return mgr, ds, nil
 }
 
-// metricsEndpointPath is where controller-runtime mounts the metrics handler.
-const metricsEndpointPath = "/metrics"
-
-// openMetricsFilterProvider builds the metrics server's FilterProvider.
-//
-// Exemplars only exist in the OpenMetrics format, and controller-runtime builds
-// its /metrics handler without EnableOpenMetrics. ExtraHandlers can't override
-// /metrics and there is no option for handler settings, so the filter is the
-// only place to swap in the same handler with OpenMetrics enabled.
-//
-// controller-runtime runs this filter over every handler it mounts, pprof and
-// /debug/plugins/state included, so only /metrics is swapped. Auth, when
-// enabled, wraps the result as before.
-func openMetricsFilterProvider(authEnabled bool) func(*rest.Config, *http.Client) (metricsserver.Filter, error) {
-	return func(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
-		var authFilter metricsserver.Filter
-		if authEnabled {
-			var err error
-			authFilter, err = filters.WithAuthenticationAndAuthorization(c, httpClient)
-			if err != nil {
-				return nil, fmt.Errorf("build metrics authentication filter: %w", err)
-			}
-		}
-
-		openMetricsHandler := promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{
-			ErrorHandling:     promhttp.HTTPErrorOnError,
-			EnableOpenMetrics: true,
-		})
-
-		return func(log logr.Logger, next http.Handler) (http.Handler, error) {
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == metricsEndpointPath {
-					openMetricsHandler.ServeHTTP(w, r)
-					return
-				}
-				next.ServeHTTP(w, r)
-			})
-			if authFilter == nil {
-				return handler, nil
-			}
-			return authFilter(log, handler)
-		}, nil
+// newMetricsServerOptions configures the EPP metrics server. OpenMetrics is
+// enabled because exemplars only exist in that format.
+func newMetricsServerOptions(port uint16, authEnabled bool) metricsserver.Options {
+	opts := metricsserver.Options{
+		BindAddress: fmt.Sprintf(":%d", port),
+		HandlerOpts: []func(*promhttp.HandlerOpts){
+			func(o *promhttp.HandlerOpts) { o.EnableOpenMetrics = true },
+		},
 	}
+	if authEnabled {
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+	return opts
 }
 
 // NewEndpointPoolFromOptions constructs an EndpointPool from standalone options.

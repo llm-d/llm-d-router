@@ -168,6 +168,7 @@ plugins:
   - type: kv-cache-utilization-scorer
   - type: passthrough-parser
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 schedulingProfiles:
   - name: default
     plugins:
@@ -177,6 +178,7 @@ requestHandler:
   parsers:
   - pluginRef: passthrough-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `,

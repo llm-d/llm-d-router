@@ -47,10 +47,12 @@ plugins:
     concurrencyMode: requests
     headroom: 0.0
 - type: mock-metrics-source
+- type: core-metrics-extractor
 requestHandler:
   parsers:
   - pluginRef: passthrough-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 schedulingProfiles:

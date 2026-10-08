@@ -233,15 +233,29 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
+	candidates := make([]ServerID, len(pods))
+	for i, pod := range pods {
+		candidates[i] = ServerID(pod.GetMetadata().ID)
+	}
 	prefixCacheServers := make(map[ServerID]int)
 	predictedCachedTokens := make(map[ServerID]int)
 	totalBlocks := 0
 	for i, hashes := range perPromptHashes {
-		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
-			prefixCacheServers[server] += matchLen
-			predictedCachedTokens[server] += min(matchLen*blockSize, perPromptTokens[i])
+		for j, matchLen := range p.indexerInst.MatchLongestPrefix(hashes, candidates) {
+			if matchLen == 0 {
+				continue
+			}
+			prefixCacheServers[candidates[j]] += matchLen
+			predictedCachedTokens[candidates[j]] += min(matchLen*blockSize, perPromptTokens[i])
 		}
 		totalBlocks += len(hashes)
+	}
+	if v := log.FromContext(ctx).V(logutil.TRACE); v.Enabled() {
+		matched := make(map[string]int, len(prefixCacheServers))
+		for server, blocks := range prefixCacheServers {
+			matched[server.String()] = blocks
+		}
+		v.Info("Prefix cache match", "matchedBlocks", matched, "totalBlocks", totalBlocks)
 	}
 
 	for _, pod := range pods {
@@ -323,25 +337,6 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
 		NumOfGPUBlocks: gpuBlocks,
 	}
-}
-
-// matchLongestPrefix returns a map of servers and length of prefix that each server caches, prefix length is defined in blocks.
-func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash) map[ServerID]int {
-	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
-	res := make(map[ServerID]int)
-
-	// Use a greedy strategy to search from the longest prefix.
-	for _, hash := range hashes {
-		cachedServers := p.indexerInst.Get(hash)
-		if len(cachedServers) == 0 {
-			break
-		}
-		loggerTrace.Info("Found cached servers", "cachedServers", cachedServers, "total # blocks", len(hashes))
-		for server := range cachedServers {
-			res[server]++
-		}
-	}
-	return res
 }
 
 // GetBlockSize returns the block size in tokens, potentially auto-tuned from endpoint metrics.

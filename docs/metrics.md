@@ -158,6 +158,15 @@ an `InferencePool`.
 | `llm_d_epp_std_dev_running_requests` | Gauge | `name` (InferencePool name) | Spread of in-flight requests. |
 | `llm_d_epp_ready_endpoints` | Gauge | `name` (InferencePool name) | Ready endpoints in the pool. |
 | `llm_d_epp_per_endpoint_queue_size` | Gauge | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint queue depth. |
+| `llm_d_epp_per_endpoint_nixl_failed_transfers_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint failed NIXL KV cache transfers. |
+| `llm_d_epp_per_endpoint_nixl_failed_notifications_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint failed NIXL KV cache notifications. |
+| `llm_d_epp_per_endpoint_nixl_kv_expired_requests_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint requests whose KV cache expired before it was read. |
+
+The `llm_d_epp_per_endpoint_nixl_*` series expose the counters that the
+[core metrics extractor](../pkg/epp/framework/plugins/datalayer/extractor/metrics/README.md#attributes-produced)
+reads from each endpoint. A series appears once an endpoint reports the counter, and restarts from
+zero when the model server restarts. If an endpoint stops reporting the counter while its pod stays
+Ready, the series keeps its last value.
 
 ### Scheduler
 

@@ -146,7 +146,7 @@ func TestPreRequest(t *testing.T) {
 		perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 		for _, promptHashes := range perPromptHashes {
 			for _, hash := range promptHashes {
-				pods := p.indexer().Get(hash)
+				pods := p.indexer().(*indexer).Get(hash)
 				assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().ID))
 			}
 		}
@@ -193,9 +193,9 @@ func TestPreRequest(t *testing.T) {
 
 		// Since capacity is 2, the first request's hash should have been evicted.
 		// The latter two should still be present.
-		assert.Empty(t, p.indexer().Get(allHashes[0][0]))
-		assert.NotEmpty(t, p.indexer().Get(allHashes[1][0]))
-		assert.NotEmpty(t, p.indexer().Get(allHashes[2][0]))
+		assert.Empty(t, p.indexer().(*indexer).Get(allHashes[0][0]))
+		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[1][0]))
+		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[2][0]))
 	})
 }
 

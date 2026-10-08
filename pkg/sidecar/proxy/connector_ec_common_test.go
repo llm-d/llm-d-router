@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -348,13 +349,15 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 		name        string
 		encoderCode int
 		wantClient  int
+		truncated   bool
 	}{
-		{"encoder rejects the body", http.StatusBadRequest, http.StatusBadGateway},
-		{"encoder finds the body unprocessable", http.StatusUnprocessableEntity, http.StatusBadGateway},
-		{"encoder does not serve the route", http.StatusNotFound, http.StatusBadGateway},
-		{"encoder is at capacity", http.StatusTooManyRequests, http.StatusBadGateway},
-		{"encoder is unavailable", http.StatusServiceUnavailable, http.StatusBadGateway},
-		{"encoder fails internally", http.StatusInternalServerError, http.StatusBadGateway},
+		{"encoder rejects the body", http.StatusBadRequest, http.StatusBadGateway, false},
+		{"encoder finds the body unprocessable", http.StatusUnprocessableEntity, http.StatusBadGateway, false},
+		{"encoder does not serve the route", http.StatusNotFound, http.StatusBadGateway, false},
+		{"encoder is at capacity", http.StatusTooManyRequests, http.StatusBadGateway, false},
+		{"encoder is unavailable", http.StatusServiceUnavailable, http.StatusBadGateway, false},
+		{"encoder fails internally", http.StatusInternalServerError, http.StatusBadGateway, false},
+		{"encoder response is truncated", http.StatusOK, http.StatusBadGateway, true},
 	}
 
 	for name, handle := range handlers {
@@ -362,6 +365,9 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 			t.Run(name+"/"+tt.name, func(t *testing.T) {
 				encoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
+					if tt.truncated {
+						w.Header().Set("Content-Length", "100")
+					}
 					w.WriteHeader(tt.encoderCode)
 					_, _ = w.Write([]byte(`{"error":"nope"}`))
 				}))
@@ -376,10 +382,14 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 				srv.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
 					dispatched = true
 				}
+				srv.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					dispatched = true
+				})
 
 				body, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
 				require.NoError(t, err)
 				req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
+				req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
 				rw := httptest.NewRecorder()
 
 				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)

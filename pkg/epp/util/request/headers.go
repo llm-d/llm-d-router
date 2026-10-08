@@ -60,8 +60,9 @@ var (
 
 	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.
 	// Only EPP plugins may set them: client values are dropped on ingress and
-	// removed from the forwarded request when no plugin sets them.
-	InternalRoutingHeaders = sets.New(
+	// removed from the forwarded request when no plugin sets them. Deprecated
+	// aliases are included, so neither spelling can be supplied by a client.
+	InternalRoutingHeaders = routingHeaderNames(
 		routing.PrefillEndpointHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
@@ -90,6 +91,14 @@ var (
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
 	return InputControlHeaders.Has(k) || ScreeningHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
+}
+
+func routingHeaderNames(keys ...string) sets.Set[string] {
+	headers := sets.New[string]()
+	for _, key := range keys {
+		headers.Insert(routing.HeaderNames(key)...)
+	}
+	return headers
 }
 
 func lowerHeaderNames(keys ...string) sets.Set[string] {

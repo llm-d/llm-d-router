@@ -104,7 +104,14 @@ func (v *Violations) recordRead() bool {
 // cannot fail the request still makes a misdeclared plugin visible in
 // production rather than leaving it to log verbosity.
 type ScopedEndpoint struct {
-	inner      fwksched.Endpoint
+	inner fwksched.Endpoint
+	*endpointScope
+}
+
+// endpointScope is the state every ScopedEndpoint of one invocation shares. The
+// wrappers hold a pointer to it so the per-endpoint cost of scoping is the
+// wrapped endpoint plus one word, whatever the scope carries.
+type endpointScope struct {
 	allowedPut map[fwkplugin.DataKey]struct{}
 	allowedGet map[fwkplugin.DataKey]struct{}
 	reporter
@@ -300,25 +307,24 @@ func Scope(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, e
 }
 
 func scopeEndpoints(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin, endpoints []fwksched.Endpoint, violations *Violations) []fwksched.Endpoint {
-	typedName := plugin.TypedName()
 	spec := scopeSpecFor(logger, plugin)
+	scope := &endpointScope{
+		allowedPut: spec.allowedPut,
+		allowedGet: spec.allowedGet,
+		reporter: reporter{
+			typedName:      plugin.TypedName(),
+			extensionPoint: extensionPoint,
+			logger:         logger,
+			violations:     violations,
+		},
+	}
 
 	// One backing array rather than an allocation per endpoint: this runs for
 	// every filter and scorer on every request, over the whole candidate set.
 	wrappers := make([]ScopedEndpoint, len(endpoints))
 	scoped := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		wrappers[i] = ScopedEndpoint{
-			inner:      endpoint,
-			allowedPut: spec.allowedPut,
-			allowedGet: spec.allowedGet,
-			reporter: reporter{
-				typedName:      typedName,
-				extensionPoint: extensionPoint,
-				logger:         logger,
-				violations:     violations,
-			},
-		}
+		wrappers[i] = ScopedEndpoint{inner: endpoint, endpointScope: scope}
 		scoped[i] = &wrappers[i]
 	}
 	return scoped
@@ -328,23 +334,17 @@ func scopeEndpoints(logger logr.Logger, extensionPoint string, plugin fwkplugin.
 func Unscope(endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	unscoped := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		unscoped[i] = unwrap(endpoint)
+		unscoped[i] = UnscopeEndpoint(endpoint)
 	}
 	return unscoped
 }
 
-// UnscopeScores rekeys a scorer's result by the underlying endpoints. The
-// scheduler sums scores across scorers in a map keyed by endpoint, so a wrapper
-// left in a key would split one endpoint's score into several entries.
-func UnscopeScores(scores map[fwksched.Endpoint]float64) map[fwksched.Endpoint]float64 {
-	unscoped := make(map[fwksched.Endpoint]float64, len(scores))
-	for endpoint, score := range scores {
-		unscoped[unwrap(endpoint)] = score
-	}
-	return unscoped
-}
-
-func unwrap(endpoint fwksched.Endpoint) fwksched.Endpoint {
+// UnscopeEndpoint returns the underlying endpoint of one key of a scorer's
+// result. The scheduler sums scores across scorers in a map keyed by endpoint,
+// so a wrapper left in a key would split one endpoint's score into several
+// entries. Unwrapping each key as it is summed avoids building a rekeyed copy of
+// every scorer's result.
+func UnscopeEndpoint(endpoint fwksched.Endpoint) fwksched.Endpoint {
 	if scoped, ok := endpoint.(*ScopedEndpoint); ok {
 		return scoped.inner
 	}

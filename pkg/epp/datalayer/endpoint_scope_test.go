@@ -243,11 +243,11 @@ func TestUnscope_RestoresEndpointIdentity(t *testing.T) {
 	assert.Equal(t, endpoints, Unscope(scopedA))
 
 	totals := map[fwksched.Endpoint]float64{}
-	for endpoint, score := range UnscopeScores(map[fwksched.Endpoint]float64{scopedA[0]: 1, scopedA[1]: 2}) {
-		totals[endpoint] += score
+	for endpoint, score := range map[fwksched.Endpoint]float64{scopedA[0]: 1, scopedA[1]: 2} {
+		totals[UnscopeEndpoint(endpoint)] += score
 	}
-	for endpoint, score := range UnscopeScores(map[fwksched.Endpoint]float64{scopedB[0]: 10, scopedB[1]: 20}) {
-		totals[endpoint] += score
+	for endpoint, score := range map[fwksched.Endpoint]float64{scopedB[0]: 10, scopedB[1]: 20} {
+		totals[UnscopeEndpoint(endpoint)] += score
 	}
 
 	require.Len(t, totals, 2, "scores from two scorers must land on the same two endpoints")
