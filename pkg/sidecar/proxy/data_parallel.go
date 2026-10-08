@@ -97,9 +97,10 @@ func (s *Server) startDataParallel(ctx context.Context, grp *errgroup.Group) err
 
 		grp.Go(func() error {
 			clone.logger = log.FromContext(ctx).WithName("proxy server on port " + rankPort)
-			// Configure handlers
+			// Configure handlers for this rank.
 			clone.handler = clone.createRoutes()
 			clone.setKVConnector()
+			clone.setECConnector()
 
 			return clone.startHTTP(ctx)
 		})

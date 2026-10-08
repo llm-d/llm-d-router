@@ -18,18 +18,22 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 	"golang.org/x/sync/errgroup"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
@@ -56,6 +60,122 @@ var _ = Describe("Data Parallel support", func() {
 	})
 
 	When("configured with --data-parallel-size > 1", func() {
+		DescribeTable("keeps inference on the selected rank", func(ecConnector string, withPrefill bool) {
+			var rank0Requests, rank1Requests, encoderRequests, prefillRequests atomic.Int32
+			rank1Backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				rank1Requests.Add(1)
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"rank":1}`))
+			}))
+			DeferCleanup(rank1Backend.Close)
+			encoder := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				encoderRequests.Add(1)
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"ec_transfer_params":{"image":{}}}`))
+			}))
+			DeferCleanup(encoder.Close)
+			prefill := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				prefillRequests.Add(1)
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"kv_transfer_params":{}}`))
+			}))
+			DeferCleanup(prefill.Close)
+
+			// Virtual base ports are one below rank 1's bound ports,
+			// avoiding the need to reserve contiguous ports.
+			rank1Listener, err := fwknet.ReserveListener()
+			Expect(err).ToNot(HaveOccurred())
+			DeferCleanup(func() { _ = rank1Listener.Close() })
+			rank1Port := rank1Listener.Addr().(*net.TCPAddr).Port
+			rank1URL, err := url.Parse(rank1Backend.URL)
+			Expect(err).ToNot(HaveOccurred())
+			rank1DecoderPort, err := strconv.Atoi(rank1URL.Port())
+			Expect(err).ToNot(HaveOccurred())
+			decoderURL, err := url.Parse("http://localhost:" + strconv.Itoa(rank1DecoderPort-1))
+			Expect(err).ToNot(HaveOccurred())
+			proxy := NewProxy(Config{
+				Port:             strconv.Itoa(rank1Port - 1),
+				DecoderURL:       decoderURL,
+				DataParallelSize: testDataParallelSize,
+				KVConnector:      constants.KVConnectorNIXLV2,
+				ECConnector:      ecConnector,
+			})
+			proxy.allowlistValidator = &AllowlistValidator{}
+			proxy.DataParallelListeners = []net.Listener{rank1Listener}
+			proxy.handler = proxy.createRoutes()
+			// A connector bound to the source Server reaches this rank-0 stub.
+			proxy.decoderProxy = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				rank0Requests.Add(1)
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"rank":0}`))
+			})
+
+			ctx, cancel := context.WithCancel(newTestContext())
+			group, ctx := errgroup.WithContext(ctx)
+			DeferCleanup(func() {
+				cancel()
+				Expect(group.Wait()).To(Succeed())
+			})
+			Expect(proxy.startDataParallel(ctx, group)).To(Succeed())
+			client := &http.Client{Timeout: 2 * time.Second}
+			baseURL := "http://" + rank1Listener.Addr().String()
+			Eventually(func() bool {
+				response, err := client.Get(baseURL + "/health")
+				if err != nil {
+					return false
+				}
+				defer response.Body.Close()
+				return response.StatusCode == http.StatusOK
+			}, "3s", "20ms").Should(BeTrue())
+
+			body := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`
+			// Select rank 1 by port so the legacy DP header cannot mask a wrong binding.
+			request, err := http.NewRequest(http.MethodPost, baseURL+reqcommon.PathChatCompletions, strings.NewReader(body))
+			Expect(err).ToNot(HaveOccurred())
+			request.Header.Set("Content-Type", "application/json")
+			if ecConnector != "" {
+				request.Header.Set(routing.EncoderEndpointsHeader, strings.TrimPrefix(encoder.URL, "http://"))
+			}
+			if withPrefill {
+				request.Header.Set(routing.PrefillEndpointHeader, strings.TrimPrefix(prefill.URL, "http://"))
+			}
+			response, err := client.Do(request)
+			Expect(err).ToNot(HaveOccurred())
+			defer response.Body.Close()
+			responseBody, err := io.ReadAll(response.Body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(response.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+			Expect(string(responseBody)).To(MatchJSON(`{"rank":1}`))
+			Expect(rank0Requests.Load()).To(BeZero())
+			Expect(rank1Requests.Load()).To(Equal(int32(1)))
+			if ecConnector != "" {
+				Expect(encoderRequests.Load()).To(Equal(int32(1)))
+			} else {
+				Expect(encoderRequests.Load()).To(BeZero())
+			}
+			if withPrefill {
+				Expect(prefillRequests.Load()).To(Equal(int32(1)))
+			} else {
+				Expect(prefillRequests.Load()).To(BeZero())
+			}
+
+			rank0Request := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			rank0Request.Header = request.Header.Clone()
+			rank0Response := httptest.NewRecorder()
+			proxy.handler.ServeHTTP(rank0Response, rank0Request)
+			Expect(rank0Response.Code).To(Equal(http.StatusOK))
+			Expect(rank0Response.Body.String()).To(MatchJSON(`{"rank":0}`))
+			Expect(rank0Requests.Load()).To(Equal(int32(1)))
+			Expect(rank1Requests.Load()).To(Equal(int32(1)))
+		},
+			Entry("ec-example encode/decode", constants.ECExampleConnector, false),
+			Entry("ec-example encode/prefill/decode", constants.ECExampleConnector, true),
+			Entry("ec-nixl encode/decode", constants.ECConnectorNIXL, false),
+			Entry("ec-nixl encode/prefill/decode", constants.ECConnectorNIXL, true),
+			Entry("decoder only", "", false),
+			Entry("prefill/decode", "", true),
+		)
+
 		It("should create an extra proxy", func() {
 			ctx := newTestContext()
 			ctx, cancel := context.WithCancel(ctx)

@@ -106,11 +106,6 @@ const (
 	LLMDKVCachePrefixMatchWalkedKey         = attribute.Key("llm_d.kv_cache.prefix_match.walked")
 	LLMDKVCachePrefixMatchPodsMatchedKey    = attribute.Key("llm_d.kv_cache.prefix_match.pods_matched")
 	LLMDKVCachePrefixMatchLongestChainKey   = attribute.Key("llm_d.kv_cache.prefix_match.longest_chain")
-	LLMDKVCacheScorerAlgorithmKey           = attribute.Key("llm_d.kv_cache.scorer.algorithm")
-	LLMDKVCacheScorerKeyCountKey            = attribute.Key("llm_d.kv_cache.scorer.key_count")
-	LLMDKVCacheScoreMaxKey                  = attribute.Key("llm_d.kv_cache.score.max")
-	LLMDKVCacheScoreAvgKey                  = attribute.Key("llm_d.kv_cache.score.avg")
-	LLMDKVCacheScorerPodsScoredKey          = attribute.Key("llm_d.kv_cache.scorer.pods_scored")
 
 	// KV Cache Event attributes
 	LLMDKVCacheEventsTopicKey            = attribute.Key("llm_d.kv_cache.events.topic")
@@ -515,31 +510,6 @@ func LLMDKVCachePrefixMatchPodsMatched(count int) attribute.KeyValue {
 // LLMDKVCachePrefixMatchLongestChain returns an attribute for prefix match longest block chain.
 func LLMDKVCachePrefixMatchLongestChain(chain int) attribute.KeyValue {
 	return LLMDKVCachePrefixMatchLongestChainKey.Int(chain)
-}
-
-// LLMDKVCacheScorerAlgorithm returns an attribute for KV cache scorer algorithm strategy.
-func LLMDKVCacheScorerAlgorithm(algo string) attribute.KeyValue {
-	return LLMDKVCacheScorerAlgorithmKey.String(algo)
-}
-
-// LLMDKVCacheScorerKeyCount returns an attribute for KV cache scorer key count.
-func LLMDKVCacheScorerKeyCount(count int) attribute.KeyValue {
-	return LLMDKVCacheScorerKeyCountKey.Int(count)
-}
-
-// LLMDKVCacheScoreMax returns an attribute for KV cache max score.
-func LLMDKVCacheScoreMax(score float64) attribute.KeyValue {
-	return LLMDKVCacheScoreMaxKey.Float64(score)
-}
-
-// LLMDKVCacheScoreAvg returns an attribute for KV cache average score.
-func LLMDKVCacheScoreAvg(score float64) attribute.KeyValue {
-	return LLMDKVCacheScoreAvgKey.Float64(score)
-}
-
-// LLMDKVCacheScorerPodsScored returns an attribute for KV cache scored pods count.
-func LLMDKVCacheScorerPodsScored(count int) attribute.KeyValue {
-	return LLMDKVCacheScorerPodsScoredKey.Int(count)
 }
 
 // KV Cache Event helpers

@@ -445,18 +445,14 @@ func (s *Server) Start(ctx context.Context) error {
 	return grp.Wait()
 }
 
-// Clone returns a clone of the current Server struct.
-// Note: decoderURL and decoderProxy are intentionally not copied — callers (e.g. startDataParallel)
-// always set them explicitly after cloning.
-// HTTPListener is not copied; each instance owns its listener.
+// Clone returns a partially initialized Server that is not ready to serve requests.
+// Routes, connector handlers, decoderProxy, and listeners are not copied;
+// callers initialize them after setting the clone's serving and decoder addresses.
 func (s *Server) Clone() *Server {
 	return &Server{
 		addr:                s.addr,
 		readyCh:             make(chan struct{}),
-		handler:             s.handler,
 		allowlistValidator:  s.allowlistValidator,
-		handlePDConnector:   s.handlePDConnector,
-		handleECConnector:   s.handleECConnector,
 		prefillerURLPrefix:  s.prefillerURLPrefix,
 		encoderURLPrefix:    s.encoderURLPrefix,
 		prefillerProxies:    s.prefillerProxies,
