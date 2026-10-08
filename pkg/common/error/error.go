@@ -19,11 +19,6 @@ package error
 
 import (
 	"fmt"
-
-	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-	"google.golang.org/grpc/status"
 )
 
 // RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
@@ -82,63 +77,4 @@ func CanonicalCode(err error) string {
 		return e.Code
 	}
 	return Unknown
-}
-
-// BuildErrResponse maps an error to an Envoy ImmediateResponse with the appropriate
-// HTTP status code and error message body. If the error code is not recognized,
-// it returns a gRPC error instead of an ImmediateResponse.
-func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
-	var httpCode envoyTypePb.StatusCode
-
-	switch CanonicalCode(err) {
-	case BadRequest:
-		httpCode = envoyTypePb.StatusCode_BadRequest
-	case Unauthorized:
-		httpCode = envoyTypePb.StatusCode_Unauthorized
-	case Forbidden:
-		httpCode = envoyTypePb.StatusCode_Forbidden
-	case NotFound:
-		httpCode = envoyTypePb.StatusCode_NotFound
-	case PreconditionFailed:
-		httpCode = envoyTypePb.StatusCode_PreconditionFailed
-	case ResourceExhausted:
-		httpCode = envoyTypePb.StatusCode_TooManyRequests
-	case Internal:
-		httpCode = envoyTypePb.StatusCode_InternalServerError
-	case ServiceUnavailable:
-		httpCode = envoyTypePb.StatusCode_ServiceUnavailable
-	default:
-		return nil, status.Errorf(status.Code(err), "failed to handle request: %v", err)
-	}
-
-	ir := &extProcPb.ImmediateResponse{
-		Status: &envoyTypePb.HttpStatus{
-			Code: httpCode,
-		},
-	}
-
-	if err.Error() != "" {
-		ir.Body = []byte(err.Error())
-	}
-
-	if e, ok := err.(Error); ok && len(e.Headers) > 0 {
-		setHeaders := make([]*configPb.HeaderValueOption, 0, len(e.Headers))
-		for k, v := range e.Headers {
-			setHeaders = append(setHeaders, &configPb.HeaderValueOption{
-				Header: &configPb.HeaderValue{
-					Key:      k,
-					RawValue: []byte(v),
-				},
-			})
-		}
-		ir.Headers = &extProcPb.HeaderMutation{
-			SetHeaders: setHeaders,
-		}
-	}
-
-	return &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: ir,
-		},
-	}, nil
 }
