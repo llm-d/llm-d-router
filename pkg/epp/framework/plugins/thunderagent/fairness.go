@@ -27,7 +27,7 @@ import (
 )
 
 // holdWaitFloor separates admission holds from normal dispatch latency in
-// the holds metric.
+// the delayed dispatch metric.
 const holdWaitFloor = time.Second
 
 // NewState satisfies the FairnessPolicy contract; Pick reads the shared
@@ -148,7 +148,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	}
 	a.metrics.releases.WithLabelValues(best.class.String()).Inc()
 	if best.waitMs >= float64(holdWaitFloor.Milliseconds()) {
-		a.metrics.holds.WithLabelValues(best.class.String()).Inc()
+		a.metrics.delayedDispatches.WithLabelValues(best.class.String()).Inc()
 	}
 	if best.starving {
 		a.metrics.starvationPromotions.Inc()

@@ -31,7 +31,7 @@ import (
 type thunderMetrics struct {
 	ledger *ledgerCollector
 
-	holds                *prometheus.CounterVec
+	delayedDispatches    *prometheus.CounterVec
 	releases             *prometheus.CounterVec
 	pauses               prometheus.Counter
 	resumes              prometheus.Counter
@@ -41,10 +41,10 @@ type thunderMetrics struct {
 func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
 	return &thunderMetrics{
 		ledger: newLedgerCollector(mgr),
-		holds: prometheus.NewCounterVec(prometheus.CounterOpts{
+		delayedDispatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "thunder_agent_holds_total",
-			Help:      metricsutil.HelpMsgWithStability("Dispatches whose head waited past the hold floor in the flow-control queue, by session class.", compbasemetrics.ALPHA),
+			Name:      "thunder_agent_delayed_dispatches_total",
+			Help:      metricsutil.HelpMsgWithStability("Dispatches whose request waited at least 1s in the flow-control queue, by session class.", compbasemetrics.ALPHA),
 		}, []string{"class"}),
 		releases: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -72,7 +72,7 @@ func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
 func (m *thunderMetrics) register(reg prometheus.Registerer) error {
 	return errors.Join(
 		reg.Register(m.ledger),
-		registerOrReuse(reg, &m.holds),
+		registerOrReuse(reg, &m.delayedDispatches),
 		registerOrReuse(reg, &m.releases),
 		registerOrReuse(reg, &m.pauses),
 		registerOrReuse(reg, &m.resumes),

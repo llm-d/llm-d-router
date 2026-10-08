@@ -103,9 +103,9 @@ Metrics (`llm_d_epp_thunder_agent_*`, all Alpha): `endpoint_working_set_tokens{e
 (compare it against the engine's KV utilization: a large working set over a
 low utilization is the KV-thrashing signature),
 `endpoint_capacity_tokens{endpoint}`, `sessions{state}`, `releases_total{class}`,
-`holds_total{class}`, `pauses_total`, `resumes_total`,
+`delayed_dispatches_total{class}`, `pauses_total`, `resumes_total`,
 `starvation_promotions_total`. To verify the gate engaged during a run,
-`pauses_total` and `holds_total` must be greater than zero. Session counts
+`pauses_total` and `delayed_dispatches_total` must be greater than zero. Session counts
 and each pod's working set and capacity are also available from the
 `/debug/plugins/state` endpoint. Session ids never appear in metrics, state
 dumps or logs.
