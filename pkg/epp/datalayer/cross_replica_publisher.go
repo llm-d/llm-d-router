@@ -21,10 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/go-logr/logr"
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,7 +52,7 @@ type crossReplicaPublisher struct {
 	mu        sync.RWMutex
 	endpoints sets.Set[types.NamespacedName]
 
-	lastPublishFailureLogNanos atomic.Int64
+	publishFailureLog rate.Sometimes
 }
 
 // newCrossReplicaPublisher collects the opted-in CrossReplicaContributors, or
@@ -82,10 +81,11 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 		publishTimeout = defaultCrossReplicaPublishTimeout
 	}
 	return &crossReplicaPublisher{
-		syncer:         syncer,
-		contributors:   contributors,
-		interval:       interval,
-		publishTimeout: publishTimeout,
+		syncer:            syncer,
+		contributors:      contributors,
+		interval:          interval,
+		publishTimeout:    publishTimeout,
+		publishFailureLog: rate.Sometimes{Interval: publishFailureLogInterval},
 	}
 }
 
@@ -203,21 +203,11 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 		spec := c.CrossReplicaState()
 		wg.Go(func() {
 			if err := p.set(ctx, spec, key); err != nil {
-				p.logPublishFailure(logger, spec.StateKey, err)
+				p.publishFailureLog.Do(func() {
+					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
+				})
 			}
 		})
 	}
 	wg.Wait()
-}
-
-func (p *crossReplicaPublisher) logPublishFailure(logger logr.Logger, key fwkdl.StateKey, err error) {
-	now := time.Now().UnixNano()
-	last := p.lastPublishFailureLogNanos.Load()
-	if now-last < int64(publishFailureLogInterval) {
-		return
-	}
-	if !p.lastPublishFailureLogNanos.CompareAndSwap(last, now) {
-		return
-	}
-	logger.Error(err, "cross-replica publish failed", "key", key)
 }

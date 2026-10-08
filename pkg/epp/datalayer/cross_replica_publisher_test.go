@@ -288,7 +288,7 @@ func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 
 func TestCrossReplicaPublisher_RateLimitsVisiblePublishFailures(t *testing.T) {
 	syncer := &fakeSyncer{setErr: assert.AnError}
-	pub := testCrossReplicaPublisher(syncer, fakeContributor{key: "inflight:test"})
+	pub := newCrossReplicaPublisher(syncer, extractorMapWith(fakeContributor{key: "inflight:test"}), 0, 0)
 	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
 	require.True(t, pub.registerEndpoint(endpointID))
 
@@ -304,7 +304,7 @@ func TestCrossReplicaPublisher_RateLimitsVisiblePublishFailures(t *testing.T) {
 	pub.publish(ctx, endpointID)
 	require.Equal(t, int64(1), failures.Load())
 
-	pub.lastPublishFailureLogNanos.Store(time.Now().Add(-publishFailureLogInterval).UnixNano())
+	pub.publishFailureLog.Interval = time.Nanosecond
 	pub.publish(ctx, endpointID)
 	require.Equal(t, int64(2), failures.Load())
 }
