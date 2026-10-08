@@ -93,7 +93,7 @@ parameters:
 | `capacityTokens` | `4194304` | Per-pod KV capacity in tokens when `cache_config_info` is not scraped. |
 | `utilThreshold` | `1.0` | Fit ceiling as a fraction of capacity (1.0 = 100%). |
 | `idleLeaseSeconds` | `30` | How long an idle session keeps its room against paused and new sessions. Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
-| `headWaitStarvationMs` | `1800000` | Forced-admission backstop; 0 disables it. |
+| `headWaitStarvationMs` | `30000` | Forced-admission backstop; 0 disables it. Keep it below the priority band's request TTL (flow control default 60 s), or the request is shed before it is force-admitted. |
 | `evictionTtlSeconds` | `3600` | Idle session state retention; must exceed `headWaitStarvationMs`. |
 | `evictionSweepSeconds` | `10` | How often the background sweep drops idle sessions. |
 

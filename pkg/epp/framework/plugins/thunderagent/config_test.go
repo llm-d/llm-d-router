@@ -45,3 +45,9 @@ func TestConfigValidate(t *testing.T) {
 	cfg.IdleLeaseSeconds = 0
 	require.NoError(t, cfg.validate(), "a zero lease reclaims idle sessions at once")
 }
+
+// The default starvation deadline fires before the flow control default
+// request TTL (60s) sheds the request.
+func TestDefaultStarvationBelowRequestTTL(t *testing.T) {
+	require.Less(t, defaultConfig().HeadWaitStarvationMs, float64(60000))
+}

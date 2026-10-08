@@ -206,7 +206,7 @@ func TestPausedResumesOnlyOnItsOwnPod(t *testing.T) {
 	a.mgr.sweep(time.Now())
 	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
 
-	qNew := makeQueue("s9", time.Now().Add(-time.Minute), 320)
+	qNew := makeQueue("s9", time.Now().Add(-10*time.Second), 320) // older, below the starvation deadline
 	require.Equal(t, q2, pick(t, a, q2, qNew))
 
 	// PreRequest confirms the resume.

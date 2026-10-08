@@ -40,7 +40,8 @@ type Config struct {
 	// about to return, longer holds admissions behind long tool calls.
 	IdleLeaseSeconds float64 `json:"idleLeaseSeconds"`
 	// HeadWaitStarvationMs is the maximum queue wait: a request waiting
-	// this long is admitted even when no pod has room. 0 disables it.
+	// this long is admitted even when no pod has room. 0 disables it. Keep it
+	// below the priority band's request TTL, or the request is shed first.
 	HeadWaitStarvationMs float64 `json:"headWaitStarvationMs"`
 }
 
@@ -51,7 +52,7 @@ func defaultConfig() Config {
 		EvictionSweepSeconds: 10,
 		UtilThreshold:        1.0,
 		IdleLeaseSeconds:     30,
-		HeadWaitStarvationMs: 1800000,
+		HeadWaitStarvationMs: 30000,
 	}
 }
 
