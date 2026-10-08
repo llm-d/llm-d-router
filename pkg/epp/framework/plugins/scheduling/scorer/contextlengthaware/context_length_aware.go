@@ -266,12 +266,12 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 }
 
 // getContextLength returns the token count after subtracting the configured
-// producer's reusable prefix token floor, or plus the output token cap when
-// includeMaxOutputTokens is set. Positive token counts have at least one token
-// of prefill work. Missing reusable-token data leaves the total token count
-// unchanged. Unavailable tokens count as 0. With cache subtraction enabled, the
-// result is stored per request and plugin instance so Filter and Score use the
-// same value.
+// producer's reusable prefix token floor. Positive token counts have at least
+// one token of prefill work. Missing reusable-token data leaves the total token
+// count unchanged. Unavailable tokens count as 0. With includeMaxOutputTokens,
+// the output token cap is added to the token count. With cache subtraction
+// enabled, the result is stored per request and plugin instance so Filter and
+// Score use the same value.
 func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil {
 		return 0
