@@ -30,7 +30,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -45,7 +44,6 @@ const (
 var (
 	_ fwkrh.Parser            = &AnthropicParser{}
 	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
-	_ fwkrh.PriorityRewriter  = &AnthropicParser{}
 )
 
 type AnthropicParser struct {
@@ -87,21 +85,30 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return parserutil.ParseRenderRequest(body)
 	}
 
-	// count_tokens delegates token counting to the server and passes its response through.
-	if strings.HasSuffix(path, "/"+countTokensAPI) {
-		return &fwkrh.ParseResult{
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
-			SkipResponseProcessing: true,
-		}, nil
-	}
-
-	if !strings.HasSuffix(path, "/"+messagesAPI) {
+	countTokens := request.MatchPathSuffix(path, countTokensAPI)
+	if !countTokens && !request.MatchPathSuffix(path, messagesAPI) {
 		return nil, fmt.Errorf("unsupported API endpoint: %s", path)
 	}
 
 	bodyMap, err := parserutil.UnmarshalEnvelope(body, "system")
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
+	}
+
+	result := &fwkrh.InferenceRequestBody{
+		Payload:         fwkrh.PayloadMap(bodyMap),
+		RawBody:         body,
+		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
+	}
+	if model, ok := bodyMap["model"].(string); ok {
+		result.Model = model
+	}
+
+	// count_tokens delegates token counting to the server and passes its response
+	// through, so only the envelope is read: Messages stays nil to keep the token
+	// producers out, while the model still resolves and rewrites.
+	if countTokens {
+		return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: true}, nil
 	}
 
 	var messagesReq fwkrh.MessagesRequest
@@ -111,16 +118,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	if len(messagesReq.Messages) == 0 {
 		return nil, errors.New("invalid messages request: must have at least one message")
 	}
-
-	result := &fwkrh.InferenceRequestBody{
-		Messages:        &messagesReq,
-		Payload:         fwkrh.PayloadMap(bodyMap),
-		RawBody:         body,
-		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
-	}
-	if model, ok := bodyMap["model"].(string); ok {
-		result.Model = model
-	}
+	result.Messages = &messagesReq
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true
 	}
@@ -136,14 +134,6 @@ func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, mod
 	}
 	m["model"] = model
 	return m, nil
-}
-
-// RewritePriority removes any client-supplied priority from the Anthropic
-// messages payload and writes the resolved EPP priority. The director only calls
-// this when priority propagation is enabled; see parsers.RewritePriority for the
-// cross-backend priority semantics.
-func (p *AnthropicParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
@@ -181,21 +171,38 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	usage := fwkrh.Usage{}
-	if v, ok := usg["input_tokens"].(float64); ok {
-		usage.PromptTokens = int(v)
-	}
-	if v, ok := usg["output_tokens"].(float64); ok {
-		usage.CompletionTokens = int(v)
+	applyInputTokens(&usage, usg)
+	if v, ok := jsonInt(usg, "output_tokens"); ok {
+		usage.CompletionTokens = v
 	}
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
-	if v, ok := usg["cache_read_input_tokens"].(float64); ok {
-		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-			CachedTokens: int(v),
-		}
-	}
-
 	return &usage, nil
+}
+
+// applyInputTokens copies the input counts of an Anthropic usage block into usage.
+// The Messages API reports input across three additive fields, where input_tokens
+// counts only the tokens that were neither read from nor written to the prompt
+// cache, so the input the server processed is their sum. CachedTokens keeps the
+// cache_read_input_tokens subset that Usage documents. A block carrying none of
+// the three leaves usage untouched, so a message_delta reporting only output
+// tokens does not erase what message_start reported.
+func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
+	input, inputOK := jsonInt(usg, "input_tokens")
+	read, readOK := jsonInt(usg, "cache_read_input_tokens")
+	creation, creationOK := jsonInt(usg, "cache_creation_input_tokens")
+	if !inputOK && !readOK && !creationOK {
+		return
+	}
+	usage.PromptTokens = input + read + creation
+	if readOK {
+		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
+	}
+}
+
+func jsonInt(m map[string]any, key string) (int, bool) {
+	v, ok := m[key].(float64)
+	return int(v), ok
 }
 
 // Anthropic SSE streaming format:
@@ -204,7 +211,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	data: {"type":"message_start","message":{"usage":{"input_tokens":25},...}}
 //
 //	event: message_delta
-//	data: {"type":"message_delta","delta":{...},"usage":{"output_tokens":15}}
+//	data: {"type":"message_delta","delta":{...},"usage":{"input_tokens":25,"output_tokens":15}}
 //
 //	event: message_stop
 //	data: {"type":"message_stop"}
@@ -241,22 +248,17 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 				if result == nil {
 					result = &fwkrh.Usage{}
 				}
-				if v, ok := event.Message.Usage["input_tokens"].(float64); ok {
-					result.PromptTokens = int(v)
-				}
-				if v, ok := event.Message.Usage["cache_read_input_tokens"].(float64); ok {
-					result.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-						CachedTokens: int(v),
-					}
-				}
+				applyInputTokens(result, event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
 					result = &fwkrh.Usage{}
 				}
-				if v, ok := event.Usage["output_tokens"].(float64); ok {
-					result.CompletionTokens = int(v)
+				// The delta counts are cumulative and authoritative over message_start.
+				applyInputTokens(result, event.Usage)
+				if v, ok := jsonInt(event.Usage, "output_tokens"); ok {
+					result.CompletionTokens = v
 				}
 			}
 		}

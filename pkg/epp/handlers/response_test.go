@@ -458,10 +458,12 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
 	}
 
+	// Prompt tokens are the sum of the Messages API input fields: 1000 uncached plus
+	// the 800 read from the cache.
 	wantUsage := fwkrh.Usage{
-		PromptTokens:       1000,
+		PromptTokens:       1800,
 		CompletionTokens:   200,
-		TotalTokens:        1200,
+		TotalTokens:        2000,
 		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
 	}
 	assert.Equal(t, wantUsage, reqCtx.Usage, "message_delta must not discard the usage reported by message_start")
@@ -476,7 +478,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	// turn into a second observation on the chunk that completes it.
 	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
 	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
-	require.Equal(t, float64(1000), inputTokens.GetSampleSum())
+	require.Equal(t, float64(1800), inputTokens.GetSampleSum())
 
 	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
 	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
