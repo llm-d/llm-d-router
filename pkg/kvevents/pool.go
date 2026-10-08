@@ -321,7 +321,7 @@ func (p *Pool) AddTask(task *RawMessage) {
 		return
 	}
 
-queueIndex := int64(h.Sum32()) % int64(p.concurrency)
+	queueIndex := int64(h.Sum32()) % int64(p.concurrency)
 	p.queues[queueIndex].Add(task)
 	p.addQueueDepth(1)
 }
