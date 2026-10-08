@@ -20,7 +20,11 @@ import (
 	"context"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 // Saturation refreshes the pod ledger from the live endpoint list and always
@@ -35,7 +39,7 @@ import (
 // used because it is the only flow-control callback that receives the
 // endpoint list each dispatch cycle. There is no pause sweep: Pick pauses
 // idle sessions on demand, when a picked turn needs their room.
-func (a *ThunderAgent) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
+func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
 	now := time.Now()
 	m := a.mgr
 
@@ -45,7 +49,12 @@ func (a *ThunderAgent) Saturation(_ context.Context, endpoints []datalayer.Endpo
 		if md == nil {
 			continue
 		}
-		m.ensureEndpointLocked(md.ID.String(), a.endpointCapacity(endpoint.GetMetrics()), now)
+		id := md.ID.String()
+		_, known := m.endpoints[id]
+		m.ensureEndpointLocked(id, a.endpointCapacity(endpoint.GetMetrics()), now)
+		if role := md.Labels[bylabel.RoleLabel]; !known && (role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill) {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("thunder-agent does not support prefill/decode disaggregation: prefill pods enter its ledger", "pod", id)
+		}
 	}
 	// A pod the endpoint list has stopped reporting is gone: unbind its
 	// sessions so their next turn re-enters as new, and drop the entry.
