@@ -23,9 +23,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -84,4 +87,39 @@ func TestDumpState(t *testing.T) {
 			"default/pod-a": {WorkingSetTokens: 500, CapacityTokens: 1000},
 		},
 	}, got)
+}
+
+// A delete event drops the endpoint and unbinds its sessions, which keep
+// their footprint; add or update events leave the ledger alone.
+func TestExtractEndpointDelete(t *testing.T) {
+	a := newTestAgent(testConfig())
+	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "pod-a"}}, nil)
+
+	require.NoError(t, a.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
+	require.Equal(t, float64(300), endpointTokens(a, "default/pod-a"))
+
+	require.NoError(t, a.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep}))
+	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
+	s, ok := sessionOf(a, "s1")
+	require.True(t, ok)
+	require.Nil(t, s.endpoint)
+	require.Equal(t, int64(300), s.committedTokens)
+}
+
+// Removing a pod through the datalayer runtime reaches the ledger.
+func TestRuntimeReleaseEndpointRemovesEndpoint(t *testing.T) {
+	a := newTestAgent(testConfig())
+	runtime := eppdatalayer.NewRuntime(0)
+	require.NoError(t, a.RegisterDependencies(runtime))
+	require.NoError(t, runtime.Configure(nil, logr.Discard()))
+
+	endpoint := runtime.NewEndpoint(context.Background(), &fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{Namespace: "default", Name: "pod-a"},
+	})
+	require.NotNil(t, endpoint)
+	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+
+	runtime.ReleaseEndpoint(endpoint)
+	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
 }

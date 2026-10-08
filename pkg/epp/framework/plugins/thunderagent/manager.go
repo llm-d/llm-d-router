@@ -173,6 +173,22 @@ func (m *sessionManager) sweep(now time.Time) {
 	}
 }
 
+// removeEndpoint drops an endpoint that left the pool. Its sessions are
+// unbound and keep their footprint, so their next turn binds them to the pod
+// that serves it.
+func (m *sessionManager) removeEndpoint(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.endpoints[id]
+	if !ok {
+		return
+	}
+	for _, s := range p.sessions {
+		s.endpoint = nil
+	}
+	delete(m.endpoints, id)
+}
+
 // snapshot returns the values to report.
 func (m *sessionManager) snapshot() gaugeSnapshot {
 	m.mu.Lock()

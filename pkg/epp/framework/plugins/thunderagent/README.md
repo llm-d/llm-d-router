@@ -21,6 +21,9 @@ working set against the engine's own KV utilization shows the KV-thrashing
 signature: idle sessions own their context in the prefix cache, but the engine
 reports those blocks as free.
 
+When a pod leaves the pool, the plugin drops it from the ledger; its sessions
+keep their footprint and move to the pod that serves their next turn.
+
 The same values (session counts, per-pod working set and capacity) are
 available from the `/debug/plugins/state` endpoint. Session ids never appear
 in metrics or state dumps.

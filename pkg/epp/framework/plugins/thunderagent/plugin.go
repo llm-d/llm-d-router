@@ -36,9 +36,11 @@ import (
 	"fmt"
 	"time"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
 
@@ -55,6 +57,8 @@ var (
 	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
+	_ fwkdl.Registrant            = &ThunderAgent{}
+	_ fwkdl.EndpointExtractor     = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -140,6 +144,30 @@ func sessionID(request *fwksched.InferenceRequest) string {
 	}
 	id, _ := fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
 	return id
+}
+
+// RegisterDependencies subscribes the plugin to endpoint lifecycle events.
+func (a *ThunderAgent) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      a.typedName,
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  a,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType,
+			sourcenotifications.EndpointNotificationSourceType,
+		),
+	})
+}
+
+// Extract drops an endpoint from the ledger when it leaves the pool.
+func (a *ThunderAgent) Extract(_ context.Context, event fwkdl.EndpointEvent) error {
+	if event.Type != fwkdl.EventDelete || event.Endpoint == nil {
+		return nil
+	}
+	if md := event.Endpoint.GetMetadata(); md != nil {
+		a.mgr.removeEndpoint(md.ID.String())
+	}
+	return nil
 }
 
 // stateDump is the snapshot returned by DumpState. Session ids come from
