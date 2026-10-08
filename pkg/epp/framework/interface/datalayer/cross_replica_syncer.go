@@ -31,16 +31,13 @@ type StateKey string
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
-	// Bind registers the live local value reader and aggregation function for key.
-	Bind(key StateKey, read func(endpointID string) Cloneable, aggregate func([]any) any)
-
 	// Set publishes the live local value for endpointID and refreshes the peer
 	// aggregate used by Get.
-	Set(ctx context.Context, key StateKey, endpointID string) error
+	Set(ctx context.Context, spec CrossReplicaSpec, endpointID string) error
 
 	// Get reads the live local value for endpointID and combines it with the
 	// prepared peer aggregate.
-	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
+	Get(ctx context.Context, spec CrossReplicaSpec, endpointID string) (any, bool, error)
 
 	// Delete removes this replica's value for endpointID.
 	Delete(ctx context.Context, key StateKey, endpointID string) error

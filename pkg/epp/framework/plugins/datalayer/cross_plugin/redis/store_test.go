@@ -41,9 +41,10 @@ import (
 )
 
 const (
-	testEndpointID = "vortex/backend-rank-0"
-	testReplicaID  = "epp-a"
-	testTTL        = time.Minute
+	testEndpointID      = "vortex/backend-rank-0"
+	testReplicaID       = "epp-a"
+	testStateTTL        = time.Minute
+	testCoordinationTTL = 3 * time.Minute
 )
 
 var testStateKey = fwkdl.StateKey("inflight")
@@ -85,6 +86,41 @@ type hgetallCounter struct {
 	count atomic.Int64
 }
 
+type miniredisHExpireCompatibilityHook struct{}
+
+func (h *miniredisHExpireCompatibilityHook) DialHook(next goredis.DialHook) goredis.DialHook {
+	return next
+}
+
+func (h *miniredisHExpireCompatibilityHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		rewriteHPExpireForMiniredis(cmd)
+		return next(ctx, cmd)
+	}
+}
+
+func (h *miniredisHExpireCompatibilityHook) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		for _, cmd := range cmds {
+			rewriteHPExpireForMiniredis(cmd)
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func rewriteHPExpireForMiniredis(cmd goredis.Cmder) {
+	if !strings.EqualFold(cmd.Name(), "HPEXPIRE") {
+		return
+	}
+	args := cmd.Args()
+	ttlMillis, ok := args[2].(int64)
+	if !ok {
+		return
+	}
+	args[0] = "HEXPIRE"
+	args[2] = (ttlMillis + 999) / 1000
+}
+
 func (c *hgetallCounter) DialHook(next goredis.DialHook) goredis.DialHook { return next }
 
 func (c *hgetallCounter) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
@@ -113,18 +149,20 @@ func newTestStore(t testing.TB, server *miniredis.Miniredis, replicaID string) (
 	t.Helper()
 	counter := &hgetallCounter{}
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+	client.AddHook(&miniredisHExpireCompatibilityHook{})
 	client.AddHook(counter)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	return &RedisStateStore{
-		replicaID: replicaID,
-		client:    client,
-		ttl:       testTTL,
+		replicaID:       replicaID,
+		client:          client,
+		stateTTL:        testStateTTL,
+		coordinationTTL: testCoordinationTTL,
 	}, counter
 }
 
-func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, replicaID string, value any, writtenAt time.Time) {
+func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, replicaID string, value any) {
 	t.Helper()
-	data, err := encodeStamped(value, writtenAt)
+	data, err := encodeValue(value)
 	require.NoError(t, err)
 	server.HSet(string(key)+":"+testEndpointID, replicaID, string(data))
 }
@@ -162,33 +200,33 @@ func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID
 func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "epp-b", cloneableInt(7), time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", cloneableInt(7))
 	local := cloneableInt(4)
 	var aggregateCalls atomic.Int64
 	aggregate := func(values []any) any {
 		aggregateCalls.Add(1)
 		return sumCloneableInts(values)
 	}
-	store.Bind(
-		testStateKey,
-		func(string) fwkdl.Cloneable { return local },
-		aggregate,
-	)
+	spec := fwkdl.CrossReplicaSpec{
+		StateKey:  testStateKey,
+		Read:      func(string) fwkdl.Cloneable { return local },
+		Aggregate: aggregate,
+	}
 
-	require.NoError(t, store.Set(context.Background(), testStateKey, testEndpointID))
+	require.NoError(t, store.Set(context.Background(), spec, testEndpointID))
 	require.Equal(t, int64(1), counter.count.Load())
 	require.Equal(t, int64(1), aggregateCalls.Load())
 	cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(7), cached.(*aggregateCacheEntry).value)
 
-	value, ok, err := store.Get(context.Background(), testStateKey, testEndpointID)
+	value, ok, err := store.Get(context.Background(), spec, testEndpointID)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(11), value)
 
 	local = 5
-	value, ok, err = store.Get(context.Background(), testStateKey, testEndpointID)
+	value, ok, err = store.Get(context.Background(), spec, testEndpointID)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(12), value)
@@ -201,7 +239,7 @@ func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
 	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testTTL)})
+	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
 
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	_, cached := store.cache.Load(hashKey)
@@ -210,21 +248,39 @@ func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	require.Equal(t, 5, total)
 }
 
-func TestStateOperationsRequireBinding(t *testing.T) {
+func TestSetAndGetConcurrent(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
+	spec := fwkdl.CrossReplicaSpec{
+		StateKey:  testStateKey,
+		Read:      func(string) fwkdl.Cloneable { return cloneableInt(1) },
+		Aggregate: sumCloneableInts,
+	}
 
-	assert.Error(t, store.Set(context.Background(), "missing", testEndpointID))
-	_, ok, err := store.Get(context.Background(), "missing", testEndpointID)
-	assert.False(t, ok)
-	assert.Error(t, err)
-	assert.Error(t, store.Delete(context.Background(), "missing", testEndpointID))
+	const iterations = 50
+	errs := make(chan error, 4*iterations)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			for range iterations {
+				errs <- store.Set(context.Background(), spec, testEndpointID)
+				_, _, err := store.Get(context.Background(), spec, testEndpointID)
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
 }
 
 func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "epp-b", &customValue{Count: 7}, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", &customValue{Count: 7})
 
 	require.NoError(t, store.set(
 		context.Background(), testStateKey, testEndpointID, &customValue{Count: 4}, sumCustomValues,
@@ -237,40 +293,33 @@ func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	require.Equal(t, &customValue{Count: 11}, value)
 }
 
-func TestEncodeStampedUsesConcreteValueStream(t *testing.T) {
-	writtenAt := time.Unix(123, 456).UTC()
-	data, err := encodeStamped(&customValue{Count: 7}, writtenAt)
+func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
+	data, err := encodeValue(&customValue{Count: 7})
 	require.NoError(t, err)
 
 	decoder := gob.NewDecoder(bytes.NewReader(data))
-	var decodedAt time.Time
-	require.NoError(t, decoder.Decode(&decodedAt))
-	require.Equal(t, writtenAt, decodedAt)
-
 	var value customValue
 	require.NoError(t, decoder.Decode(&value))
 	require.Equal(t, customValue{Count: 7}, value)
 }
 
-func TestEncodeStampedSupportsInFlightLoad(t *testing.T) {
-	writtenAt := time.Unix(123, 456).UTC()
+func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
 	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
-	data, err := encodeStamped(want, writtenAt)
+	data, err := encodeValue(want)
 	require.NoError(t, err)
 
-	stamped, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
+	actual, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
 	require.NoError(t, err)
-	require.Equal(t, want, stamped.Value)
-	require.Equal(t, writtenAt, stamped.WrittenAt)
+	require.Equal(t, want, actual)
 }
 
 func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, counter := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7)
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	seedReplica(t, server, testStateKey, "epp-b", 9, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 9)
 	total := getSum(t, store, testStateKey, testEndpointID, 4)
 	require.Equal(t, 11, total)
 
@@ -283,9 +332,9 @@ func TestSetRefreshesPreparedAggregate(t *testing.T) {
 func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "epp-z", "third", time.Now())
-	seedReplica(t, server, testStateKey, "epp-b", "first", time.Now())
-	seedReplica(t, server, testStateKey, "epp-m", "second", time.Now())
+	seedReplica(t, server, testStateKey, "epp-z", "third")
+	seedReplica(t, server, testStateKey, "epp-b", "first")
+	seedReplica(t, server, testStateKey, "epp-m", "second")
 	aggregate := func(values []any) any {
 		parts := make([]string, 0, len(values))
 		for _, value := range values {
@@ -331,11 +380,10 @@ func TestGetReturnsLiveLocalBeforeSet(t *testing.T) {
 	require.Zero(t, counter.count.Load())
 }
 
-func TestSetSkipsStaleAndUndecodableFields(t *testing.T) {
+func TestSetSkipsUndecodableFields(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "stale", 100, time.Now().Add(-2*testTTL))
-	seedReplica(t, server, testStateKey, "fresh", 7, time.Now())
+	seedReplica(t, server, testStateKey, "fresh", 7)
 	server.HSet(store.hashKey(testStateKey, testEndpointID), "corrupt", "not-gob")
 
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
@@ -360,29 +408,29 @@ func TestExpiredPeerAggregateFallsBackToLiveLocal(t *testing.T) {
 	require.False(t, cached)
 }
 
-func TestSetExpiresAggregatesWithOldestIncludedValue(t *testing.T) {
+func TestSetExpiresAggregatesFromLocalRefreshTime(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
 	hashKey := store.hashKey(testStateKey, testEndpointID)
-	oldestWrittenAt := time.Now().Add(-30 * time.Second)
-	seedReplica(t, server, testStateKey, "epp-b", 7, oldestWrittenAt)
-	seedReplica(t, server, testStateKey, "epp-c", 9, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+	seedReplica(t, server, testStateKey, "epp-c", 9)
 
+	refreshedAt := time.Now()
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	cached, ok := store.cache.Load(hashKey)
 	require.True(t, ok)
 	entry := cached.(*aggregateCacheEntry)
 
-	require.WithinDuration(t, oldestWrittenAt.Add(testTTL), entry.expiresAt, time.Millisecond)
+	require.WithinDuration(t, refreshedAt.Add(testStateTTL), entry.expiresAt, 100*time.Millisecond)
 }
 
 func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7)
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	require.NoError(t, store.delete(context.Background(), testStateKey, testEndpointID))
+	require.NoError(t, store.Delete(context.Background(), testStateKey, testEndpointID))
 
 	_, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
 	require.False(t, ok)
@@ -396,11 +444,11 @@ func TestDeleteInvalidatesAggregateWhenRedisFails(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, ttl: testTTL}
+	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testTTL)})
+	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
 
-	err := store.delete(context.Background(), testStateKey, testEndpointID)
+	err := store.Delete(context.Background(), testStateKey, testEndpointID)
 
 	require.ErrorContains(t, err, "redis unavailable")
 	_, ok := store.cache.Load(hashKey)
@@ -412,7 +460,7 @@ func TestSetWritesAndReadsAggregateInOneTransaction(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, ttl: testTTL}
+	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 	hashKey := store.hashKey(testStateKey, testEndpointID)
 
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
@@ -420,8 +468,9 @@ func TestSetWritesAndReadsAggregateInOneTransaction(t *testing.T) {
 	require.Len(t, recorder.commands, 6)
 	require.Equal(t, "multi", recorder.commands[0].Name())
 	require.Equal(t, "hset", recorder.commands[1].Name())
-	require.Equal(t, []any{"HEXPIRE", hashKey, int64(60), "FIELDS", 1, testReplicaID}, recorder.commands[2].Args())
-	require.Equal(t, "expire", recorder.commands[3].Name())
+	require.Equal(t, []any{"HPEXPIRE", hashKey, int64(60000), "FIELDS", 1, testReplicaID}, recorder.commands[2].Args())
+	require.Equal(t, "pexpire", recorder.commands[3].Name())
+	require.Equal(t, []any{"pexpire", hashKey, int64(60000)}, recorder.commands[3].Args())
 	require.Equal(t, "hgetall", recorder.commands[4].Name())
 	require.Equal(t, "exec", recorder.commands[5].Name())
 }
@@ -433,8 +482,8 @@ func TestSetAppliesFieldTTL(t *testing.T) {
 
 	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	server.HSet(hashKey, "peer", "value")
-	server.SetTTL(hashKey, 2*testTTL)
-	server.FastForward(testTTL + time.Second)
+	server.SetTTL(hashKey, 2*testStateTTL)
+	server.FastForward(testStateTTL + time.Second)
 
 	exists, err := store.client.HExists(context.Background(), hashKey, testReplicaID).Result()
 	require.NoError(t, err)
@@ -523,7 +572,7 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	store, _ := newTestStore(t, server, testReplicaID)
 	ctx := context.Background()
 
-	peer, err := encodeStamped(7, time.Now())
+	peer, err := encodeValue(7)
 	require.NoError(t, err)
 	server.HSet(store.hashKey("request", "request-id"), "epp-b", string(peer))
 	require.NoError(t, store.set(ctx, "request", "request-id", 4, sumInts))
@@ -539,14 +588,14 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 func TestGetOrSetExpires(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := newTestStore(t, server, testReplicaID)
-	store.ttl = time.Second
+	store.coordinationTTL = time.Second
 	ctx := context.Background()
 
 	_, existed, err := store.GetOrSet(ctx, "request", "request-id", "first")
 	require.NoError(t, err)
 	require.False(t, existed)
 
-	server.FastForward(2 * store.ttl)
+	server.FastForward(2 * store.coordinationTTL)
 	actual, existed, err := store.GetOrSet(ctx, "request", "request-id", "second")
 	require.NoError(t, err)
 	require.False(t, existed)
@@ -558,7 +607,7 @@ func TestGetOrSetPropagatesRedisErrors(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{client: client, ttl: testTTL}
+	store := &RedisStateStore{client: client, coordinationTTL: testCoordinationTTL}
 
 	actual, existed, err := store.GetOrSet(context.Background(), "request", "request-id", "candidate")
 
@@ -580,15 +629,16 @@ func TestSetRecoversAfterRedisBecomesAvailable(t *testing.T) {
 		WriteTimeout: 100 * time.Millisecond,
 		MaxRetries:   0,
 	})
+	client.AddHook(&miniredisHExpireCompatibilityHook{})
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, ttl: testTTL}
+	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 
 	require.Error(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	server := miniredis.NewMiniRedis()
 	require.NoError(t, server.StartAddr(address))
 	t.Cleanup(server.Close)
-	seedReplica(t, server, testStateKey, "epp-b", 7, time.Now())
+	seedReplica(t, server, testStateKey, "epp-b", 7)
 
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		assert.NoError(collect, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
@@ -613,7 +663,7 @@ func TestGetOrSetUsesOneAtomicRedisCommand(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{client: client, ttl: testTTL}
+	store := &RedisStateStore{client: client, coordinationTTL: testCoordinationTTL}
 
 	actual, existed, err := store.GetOrSet(context.Background(), "request", "request-id", "candidate")
 
@@ -627,46 +677,49 @@ func TestGetOrSetUsesOneAtomicRedisCommand(t *testing.T) {
 	require.Equal(t, store.coordKey("request", "request-id"), args[1])
 	_, ok := args[2].([]byte)
 	require.True(t, ok)
-	require.Equal(t, []any{"ex", int64(60), "NX", "get"}, args[3:])
+	require.Equal(t, []any{"ex", int64(180), "NX", "get"}, args[3:])
 }
 
 func TestFactoryConfiguration(t *testing.T) {
 	server := miniredis.RunT(t)
 	testCases := []struct {
-		name    string
-		params  string
-		wantErr string
-		wantTTL time.Duration
+		name                string
+		params              string
+		wantErr             string
+		wantStateTTL        time.Duration
+		wantCoordinationTTL time.Duration
 	}{
 		{
-			name:    "defaults",
-			params:  fmt.Sprintf("{\"address\": %q}", server.Addr()),
-			wantTTL: defaultTTL,
+			name:                "defaults",
+			params:              fmt.Sprintf("{\"address\": %q}", server.Addr()),
+			wantStateTTL:        defaultStateTTL,
+			wantCoordinationTTL: defaultCoordinationTTL,
 		},
 		{
-			name:    "explicit TTL",
-			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"30s\"}", server.Addr()),
-			wantTTL: 30 * time.Second,
+			name:                "explicit TTLs",
+			params:              fmt.Sprintf("{\"address\": %q, \"stateTTL\": \"500ms\", \"coordinationTTL\": \"30s\"}", server.Addr()),
+			wantStateTTL:        500 * time.Millisecond,
+			wantCoordinationTTL: 30 * time.Second,
 		},
 		{
-			name:    "invalid TTL",
-			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"soon\"}", server.Addr()),
-			wantErr: "invalid ttl",
+			name:    "invalid state TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"stateTTL\": \"soon\"}", server.Addr()),
+			wantErr: "invalid stateTTL",
 		},
 		{
-			name:    "zero TTL",
-			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"0s\"}", server.Addr()),
-			wantErr: "ttl must be at least 1s",
+			name:    "invalid coordination TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"coordinationTTL\": \"soon\"}", server.Addr()),
+			wantErr: "invalid coordinationTTL",
 		},
 		{
-			name:    "negative TTL",
-			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"-1s\"}", server.Addr()),
-			wantErr: "ttl must be at least 1s",
+			name:    "zero state TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"stateTTL\": \"0s\"}", server.Addr()),
+			wantErr: "stateTTL must be at least 1ms",
 		},
 		{
-			name:    "sub-second TTL",
-			params:  fmt.Sprintf("{\"address\": %q, \"ttl\": \"500ms\"}", server.Addr()),
-			wantErr: "ttl must be at least 1s",
+			name:    "sub-millisecond coordination TTL",
+			params:  fmt.Sprintf("{\"address\": %q, \"coordinationTTL\": \"500us\"}", server.Addr()),
+			wantErr: "coordinationTTL must be at least 1ms",
 		},
 	}
 
@@ -680,7 +733,8 @@ func TestFactoryConfiguration(t *testing.T) {
 			require.NoError(t, err)
 			store := plugin.(*RedisStateStore)
 			t.Cleanup(func() { require.NoError(t, store.client.Close()) })
-			require.Equal(t, tc.wantTTL, store.ttl)
+			require.Equal(t, tc.wantStateTTL, store.stateTTL)
+			require.Equal(t, tc.wantCoordinationTTL, store.coordinationTTL)
 			require.Equal(t, RedisStateStoreType, store.TypedName().Type)
 			require.Equal(t, "redis", store.TypedName().Name)
 		})

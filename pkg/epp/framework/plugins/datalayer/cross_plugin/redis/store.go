@@ -19,11 +19,14 @@ package redis
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -40,30 +43,45 @@ import (
 )
 
 const (
-	RedisStateStoreType = "redis-state-store"
-	defaultAddress      = "localhost:6379"
-	defaultTTL          = 180 * time.Second
+	RedisStateStoreType    = "redis-state-store"
+	defaultAddress         = "localhost:6379"
+	defaultStateTTL        = 2 * time.Second
+	defaultCoordinationTTL = 180 * time.Second
+	minimumTTL             = time.Millisecond
 )
 
 var _ fwkdl.CrossReplicaSyncer = (*RedisStateStore)(nil)
 
 type redisConfig struct {
-	Address  string `json:"address"`
-	Password string `json:"password"`
-	DB       int    `json:"db"`
-	TTL      string `json:"ttl"`
+	Address         string          `json:"address"`
+	Username        string          `json:"username"`
+	Password        string          `json:"password"`
+	PasswordEnv     string          `json:"passwordEnv"`
+	PasswordFile    string          `json:"passwordFile"`
+	DB              int             `json:"db"`
+	StateTTL        string          `json:"stateTTL"`
+	CoordinationTTL string          `json:"coordinationTTL"`
+	TLS             *redisTLSConfig `json:"tls"`
+}
+
+type redisTLSConfig struct {
+	ServerName         string `json:"serverName"`
+	CACertPath         string `json:"caCertPath"`
+	ClientCertPath     string `json:"clientCertPath"`
+	ClientKeyPath      string `json:"clientKeyPath"`
+	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
 }
 
 // RedisStateStore is a CrossReplicaSyncer backed by Redis for cross-replica
 // state sharing. Set prepares each endpoint's peer aggregate, and Get combines
 // it with the live local value.
 type RedisStateStore struct {
-	typedName fwkplugin.TypedName
-	replicaID string
-	client    *goredis.Client
-	ttl       time.Duration
-	cache     sync.Map
-	states    map[fwkdl.StateKey]stateDefinition
+	typedName       fwkplugin.TypedName
+	replicaID       string
+	client          *goredis.Client
+	stateTTL        time.Duration
+	coordinationTTL time.Duration
+	cache           sync.Map
 }
 
 type aggregateCacheEntry struct {
@@ -71,9 +89,80 @@ type aggregateCacheEntry struct {
 	expiresAt time.Time
 }
 
-type stateDefinition struct {
-	read      func(string) fwkdl.Cloneable
-	aggregate func([]any) any
+func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
+	if raw == "" {
+		return defaultValue, nil
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("redis-state-store: invalid %s %q: %w", name, raw, err)
+	}
+	if ttl < minimumTTL {
+		return 0, fmt.Errorf("redis-state-store: %s must be at least %s, got %s", name, minimumTTL, ttl)
+	}
+	return ttl, nil
+}
+
+func resolvePassword(cfg redisConfig) (string, error) {
+	if cfg.Password != "" {
+		return "", errors.New("redis-state-store: password must use passwordEnv or passwordFile")
+	}
+	if cfg.PasswordEnv != "" && cfg.PasswordFile != "" {
+		return "", errors.New("redis-state-store: passwordEnv and passwordFile are mutually exclusive")
+	}
+	if cfg.PasswordEnv != "" {
+		password, ok := os.LookupEnv(cfg.PasswordEnv)
+		if !ok {
+			return "", fmt.Errorf("redis-state-store: password environment variable %q is not set", cfg.PasswordEnv)
+		}
+		return password, nil
+	}
+	if cfg.PasswordFile != "" {
+		password, err := os.ReadFile(cfg.PasswordFile)
+		if err != nil {
+			return "", fmt.Errorf("redis-state-store: read password file %q: %w", cfg.PasswordFile, err)
+		}
+		return string(password), nil
+	}
+	return "", nil
+}
+
+func buildTLSConfig(address string, cfg redisTLSConfig) (*tls.Config, error) {
+	serverName := cfg.ServerName
+	if serverName == "" {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("redis-state-store: derive TLS server name from address %q: %w", address, err)
+		}
+		serverName = host
+	}
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // Explicit operator configuration.
+	}
+	if cfg.CACertPath != "" {
+		pem, err := os.ReadFile(cfg.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("redis-state-store: read CA certificate %q: %w", cfg.CACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("redis-state-store: no valid CA certificates in %q", cfg.CACertPath)
+		}
+		tlsConfig.RootCAs = pool
+	}
+	if (cfg.ClientCertPath == "") != (cfg.ClientKeyPath == "") {
+		return nil, errors.New("redis-state-store: clientCertPath and clientKeyPath must be set together")
+	}
+	if cfg.ClientCertPath != "" {
+		certificate, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("redis-state-store: load client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
+	return tlsConfig, nil
 }
 
 func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -87,16 +176,24 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 		cfg.Address = defaultAddress
 	}
 
-	ttl := defaultTTL
-	if cfg.TTL != "" {
-		parsed, err := time.ParseDuration(cfg.TTL)
-		if err != nil {
-			return nil, fmt.Errorf("redis-state-store: invalid ttl %q: %w", cfg.TTL, err)
-		}
-		ttl = parsed
+	stateTTL, err := parseTTL("stateTTL", cfg.StateTTL, defaultStateTTL)
+	if err != nil {
+		return nil, err
 	}
-	if ttl < time.Second {
-		return nil, fmt.Errorf("redis-state-store: ttl must be at least 1s, got %s", ttl)
+	coordinationTTL, err := parseTTL("coordinationTTL", cfg.CoordinationTTL, defaultCoordinationTTL)
+	if err != nil {
+		return nil, err
+	}
+	password, err := resolvePassword(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var tlsConfig *tls.Config
+	if cfg.TLS != nil {
+		tlsConfig, err = buildTLSConfig(cfg.Address, *cfg.TLS)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	hostname, _ := os.Hostname()
@@ -106,40 +203,27 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 	replicaID := hostname + "-" + uuid.NewString()
 
 	client := goredis.NewClient(&goredis.Options{
-		Addr:     cfg.Address,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		Addr:      cfg.Address,
+		Username:  cfg.Username,
+		Password:  password,
+		DB:        cfg.DB,
+		TLSConfig: tlsConfig,
 	})
 	if handle != nil && handle.Context() != nil {
 		context.AfterFunc(handle.Context(), func() { _ = client.Close() })
 	}
 
 	return &RedisStateStore{
-		typedName: fwkplugin.TypedName{Type: RedisStateStoreType, Name: name},
-		replicaID: replicaID,
-		client:    client,
-		ttl:       ttl,
-		states:    make(map[fwkdl.StateKey]stateDefinition),
+		typedName:       fwkplugin.TypedName{Type: RedisStateStoreType, Name: name},
+		replicaID:       replicaID,
+		client:          client,
+		stateTTL:        stateTTL,
+		coordinationTTL: coordinationTTL,
 	}, nil
 }
 
 func (s *RedisStateStore) TypedName() fwkplugin.TypedName {
 	return s.typedName
-}
-
-func (s *RedisStateStore) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) {
-	if s.states == nil {
-		s.states = make(map[fwkdl.StateKey]stateDefinition)
-	}
-	s.states[key] = stateDefinition{read: read, aggregate: aggregate}
-}
-
-func (s *RedisStateStore) state(key fwkdl.StateKey) (stateDefinition, error) {
-	state, ok := s.states[key]
-	if !ok {
-		return stateDefinition{}, fmt.Errorf("redis-state-store: state key %q is not bound", key)
-	}
-	return state, nil
 }
 
 func (s *RedisStateStore) hashKey(key fwkdl.StateKey, endpointID string) string {
@@ -151,44 +235,31 @@ func (s *RedisStateStore) coordKey(key fwkdl.StateKey, id string) string {
 	return "coord:" + string(key) + ":" + id
 }
 
-type stampedValue struct {
-	Value     any
-	WrittenAt time.Time
-}
-
-func encodeStamped(value any, now time.Time) ([]byte, error) {
+func encodeValue(value any) ([]byte, error) {
 	if value == nil {
 		return nil, errors.New("cannot encode nil value")
 	}
 
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
-	if err := encoder.Encode(now); err != nil {
-		return nil, err
-	}
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-func gobDecode(data []byte, prototype any) (stampedValue, error) {
+func gobDecode(data []byte, prototype any) (any, error) {
 	if prototype == nil {
-		return stampedValue{}, errors.New("cannot decode stored value without a type prototype")
+		return nil, errors.New("cannot decode stored value without a type prototype")
 	}
 
 	decoder := gob.NewDecoder(bytes.NewReader(data))
-	var writtenAt time.Time
-	if err := decoder.Decode(&writtenAt); err != nil {
-		return stampedValue{}, err
-	}
-
 	valueType := reflect.TypeOf(prototype)
 	target := reflect.New(valueType)
 	if err := decoder.Decode(target.Interface()); err != nil {
-		return stampedValue{}, err
+		return nil, err
 	}
-	return stampedValue{Value: target.Elem().Interface(), WrittenAt: writtenAt}, nil
+	return target.Elem().Interface(), nil
 }
 
 // set publishes this replica's value and prepares the peer aggregate returned
@@ -197,7 +268,7 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	logger := ctrl.LoggerFrom(ctx)
 	now := time.Now()
 
-	data, err := encodeStamped(value, now)
+	data, err := encodeValue(value)
 	if err != nil {
 		return fmt.Errorf("redis-state-store: encode: %w", err)
 	}
@@ -205,11 +276,11 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	hashKey := s.hashKey(key, endpointID)
 	pipe := s.client.TxPipeline()
 	pipe.HSet(ctx, hashKey, s.replicaID, data)
-	pipe.HExpire(ctx, hashKey, s.ttl, s.replicaID)
-	pipe.Expire(ctx, hashKey, s.ttl)
+	pipe.HPExpire(ctx, hashKey, s.stateTTL, s.replicaID)
+	pipe.PExpire(ctx, hashKey, s.stateTTL)
 	result := pipe.HGetAll(ctx, hashKey)
 	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("redis-state-store: set and get aggregate: %w", err)
+		return fmt.Errorf("redis-state-store: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
 	}
 
 	raw, err := result.Result()
@@ -217,30 +288,19 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 		return fmt.Errorf("redis-state-store: hgetall: %w", err)
 	}
 	remoteValues := make([]any, 0, len(raw))
-	var remoteExpiresAt time.Time
 	for _, field := range slices.Sorted(maps.Keys(raw)) {
 		if field == s.replicaID {
 			continue
 		}
 		encoded := raw[field]
-		stamped, err := gobDecode([]byte(encoded), value)
+		remoteValue, err := gobDecode([]byte(encoded), value)
 		if err != nil {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("redis-state-store: decode error", "field", field, "error", err)
 			}
 			continue
 		}
-		valueExpiresAt := stamped.WrittenAt.Add(s.ttl)
-		if !valueExpiresAt.After(now) {
-			if v := logger.V(logutil.DEBUG); v.Enabled() {
-				v.Info("redis-state-store: skipping stale entry", "field", field, "age", now.Sub(stamped.WrittenAt), "ttl", s.ttl)
-			}
-			continue
-		}
-		remoteValues = append(remoteValues, stamped.Value)
-		if remoteExpiresAt.IsZero() || valueExpiresAt.Before(remoteExpiresAt) {
-			remoteExpiresAt = valueExpiresAt
-		}
+		remoteValues = append(remoteValues, remoteValue)
 	}
 
 	if len(remoteValues) == 0 {
@@ -248,7 +308,7 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	} else {
 		s.cache.Store(hashKey, &aggregateCacheEntry{
 			value:     aggregate(remoteValues),
-			expiresAt: remoteExpiresAt,
+			expiresAt: now.Add(s.stateTTL),
 		})
 	}
 
@@ -258,12 +318,8 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	return nil
 }
 
-func (s *RedisStateStore) Set(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
-	state, err := s.state(key)
-	if err != nil {
-		return err
-	}
-	return s.set(ctx, key, endpointID, state.read(endpointID), state.aggregate)
+func (s *RedisStateStore) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
+	return s.set(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate)
 }
 
 // get combines the live local value with the peer aggregate prepared by set.
@@ -281,12 +337,8 @@ func (s *RedisStateStore) get(_ context.Context, key fwkdl.StateKey, endpointID 
 	return aggregate([]any{local, entry.value})
 }
 
-func (s *RedisStateStore) Get(ctx context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
-	state, err := s.state(key)
-	if err != nil {
-		return nil, false, err
-	}
-	return s.get(ctx, key, endpointID, state.read(endpointID), state.aggregate), true, nil
+func (s *RedisStateStore) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	return s.get(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate), true, nil
 }
 
 func (s *RedisStateStore) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
@@ -296,9 +348,6 @@ func (s *RedisStateStore) delete(ctx context.Context, key fwkdl.StateKey, endpoi
 }
 
 func (s *RedisStateStore) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
-	if _, err := s.state(key); err != nil {
-		return err
-	}
 	return s.delete(ctx, key, endpointID)
 }
 
@@ -309,7 +358,7 @@ func (s *RedisStateStore) GetOrSet(ctx context.Context, key fwkdl.StateKey, id s
 		return nil, false, errors.New("redis-state-store: getorset candidate must not be nil")
 	}
 
-	data, err := encodeStamped(candidate, time.Now())
+	data, err := encodeValue(candidate)
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-state-store: getorset encode: %w", err)
 	}
@@ -317,7 +366,7 @@ func (s *RedisStateStore) GetOrSet(ctx context.Context, key fwkdl.StateKey, id s
 	stored, err := s.client.SetArgs(ctx, s.coordKey(key, id), data, goredis.SetArgs{
 		Mode: "NX",
 		Get:  true,
-		TTL:  s.ttl,
+		TTL:  s.coordinationTTL,
 	}).Result()
 	if errors.Is(err, goredis.Nil) {
 		return candidate, false, nil
@@ -330,5 +379,5 @@ func (s *RedisStateStore) GetOrSet(ctx context.Context, key fwkdl.StateKey, id s
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-state-store: getorset decode: %w", err)
 	}
-	return actual.Value, true, nil
+	return actual, true, nil
 }

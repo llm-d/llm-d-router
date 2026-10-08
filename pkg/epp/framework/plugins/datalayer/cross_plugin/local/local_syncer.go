@@ -19,7 +19,6 @@ package local
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"sync"
 
@@ -37,19 +36,12 @@ type LocalSyncer struct {
 	typedName fwkplugin.TypedName
 	replicaID string
 	data      sync.Map
-	states    map[fwkdl.StateKey]stateDefinition
-}
-
-type stateDefinition struct {
-	read      func(string) fwkdl.Cloneable
-	aggregate func([]any) any
 }
 
 func NewLocalSyncer(name, replicaID string) *LocalSyncer {
 	return &LocalSyncer{
 		typedName: fwkplugin.TypedName{Type: LocalSyncerType, Name: name},
 		replicaID: replicaID,
-		states:    make(map[fwkdl.StateKey]stateDefinition),
 	}
 }
 
@@ -65,41 +57,20 @@ func (s *LocalSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *LocalSyncer) Bind(key fwkdl.StateKey, read func(string) fwkdl.Cloneable, aggregate func([]any) any) {
-	if s.states == nil {
-		s.states = make(map[fwkdl.StateKey]stateDefinition)
-	}
-	s.states[key] = stateDefinition{read: read, aggregate: aggregate}
-}
-
 func (s *LocalSyncer) syncKey(key fwkdl.StateKey, id string) string {
 	return s.replicaID + ":" + string(key) + ":" + id
 }
 
-func (s *LocalSyncer) state(key fwkdl.StateKey) (stateDefinition, error) {
-	state, ok := s.states[key]
-	if !ok {
-		return stateDefinition{}, fmt.Errorf("local-syncer: state key %q is not bound", key)
-	}
-	return state, nil
+func (s *LocalSyncer) Set(context.Context, fwkdl.CrossReplicaSpec, string) error {
+	return nil
 }
 
-func (s *LocalSyncer) Set(_ context.Context, key fwkdl.StateKey, _ string) error {
-	_, err := s.state(key)
-	return err
+func (s *LocalSyncer) Get(_ context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	return spec.Aggregate([]any{spec.Read(endpointID)}), true, nil
 }
 
-func (s *LocalSyncer) Get(_ context.Context, key fwkdl.StateKey, endpointID string) (any, bool, error) {
-	state, err := s.state(key)
-	if err != nil {
-		return nil, false, err
-	}
-	return state.aggregate([]any{state.read(endpointID)}), true, nil
-}
-
-func (s *LocalSyncer) Delete(_ context.Context, key fwkdl.StateKey, _ string) error {
-	_, err := s.state(key)
-	return err
+func (s *LocalSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
+	return nil
 }
 
 func (s *LocalSyncer) GetOrSet(_ context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
