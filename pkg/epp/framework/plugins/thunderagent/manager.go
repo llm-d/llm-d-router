@@ -19,11 +19,9 @@ package thunderagent
 import (
 	"sync"
 	"time"
-)
 
-// bytesPerToken converts a request body size to an estimated prompt token
-// count.
-const bytesPerToken = 4.0
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+)
 
 // endpointStaleAfter drops a pod entry that holds no sessions and has not been
 // seen for this long.
@@ -138,7 +136,7 @@ func estimateTokens(sizeBytes int) int64 {
 	if sizeBytes <= 0 {
 		return 0
 	}
-	return int64(float64(sizeBytes) / bytesPerToken)
+	return int64(sizeBytes / fwkrh.BytesPerToken)
 }
 
 // gaugeSnapshot is the ledger state the metrics collector reports.

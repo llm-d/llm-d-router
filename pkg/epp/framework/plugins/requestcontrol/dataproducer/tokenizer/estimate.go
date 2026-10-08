@@ -33,10 +33,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
-// bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
-// pseudo-tokens covers the same input bytes as an N-token raw-byte block.
-const bytesPerToken = 4
-
 // Content-block types read by the estimate backend.
 const (
 	blockTypeText       = "text"
@@ -531,10 +527,10 @@ func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh
 // feature under modality so labels agree with the vllm backend.
 func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkrh.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
 	out = align(out)
-	offset := len(out) / bytesPerToken
+	offset := len(out) / fwkrh.BytesPerToken
 
 	sum := xxhash.Sum64String(content)
-	token := make([]byte, bytesPerToken)
+	token := make([]byte, fwkrh.BytesPerToken)
 	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {
 		out = append(out, token...)
@@ -556,17 +552,17 @@ func packBytes(raw []byte) []uint32 {
 		return nil
 	}
 	raw = align(raw)
-	out := make([]uint32, len(raw)/bytesPerToken)
+	out := make([]uint32, len(raw)/fwkrh.BytesPerToken)
 	for i := range out {
-		out[i] = binary.LittleEndian.Uint32(raw[i*bytesPerToken:])
+		out[i] = binary.LittleEndian.Uint32(raw[i*fwkrh.BytesPerToken:])
 	}
 	return out
 }
 
-// align zero-pads b up to a bytesPerToken boundary.
+// align zero-pads b up to a fwkrh.BytesPerToken boundary.
 func align(b []byte) []byte {
-	if r := len(b) % bytesPerToken; r != 0 {
-		b = append(b, make([]byte, bytesPerToken-r)...)
+	if r := len(b) % fwkrh.BytesPerToken; r != 0 {
+		b = append(b, make([]byte, fwkrh.BytesPerToken-r)...)
 	}
 	return b
 }

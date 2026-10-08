@@ -31,6 +31,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
@@ -294,15 +295,14 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		}
 	})
 
-	// Record metrics. Lengths are reported as a byte estimate (~averageCharactersPerToken bytes/token).
+	// Record metrics. Lengths are reported as a byte estimate (fwkrh.BytesPerToken bytes per token).
 	total := 0
 	for _, hashes := range state.PerPromptHashes {
 		total += len(hashes)
 	}
 	matchLen := state.PrefixCacheServers[ServerID(targetEndpoint.GetMetadata().ID)]
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
-	const averageCharactersPerToken = 4
-	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*averageCharactersPerToken, total*blockSize*averageCharactersPerToken)
+	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*fwkrh.BytesPerToken, total*blockSize*fwkrh.BytesPerToken)
 	if request.Body != nil {
 		predictionEndpoint, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
 		prefixmetrics.RecordPrediction(p.typedName.Name, p.typedName.Type, role,

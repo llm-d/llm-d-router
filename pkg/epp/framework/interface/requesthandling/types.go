@@ -209,6 +209,12 @@ func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	return nil
 }
 
+// BytesPerToken is the average number of request bytes per prompt token, used
+// to estimate token counts without a tokenizer. The tokenizer's estimate
+// backend packs this many bytes into each pseudo-token, so its counts agree
+// with byte-based estimates.
+const BytesPerToken = 4
+
 // TokenizedRequest contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
