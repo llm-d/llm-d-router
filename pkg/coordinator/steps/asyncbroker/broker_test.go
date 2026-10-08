@@ -633,6 +633,7 @@ func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 		require.NoError(t, err)
 		key := resultKey("team-a", id)
 		require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+		require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
 		return key
 	}
 	assertRetained := func(t *testing.T, rdb *redis.Client, key string) {
@@ -664,6 +665,20 @@ func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 
 		r.ServeHTTP(newFailingWriter(), req)
 		assertRetained(t, rdb, key)
+	})
+
+	t.Run("fetch with grace", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 5})
+		key := seed(t, rdb, "grace-id")
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/grace-id", nil)
+		req.Header.Set(defaultTenantHeader, "team-a")
+
+		r.ServeHTTP(newFailingWriter(), req)
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, time.Hour, ttl)
 	})
 }
 
