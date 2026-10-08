@@ -4,8 +4,8 @@
 
 Routes inference requests based on a token count, with optional filtering.
 Scoring is always applied; filtering is off by default. The routing length is
-the total prompt length unless `reusableTokensProducerName` enables P2P cache
-subtraction.
+the longest prompt's token count unless `reusableTokensProducerName` enables P2P
+cache subtraction.
 
 **Use Cases:**
 - Route short prompts to pods with smaller GPU memory.
@@ -58,15 +58,20 @@ schedulingProfiles:
 
 #### Token Counting
 
-Reads total prompt tokens from `request.Body.TokenizedRequest.TokenCount()`.
-A `token-producer` populates this data and is auto-created with the
+Reads per-prompt tokens from `request.Body.TokenizedRequest`. A
+`token-producer` populates this data and is auto-created with the
 tokenizer-free `estimate` backend when none is configured.
+
+A request can carry several prompts, for example a `/v1/completions` prompt
+array. The model server checks each prompt against its maximum model length
+separately, so the routing length is the token count of the longest prompt.
+With cache subtraction it is the total across all prompts.
 
 When `reusableTokensProducerName` is configured, the plugin requires the
 name-bound attribute from that `p2p-source-producer`. Missing request data at
 runtime leaves the total prompt length unchanged. This includes requests for
 which the producer finds no pullable source. The default configuration does
-not consume this attribute and always uses total prompt length.
+not consume this attribute and always uses the longest prompt's token count.
 
 #### P2P Cache-Aware Prefill Work
 
