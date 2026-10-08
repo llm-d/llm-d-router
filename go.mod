@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	cloud.google.com/go/aiplatform v1.124.0
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/caio/go-tdigest/v5 v5.0.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/dustin/go-humanize v1.0.1
