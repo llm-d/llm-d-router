@@ -399,7 +399,7 @@ func TestFullPipeline_MetricsSmoke(t *testing.T) {
 	defer renderServer.Close()
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Header.Get(gateway.EPPProfileHeader) {
+		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
 			var parsed struct {
