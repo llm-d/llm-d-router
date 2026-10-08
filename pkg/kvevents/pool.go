@@ -321,7 +321,7 @@ func (p *Pool) AddTask(task *RawMessage) {
 		return
 	}
 
-	queueIndex := h.Sum32() % uint32(p.concurrency) //#nosec G115 -- concurrency is validated positive and sizes the queues slice
+queueIndex := int64(h.Sum32()) % int64(p.concurrency)
 	p.queues[queueIndex].Add(task)
 	p.addQueueDepth(1)
 }
