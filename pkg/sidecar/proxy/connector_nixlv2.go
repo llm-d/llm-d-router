@@ -87,6 +87,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		return
 	}
 
+	// Telemetry failure must not change routing or reject an inference request.
+	toolFields, _ := captureToolCallingRequest(apiType, original)
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+
 	// Prefill Stage
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
@@ -199,6 +203,8 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// reset → 502) are common when the prefill pod's accept queue overflows
 	// under load. Retrying the same host avoids expensive local prefill on
 	// decode. Non-transient errors (500/501) fail immediately.
+	// Every attempt uses the same serialized body, so compare it once.
+	_, _ = toolFields.compareDispatched(pbody)
 	var pw *bufferedResponseWriter
 retryLoop:
 	for attempt := 0; ; attempt++ {
@@ -415,6 +421,11 @@ retryLoop:
 	if !dataParallelUsed {
 		s.logger.V(logging.DEBUG).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
+		// Chunked decode constructs its own outbound bodies; this prepared body
+		// is only dispatched directly when chunking is disabled for the API.
+		if s.config.DecodeChunkSize <= 0 || apiType != reqcommon.APITypeChatCompletions {
+			_, _ = toolFields.compareDispatched(dbody)
+		}
 		s.dispatchDecode(decodeWriter, dreq, body)
 	}
 	decodeReturned = true

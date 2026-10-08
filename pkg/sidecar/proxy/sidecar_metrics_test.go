@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -412,6 +414,128 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
+func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
+	chatBody := `{"model":"test-model","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
+	chatFields, err := toolcalling.FieldsForSurface(toolcalling.APISurfaceChatCompletions)
+	require.NoError(t, err)
+	messagesFields, err := toolcalling.FieldsForSurface(toolcalling.APISurfaceMessages)
+	require.NoError(t, err)
+	tests := []struct {
+		name            string
+		api             reqcommon.APIType
+		body            string
+		failPrefill     int
+		prefillStatus   int
+		prefillResponse string
+		decodeStatus    int
+		requestIDError  bool
+		denyTarget      bool
+		invalidTarget   bool
+		wantCode        int
+		wantPrefill     int
+		wantDecode      int
+		wantFields      []toolcalling.Field
+	}{
+		{name: "chat fields preserved across both stages", body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
+		{name: "messages ignores unsupported fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: messagesFields},
+		{name: "null and empty fields are observed", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: messagesFields},
+		{name: "non-tool request", body: `{"messages":[]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
+		{name: "nested tools are not observed", body: `{"messages":[{"tools":[]}]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
+		{name: "malformed body keeps existing rejection", body: `{"tools":`, wantCode: 400},
+		{name: "retry success counts fields once", body: chatBody, failPrefill: 2, prefillStatus: 503, wantCode: 200, wantPrefill: 3, wantDecode: 1, wantFields: chatFields},
+		{name: "exhausted retries do not imply field rejection", body: chatBody, failPrefill: 3, prefillStatus: 503, wantCode: 503, wantPrefill: 3, wantFields: chatFields},
+		{name: "generic upstream 400 does not imply field rejection", body: chatBody, failPrefill: 1, prefillStatus: 400, wantCode: 400, wantPrefill: 1, wantFields: chatFields},
+		{name: "invalid prefill response skips decode", body: chatBody, prefillResponse: `not-json`, wantCode: 400, wantPrefill: 1, wantFields: chatFields},
+		{name: "decode failure does not imply field rejection", body: chatBody, decodeStatus: 500, wantCode: 500, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
+		{name: "request ID failure sends no request", body: chatBody, requestIDError: true, wantCode: 502},
+		{name: "SSRF denial sends no request", body: chatBody, denyTarget: true, wantCode: 403},
+		{name: "handler initialization failure sends no request", body: chatBody, invalidTarget: true, wantCode: 502},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prefillBodies := make(chan []byte, 4)
+			decodeBodies := make(chan []byte, 1)
+			var attempts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, readErr := io.ReadAll(r.Body)
+				assert.NoError(t, readErr)
+				prefillBodies <- raw
+				if int(attempts.Add(1)) <= tt.failPrefill {
+					statusHandler(tt.prefillStatus, `{"error":"upstream failure"}`).ServeHTTP(w, r)
+					return
+				}
+				response := tt.prefillResponse
+				if response == "" {
+					response = `{"kv_transfer_params":{}}`
+				}
+				statusHandler(http.StatusOK, response).ServeHTTP(w, r)
+			}))
+			defer prefill.Close()
+			decode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, readErr := io.ReadAll(r.Body)
+				assert.NoError(t, readErr)
+				decodeBodies <- raw
+				code := tt.decodeStatus
+				if code == 0 {
+					code = http.StatusOK
+				}
+				statusHandler(code, `{"choices":[]}`).ServeHTTP(w, r)
+			}))
+			defer decode.Close()
+			decodeURL, parseErr := url.Parse(decode.URL)
+			require.NoError(t, parseErr)
+			prefillURL, parseErr := url.Parse(prefill.URL)
+			require.NoError(t, parseErr)
+			s := NewProxy(Config{DecoderURL: decodeURL, KVConnector: constants.KVConnectorNIXLV2, PrefillMaxRetries: 2})
+			s.logger = log.Log
+			s.allowlistValidator = &AllowlistValidator{enabled: tt.denyTarget}
+			if tt.requestIDError {
+				s.nixlRequestIDFn = func() (string, error) { return "", errors.New("request ID failure") }
+			}
+			target := prefillURL.Host
+			if tt.invalidTarget {
+				target = "%invalid"
+			}
+			before := toolFieldCounters(t)
+			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+			r.Header.Set(routing.PrefillEndpointHeader, target)
+			rw := httptest.NewRecorder()
+			s.createRoutes().ServeHTTP(rw, r)
+			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			require.Len(t, prefillBodies, tt.wantPrefill)
+			require.Len(t, decodeBodies, tt.wantDecode)
+
+			delta := make(map[[2]string]float64)
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			want := make(map[[2]string]float64)
+			for _, field := range tt.wantFields {
+				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			require.Equal(t, want, delta)
+
+			// Check the bytes received upstream, including nested field key order
+			// and numbers that cannot be represented exactly as float64.
+			if tt.wantPrefill+tt.wantDecode > 0 {
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
+				for _, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+					for len(bodies) > 0 {
+						var actual map[string]json.RawMessage
+						require.NoError(t, json.Unmarshal(<-bodies, &actual))
+						for _, field := range chatFields {
+							require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
+						}
+					}
+				}
+			}
 		})
 	}
 }
