@@ -68,7 +68,7 @@ var coordinatorConfigNIXLGenerate = strings.Replace(
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its
-// EPP-Profile header value (see header-profile-handler); the role filters
+// x-llm-d-epp-profile header value (see header-profile-handler); the role filters
 // narrow the combined encode+prefill+decode pod pool down to the profile's own
 // role, since the InferencePool now selects across all three roles at once.
 //
@@ -123,7 +123,7 @@ schedulingProfiles:
 // each backing its own role-scoped InferencePool. Because a role-scoped EPP only
 // ever sees its own role's pods, it needs no role filter and no profile-selection
 // plugin: single-profile-handler picks the one "default" profile, and the Envoy
-// route (envoy-3-epp.yaml) is what dispatches each EPP-Profile value to the right
+// route (envoy-3-epp.yaml) is what dispatches each x-llm-d-epp-profile value to the right
 // EPP. The openai-parser/vllmhttp-parser request handler matches the single-EPP
 // config so the generate path (vllm-http wire format) is parsed the same way.
 

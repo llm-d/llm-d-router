@@ -152,7 +152,7 @@ func TestSubscriberManager_RemoveSubscriberResetsQueuedPodState(t *testing.T) {
 		sourceEndpoint = "10.0.0.1:8000"
 	)
 	done := make(chan struct{})
-	subscriber := newZMQSubscriber(pool, podIdentifier, sourceEndpoint, "", "", "kv@", false)
+	subscriber := newZMQSubscriber(pool, podIdentifier, sourceEndpoint, "", "", "", "kv@", false)
 
 	manager := NewSubscriberManager(pool)
 	manager.subscribers[podIdentifier] = &subscriberEntry{
@@ -228,8 +228,8 @@ func TestSubscriberManager_RemoveSubscriberKeepsSharedSourceUntilLastSubscriber(
 	manager := NewSubscriberManager(pool)
 	dones := []chan struct{}{make(chan struct{}), make(chan struct{})}
 	subscribers := []*zmqSubscriber{
-		newZMQSubscriber(pool, "ns/pod-rank-0", sourceEndpoint, "", "", "kv@", false),
-		newZMQSubscriber(pool, "ns/pod-rank-1", sourceEndpoint, "", "", "kv@", false),
+		newZMQSubscriber(pool, "ns/pod-rank-0", sourceEndpoint, "", "", "", "kv@", false),
+		newZMQSubscriber(pool, "ns/pod-rank-1", sourceEndpoint, "", "", "", "kv@", false),
 	}
 	for i, podIdentifier := range []string{"ns/pod-rank-0", "ns/pod-rank-1"} {
 		manager.subscribers[podIdentifier] = &subscriberEntry{
@@ -270,7 +270,7 @@ func TestZMQSubscriber_RetireDropsMessagesWithoutSourceEndpoint(t *testing.T) {
 	pool.concurrency = 1
 	defer pool.Shutdown(ctx)
 
-	subscriber := newZMQSubscriber(pool, "local-subscriber", "", "", "", "kv@", false)
+	subscriber := newZMQSubscriber(pool, "local-subscriber", "", "", "", "", "kv@", false)
 	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 1, []byte{1})
 	subscriber.retire(false)
 	subscriber.addTask(ctx, "kv@10.0.0.1:8000@test-model", 2, []byte{2})

@@ -23,6 +23,7 @@ import (
 
 	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
@@ -38,6 +39,34 @@ type msgpackEventBatch struct {
 	TS               float64
 	Events           []msgpack.RawMessage
 	DataParallelRank *int `msgpack:",omitempty"`
+}
+
+// DecodeMsgpack decodes [ts, events, data_parallel_rank] and skips trailing
+// elements, such as the publisher_id a vLLM publisher that serves snapshots
+// appends. Array-encoded struct decoding rejects any other element count.
+func (b *msgpackEventBatch) DecodeMsgpack(dec *msgpack.Decoder) error {
+	n, err := dec.DecodeArrayLen()
+	if err != nil {
+		return err
+	}
+	if n < 3 {
+		return fmt.Errorf("event batch has %d elements, want at least 3", n)
+	}
+	if b.TS, err = dec.DecodeFloat64(); err != nil {
+		return err
+	}
+	if err := dec.Decode(&b.Events); err != nil {
+		return err
+	}
+	if err := dec.Decode(&b.DataParallelRank); err != nil {
+		return err
+	}
+	for range n - 3 {
+		if err := dec.Skip(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parseTopic extracts pod ID and model name from the topic format "kv@<pod-id>@<model-name>".
@@ -93,11 +122,7 @@ func getHashAsUint64(raw any) (uint64, error) {
 	}
 }
 
-// decodeEvent decodes a single msgpack event and dispatches it to the converter
-// for its tag. vLLM and SGLang send events either as positional arrays or as
-// field-name maps; toFields converts a map into the positional layout, so each
-// converter handles only that layout. The vLLM and SGLang adapters differ only
-// in toFields and their converter set.
+// The SGLang converters use positional fields for both array and map events.
 func decodeEvent(
 	rawEventBytes []byte,
 	toFields func(map[string]any) ([]any, error),
@@ -154,20 +179,49 @@ func convertBlockHashes(rawHashes []any) ([]uint64, error) {
 	return blockHashes, nil
 }
 
-// convertExtraKeys converts raw extra_keys to typed slice.
-func convertExtraKeys(rawExtraKeys []any) ([][]any, error) {
-	if rawExtraKeys == nil {
-		return nil, nil
+func fieldAt(fields []any, i int) any {
+	if i < len(fields) {
+		return fields[i]
 	}
-	extraKeys := make([][]any, 0, len(rawExtraKeys))
-	for i, rawKey := range rawExtraKeys {
-		if rawKey == nil {
-			extraKeys = append(extraKeys, nil)
-		} else if keySlice, ok := rawKey.([]any); ok {
-			extraKeys = append(extraKeys, keySlice)
-		} else {
-			return nil, fmt.Errorf("extra_keys[%d] has invalid type %T, expected []any or nil", i, rawKey)
+	return nil
+}
+
+func toUint32Slice(raw any) ([]uint32, error) {
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("token_ids is not an array: %T", raw)
+	}
+	result := make([]uint32, len(arr))
+	for i, v := range arr {
+		n, err := toInt(v)
+		if err != nil {
+			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
+		result[i] = clamp.Uint32(n)
 	}
-	return extraKeys, nil
+	return result, nil
+}
+
+func toInt(raw any) (int, error) {
+	switch v := raw.(type) {
+	case int64:
+		return int(v), nil
+	case uint64:
+		//#nosec -- token IDs and lora IDs fit in the platform int range
+		return int(v), nil
+	case int8:
+		return int(v), nil
+	case int16:
+		return int(v), nil
+	case int32:
+		return int(v), nil
+	case uint8:
+		return int(v), nil
+	case uint16:
+		return int(v), nil
+	case uint32:
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type: %T", raw)
+	}
 }

@@ -61,7 +61,7 @@ and makes one separate scheduling call per profile.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `headerName` | string | `EPP-Profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
+| `headerName` | string | `x-llm-d-epp-profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
 | `defaultProfile` | string | `decode` | Scheduling profile to run when the header is missing or blank and more than one profile is configured. Matched case-sensitively against `schedulingProfiles` names, like the header value itself. Ignored when only one profile is configured, since that profile always runs. |
 
 ### Example
@@ -84,8 +84,8 @@ schedulingProfiles:
   - pluginRef: decode-filter
 ```
 
-A request with `EPP-Profile: prefill` runs only the `prefill` profile. A request with no
-`EPP-Profile` header at all -- e.g. `GET /models` -- runs `decode`, the default.
+A request with `x-llm-d-epp-profile: prefill` runs only the `prefill` profile. A request with no
+`x-llm-d-epp-profile` header at all -- e.g. `GET /models` -- runs `decode`, the default.
 
 To use a different fallback than `decode`:
 

@@ -3,6 +3,7 @@
 package scheme
 
 import (
+	xinferencev1 "github.com/llm-d/llm-d-router/apix/v1"
 	xinferencev1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -15,6 +16,7 @@ var Scheme = runtime.NewScheme()
 var Codecs = serializer.NewCodecFactory(Scheme)
 var ParameterCodec = runtime.NewParameterCodec(Scheme)
 var localSchemeBuilder = runtime.SchemeBuilder{
+	xinferencev1.AddToScheme,
 	xinferencev1alpha2.AddToScheme,
 }
 

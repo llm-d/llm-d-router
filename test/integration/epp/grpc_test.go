@@ -173,7 +173,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-				"inference error: Internal - no pods available in datastore"),
+				"no pods available in datastore"),
 		},
 
 		// // --- Subsetting & Metadata ---
@@ -207,7 +207,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 			},
 			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-				"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+				"failed to find endpoint candidates for serving the request",
 				errcommon.RequestDroppedReasonNoEndpoints),
 		},
 

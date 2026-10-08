@@ -19,6 +19,7 @@ package parserutil
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -107,13 +108,19 @@ func FuzzJSONMapAcceptance(f *testing.F) {
 }
 
 func TestUnmarshalEnvelopeStringAllocations(t *testing.T) {
+	// AllocsPerRun counts allocations process-wide, so other goroutines can inflate a sample. The
+	// minimum over several samples excludes them while growth in the decoder shows in every sample.
 	allocations := func(size int) float64 {
 		data := []byte(`{"model":"m","max_tokens":1,"prompt":"` + strings.Repeat("x", size) + `"}`)
-		return testing.AllocsPerRun(100, func() {
-			if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
-				t.Fatal(err)
-			}
-		})
+		least := math.Inf(1)
+		for range 5 {
+			least = min(least, testing.AllocsPerRun(20, func() {
+				if _, err := UnmarshalEnvelope(data, "prompt"); err != nil {
+					t.Fatal(err)
+				}
+			}))
+		}
+		return least
 	}
 	small, large := allocations(1024), allocations(240*1024)
 	if large > small+1 {

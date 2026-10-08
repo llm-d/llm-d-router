@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-tracing-modelserver
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: epp-tracing-modelserver
+  template:
+    metadata:
+      labels:
+        app: epp-tracing-modelserver
+        llm-d.ai/guide: optimized-baseline
+        llm-d.ai/model: qwen-qwen3-06b
+        llm-d.ai/role: decode
+        study.llm-d.ai/name: epp-tracing-overhead
+    spec:
+      containers:
+        - name: modelserver
+          image: vllm/vllm-openai:v0.27.0
+          imagePullPolicy: IfNotPresent
+          command: [vllm, serve]
+          args:
+            - /model-cache/models/Qwen-Qwen3-0.6B
+            - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+            - --tensor-parallel-size=1
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --gpu-memory-utilization=0.55
+            - --max-num-seqs=256
+            - --trust-remote-code
+            - --no-enable-log-requests
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: huggingface-token
+                  key: HF_TOKEN
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: PYTHONHASHSEED
+              value: "0"
+          ports:
+            - name: modelserver
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "8"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: torch-compile-cache
+              mountPath: /.cache
+            - name: triton-cache
+              mountPath: /.triton
+            - name: vllm-config
+              mountPath: /.config
+            - name: models-storage
+              mountPath: /model-cache
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: modelserver
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Gi
+        - name: torch-compile-cache
+          emptyDir: {}
+        - name: triton-cache
+          emptyDir: {}
+        - name: vllm-config
+          emptyDir: {}
+        - name: models-storage
+          persistentVolumeClaim:
+            claimName: models-storage

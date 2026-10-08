@@ -23,9 +23,11 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const finishReasonCacheThreshold = "cache_threshold"
@@ -45,7 +47,20 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	if cacheHitThreshold, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
 		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
-		needsPrefill, err := s.tryDecode(w, decodeReq, body)
+		attemptStart := time.Now()
+		attemptWriter, attemptStatus := captureResponseStatus(w)
+		attemptReturned := false
+		defer recordDecodeAbort(&attemptReturned, attemptStart)
+		needsPrefill, err := s.tryDecode(attemptWriter, decodeReq, body)
+		attemptReturned = true
+		// An attempt that falls back to prefill is not sampled; the decode after
+		// prefill is this request's decode stage.
+		if !needsPrefill {
+			metrics.RecordDecodeDuration(time.Since(attemptStart))
+			if err != nil || attemptStatus.failed() {
+				metrics.RecordError(metrics.StageDecode)
+			}
+		}
 		if err != nil {
 			return
 		}
@@ -74,7 +89,16 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	decodeReq := cloneRequestWithBody(r.Context(), r, decodeRequestBody)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	decodeStart := time.Now()
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	decodeReturned = true
+	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+	}
 }
 
 // tryDecode attempts to decode and returns whether prefill is needed.
@@ -274,9 +298,12 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	// send prefill request
 	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
 	pw := &bufferedResponseWriter{}
+	prefillStart := time.Now()
 	prefillHandler.ServeHTTP(pw, preq)
+	metrics.RecordPrefillDuration(time.Since(prefillStart))
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		w.WriteHeader(pw.statusCode)
 		if pw.buffer.Len() > 0 {

@@ -688,8 +688,8 @@ func TestValidatePoolGroupFlag(t *testing.T) {
 	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
 	opts.PoolName = testPoolName
 	opts.PoolGroup = "inference.networking.x-k8s.io"
-	if err := opts.Validate(); err != nil {
-		t.Errorf("Expected Validate() to accept the deprecated PoolGroup, got: %v", err)
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to reject the inference.networking.x-k8s.io PoolGroup, but it succeeded")
 	}
 
 	opts = NewOptions()

@@ -51,7 +51,7 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 	defer renderServer.Close()
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			encodeCalled.Store(true)

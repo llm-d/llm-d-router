@@ -171,6 +171,8 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 				PoolGKNN:                 r.GKNN,
 				PriorityBandControlPlane: r.PriorityBandControlPlane,
 				RunOnNonLeaders:          runOnNonLeaders,
+				PrimaryV1:                r.ControllerCfg.hasV1InferenceObjective,
+				WatchV1Alpha2:            r.ControllerCfg.SecondaryObjectiveGV == inferenceAPIGV,
 			}).SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("failed setting up InferenceObjectiveReconciler - %w", err)
 			}

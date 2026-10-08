@@ -177,6 +177,7 @@ test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPre
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
+test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
@@ -217,6 +218,12 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   if [ "${key}" == "tokenizer-python" ]; then
     if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-autoscaling" ]; then
+    if ! grep -q "name: release-name-proxy" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "kind: HorizontalPodAutoscaler" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
+      echo "Validation failed: proxy HorizontalPodAutoscaler not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
@@ -278,7 +285,125 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}"
   verify_leader_election_rbac "${chart}" true --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=true
   verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 "${mode_flags[@]}" --set router.epp.flags.ha-enable-leader-election=false
+  verify_leader_election_rbac "${chart}" false --set router.epp.replicas=2 --set router.epp.autoscaling.enabled=true
   echo "Leader-election RBAC checks passed for ${chart}."
+done
+
+echo "Verifying EPP autoscaling (HPA) rendering and validations..."
+hpa_out="${TEMP_DIR}/hpa-render.yaml"
+hpa_deploy="${TEMP_DIR}/hpa-deployment.yaml"
+render() {
+  "${HELM}" template hpa "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --set router.modelServers.matchLabels.app=test-app \
+    --set router.epp.autoscaling.enabled=true "${extra_args[@]}" "$@"
+}
+# Renders the chart and extracts the EPP Deployment document into ${hpa_deploy}.
+render_ok() {
+  render "$@" > "${hpa_out}" || { echo "${chart}: render failed: $*"; exit 1; }
+  awk 'BEGIN{RS="---"} (/\nkind: Deployment/ || /^kind: Deployment/) && /name: hpa-epp/ {print}' "${hpa_out}" > "${hpa_deploy}"
+  [ -s "${hpa_deploy}" ] || { echo "${chart}: EPP Deployment not rendered: $*"; exit 1; }
+}
+expect_fail() {
+  if render "$@" >/dev/null 2>&1; then echo "${chart}: expected failure for $*"; exit 1; fi
+}
+require() { grep -q -- "$1" "$2" || { echo "${chart}: expected '$1' in $2"; exit 1; }; }
+forbid() { ! grep -q -- "$1" "$2" || { echo "${chart}: unexpected '$1' in $2"; exit 1; }; }
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  extra_args=()
+  if [ "${chart}" == "llm-d-router-gateway" ]; then
+    mode_flags=(--set provider.name=gke --set provider.gke.preferredBackends.enabled=true)
+  else
+    extra_args+=(--set router.inferencePool.create=false)
+    mode_flags=(--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true)
+  fi
+
+  render_ok --set router.epp.autoscaling.enabled=false
+  require '^  replicas: 1$' "${hpa_deploy}"
+  forbid 'kind: HorizontalPodAutoscaler' "${hpa_out}"
+
+  render_ok
+  require 'kind: HorizontalPodAutoscaler' "${hpa_out}"
+  require 'minReplicas: 1' "${hpa_out}"
+  require 'maxReplicas: 5' "${hpa_out}"
+  require 'averageUtilization: 80' "${hpa_out}"
+  forbid '^  replicas:' "${hpa_deploy}"
+  require 'maxUnavailable: 0' "${hpa_deploy}"
+  require 'maxSurge: 1' "${hpa_deploy}"
+  forbid 'ha-enable-leader-election' "${hpa_deploy}"
+
+  render_ok --set router.epp.deploymentStrategy.type=Recreate
+  require 'type: Recreate' "${hpa_deploy}"
+  forbid 'maxSurge:' "${hpa_deploy}"
+
+  render_ok --set router.epp.autoscaling.minReplicas=3 --set router.epp.autoscaling.maxReplicas=3
+  require 'minReplicas: 3' "${hpa_out}"
+  require 'maxReplicas: 3' "${hpa_out}"
+
+  render_ok --set router.epp.autoscaling.behavior.scaleDown.stabilizationWindowSeconds=300
+  require 'stabilizationWindowSeconds: 300' "${hpa_out}"
+
+  expect_fail "${mode_flags[@]}"
+  expect_fail --set router.epp.flags.ha-enable-leader-election=true
+  expect_fail --set router.epp.autoscaling.minReplicas=5 --set router.epp.autoscaling.maxReplicas=2
+  for v in 0 -1; do
+    expect_fail --set router.epp.autoscaling.minReplicas="${v}"
+    expect_fail --set router.epp.autoscaling.maxReplicas="${v}"
+  done
+  for v in 0 101; do
+    expect_fail --set router.epp.autoscaling.targetCPUUtilizationPercentage="${v}"
+    expect_fail --set router.epp.autoscaling.targetMemoryUtilizationPercentage="${v}"
+  done
+
+  echo "EPP autoscaling checks passed for ${chart}."
+done
+
+echo "Verifying metrics authentication RBAC..."
+verify_metrics_auth_rbac() {
+  local chart="$1" expected_delegation="$2" expected_metrics_reader="$3"
+  shift 3
+  local output="${TEMP_DIR}/${chart}-metrics-auth.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template metrics-auth "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace metrics-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    "${args[@]}" "$@" > "${output}"; then
+    echo "Metrics authentication rendering failed for ${chart}: $*"
+    exit 1
+  fi
+  local resource actual
+  for resource in tokenreviews subjectaccessreviews; do
+    if grep -q -- "^    - ${resource}$" "${output}"; then
+      actual=true
+    else
+      actual=false
+    fi
+    if [ "${actual}" != "${expected_delegation}" ]; then
+      echo "${chart}: expected ${resource} rule present=${expected_delegation}, got ${actual}; flags: $*"
+      exit 1
+    fi
+  done
+  # The EPP ClusterRole quotes the path; the GMP metrics reader ClusterRole does not.
+  if grep -q -- '^    - "/metrics"$' "${output}"; then
+    actual=true
+  else
+    actual=false
+  fi
+  if [ "${actual}" != "${expected_metrics_reader}" ]; then
+    echo "${chart}: expected EPP /metrics rule present=${expected_metrics_reader}, got ${actual}; flags: $*"
+    exit 1
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  verify_metrics_auth_rbac "${chart}" true false
+  verify_metrics_auth_rbac "${chart}" true true --set router.monitoring.prometheus.enabled=true
+  verify_metrics_auth_rbac "${chart}" false false --set router.monitoring.prometheus.auth.enabled=false
+  verify_metrics_auth_rbac "${chart}" false false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false
+  verify_metrics_auth_rbac "${chart}" true false --set router.monitoring.prometheus.enabled=true --set router.monitoring.provider.name=gmp
+  echo "Metrics authentication RBAC checks passed for ${chart}."
 done
 
 echo "Running llm-d-router-standalone negative validation tests..."
@@ -497,3 +622,63 @@ if ! grep -q -- 'agentgateway-config-template' "${agentgateway_service_mode_outp
   echo "Agentgateway service mode did not mount the agentgateway config in the proxy Deployment"
   exit 1
 fi
+
+echo "Verifying standalone proxy autoscaling (HPA) rendering and validations..."
+proxy_hpa_out="${TEMP_DIR}/proxy-hpa-render.yaml"
+proxy_hpa_deploy="${TEMP_DIR}/proxy-hpa-deployment.yaml"
+render_proxy() {
+  "${HELM}" template proxy-hpa "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=test-app \
+    --set router.inferencePool.create=false \
+    --set router.proxy.mode=service \
+    --set router.proxy.autoscaling.enabled=true "$@"
+}
+render_proxy_ok() {
+  render_proxy "$@" > "${proxy_hpa_out}" || { echo "llm-d-router-standalone: proxy render failed: $*"; exit 1; }
+  awk 'BEGIN{RS="---"} (/\nkind: Deployment/ || /^kind: Deployment/) && /name: proxy-hpa-proxy/ {print}' "${proxy_hpa_out}" > "${proxy_hpa_deploy}"
+  [ -s "${proxy_hpa_deploy}" ] || { echo "llm-d-router-standalone: Proxy Deployment not rendered: $*"; exit 1; }
+}
+expect_proxy_fail() {
+  if render_proxy "$@" >/dev/null 2>&1; then echo "llm-d-router-standalone: expected proxy failure for $*"; exit 1; fi
+}
+
+render_proxy_ok --set router.proxy.autoscaling.enabled=false
+require '^  replicas: 2$' "${proxy_hpa_deploy}"
+forbid 'kind: HorizontalPodAutoscaler' "${proxy_hpa_out}"
+
+render_proxy_ok
+require 'name: proxy-hpa-proxy' "${proxy_hpa_out}"
+require 'kind: HorizontalPodAutoscaler' "${proxy_hpa_out}"
+require 'minReplicas: 1' "${proxy_hpa_out}"
+require 'maxReplicas: 5' "${proxy_hpa_out}"
+require 'averageUtilization: 80' "${proxy_hpa_out}"
+forbid '^  replicas:' "${proxy_hpa_deploy}"
+require 'terminationGracePeriodSeconds: 70' "${proxy_hpa_deploy}"
+
+render_proxy_ok --set router.proxy.autoscaling.minReplicas=3 --set router.proxy.autoscaling.maxReplicas=3
+require 'minReplicas: 3' "${proxy_hpa_out}"
+require 'maxReplicas: 3' "${proxy_hpa_out}"
+
+render_proxy_ok --set router.proxy.autoscaling.behavior.scaleDown.stabilizationWindowSeconds=300
+require 'stabilizationWindowSeconds: 300' "${proxy_hpa_out}"
+
+render_proxy_ok --set router.proxy.autoscaling.targetMemoryUtilizationPercentage=75
+require 'averageUtilization: 75' "${proxy_hpa_out}"
+
+render_proxy_ok --set router.proxy.autoscaling.targetCPUUtilizationPercentage=null --set 'router.proxy.autoscaling.metrics[0].type=Resource' --set 'router.proxy.autoscaling.metrics[0].resource.name=cpu' --set 'router.proxy.autoscaling.metrics[0].resource.target.type=Utilization' --set 'router.proxy.autoscaling.metrics[0].resource.target.averageUtilization=60'
+require 'averageUtilization: 60' "${proxy_hpa_out}"
+
+# Negative validations
+expect_proxy_fail --set router.proxy.mode=sidecar
+expect_proxy_fail --set router.proxy.enabled=false
+expect_proxy_fail --set router.proxy.autoscaling.minReplicas=5 --set router.proxy.autoscaling.maxReplicas=2
+for v in 0 -1; do
+  expect_proxy_fail --set router.proxy.autoscaling.minReplicas="${v}"
+  expect_proxy_fail --set router.proxy.autoscaling.maxReplicas="${v}"
+done
+for v in 0 101; do
+  expect_proxy_fail --set router.proxy.autoscaling.targetCPUUtilizationPercentage="${v}"
+  expect_proxy_fail --set router.proxy.autoscaling.targetMemoryUtilizationPercentage="${v}"
+done
+
+echo "Proxy autoscaling checks passed for llm-d-router-standalone."

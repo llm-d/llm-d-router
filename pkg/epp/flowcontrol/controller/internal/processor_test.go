@@ -69,7 +69,9 @@ func TestMain(m *testing.M) {
 
 type mockSaturationDetector struct {
 	flowcontrol.SaturationDetector
-	SaturationFunc func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	SaturationFunc      func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	ReserveDispatchFunc func(requestID string) bool
+	ReleaseDispatchFunc func(requestID string) bool
 }
 
 func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods []fwkdl.Endpoint) float64 {
@@ -77,6 +79,20 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 		return m.SaturationFunc(ctx, candidatePods)
 	}
 	return 0.0
+}
+
+func (m *mockSaturationDetector) ReserveDispatch(requestID string) bool {
+	if m.ReserveDispatchFunc != nil {
+		return m.ReserveDispatchFunc(requestID)
+	}
+	return false
+}
+
+func (m *mockSaturationDetector) ReleaseDispatch(requestID string) bool {
+	if m.ReleaseDispatchFunc != nil {
+		return m.ReleaseDispatchFunc(requestID)
+	}
+	return false
 }
 
 // testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
@@ -1414,6 +1430,44 @@ func TestProcessor(t *testing.T) {
 				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
 			})
 
+			t.Run("should drop unpartitioned stale-endpoints series once stages are evaluated", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "unpartitioned-stale-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlStaleEndpoints(detector, flowcontrol.SaturationStageFromContext(ctx), 1)
+					return 1.0
+				}
+
+				// Empty pool: the detector is evaluated without a stage.
+				h.endpointCandidates.Candidates = nil
+				h.processor.dispatchCycle(context.Background())
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				families, err := ctrlmetrics.Registry.Gather()
+				require.NoError(t, err)
+				var stages []string
+				for _, mf := range families {
+					if mf.GetName() != "llm_d_epp_flow_control_stale_endpoints" {
+						continue
+					}
+					for _, m := range mf.GetMetric() {
+						labels := map[string]string{}
+						for _, lp := range m.GetLabel() {
+							labels[lp.GetName()] = lp.GetValue()
+						}
+						if labels["detector"] == detector {
+							stages = append(stages, labels["stage"])
+						}
+					}
+				}
+				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
+			})
+
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
 				t.Parallel()
 				h := newTestHarness(t, testCleanupTick)
@@ -1534,6 +1588,50 @@ func TestProcessor(t *testing.T) {
 					"The item's final outcome should be RejectedOther")
 				assert.ErrorContains(t, finalState.Err, "already done",
 					"The error should be the one from the first Finalize call")
+			})
+
+			t.Run("should reserve before finalizing dispatch", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-reserved", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				var reserved bool
+				h.saturationDetector.ReserveDispatchFunc = func(requestID string) bool {
+					require.Equal(t, "req-reserved", requestID)
+					require.Nil(t, item.FinalState(), "reservation must precede dispatch finalization")
+					reserved = true
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				require.True(t, reserved)
+				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
+			})
+
+			t.Run("should release the reservation when the item is finalized during reserve", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-finalized-during-reserve", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+					item.FinalizeWithError(fmt.Errorf("%w: finalized during reserve", types.ErrRejected))
+					return true
+				}
+				var released []string
+				h.saturationDetector.ReleaseDispatchFunc = func(requestID string) bool {
+					released = append(released, requestID)
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
+					"The outcome set during reserve should be preserved")
+				assert.Equal(t, []string{"req-finalized-during-reserve"}, released,
+					"The reservation should be released exactly once")
 			})
 		})
 

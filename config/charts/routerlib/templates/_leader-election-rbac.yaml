@@ -3,7 +3,8 @@
 {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
 {{- $eppFlags := .Values.router.epp.flags | default dict -}}
 {{- $explicitLeaderElection := regexMatch "^(1|t|T|true|TRUE|True)$" (toString (index $eppFlags "ha-enable-leader-election")) -}}
-{{- if or $explicitLeaderElection (and (gt (.Values.router.epp.replicas | int) 1) (not $gkePB.enabled) (not $isPriorityRouting)) }}
+{{- $autoscaling := .Values.router.epp.autoscaling | default dict -}}
+{{- if or $explicitLeaderElection (and (not $autoscaling.enabled) (gt (.Values.router.epp.replicas | int) 1) (not $gkePB.enabled) (not $isPriorityRouting)) }}
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1

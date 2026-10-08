@@ -17,7 +17,10 @@ limitations under the License.
 package latencypredictorclient
 
 import (
+	"encoding/json"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,6 +86,66 @@ func TestValidateTrainingEntry_EncoderSizes(t *testing.T) {
 	assert.Error(t, predictor.ValidateTrainingEntry(entry))
 
 	entry.EncoderInputSize, entry.EncoderMatchedSize = 2, 3
+	assert.Error(t, predictor.ValidateTrainingEntry(entry))
+}
+
+func TestTrainingEntry_PredictedFieldsJSONOmitEmpty(t *testing.T) {
+	predTTFT := 80.0
+	predTPOT := 12.0
+
+	withPred := TrainingEntry{
+		KVCachePercentage: 0.5,
+		ActualTTFT:        100,
+		PredictedTTFT:     &predTTFT,
+		Timestamp:         time.Unix(0, 0).UTC(),
+	}
+	raw, err := json.Marshal(withPred)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"predicted_ttft_ms":80`)
+	assert.NotContains(t, string(raw), `predicted_tpot_ms`)
+
+	tpotOnly := TrainingEntry{
+		KVCachePercentage: 0.5,
+		ActualTPOT:        10,
+		PredictedTPOT:     &predTPOT,
+		Timestamp:         time.Unix(0, 0).UTC(),
+	}
+	raw, err = json.Marshal(tpotOnly)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"predicted_tpot_ms":12`)
+	assert.NotContains(t, string(raw), `predicted_ttft_ms`)
+
+	legacy := TrainingEntry{
+		KVCachePercentage: 0.5,
+		ActualTTFT:        100,
+		Timestamp:         time.Unix(0, 0).UTC(),
+	}
+	raw, err = json.Marshal(legacy)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `predicted_ttft_ms`)
+	assert.NotContains(t, string(raw), `predicted_tpot_ms`)
+}
+
+func TestValidateTrainingEntry_PredictedFields(t *testing.T) {
+	predictor := &Predictor{}
+	neg := -1.0
+	entry := TrainingEntry{
+		KVCachePercentage: 0.5,
+		ActualTTFT:        50,
+		PredictedTTFT:     &neg,
+	}
+	assert.Error(t, predictor.ValidateTrainingEntry(entry))
+
+	ok := 10.0
+	entry.PredictedTTFT = &ok
+	assert.NoError(t, predictor.ValidateTrainingEntry(entry))
+
+	nan := math.NaN()
+	entry.PredictedTTFT = &nan
+	assert.Error(t, predictor.ValidateTrainingEntry(entry))
+
+	inf := math.Inf(1)
+	entry.PredictedTTFT = &inf
 	assert.Error(t, predictor.ValidateTrainingEntry(entry))
 }
 

@@ -228,6 +228,10 @@ func NewFlowController(
 // EnqueueAndWait is the primary, synchronous entry point to the Flow Control system. It submits a request and blocks
 // until the request reaches a terminal outcome (dispatched, rejected, or evicted).
 //
+// When the configured saturation detector implements DispatchReservationTracker, a dispatched request holds a
+// reservation on it. The caller must call ReleaseDispatchReservation once the request's in-flight load is published,
+// or the detector keeps counting the request.
+//
 // # Design Rationale: The Synchronous Model
 //
 // This blocking model is deliberately chosen for its simplicity and robustness, especially in the context of Envoy
@@ -315,6 +319,14 @@ func (fc *FlowController) EnqueueAndWait(
 	metrics.IncFlowControlRequestsTotal(finalOutcome.String(), priority, req.InferencePoolName())
 
 	return finalOutcome, err
+}
+
+// ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
+// publication by request lifecycle hooks.
+func (fc *FlowController) ReleaseDispatchReservation(requestID string) {
+	if tracker, ok := fc.saturationDetector.(flowcontrol.DispatchReservationTracker); ok {
+		tracker.ReleaseDispatch(requestID)
+	}
 }
 
 // fallbackRequest wraps a FlowControlRequest to override its flow key, so a request that falls back to a different

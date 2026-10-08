@@ -44,8 +44,8 @@ func TestPrefillStep_SendsCorrectGenerateRequest(t *testing.T) {
 		if r.URL.Path != "/inference/v1/generate" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhasePrefill {
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -186,8 +186,8 @@ func TestPrefillStep_CompletionsFormat(t *testing.T) {
 		if r.URL.Path != reqcommon.PathCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhasePrefill {
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -292,8 +292,8 @@ func TestPrefillStep_ChatCompletionsFormat(t *testing.T) {
 		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhasePrefill {
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)
@@ -454,8 +454,8 @@ func TestPrefillStep_ChatCompletionsFormat_ForcesNonStreaming(t *testing.T) {
 		if r.URL.Path != reqcommon.PathChatCompletions {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhasePrefill {
-			t.Fatalf("expected EPP-Profile: prefill, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhasePrefill {
+			t.Fatalf("expected x-llm-d-epp-profile: prefill, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &prefillBody)

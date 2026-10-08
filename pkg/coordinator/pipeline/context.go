@@ -40,7 +40,7 @@ var hopByHopHeaders = map[string]bool{
 // dropped, and so is a value of forward_response_headers under these names.
 // EPP routes on epp-profile and x-llm-d-pin-host-port.
 var internalForwardingHeaders = map[string]bool{
-	"epp-profile":                         true,
+	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	routing.EndpointPinHeader:             true,
 }

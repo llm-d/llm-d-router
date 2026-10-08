@@ -55,7 +55,7 @@ func upstreamError(step string, statusCode int, body []byte) error {
 func gatewayHeaders(reqCtx *pipeline.RequestContext, phase string) map[string]string {
 	headers := reqCtx.ForwardedHeaders()
 	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = phase
+	headers[reqcommon.EPPProfileHeaderKey] = phase
 	return headers
 }
 

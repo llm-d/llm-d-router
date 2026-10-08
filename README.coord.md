@@ -98,7 +98,7 @@ make -f Makefile.coord.mk test-e2e-coordinator-3epp   # 3-EPP
 ```
 
 - **single** (default): one EPP running a profile-per-phase, and one InferencePool spanning the encode, prefill, and decode workers.
-- **3epp**: one role-scoped EPP and InferencePool per phase (encode, prefill, decode), with Envoy dispatching each `EPP-Profile` request to that role's EPP.
+- **3epp**: one role-scoped EPP and InferencePool per phase (encode, prefill, decode), with Envoy dispatching each `x-llm-d-epp-profile` request to that role's EPP.
 
 **Running the tests in parallel**
 

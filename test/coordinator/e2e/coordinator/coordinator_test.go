@@ -249,7 +249,7 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 		// never sees, so the kv connector's "preparing decode kv params" trace,
 		// which always sets do_remote_prefill=true, is where the decode request surfaces.
 		ginkgo.By("Verifying kv_transfer_params forwarded on the prefill request")
-		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"prefill"`, `"kv_transfer_params"`)).To(gomega.BeTrue(),
 			"coordinator logs have no prefill request body carrying kv_transfer_params")
 
 		ginkgo.By("Verifying kv_transfer_params in the prefill response")
@@ -277,7 +277,7 @@ func verifyCoordinatorSteps(logs string, expectedSteps []string, expectedImages 
 				"coordinator logs missing merged encode response with total=%d", expectedImages)
 
 			ginkgo.By("Verifying ec_transfer_params forwarded on the prefill request")
-			gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
+			gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"prefill"`, `"ec_transfer_params"`)).To(gomega.BeTrue(),
 				"coordinator logs have no prefill request body carrying ec_transfer_params")
 		}
 	}
@@ -309,13 +309,13 @@ func verifyToplevelTransferParams(logs string) {
 
 // parsePrefillGenerateBody returns the prefill leg's outgoing request body from
 // the coordinator log: the gateway's TRACE "request body" record whose
-// epp-profile is prefill, with its http_body field decoded. The body is the
+// x-llm-d-epp-profile is prefill, with its http_body field decoded. The body is the
 // redacted map the gateway logs (long strings collapsed), which keeps every
 // structural field this check reads.
 func parsePrefillGenerateBody(logs string) map[string]any {
 	prefillLine := ""
 	for _, line := range strings.Split(logs, "\n") {
-		if strings.Contains(line, `"epp-profile":"prefill"`) && strings.Contains(line, `"http_body":{`) {
+		if strings.Contains(line, `"x-llm-d-epp-profile":"prefill"`) && strings.Contains(line, `"http_body":{`) {
 			prefillLine = line
 			break
 		}
@@ -371,11 +371,11 @@ func extractJSONObject(s, key string) string {
 	return s[start:]
 }
 
-// verifyPerRoleRouting asserts the Envoy EPP-Profile dispatch (envoy-3-epp.yaml)
+// verifyPerRoleRouting asserts the Envoy x-llm-d-epp-profile dispatch (envoy-3-epp.yaml)
 // delivered each pipeline request to a worker of its own role. The Envoy access log
-// records the EPP-Profile value and the upstream pod for every request, so each
+// records the x-llm-d-epp-profile value and the upstream pod for every request, so each
 // request must land on a pod whose role matches its profile. This is echo-mode
-// independent and catches a misrouted or swapped EPP-Profile route, which a
+// independent and catches a misrouted or swapped x-llm-d-epp-profile route, which a
 // status-code check (all workers echo a plausible 200) cannot.
 //
 // reqID scopes the access-log parse to this request (see parseEnvoyProfileRoutes).
@@ -411,7 +411,7 @@ func verifyPerRoleRouting(nsName string, expectEncode bool, reqID string) {
 				"no %s request recorded in the Envoy access log", role)
 			for _, upstream := range routes[role] {
 				g.Expect(roleIPs[role]).To(gomega.HaveKey(upstream),
-					"%s request routed to upstream %s, not a %s-role pod; EPP-Profile routing is wrong",
+					"%s request routed to upstream %s, not a %s-role pod; x-llm-d-epp-profile routing is wrong",
 					role, upstream, role)
 			}
 		}
@@ -419,7 +419,7 @@ func verifyPerRoleRouting(nsName string, expectEncode bool, reqID string) {
 }
 
 // parseEnvoyProfileRoutes extracts the per-role pipeline requests from the Envoy access
-// log (format defined in envoy-3-epp.yaml). It returns, per EPP-Profile value in
+// log (format defined in envoy-3-epp.yaml). It returns, per x-llm-d-epp-profile value in
 // roles, the upstream pod IPs Envoy routed those requests to. Only lines carrying
 // reqID are considered: Envoy outlives the per-spec workload and its access log
 // accumulates, so scoping by request id keeps unrelated requests (on
@@ -490,19 +490,19 @@ func fetchCoordinatorLogs(nsName string) string {
 // log_level 5.
 func verifyTokenLimits(logs string, limits tokenLimits, requestsSpeakChat bool, capSteps []string) {
 	ginkgo.By("Verifying decode request forwards the client min_tokens/max_tokens")
-	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"decode"`,
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"decode"`,
 		fmt.Sprintf(`"min_tokens":%d`, limits.min), fmt.Sprintf(`"max_tokens":%d`, limits.max))).To(gomega.BeTrue(),
 		"coordinator logs have no decode request body carrying min_tokens=%d and max_tokens=%d", limits.min, limits.max)
 
 	if limits.maxCompletion > 0 {
 		ginkgo.By("Verifying decode request forwards the client max_completion_tokens")
-		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"epp-profile":"decode"`,
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"decode"`,
 			fmt.Sprintf(`"max_completion_tokens":%d`, limits.maxCompletion))).To(gomega.BeTrue(),
 			"coordinator logs have no decode request body carrying max_completion_tokens=%d", limits.maxCompletion)
 	}
 
 	for _, phase := range capSteps {
-		phaseField := `"epp-profile":"` + phase + `"`
+		phaseField := `"x-llm-d-epp-profile":"` + phase + `"`
 
 		ginkgo.By("Verifying " + phase + " request caps max_tokens to 1")
 		gomega.Expect(logHasLine(logs, `"body":"request body"`, phaseField, `"max_tokens":1`)).To(gomega.BeTrue(),

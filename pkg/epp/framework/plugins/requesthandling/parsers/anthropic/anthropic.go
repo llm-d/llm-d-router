@@ -153,7 +153,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 
 	isStream := false
 	for k, v := range headers {
-		if strings.ToLower(k) == request.HeaderContentType && strings.Contains(strings.ToLower(v), request.MediaTypeEventStream) {
+		if strings.ToLower(k) == reqcommon.HeaderContentType && strings.Contains(strings.ToLower(v), request.MediaTypeEventStream) {
 			isStream = true
 			break
 		}

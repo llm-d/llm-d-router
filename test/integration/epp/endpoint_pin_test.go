@@ -26,14 +26,11 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
-const (
-	// profileHeader is the header that header-profile-handler reads.
-	profileHeader  = "epp-profile"
-	prefillProfile = "prefill"
-)
+const prefillProfile = "prefill"
 
 // pinConfigBase is the EPP config of a coordinator deployment: one scheduling
 // call per profile, selected by header. The slot holds the screener line, or
@@ -88,8 +85,8 @@ func TestEndpointPin_RoutesToThePinnedEndpoint(t *testing.T) {
 	for _, pin := range pinPrefillEndpoints {
 		for range repeats {
 			routed := sendRoutedRequest(t, h, map[string]string{
-				profileHeader:             prefillProfile,
-				routing.EndpointPinHeader: pin,
+				reqcommon.EPPProfileHeaderKey: prefillProfile,
+				routing.EndpointPinHeader:     pin,
 			})
 			require.Equal(t, pin, routed)
 		}
@@ -102,8 +99,8 @@ func TestEndpointPin_NoEndpoint(t *testing.T) {
 	h := setupPDHarness(t, pinConfig)
 
 	const (
-		screenedMsg = "inference error: ServiceUnavailable - screeners eliminated all endpoint candidates"
-		filteredMsg = "inference error: ServiceUnavailable - no endpoints available for the given request"
+		screenedMsg = "screeners eliminated all endpoint candidates"
+		filteredMsg = "no endpoints available for the given request"
 	)
 	tests := []struct {
 		name    string
@@ -119,8 +116,8 @@ func TestEndpointPin_NoEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			responses := streamRequests(t, h, newRoutedRequest(map[string]string{
-				profileHeader:             prefillProfile,
-				routing.EndpointPinHeader: tt.pin,
+				reqcommon.EPPProfileHeaderKey: prefillProfile,
+				routing.EndpointPinHeader:     tt.pin,
 			}), 1)
 			want := ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable, tt.wantMsg, errcommon.RequestDroppedReasonNoEndpoints)
 			if diff := cmp.Diff(want, responses, protocmp.Transform()); diff != "" {
@@ -136,8 +133,8 @@ func TestEndpointPin_ScreenerNotConfigured(t *testing.T) {
 	h := setupPDHarness(t, noScreenerConfig)
 
 	routed := sendRoutedRequest(t, h, map[string]string{
-		profileHeader:             prefillProfile,
-		routing.EndpointPinHeader: "192.168.1.200:8000",
+		reqcommon.EPPProfileHeaderKey: prefillProfile,
+		routing.EndpointPinHeader:     "192.168.1.200:8000",
 	})
 	require.Contains(t, pinPrefillEndpoints, routed)
 }
