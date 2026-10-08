@@ -227,9 +227,15 @@ type openAIErrorBody struct {
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, errType, code, msg string) {
+	_ = encodeOpenAIError(w, status, errType, code, msg)
+}
+
+// encodeOpenAIError is writeOpenAIError for callers that confirm delivery:
+// it returns the body write error.
+func encodeOpenAIError(w http.ResponseWriter, status int, errType, code, msg string) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(openAIError{Error: openAIErrorBody{Message: msg, Type: errType, Code: code}})
+	return json.NewEncoder(w).Encode(openAIError{Error: openAIErrorBody{Message: msg, Type: errType, Code: code}})
 }
 
 func writePending(w http.ResponseWriter, id string) {
@@ -244,15 +250,14 @@ func writePending(w http.ResponseWriter, id string) {
 // GATE_DROPPED -> 429, DEADLINE_EXCEEDED -> 504, INVALID_REQUEST -> 400,
 // CANCELLED -> 499, everything else -> 502, wrapped in the OpenAI error
 // envelope. Returns the body write error so callers that confirm delivery
-// can act on it; the error-envelope branches always return nil.
+// can act on it.
 func writeResult(w http.ResponseWriter, res *api.ResultMessage) error {
 	if res.StatusCode > 0 {
 		// The stored result is external data: guard the range rather than
 		// letting WriteHeader panic on a corrupted value.
 		if res.StatusCode < 100 || res.StatusCode > 599 {
-			writeOpenAIError(w, http.StatusBadGateway, "api_error", "MALFORMED_RESULT",
+			return encodeOpenAIError(w, http.StatusBadGateway, "api_error", "MALFORMED_RESULT",
 				fmt.Sprintf("stored result carries invalid status code %d", res.StatusCode))
-			return nil
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// The upstream body is written verbatim without re-encoding; block
@@ -265,17 +270,16 @@ func writeResult(w http.ResponseWriter, res *api.ResultMessage) error {
 	}
 	switch res.ErrorCode {
 	case api.ErrCodeGateDropped:
-		writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", res.ErrorCode, res.ErrorMessage)
+		return encodeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", res.ErrorCode, res.ErrorMessage)
 	case api.ErrCodeDeadlineExceeded:
-		writeOpenAIError(w, http.StatusGatewayTimeout, "timeout_error", res.ErrorCode, res.ErrorMessage)
+		return encodeOpenAIError(w, http.StatusGatewayTimeout, "timeout_error", res.ErrorCode, res.ErrorMessage)
 	case api.ErrCodeInvalidRequest:
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", res.ErrorCode, res.ErrorMessage)
+		return encodeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", res.ErrorCode, res.ErrorMessage)
 	case api.ErrCodeCancelled:
 		// 499 Client Closed Request (nginx convention): the caller abandoned
 		// the request and cancellation dropped it pre-dispatch.
-		writeOpenAIError(w, 499, "cancelled", res.ErrorCode, res.ErrorMessage)
+		return encodeOpenAIError(w, 499, "cancelled", res.ErrorCode, res.ErrorMessage)
 	default:
-		writeOpenAIError(w, http.StatusBadGateway, "api_error", res.ErrorCode, res.ErrorMessage)
+		return encodeOpenAIError(w, http.StatusBadGateway, "api_error", res.ErrorCode, res.ErrorMessage)
 	}
-	return nil
 }
