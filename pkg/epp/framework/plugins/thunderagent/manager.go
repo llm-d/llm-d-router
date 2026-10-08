@@ -67,7 +67,7 @@ func (p *endpointState) workingSetTokens() float64 {
 	return total
 }
 
-// sessionManager is the ledger shared by all of the thunder agent plugin's hooks/
+// sessionManager is the ledger shared by all of the thunder agent plugin's hooks.
 type sessionManager struct {
 	// mu guards everything below, including all session and endpointState
 	// fields. The Locked suffix and the session / endpointState helpers all
