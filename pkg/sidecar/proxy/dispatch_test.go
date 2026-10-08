@@ -84,11 +84,34 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 			expectedPrefillHostPorts: []string{"a"},
 		},
 		{
-			// An EPP that writes both: the canonical spelling wins.
-			name: "both spellings present prefers the canonical one",
+			// An upgraded EPP writes both spellings with the same value.
+			name: "both spellings present routes to that value",
 			r: &http.Request{Header: http.Header{
 				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"a"},
-				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"b"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that predates the rename forwards a client-supplied canonical
+			// name untouched. It must not override the target EPP itself set (#3087).
+			name: "canonical spelling does not override the legacy target",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"attacker"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// The canonical spelling alone still routes, which is what a release
+			// that has dropped the alias sends.
+			name: "canonical spelling alone routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a"},
 			}},
 
 			expectedCode:             200,

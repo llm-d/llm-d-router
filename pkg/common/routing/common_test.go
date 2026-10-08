@@ -235,11 +235,28 @@ func TestTakeRoutingHeaderValues(t *testing.T) {
 		set  map[string]string
 		want []string
 	}{
-		{"canonical only", map[string]string{PrefillEndpointHeader: "a:1"}, []string{"a:1"}},
+		// Only the legacy spelling is sanitized by every supported EPP, so it is
+		// the only one trusted while the alias exists.
 		{"legacy only", map[string]string{LegacyPrefillEndpointHeader: "b:2"}, []string{"b:2"}},
 		{
-			"both present prefers canonical",
-			map[string]string{PrefillEndpointHeader: "a:1", LegacyPrefillEndpointHeader: "b:2"},
+			// An upgraded EPP writes both with one value, so this is the live path.
+			"both present reads the legacy value",
+			map[string]string{PrefillEndpointHeader: "b:2", LegacyPrefillEndpointHeader: "b:2"},
+			[]string{"b:2"},
+		},
+		{
+			// An older EPP forwards a client-supplied canonical name untouched; it
+			// must not override the target that EPP itself set (#3087).
+			"canonical does not override legacy",
+			map[string]string{PrefillEndpointHeader: "attacker:9999", LegacyPrefillEndpointHeader: "b:2"},
+			[]string{"b:2"},
+		},
+		{
+			// Still honored: the alias comes out in a later release, after which
+			// this is the only spelling. An EPP that sanitizes both names is what
+			// keeps a client from reaching here (see InternalRoutingHeaders).
+			"canonical only is still read",
+			map[string]string{PrefillEndpointHeader: "a:1"},
 			[]string{"a:1"},
 		},
 		{"neither present", map[string]string{}, nil},
@@ -281,5 +298,19 @@ func TestTakeRoutingHeaderValueMultiValued(t *testing.T) {
 	}
 	if got := TakeRoutingHeaderValue(h, KVCacheSourceHeader); got != "" {
 		t.Errorf("second take = %q, want empty", got)
+	}
+}
+
+func TestTakeRoutingHeaderValuesWithoutAlias(t *testing.T) {
+	// DataParallelEndpointHeader has no alias, standing in for any header once its
+	// alias is dropped from headerAliases: the name itself is read.
+	h := http.Header{}
+	h.Set(DataParallelEndpointHeader, "dp:1")
+
+	if got := TakeRoutingHeaderValue(h, DataParallelEndpointHeader); got != "dp:1" {
+		t.Errorf("TakeRoutingHeaderValue = %q, want %q", got, "dp:1")
+	}
+	if h.Get(DataParallelEndpointHeader) != "" {
+		t.Error("header survived the take")
 	}
 }

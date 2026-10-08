@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -370,7 +371,7 @@ func NewRequestBufferedResponse(
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
 						SetHeaders:    setHeaders,
-						RemoveHeaders: unsetRoutingHeaderNames(),
+						RemoveHeaders: unsetRoutingHeaders,
 					},
 				},
 			},
@@ -673,6 +674,15 @@ func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan 
 // --- Internal Helpers ---
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
+// unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
+// is told to strip when no plugin set them, deprecated aliases included.
+var unsetRoutingHeaders = slices.Concat(
+	routing.HeaderNames(routing.PrefillEndpointHeader),
+	routing.HeaderNames(routing.EncoderEndpointsHeader),
+	routing.HeaderNames(routing.DataParallelEndpointHeader),
+	routing.HeaderNames(routing.KVCacheSourceHeader),
+)
+
 func makeDestinationMetadata(endpoint string) *structpb.Struct {
 	return &structpb.Struct{
 		Fields: map[string]*structpb.Value{
@@ -691,20 +701,4 @@ func makeDestinationMetadata(endpoint string) *structpb.Struct {
 			},
 		},
 	}
-}
-
-// unsetRoutingHeaderNames lists every spelling of the internal routing headers
-// Envoy is told to strip when no plugin set them, deprecated aliases included.
-func unsetRoutingHeaderNames() []string {
-	canonical := []string{
-		routing.PrefillEndpointHeader,
-		routing.EncoderEndpointsHeader,
-		routing.DataParallelEndpointHeader,
-		routing.KVCacheSourceHeader,
-	}
-	names := make([]string, 0, 2*len(canonical))
-	for _, h := range canonical {
-		names = append(names, routing.HeaderNames(h)...)
-	}
-	return names
 }

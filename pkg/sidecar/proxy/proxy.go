@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -420,7 +421,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if !s.allowlistValidator.enabled {
 		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
 			"flag", "--"+enableSSRFProtection,
-			"headers", []string{routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader, routing.KVCacheSourceHeader})
+			"headers", slices.Concat(
+				routing.HeaderNames(routing.PrefillEndpointHeader),
+				routing.HeaderNames(routing.EncoderEndpointsHeader),
+				routing.HeaderNames(routing.KVCacheSourceHeader)))
 	}
 
 	// Configure handlers

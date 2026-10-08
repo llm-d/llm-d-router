@@ -110,9 +110,10 @@ func IsConditionalDecode(headers map[string]string) bool {
 }
 
 // headerAliases maps each disaggregation header to its pre-convention name. EPP
-// writes both so a sidecar that predates the rename still routes, and the sidecar
-// accepts either so a sidecar ahead of EPP does too. Drop the aliases, and the
-// writes and lookups below, once no supported EPP or sidecar emits the old names.
+// writes both spellings with the same value, so a sidecar that predates the
+// rename still routes. Removing an entry here retires its old name: EPP stops
+// writing it and the sidecar starts reading the canonical name (see
+// TakeRoutingHeaderValues). Do that once no supported EPP emits the old names.
 var headerAliases = map[string]string{
 	PrefillEndpointHeader:  LegacyPrefillEndpointHeader,
 	EncoderEndpointsHeader: LegacyEncoderEndpointsHeader,
@@ -142,15 +143,34 @@ func DeleteRoutingHeader(headers map[string]string, name string) {
 	}
 }
 
-// TakeRoutingHeaderValues returns the values of name, falling back to its
-// deprecated alias, and removes both from h. Taking and removing in one step
-// keeps a request from reaching a worker with a routing header still on it.
+// trustOrder returns the spellings of name in the order their values are
+// trusted: the deprecated alias first, deliberately against the usual
+// preference for the current name. Sanitization was deployed under the old
+// name, so every supported EPP strips a client-supplied alias on ingress, while
+// one that predates the rename forwards the canonical name untouched. Preferring
+// the alias keeps a client-supplied canonical value from overriding the target
+// such an EPP chose (#3087). An upgraded EPP writes both spellings with the same
+// value, so the order changes nothing once EPP is upgraded.
+func trustOrder(name string) []string {
+	if alias, ok := headerAliases[name]; ok {
+		return []string{alias, name}
+	}
+	return []string{name}
+}
+
+// TakeRoutingHeaderValues returns the values of name, preferring its deprecated
+// alias (see trustOrder), and removes every spelling from h. Taking and removing
+// in one step keeps a request from reaching a worker with a routing header still
+// on it.
 func TakeRoutingHeaderValues(h http.Header, name string) []string {
 	var values []string
-	for _, n := range HeaderNames(name) {
+	for _, n := range trustOrder(name) {
 		if len(values) == 0 {
 			values = h.Values(n)
 		}
+	}
+
+	for _, n := range HeaderNames(name) {
 		h.Del(n)
 	}
 	return values

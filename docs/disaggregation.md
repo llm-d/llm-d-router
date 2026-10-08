@@ -51,13 +51,33 @@ EPP passes its stage decisions to the sidecar in three headers:
 `x-llm-d-prefiller-host-port`, `x-llm-d-encoder-hosts-ports` and
 `x-llm-d-kv-cache-source-host-port`. EPP also sends each under its
 pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
-`x-kv-cache-source-host-port`), and the sidecar accepts either, so an EPP and a
-sidecar on opposite sides of the rename interoperate during a rolling upgrade.
-The old names are deprecated and will be removed.
+`x-kv-cache-source-host-port`), so a sidecar that predates the rename still
+routes. The old names are deprecated and will be removed.
 
 The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
 never read from or passed to a model server.
+
+When both spellings are present the sidecar reads the old one, against the usual
+preference for the current name. Sanitization was deployed under the old name,
+so an EPP that predates the rename strips a client-supplied old name but
+forwards the `x-llm-d-` one untouched; preferring the old name keeps a
+client-supplied `x-llm-d-` value from overriding the target that EPP chose. An
+upgraded EPP writes both with the same value, so the order changes nothing once
+EPP is upgraded, and the `x-llm-d-` name is read on its own once the old names
+are removed.
+
+#### Upgrade order
+
+**Upgrade EPP before rolling the decode and sidecar pods.** Until EPP is
+upgraded it does not strip client-supplied `x-llm-d-` routing headers on
+ingress. On a request that EPP leaves undisaggregated there is no old-name value
+to prefer, so a client-supplied `x-llm-d-` header would reach an upgraded
+sidecar as the only stage target. Upgrading EPP first means every inbound
+spelling is rejected at ingress before any sidecar reads it. This matters most
+with `--enable-ssrf-protection=false` (the default), where the sidecar does not
+check a target against the InferencePool; see
+[SSRF Protection](#ssrf-protection).
 
 ### P/D (Prefill/Decode)
 
