@@ -141,7 +141,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 
 	if paused > 0 {
 		a.metrics.pauses.Add(float64(paused))
-		log.FromContext(ctx).V(logutil.DEBUG).Info("thunderagent.reclaim", "class", best.class.String(), "paused", paused)
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Paused idle sessions to make room", "sessionClass", best.class.String(), "pausedSessions", paused)
 	}
 	if best == nil {
 		return nil, nil //nolint:nilnil
