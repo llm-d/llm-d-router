@@ -502,13 +502,13 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 			return false
 		}
 		if replayCtx.Err() != nil {
-			dealer.Close()
+			_ = dealer.Close()
 			attemptCancel()
 			continue
 		}
 		waitStarted := time.Now()
 		if err := processReplayLimiter.Acquire(replayCtx, 1); err != nil {
-			dealer.Close()
+			_ = dealer.Close()
 			attemptCancel()
 			z.invalidateReplay(z.topicFilter)
 			metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "replay-capacity").Inc()
@@ -525,7 +525,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		seqBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(seqBytes, nextSeq)
 		if err := dealer.SendMulti(zmq4.NewMsgFrom([]byte{}, seqBytes)); err != nil {
-			dealer.Close()
+			_ = dealer.Close()
 			attemptCancel()
 			processReplayLimiter.Release(1)
 			z.invalidateReplay(z.topicFilter)
@@ -577,7 +577,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 		}
 
 		idleTimer.Stop()
-		dealer.Close()
+		_ = dealer.Close()
 		attemptCancel()
 		processReplayLimiter.Release(1)
 		if terminalErr != nil {

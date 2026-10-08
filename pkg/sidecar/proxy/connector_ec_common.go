@@ -238,7 +238,17 @@ func (s *Server) fanoutEncoder(
 	grp, gctx := errgroup.WithContext(ctx)
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
-		grp.Go(func() error {
+		grp.Go(func() (err error) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					if rec != http.ErrAbortHandler {
+						panic(rec)
+					}
+					err = fmt.Errorf("encoder response interrupted for item %d: %w", idx, http.ErrAbortHandler)
+					s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				}
+			}()
+
 			encoderRequest := reqcommon.NewEncoderPrimingBody(originalRequest, mmItem, apiType)
 
 			body, err := json.Marshal(encoderRequest)

@@ -204,7 +204,7 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	logger := log.FromContext(ctx)
 	debugLogger := logger.V(logging.DEBUG)
-	endpoint := primaryDecodeEndpoint(schedulingResult)
+	endpoint := schedulingResult.PrimaryEndpoint()
 	if endpoint == nil {
 		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
 		return errCondDecodeCacheMiss
@@ -220,20 +220,6 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	debugLogger.Info("conditional-decode: forwarding")
 	return nil
-}
-
-// primaryDecodeEndpoint returns the first endpoint chosen by the primary
-// profile, or nil when the scheduling result is missing, malformed, or the
-// primary profile produced no endpoint.
-func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpoint {
-	if result == nil || result.PrimaryProfileName == "" || result.ProfileResults == nil {
-		return nil
-	}
-	primary := result.ProfileResults[result.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return nil
-	}
-	return primary.TargetEndpoints[0]
 }
 
 // disaggregate reports whether remote prefill should run for this request.

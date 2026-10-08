@@ -20,6 +20,7 @@ package predictedlatency
 
 import (
 	"context"
+	"fmt"
 
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -88,8 +89,11 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	// Bulk predict
 	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings, encoderInputSizes, encoderMatchedSizes)
 	if err != nil {
-		logger.V(logutil.DEBUG).Error(err, "Bulk prediction failed")
+		logger.V(logutil.DEBUG).Info("Bulk prediction failed", "error", err)
 		return nil, err
+	}
+	if len(bulkPredictions) != len(candidateEndpoints) {
+		return nil, fmt.Errorf("%w: got %d, want %d", latencypredictor.ErrResponseLengthMismatch, len(bulkPredictions), len(candidateEndpoints))
 	}
 
 	// Process results

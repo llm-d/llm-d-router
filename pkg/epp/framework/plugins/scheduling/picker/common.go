@@ -53,7 +53,7 @@ func newLockedRand() *lockedRand {
 	seed := uint64(time.Now().UnixNano())
 
 	return &lockedRand{
-		rand: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
+		rand: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), //#nosec G404 -- endpoint selection, not security-sensitive
 	}
 }
 

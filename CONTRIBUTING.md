@@ -7,10 +7,10 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for how to build, run, and test the codebas
 
 ## Claiming an issue
 
-Comment on the issue to say you would like to work on it. That comment is what
-marks the issue as taken, so check for an existing claim before you start work.
-A maintainer will acknowledge in a reply and assign the issue to you where
-possible.
+Comment `/assign` on the issue to assign it to yourself. The assignee is what
+marks the issue as taken, so check for an existing assignee before you start
+work. Comment `/unassign` to release an issue you no longer plan to work on.
 
-> [!NOTE]
-> Some llm-d repositories may still run Prow and accept `/assign` as a self-assignment command.
+An assigned issue is expected to get a pull request. See
+[docs/issue_triage.md](docs/issue_triage.md#assigned-issues) for when an
+assignment is released.

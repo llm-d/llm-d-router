@@ -5,6 +5,7 @@
 {{ include "llm-d-epp.hpa" . }}
 {{ include "llm-d-epp.proxy-deployment" . }}
 {{ include "llm-d-epp.proxy-service" . }}
+{{ include "llm-d-epp.proxy-hpa" . }}
 {{ include "llm-d-router.gke" . }}
 {{ include "llm-d-epp.leader-election-rbac" . }}
 {{ include "llm-d-epp.sa-token-secret" . }}

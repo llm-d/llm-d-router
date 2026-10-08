@@ -69,7 +69,7 @@ func TestInstrumentedIndexCountsOnlySuccessfulOperations(t *testing.T) {
 	// that actually changed the index.
 	failing := NewInstrumentedIndex(&failingIndex{err: errors.New("index unavailable")})
 	require.Error(t, failing.Add(ctx, nil, requestKeys, entries))
-	require.Error(t, failing.Evict(ctx, BlockHash(1), EngineKey, entries))
+	require.Error(t, failing.Evict(ctx, EngineKey, []BlockHash{1}, entries))
 
 	assert.InDelta(t, admissionsBefore, testutil.ToFloat64(metrics.Admissions), 1e-9,
 		"failed admissions must not be counted")
@@ -79,7 +79,7 @@ func TestInstrumentedIndexCountsOnlySuccessfulOperations(t *testing.T) {
 	// Successful operations must still count every block.
 	succeeding := NewInstrumentedIndex(&failingIndex{})
 	require.NoError(t, succeeding.Add(ctx, nil, requestKeys, entries))
-	require.NoError(t, succeeding.Evict(ctx, BlockHash(1), EngineKey, entries))
+	require.NoError(t, succeeding.Evict(ctx, EngineKey, []BlockHash{1}, entries))
 
 	assert.InDelta(t, admissionsBefore+float64(len(requestKeys)), testutil.ToFloat64(metrics.Admissions), 1e-9,
 		"successful admissions must be counted")

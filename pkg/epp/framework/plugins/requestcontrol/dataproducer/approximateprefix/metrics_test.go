@@ -215,6 +215,151 @@ func TestPreRequestPredictionFollowsPrefillEndpoint(t *testing.T) {
 	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode))
 }
 
+// The best the picker could have chosen spans every scored candidate, not just
+// the one it took, so a request routed away from the cached pod reports the hit
+// it passed up.
+func TestPreRequestBestPredictedSpansScoredCandidates(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-scored"
+	p := producerForPrediction(t, name, 2)
+	cold, cached := namedEndpoint("cold"), namedEndpoint("cached")
+	pods := []fwksched.Endpoint{cold, cached}
+	tokens := []uint32{1, 2, 3, 4}
+
+	// Seed the cached pod by routing the prompt to it once.
+	runPrediction(t, p, "seed", tokens, pods, resultWith(cached, cold, cached))
+	// Route the same prompt to the cold pod instead.
+	runPrediction(t, p, "reroute", tokens, pods, resultWith(cold, cold, cached))
+
+	assert.Equal(t, float64(0), metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode),
+		"both requests landed on a pod holding nothing")
+	assert.Equal(t, float64(len(tokens)), metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode),
+		"the second request could have reached the cached pod")
+}
+
+// A pod that holds the prefix but is not among the request's candidates does
+// not raise either maximum, since the router was never offered it.
+func TestPreRequestBestIgnoresNonCandidateServers(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-non-candidate"
+	p := producerForPrediction(t, name, 2)
+	other, candidate := namedEndpoint("other-pool"), namedEndpoint("candidate")
+	tokens := []uint32{1, 2, 3, 4}
+
+	// Seed the indexer with a pod that the next request cannot reach.
+	runPrediction(t, p, "seed", tokens, []fwksched.Endpoint{other}, resultWith(other, other))
+	runPrediction(t, p, "scoped", tokens, []fwksched.Endpoint{candidate}, resultWith(candidate, candidate))
+
+	assert.Equal(t, float64(0), metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(0), metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
+}
+
+// A candidate dropped by a filter never reaches the picker, so the reuse it
+// held shows up as available but not as a hit the picker could have taken.
+func TestPreRequestBestAvailableSpansFilteredOutCandidates(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-available"
+	p := producerForPrediction(t, name, 2)
+	survivor, dropped := namedEndpoint("survivor"), namedEndpoint("dropped")
+	pods := []fwksched.Endpoint{survivor, dropped}
+	tokens := []uint32{1, 2, 3, 4}
+
+	runPrediction(t, p, "seed", tokens, pods, resultWith(dropped, survivor, dropped))
+	// The cached pod is still a candidate, but a filter kept it from the picker.
+	runPrediction(t, p, "filtered", tokens, pods, resultWith(survivor, survivor))
+
+	assert.Equal(t, float64(0), metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode),
+		"the picker only saw the pod holding nothing")
+	assert.Equal(t, float64(len(tokens)), metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode),
+		"the filtered-out candidate still held the prefix")
+}
+
+// A profile that reports no scored candidates leaves the chosen endpoint as the
+// only evidence, so both maxima fall back to it rather than dropping to zero
+// and reporting a hit the router never had the chance to miss.
+func TestPreRequestBestFallsBackToSelected(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-no-scored"
+	p := producerForPrediction(t, name, 2)
+	endpoints, result := endpointAndResult()
+	require.Empty(t, result.ProfileResults["default"].ScoredCandidates)
+	tokens := []uint32{1, 2, 3, 4}
+
+	runPrediction(t, p, "seed", tokens, endpoints, result)
+	runPrediction(t, p, "repeat", tokens, endpoints, result)
+
+	selected := metricSum(t, predictedCachedTokensMetric, name, prefixmetrics.RoleDecode)
+	assert.Equal(t, float64(len(tokens)), selected)
+	assert.Equal(t, selected, metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, selected, metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
+}
+
+// A profile handler that rebuilds the result from its targets alone, such as
+// the data-parallel one, leaves no scored candidates. The pre-filter maximum
+// falls back with the picker-side one, so a routing miss toward a warmer
+// candidate is not reported as reuse lost to filtering.
+func TestPreRequestBestAvailableFallsBackWithoutScoredCandidates(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-available-no-scored"
+	p := producerForPrediction(t, name, 2)
+	cold, cached := namedEndpoint("cold"), namedEndpoint("cached")
+	pods := []fwksched.Endpoint{cold, cached}
+	tokens := []uint32{1, 2, 3, 4}
+
+	runPrediction(t, p, "seed", tokens, pods, resultWith(cached, cold, cached))
+	runPrediction(t, p, "targets-only", tokens, pods, resultWith(cold))
+
+	assert.Equal(t, float64(0), metricSum(t, bestPredictedMetric, name, prefixmetrics.RoleDecode))
+	assert.Equal(t, float64(0), metricSum(t, bestAvailableMetric, name, prefixmetrics.RoleDecode))
+}
+
+// The two maxima carry the modalities the request holds, so the reuse routing
+// and filtering left behind can be split between multimodal and text-only
+// traffic.
+func TestPreRequestMaximaCarryModality(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+
+	const name = "approx-best-modality"
+	p := producerForPrediction(t, name, 2)
+	endpoints, result := endpointAndResult()
+
+	body := tokenizedBody([]uint32{1, 2, 3, 4})
+	body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
+		{Modality: fwkrh.ModalityImage, Hash: "img"},
+	}
+	runPredictionWithBody(t, p, "mm", body, endpoints, result)
+
+	image := string(fwkrh.ModalityImage)
+	assert.Equal(t, image, metricModality(t, bestPredictedMetric, name))
+	assert.Equal(t, image, metricModality(t, bestAvailableMetric, name))
+}
+
+func namedEndpoint(name string) fwksched.Endpoint {
+	return fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
+		fwkdl.NewMetrics(), fwkdl.NewAttributes())
+}
+
+// resultWith selects target and reports scored as the candidates that reached
+// the picker. A candidate the scheduler filtered out is left out of scored.
+func resultWith(target fwksched.Endpoint, scored ...fwksched.Endpoint) *fwksched.SchedulingResult {
+	candidates := make([]fwksched.ScoredEndpoint, 0, len(scored))
+	for _, endpoint := range scored {
+		candidates = append(candidates, fwksched.ScoredEndpoint{Endpoint: endpoint})
+	}
+	return &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{target}, ScoredCandidates: candidates},
+		},
+	}
+}
+
 func producerForPrediction(t *testing.T, name string, blockSize int) *dataProducer {
 	t.Helper()
 	p, err := newDataProducer(context.Background(), name, config{
@@ -256,8 +401,10 @@ func runPredictionWithBody(t *testing.T, p *dataProducer, id string, body *fwkrh
 }
 
 const (
-	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens" //#nosec G101 -- metric name, not a credential
-	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"           //#nosec G101 -- metric name, not a credential
+	predictedCachedTokensMetric = "llm_d_epp_prefix_predicted_cached_tokens"      //nolint:gosec // G101: metric name, not a credential
+	bestPredictedMetric         = "llm_d_epp_prefix_best_predicted_cached_tokens" //nolint:gosec // G101: metric name, not a credential
+	bestAvailableMetric         = "llm_d_epp_prefix_best_available_cached_tokens" //nolint:gosec // G101: metric name, not a credential
+	promptTokensMetric          = "llm_d_epp_prefix_prompt_tokens"                //nolint:gosec // G101: metric name, not a credential
 )
 
 // metricSum reads a shared prefix metric out of the registry it is registered
@@ -281,4 +428,29 @@ func metricSum(t *testing.T, metricName, pluginName, role string) float64 {
 		}
 	}
 	return 0
+}
+
+// metricModality returns the modality label of the plugin's only series of a
+// shared prefix metric.
+func metricModality(t *testing.T, metricName, pluginName string) string {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var modalities []string
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName {
+				modalities = append(modalities, labels["modality"])
+			}
+		}
+	}
+	require.Len(t, modalities, 1)
+	return modalities[0]
 }

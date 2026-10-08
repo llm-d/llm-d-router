@@ -145,28 +145,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	updated := false
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.WaitingQueueSize = int(extractValue(metric))
+			clone.WaitingQueueSize = int(value)
 			updated = true
 		}
 	}
 
 	if spec := mapping.TotalRunningRequests; spec != nil { // extract running requests
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.RunningRequestsSize = int(extractValue(metric))
+			clone.RunningRequestsSize = int(value)
 			updated = true
 		}
 	}
 
 	if spec := mapping.KVCacheUtilization; spec != nil { // extract KV cache usage
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateMax); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.KVCacheUsagePercent = extractValue(metric)
+			clone.KVCacheUsagePercent = value
 			updated = true
 		}
 	}
@@ -217,7 +217,9 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	for _, custom := range mapping.CustomMetrics {
 		metric, err := custom.Spec.getLatestMetric(families)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			if !custom.Optional {
+				errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			}
 			continue
 		}
 		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))

@@ -77,7 +77,9 @@ func captureResponseStatus(w http.ResponseWriter) (http.ResponseWriter, *respons
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 			return func(statusCode int) {
 				// 1xx responses are informational; the final status follows them.
-				if s.statusCode == 0 && statusCode >= http.StatusOK {
+				// An error status after an implicit 200 (e.g. a later failing chunk
+				// in streaming chunked decode) still marks the response failed.
+				if statusCode >= http.StatusOK && (s.statusCode == 0 || isHTTPError(statusCode)) {
 					s.statusCode = statusCode
 				}
 				next(statusCode)

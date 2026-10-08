@@ -459,10 +459,10 @@ func (d *Director) selectWeightedModel(ctx context.Context, models []v1alpha2.Ta
 
 	if totalWeight == 0 {
 		// If total weight is 0, distribute evenly
-		return models[rand.Intn(len(models))].ModelRewrite
+		return models[rand.Intn(len(models))].ModelRewrite //#nosec G404 -- model traffic split, not security-sensitive
 	}
 
-	randomNum := rand.Intn(int(totalWeight))
+	randomNum := rand.Intn(int(totalWeight)) //#nosec G404 -- model traffic split, not security-sensitive
 	var currentWeight int32
 	for _, model := range models {
 		if model.Weight != nil {
@@ -673,7 +673,7 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	if len(pods) == 0 {
 		return nil
 	}
-	number := rand.Intn(len(pods))
+	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
 	pod := pods[number]
 	return pod.GetMetadata()
 }

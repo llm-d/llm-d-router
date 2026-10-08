@@ -203,7 +203,7 @@ func TestSpeculativeAnnotation(t *testing.T) {
 	t.Run("SpeculativeEvictPreservesConfirmed", func(t *testing.T) {
 		// Evict the speculative entry using requestKey directly (no engineKey mapping exists).
 		speculativePod := PodEntry{PodIdentifier: "10.0.0.1:8080", Speculative: true}
-		err := index.Evict(ctx, requestKey, RequestKey, []PodEntry{speculativePod})
+		err := index.Evict(ctx, RequestKey, []BlockHash{requestKey}, []PodEntry{speculativePod})
 		require.NoError(t, err)
 
 		// Confirmed entry should remain
@@ -236,7 +236,7 @@ func TestSpeculativeEvictThenEmpty(t *testing.T) {
 	assert.Len(t, podsPerKey[requestKey], 1)
 
 	// Evict speculative entry using requestKey directly
-	err = index.Evict(ctx, requestKey, RequestKey, []PodEntry{speculativePod})
+	err = index.Evict(ctx, RequestKey, []BlockHash{requestKey}, []PodEntry{speculativePod})
 	require.NoError(t, err)
 
 	// Lookup should return empty
@@ -290,8 +290,8 @@ func TestInMemoryIndexRecencyPromotion(t *testing.T) {
 			name:       "request-key evict does not promote recency",
 			engineKeys: false,
 			touch: func(t *testing.T, index Index) {
-				require.NoError(t, index.Evict(ctx, requestKey1, RequestKey,
-					[]PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+				require.NoError(t, index.Evict(ctx, RequestKey,
+					[]BlockHash{requestKey1}, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
 			},
 			wantKey1: false,
 			wantKey2: true,
@@ -300,8 +300,8 @@ func TestInMemoryIndexRecencyPromotion(t *testing.T) {
 			name:       "engine-key evict does not promote recency",
 			engineKeys: true,
 			touch: func(t *testing.T, index Index) {
-				require.NoError(t, index.Evict(ctx, engineKey1, EngineKey,
-					[]PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+				require.NoError(t, index.Evict(ctx, EngineKey,
+					[]BlockHash{engineKey1}, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
 			},
 			wantKey1: false,
 			wantKey2: true,

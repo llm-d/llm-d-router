@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -54,6 +55,11 @@ type parameters struct {
 	// TopologyProducerName selects the topology-extractor instance to read
 	// endpoint topology from. Defaults to the extractor's default producer.
 	TopologyProducerName string `json:"topologyProducerName,omitempty"`
+	// PeerTopologyHeader names the request header carrying the peer's
+	// encoded topology in coordinator deployments, where the peer endpoint
+	// is not in-process. Unset by default: single-EPP deployments resolve
+	// the peer through the peer-endpoint request attribute instead.
+	PeerTopologyHeader string `json:"peerTopologyHeader,omitempty"`
 }
 
 var _ fwksched.Scorer = &Scorer{}
@@ -67,12 +73,16 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", ScorerType, err)
 		}
 	}
+	if err := topoutil.ValidateHeaderName(params.PeerTopologyHeader); err != nil {
+		return nil, fmt.Errorf("invalid configuration for '%s' scorer: %w", ScorerType, err)
+	}
 	if name == "" {
 		name = ScorerType
 	}
 	return &Scorer{
-		typedName: fwkplugin.TypedName{Type: ScorerType, Name: name},
-		dataKey:   attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(params.TopologyProducerName),
+		typedName:          fwkplugin.TypedName{Type: ScorerType, Name: name},
+		dataKey:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(params.TopologyProducerName),
+		peerTopologyHeader: strings.ToLower(params.PeerTopologyHeader),
 	}, nil
 }
 
@@ -80,8 +90,9 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 // endpoint, using the fixed levelScores curve. Endpoints score 0 when no peer
 // topology is available, or when the endpoint has no matching field.
 type Scorer struct {
-	typedName fwkplugin.TypedName
-	dataKey   fwkplugin.DataKey
+	typedName          fwkplugin.TypedName
+	dataKey            fwkplugin.DataKey
+	peerTopologyHeader string
 }
 
 func (s *Scorer) TypedName() fwkplugin.TypedName {
@@ -110,7 +121,7 @@ func (s *Scorer) Category() fwksched.ScorerCategory {
 func (s *Scorer) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 
-	peer, ok := topoutil.PeerTopology(request, s.dataKey)
+	peer, ok := topoutil.PeerTopology(request, s.dataKey, s.peerTopologyHeader)
 	if !ok {
 		for _, endpoint := range endpoints {
 			scores[endpoint] = 0

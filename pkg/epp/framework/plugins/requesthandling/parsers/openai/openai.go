@@ -269,7 +269,7 @@ func isStreamTerminator(content []byte) bool {
 }
 
 func responseMediaType(headers map[string]string) string {
-	value, ok := headerValue(headers, request.HeaderContentType)
+	value, ok := headerValue(headers, reqcommon.HeaderContentType)
 	if !ok {
 		return ""
 	}
@@ -440,7 +440,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	contentTypeValue, _ := headerValue(headers, request.HeaderContentType)
+	contentTypeValue, _ := headerValue(headers, reqcommon.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
 		return nil, errors.New("images edits request must have a multipart/form-data content-type")

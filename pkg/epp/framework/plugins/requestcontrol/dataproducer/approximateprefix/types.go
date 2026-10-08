@@ -30,15 +30,16 @@ import (
 // indexerInterface maintains an LRU cache of prompt prefix hashes and the server(s) that might have that
 // prefix cached.
 type indexerInterface interface {
-	Get(hash blockHash) podSet
+	// MatchLongestPrefix returns, for each candidate, the number of leading
+	// blocks of hashes the candidate holds.
+	MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int
+	// Add records that server holds hashes. hashes must be a prompt's block
+	// hashes starting at block 0; MatchLongestPrefix relies on this.
 	Add(hashes []blockHash, server server)
 	RemovePod(server ServerID)
 	Pods() []ServerID
 	PodBlockCounts() map[ServerID]int
 }
-
-// podSet holds a set of pods that may have a specific prefix hash.
-type podSet map[ServerID]struct{}
 
 // blockHash is a hash of a block of request data. It aliases prefixhash.BlockHash
 // so this package and other prefix-aware producers share one block-hash type.
@@ -62,13 +63,18 @@ type SchedulingContextState struct {
 	// PerPromptHashes holds the prefix hashes for each prompt in the request,
 	// one inner slice per prompt. Single-prompt requests use a length-1 outer slice.
 	PerPromptHashes [][]blockHash
-	// A map of server to its longest prefix cache match length in blocks.
+	// A map of candidate server to its longest prefix cache match length in
+	// blocks, summed across prompts. Candidates without a match are absent.
 	PrefixCacheServers map[ServerID]int
 	// A map of server to the prompt tokens it is expected to serve from cache.
 	// Blocks are converted to tokens during Produce, which holds both the block
 	// size the hashes were derived at and each prompt's length; the conversion
 	// is bounded per prompt because a prompt's final block may be partial.
 	PredictedCachedTokens map[ServerID]int
+	// The highest PredictedCachedTokens across the request's candidate
+	// endpoints. Taken during Produce, the only stage that sees the candidates
+	// as they were before the scheduler's filters narrowed them.
+	BestAvailableCachedTokens int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -88,9 +94,10 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 	}
 
 	return &SchedulingContextState{
-		PerPromptHashes:       perPromptHashes,
-		PrefixCacheServers:    prefixCacheServers,
-		PredictedCachedTokens: predictedCachedTokens,
+		PerPromptHashes:           perPromptHashes,
+		PrefixCacheServers:        prefixCacheServers,
+		PredictedCachedTokens:     predictedCachedTokens,
+		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
 }
 

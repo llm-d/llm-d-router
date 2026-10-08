@@ -30,6 +30,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -80,6 +81,7 @@ type PredictedLatency struct {
 	inFlightLoadDataKey          plugin.DataKey
 	encoderCacheDataKey          plugin.DataKey
 	latencyPredictionInfoDataKey plugin.DataKey
+	failureLog                   rate.Sometimes
 }
 
 // endpointInFlightLoad reads the InFlightLoad attribute published by the
@@ -320,6 +322,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		encoderCacheDataKey:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(config.EncoderCacheMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
+		failureLog:                   rate.Sometimes{Interval: predictionFailureLogInterval},
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(

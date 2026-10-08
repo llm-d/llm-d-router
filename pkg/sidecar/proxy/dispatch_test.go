@@ -74,6 +74,50 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 			expectedPrefillHostPorts: []string{"a"},
 		},
 		{
+			// An EPP that predates the rename sends only the legacy spelling.
+			name: "legacy prefill header still routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An upgraded EPP writes both spellings with the same value.
+			name: "both spellings present routes to that value",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"a"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that predates the rename forwards a client-supplied canonical
+			// name untouched. It must not override the target EPP itself set (#3087).
+			name: "canonical spelling does not override the legacy target",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"attacker"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// The canonical spelling alone still routes, which is what a release
+			// that has dropped the alias sends.
+			name: "canonical spelling alone routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
 			name:     "sample from comma delimited header",
 			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,b"}}},
 			sampling: true,
@@ -178,8 +222,11 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 					}
 				}
 				if capturedReq != nil {
-					if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
-						t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
+					// Both spellings must go, or a worker sees a routing header.
+					for _, name := range routing.HeaderNames(routing.PrefillEndpointHeader) {
+						if v := capturedReq.Header.Get(name); v != "" {
+							t.Errorf("%s should be stripped before forwarding, got %q", name, v)
+						}
 					}
 				}
 			})
@@ -365,7 +412,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:        []string{"other-host"},
+			allowedHosts:        []string{"other-host:8000"},
 			epdConfigured:       true,
 			expectedPassthrough: true,
 		},
@@ -377,7 +424,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:        []string{"enc1"},
+			allowedHosts:        []string{"enc1:8000"},
 			epdConfigured:       true,
 			expectedEPD:         true,
 			expectedEPDEncoders: []string{"enc1:8000"},
@@ -392,7 +439,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:   []string{"prefill1"},
+			allowedHosts:   []string{"prefill1:8000"},
 			epdConfigured:  true,
 			expectedPD:     true,
 			expectedPDHost: "prefill1:8000",

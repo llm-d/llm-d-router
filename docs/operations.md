@@ -260,3 +260,37 @@ router:
 
 See `router.epp.autoscaling` in `config/charts/routerlib/values.yaml` for all fields and defaults. Custom metrics can be supplied via `autoscaling.metrics` to replace auto-generated CPU and memory metrics (target percentage fields remain range-validated if defined).
 
+### Standalone Proxy Autoscaling (Service Mode)
+
+In standalone service mode (`router.proxy.mode: service`), the proxy runs as an independent Deployment and Service that can be autoscaled using Kubernetes HorizontalPodAutoscaler (HPA v2). When enabled via `router.proxy.autoscaling.enabled: true`, Helm omits `spec.replicas` on the proxy Deployment and generates an HPA targeting the proxy Deployment.
+
+#### Operational Prerequisites and Constraints
+
+- **Service Mode Required**: Proxy autoscaling is supported only when `router.proxy.mode: service` and `router.proxy.enabled: true`. In `sidecar` mode, the proxy lifecycle and replica count are tied to the EPP pod.
+- **Replica Count Configuration**: When autoscaling is enabled, `router.proxy.replicas` is ignored. Replica counts are managed by `router.proxy.autoscaling.minReplicas` and `router.proxy.autoscaling.maxReplicas`.
+- **Drain and Termination Grace Period**: Envoy drains in-flight connections over a 60-second window (`--drain-time-s 60`). The proxy pod defaults `terminationGracePeriodSeconds: 70` and includes a 5-second `preStop` delay on Kubernetes 1.30+ to allow Service endpoint deregistration before Envoy terminates listeners.
+
+#### Helm Configuration
+
+```yaml
+router:
+  proxy:
+    mode: service
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        memory: 16Gi
+```
+
+See `router.proxy.autoscaling` in `config/charts/llm-d-router-standalone/values.yaml` for all fields and defaults.
+

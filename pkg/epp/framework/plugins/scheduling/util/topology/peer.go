@@ -30,20 +30,33 @@ import (
 var PeerEndpointDataKey = disagg.PeerEndpointAttributeKey
 
 // PeerTopology returns the topology of the endpoint selected in the peer
-// scheduling phase, or false when no peer topology is available.
+// scheduling phase, or false when no peer topology is available. headerName
+// must already be lowercased, matching request.Headers' keys.
 //
-// disagg-profile-handler publishes the peer Endpoint as the
-// disagg.PeerEndpointAttributeKey request attribute before running the
-// prefill profile; its Topology attribute (dataKey) is read directly. Scoped
-// to single-EPP deployments; coordinator deployments, where the peer's
-// topology arrives on a request header instead, are not yet supported.
-func PeerTopology(request *fwksched.InferenceRequest, dataKey fwkplugin.DataKey) (*attrtopology.Topology, bool) {
+// Single-EPP deployments: disagg-profile-handler publishes the peer Endpoint
+// as the disagg.PeerEndpointAttributeKey request attribute before running
+// the prefill profile; its Topology attribute (dataKey) is read directly.
+//
+// Coordinator deployments, where prefill and decode are picked by separate
+// EPPs, carry the peer's topology on headerName instead, stamped by
+// topology-stamp-handler on the prefill response and forwarded by the
+// coordinator to the decode request. The attribute is preferred over the
+// header when both are present.
+func PeerTopology(request *fwksched.InferenceRequest, dataKey fwkplugin.DataKey, headerName string) (*attrtopology.Topology, bool) {
 	if request == nil {
 		return nil, false
 	}
-	peer, ok := fwksched.ReadRequestAttribute[fwksched.Endpoint](request, disagg.PeerEndpointAttributeKey)
-	if !ok || peer == nil {
+	if peer, ok := fwksched.ReadRequestAttribute[fwksched.Endpoint](request, disagg.PeerEndpointAttributeKey); ok && peer != nil {
+		if topo, ok := fwkdl.ReadAttribute[*attrtopology.Topology](peer, dataKey); ok {
+			return topo, true
+		}
+	}
+	if headerName == "" {
 		return nil, false
 	}
-	return fwkdl.ReadAttribute[*attrtopology.Topology](peer, dataKey)
+	header := request.Headers[headerName]
+	if header == "" {
+		return nil, false
+	}
+	return Decode(header), true
 }

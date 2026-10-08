@@ -132,6 +132,52 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 	return latest, nil
 }
 
+// aggregation selects how the series of one metric family fold into a single value.
+// The README section "Families with several series" gives the choice per metric.
+type aggregation int
+
+const (
+	aggregateSum aggregation = iota
+	aggregateMax
+)
+
+// aggregateMetric folds every series matching Spec into one value, so a pod
+// exposing one series per engine reports all of its engines. A non-finite
+// value on any matching series fails the whole family.
+func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, agg aggregation) (float64, error) {
+	family, err := extractFamily(spec, families)
+	if err != nil {
+		return 0, err
+	}
+
+	var result float64
+	matched := 0
+
+	for _, metric := range family.GetMetric() {
+		if !spec.labelsMatch(metric.GetLabel()) {
+			continue
+		}
+		value := extractValue(metric)
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return 0, fmt.Errorf("non-finite metric value %v for %q", value, spec.Name)
+		}
+		switch {
+		case matched == 0:
+			result = value
+		case agg == aggregateSum:
+			result += value
+		case value > result:
+			result = value
+		}
+		matched++
+	}
+
+	if matched == 0 {
+		return 0, fmt.Errorf("no matching metric found for %q with labels %v", spec.Name, spec.Labels)
+	}
+	return result, nil
+}
+
 // labelsMatch checks if metric labels match the specification labels.
 // Scans the label pairs directly rather than building a map: this runs per
 // series per scrape tick, and specs carry at most a couple of label matchers.

@@ -18,7 +18,6 @@ package gateway
 
 const (
 	ContentTypeHeader = "Content-Type"
-	ContentTypeJSON   = "application/json"
 
 	PhaseEncode  = "encode"
 	PhasePrefill = "prefill"

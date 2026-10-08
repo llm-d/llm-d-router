@@ -118,7 +118,7 @@ epp:
 
 # By default no proxy is configured
 proxy:
-  enabled: false    
+  enabled: false
 
 # Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
 # `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and

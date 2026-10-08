@@ -184,6 +184,25 @@ type SchedulingResult struct {
 	PrimaryProfileName string
 }
 
+// PrimaryEndpoint returns the first endpoint the primary profile picked, as
+// stored, or nil when the result is nil, has no primary profile name, or the
+// primary profile picked none.
+func (r *SchedulingResult) PrimaryEndpoint() Endpoint {
+	if r == nil || r.PrimaryProfileName == "" {
+		return nil
+	}
+	return r.ProfileResults[r.PrimaryProfileName].FirstEndpoint()
+}
+
+// FirstEndpoint returns the first endpoint the profile picked, as stored, or
+// nil when the result is nil or the profile picked none.
+func (r *ProfileRunResult) FirstEndpoint() Endpoint {
+	if r == nil || len(r.TargetEndpoints) == 0 {
+		return nil
+	}
+	return r.TargetEndpoints[0]
+}
+
 type SchedulerProfile interface {
 	Run(ctx context.Context, request *InferenceRequest, candidateEndpoints []Endpoint) (*ProfileRunResult, error)
 }

@@ -19,30 +19,35 @@ package approximateprefix
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
-// indexer implements the indexerInterface interface.
+// indexer implements the indexerInterface interface. It keeps one LRU of block
+// hashes per pod and answers prefix queries per candidate pod.
 type indexer struct {
-	mu             sync.RWMutex
-	hashToPods     map[blockHash]podSet                         // the lookup data structure to find pods that have the blockHash cached
-	podToLRU       map[ServerID]*lru.Cache[blockHash, struct{}] // key is pod namespacedName, value is an LRU cache
+	mu             sync.RWMutex // guards pods; each podCache guards its own LRU
+	pods           map[ServerID]*podCache
 	defaultLRUSize int
 	pluginName     string
 	pluginType     string
 }
 
+type podCache struct {
+	mu  sync.RWMutex
+	lru *simplelru.LRU[blockHash, struct{}]
+}
+
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
 func newIndexer(ctx context.Context, defaultLRUSize int, pluginName, pluginType string) indexerInterface {
 	i := &indexer{
-		hashToPods:     make(map[blockHash]podSet),
-		podToLRU:       make(map[ServerID]*lru.Cache[blockHash, struct{}]),
+		pods:           make(map[ServerID]*podCache),
 		defaultLRUSize: defaultLRUSize,
 		pluginName:     pluginName,
 		pluginType:     pluginType,
@@ -52,70 +57,101 @@ func newIndexer(ctx context.Context, defaultLRUSize int, pluginName, pluginType 
 	return i
 }
 
-// Add adds a list of prefix hashes to the cache, tied to the server.
-func (i *indexer) Add(hashes []blockHash, pod server) {
+func (i *indexer) podCacheFor(pod server) *podCache {
+	i.mu.RLock()
+	pc := i.pods[pod.ServerID]
+	i.mu.RUnlock()
+	if pc != nil {
+		return pc
+	}
+
 	i.mu.Lock()
 	defer i.mu.Unlock()
-
-	// Check if the LRU pod exist
-	lruForPod, exists := i.podToLRU[pod.ServerID]
-	if !exists {
+	if pc = i.pods[pod.ServerID]; pc == nil {
 		lruSize := pod.NumOfGPUBlocks
 		if lruSize <= 0 {
 			lruSize = i.defaultLRUSize
 		}
 		// We ignore the error since the only possible error is if size <= 0.
-		newLRU, _ := lru.NewWithEvict(lruSize, i.makeEvictionFn(pod.ServerID))
-		i.podToLRU[pod.ServerID] = newLRU
-		lruForPod = newLRU
+		l, _ := simplelru.NewLRU[blockHash, struct{}](lruSize, nil)
+		pc = &podCache{lru: l}
+		i.pods[pod.ServerID] = pc
 	}
+	return pc
+}
 
-	// Insert hashes tail-first: matching is anchored at the first block, so
-	// the head is the most valuable entry and must stay cached longest; an
-	// oversized batch naturally keeps exactly its head. hashToPods is updated
-	// in the same iteration because the eviction callback can fire mid-batch.
+// Add inserts hashes tail-first: matching is anchored at the first block, so
+// the leading blocks are the most valuable entries and must stay cached
+// longest; an oversized batch naturally keeps exactly its leading blocks.
+// Because block hashes are chained, every Add that inserts block j of a prompt
+// also inserts blocks 0..j-1 after it, so within a pod's LRU the blocks of any
+// prompt that remain cached form a contiguous run from block 0, which is what
+// the galloping search in MatchLongestPrefix requires.
+//
+// If RemovePod runs between looking up the pod's cache and inserting, the
+// insert lands in the removed cache and is discarded with it, as if Add had
+// completed before RemovePod.
+func (i *indexer) Add(hashes []blockHash, pod server) {
+	pc := i.podCacheFor(pod)
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
-		hash := hashes[idx]
-		lruForPod.Add(hash, struct{}{})
-		podIDs := i.hashToPods[hash]
-		if podIDs == nil {
-			podIDs = make(podSet)
-		}
-		podIDs[pod.ServerID] = struct{}{}
-		i.hashToPods[hash] = podIDs
+		pc.lru.Add(hashes[idx], struct{}{})
 	}
 }
 
-// Get returns a set of servers that have the given prefix hash cached.
-func (i *indexer) Get(hash blockHash) podSet {
+// MatchLongestPrefix finds each candidate's run by galloping search over its
+// LRU.
+func (i *indexer) MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int {
+	res := make([]int, len(candidates))
+	if len(hashes) == 0 {
+		return res
+	}
+	// Release i.mu before waiting on pod locks, so a pending RemovePod or new
+	// pod does not stall other queries behind an in-progress Add.
+	caches := make([]*podCache, len(candidates))
 	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	pods := i.hashToPods[hash]
-	if pods == nil {
-		return nil
+	for j, c := range candidates {
+		caches[j] = i.pods[c]
 	}
+	i.mu.RUnlock()
 
-	res := make(podSet, len(pods))
-	for pod := range pods {
-		// Deep copy to avoid race condition.
-		res[pod] = struct{}{}
+	for j, pc := range caches {
+		if pc == nil {
+			continue
+		}
+		pc.mu.RLock()
+		res[j] = runLength(pc.lru, hashes)
+		pc.mu.RUnlock()
 	}
-
 	return res
 }
 
-// makeEvictionFn returns a per-pod LRU eviction callback that removes the pod from hashToPods on eviction.
-func (i *indexer) makeEvictionFn(pod ServerID) func(blockHash, struct{}) {
-	return func(hash blockHash, _ struct{}) {
-		// Remove the pod from the hash→pods map
-		if podSet, ok := i.hashToPods[hash]; ok {
-			delete(podSet, pod)
-			if len(podSet) == 0 {
-				delete(i.hashToPods, hash)
-			}
+// runLength returns the largest n such that the LRU holds hashes[n-1], relying
+// on the contiguous run described on Add. It uses only Contains, which does not
+// update recency, so callers need only the pod's read lock.
+func runLength(l *simplelru.LRU[blockHash, struct{}], hashes []blockHash) int {
+	if !l.Contains(hashes[0]) {
+		return 0
+	}
+	// held is a length known to be held; missing is one known not to be.
+	held, missing := 1, len(hashes)+1
+	for step := 1; held+step < missing; step *= 2 {
+		if !l.Contains(hashes[held+step-1]) {
+			missing = held + step
+			break
+		}
+		held += step
+	}
+	for missing-held > 1 {
+		mid := held + (missing-held)/2
+		if l.Contains(hashes[mid-1]) {
+			held = mid
+		} else {
+			missing = mid
 		}
 	}
+	return held
 }
 
 // reportLRUSize starts a goroutine that periodically reports the LRU cache size metric.
@@ -133,15 +169,12 @@ func (i *indexer) reportLRUSize(ctx context.Context, interval time.Duration) {
 }
 
 func (i *indexer) reportOnce(ctx context.Context) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
+	counts := i.PodBlockCounts()
 
 	totalEntries := 0
 	maxPodEntries := 0
 	var maxPodName ServerID
-
-	for pod, lruCache := range i.podToLRU {
-		size := lruCache.Len()
+	for pod, size := range counts {
 		totalEntries += size
 		if size > maxPodEntries {
 			maxPodEntries = size
@@ -149,7 +182,7 @@ func (i *indexer) reportOnce(ctx context.Context) {
 		}
 	}
 
-	numPods := len(i.podToLRU)
+	numPods := len(counts)
 	avg := 0.0
 	if numPods > 0 {
 		avg = float64(totalEntries) / float64(numPods)
@@ -171,18 +204,7 @@ func (i *indexer) reportOnce(ctx context.Context) {
 func (i *indexer) RemovePod(pod ServerID) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-
-	lruCache, exists := i.podToLRU[pod]
-	if !exists {
-		return
-	}
-
-	// Remove all hashes associated with the pod from hashToPods (triggers eviction callbacks).
-	for _, hash := range lruCache.Keys() {
-		lruCache.Remove(hash)
-	}
-
-	delete(i.podToLRU, pod)
+	delete(i.pods, pod)
 }
 
 // Pods returns the list of all pods currently tracked in the indexer.
@@ -190,8 +212,8 @@ func (i *indexer) Pods() []ServerID {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	pods := make([]ServerID, 0, len(i.podToLRU))
-	for pod := range i.podToLRU {
+	pods := make([]ServerID, 0, len(i.pods))
+	for pod := range i.pods {
 		pods = append(pods, pod)
 	}
 	return pods
@@ -200,11 +222,14 @@ func (i *indexer) Pods() []ServerID {
 // PodBlockCounts returns the number of cached blocks currently tracked per pod.
 func (i *indexer) PodBlockCounts() map[ServerID]int {
 	i.mu.RLock()
-	defer i.mu.RUnlock()
+	caches := maps.Clone(i.pods)
+	i.mu.RUnlock()
 
-	counts := make(map[ServerID]int, len(i.podToLRU))
-	for pod, lruCache := range i.podToLRU {
-		counts[pod] = lruCache.Len()
+	counts := make(map[ServerID]int, len(caches))
+	for pod, pc := range caches {
+		pc.mu.RLock()
+		counts[pod] = pc.lru.Len()
+		pc.mu.RUnlock()
 	}
 	return counts
 }

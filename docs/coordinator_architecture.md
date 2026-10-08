@@ -457,7 +457,7 @@ worker**. No sidecar or coordination logic runs on the prefill or encode nodes. 
    multimodal content is detected), then prefill (if the P/D decider judges it
    beneficial).
 2. The EPP communicates the selected pods to the decode sidecar as **request headers**:
-   `x-prefiller-host-port` (the selected prefill worker) and `x-encoder-hosts-ports` (one
+   `x-llm-d-prefiller-host-port` (the selected prefill worker) and `x-llm-d-encoder-hosts-ports` (one
    or more encode workers). The gateway then forwards the request to the decode pod.
 3. The sidecar orchestrates the cascade: it dispatches multimodal content to the encode
    workers, sends a remote prefill request (`max_tokens=1`) to the prefill worker,
@@ -492,7 +492,7 @@ service in front of the Inference Gateway:
 | Pipeline versatility | Fixed E/P/D orchestration baked into the sidecar | Configurable pipeline of independent, reorderable plugin steps; new stages added without touching existing ones |
 | EPP scheduling | One cycle selects all phases (`disagg-profile-handler`) | One EPP call per phase, coordinator drives the cascade |
 | vLLM pod selection | All phase pods chosen up front in one scheduling cycle | Deferred per phase: each pod is selected only when that phase's call is made, at the point its destination becomes relevant |
-| Phase selection signal | EPP request headers `x-prefiller-host-port`, `x-encoder-hosts-ports` read by the sidecar | `x-llm-d-epp-profile` header per call; the EPP runs the matching profile and picks the pod |
+| Phase selection signal | EPP request headers `x-llm-d-prefiller-host-port`, `x-llm-d-encoder-hosts-ports` read by the sidecar | `x-llm-d-epp-profile` header per call; the EPP runs the matching profile and picks the pod |
 | Tokenization | On the workers | Once, in the coordinator's render step; token IDs reused downstream (experimental path) |
 | Cross-phase state | Held by the sidecar | Held on the coordinator `RequestContext` |
 
