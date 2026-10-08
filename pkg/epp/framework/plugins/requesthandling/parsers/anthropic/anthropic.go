@@ -106,8 +106,13 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 
 	// count_tokens delegates token counting to the server and passes its response
 	// through, so only the envelope is read: Messages stays nil to keep the token
-	// producers out, while the model still resolves and rewrites.
+	// producers out, while the model still resolves and rewrites. The server
+	// requires model, and a JSON null unmarshals into an envelope with no fields,
+	// so the field is validated here as messages is on the path below.
 	if countTokens {
+		if result.Model == "" {
+			return nil, errors.New("invalid count_tokens request: must have a model")
+		}
 		return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: true}, nil
 	}
 

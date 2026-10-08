@@ -89,15 +89,19 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
-		// Metrics observe the values this chunk carried, not the accumulated ones: a field
-		// already reported by an earlier chunk would otherwise be observed a second time.
-		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokens)
-		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.CompletionTokens)
-		if parsedResp.Usage.PromptTokenDetails != nil {
-			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokenDetails.CachedTokens)
-		}
 	}
 	if endOfStream {
+		// Token counts belong to the request, not to the chunk that happened to carry
+		// them: a server reporting cumulative usage on more than one chunk would
+		// otherwise be observed once per chunk. The zero counts of a response that
+		// reported no usage are not observed, since the input and output recorders
+		// drop non-positive values and the cached recorder is reached only when a
+		// usage block carried the detail.
+		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
+		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
+		if reqCtx.Usage.PromptTokenDetails != nil {
+			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokenDetails.CachedTokens)
+		}
 		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp)
 		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.responseSize)
@@ -108,11 +112,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 }
 
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
-// The Anthropic streaming format splits usage across events - message_start carries the
-// prompt tokens and the cached-token detail, message_delta carries the completion tokens -
-// and those events reach the parser in separate chunks, so each field is taken only from
-// the blocks that report it. Parsers that emit usage once with every field populated are
-// unaffected.
+// The Anthropic streaming format splits usage across events that reach the parser in
+// separate chunks: message_start carries the input counts and the cached-token detail,
+// message_delta carries the output count and may repeat the input counts. Each field is
+// therefore taken only from the blocks that report it, with a later block superseding an
+// earlier one. Parsers that emit usage once with every field populated are unaffected.
 func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens

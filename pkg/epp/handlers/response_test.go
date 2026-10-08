@@ -489,6 +489,73 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	require.Equal(t, float64(200), outputTokens.GetSampleSum())
 }
 
+// vLLM builds the usage block for message_start and message_delta from the same
+// helper, so both events carry the cumulative input and cache counts. The counts
+// belong to one request and must reach the histograms once.
+func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+		[]byte(`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1000,"cache_read_input_tokens":800,"output_tokens":200}}` + "\n\n"),
+		[]byte(`event: message_stop` + "\n" + `data: {"type":"message_stop"}`),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for i, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
+	}
+
+	wantUsage := fwkrh.Usage{
+		PromptTokens:       1800,
+		CompletionTokens:   200,
+		TotalTokens:        2000,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+	}
+	assert.Equal(t, wantUsage, reqCtx.Usage)
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       reqcommon.DefaultFairnessID,
+		"priority":          "0",
+	}
+	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
+	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
+	require.Equal(t, float64(1800), inputTokens.GetSampleSum())
+
+	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
+	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
+	require.Equal(t, float64(800), cachedTokens.GetSampleSum())
+
+	outputTokens := findHistogramMetric(t, "llm_d_epp_request_output_tokens", labels)
+	require.Equal(t, uint64(1), outputTokens.GetSampleCount())
+	require.Equal(t, float64(200), outputTokens.GetSampleSum())
+}
+
 func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	server := &StreamingServer{}
 	reqCtx := &RequestContext{

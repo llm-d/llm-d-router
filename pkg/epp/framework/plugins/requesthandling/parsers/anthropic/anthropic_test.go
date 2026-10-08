@@ -814,6 +814,18 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 			},
 		},
 		{
+			name:    "null body",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte(`null`),
+			wantErr: true,
+		},
+		{
+			name:    "body without model",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte(`{"messages":[{"role":"user","content":"Hello"}]}`),
+			wantErr: true,
+		},
+		{
 			name:    "empty body",
 			headers: map[string]string{":path": "/v1/messages/count_tokens"},
 			body:    []byte{},
