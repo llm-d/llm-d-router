@@ -534,9 +534,9 @@ func TestGatewayHeaders(t *testing.T) {
 	headers := gatewayHeaders(reqCtx, gateway.PhaseEncode)
 
 	want := map[string]string{
-		"x-custom":                   "v",
-		reqcommon.RequestIDHeaderKey: "req-1",
-		gateway.EPPProfileHeader:     gateway.PhaseEncode,
+		"x-custom":                    "v",
+		reqcommon.RequestIDHeaderKey:  "req-1",
+		reqcommon.EPPProfileHeaderKey: gateway.PhaseEncode,
 	}
 	if len(headers) != len(want) {
 		t.Errorf("headers = %v, want %v", headers, want)
@@ -555,7 +555,7 @@ func TestGatewayHeaders(t *testing.T) {
 
 func TestGatewayHeaders_NoClientHeaders(t *testing.T) {
 	headers := gatewayHeaders(&pipeline.RequestContext{RequestID: "req-1"}, gateway.PhasePrefill)
-	if headers[reqcommon.RequestIDHeaderKey] != "req-1" || headers[gateway.EPPProfileHeader] != gateway.PhasePrefill {
+	if headers[reqcommon.RequestIDHeaderKey] != "req-1" || headers[reqcommon.EPPProfileHeaderKey] != gateway.PhasePrefill {
 		t.Errorf("headers = %v, want the request id and the prefill profile", headers)
 	}
 }
@@ -694,7 +694,7 @@ func TestPostToGateway_DebugRecord(t *testing.T) {
 			verbosity:   logutil.DEBUG,
 			logMsg:      "sub-request body",
 			body:        []byte(`{"model":"m"}`),
-			headers:     map[string]string{gateway.EPPProfileHeader: gateway.PhaseEncode},
+			headers:     map[string]string{reqcommon.EPPProfileHeaderKey: gateway.PhaseEncode},
 			wantMsg:     "sub-request body",
 			wantKeys:    []string{`"index"=2`, `"path"="` + reqcommon.PathCompletions + `"`, `"bodyLen"=13`},
 			wantRecords: 1,

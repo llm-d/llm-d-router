@@ -17,9 +17,7 @@ limitations under the License.
 package gateway
 
 const (
-	EPPProfileHeader  = "EPP-Profile"
 	ContentTypeHeader = "Content-Type"
-	ContentTypeJSON   = "application/json"
 
 	PhaseEncode  = "encode"
 	PhasePrefill = "prefill"

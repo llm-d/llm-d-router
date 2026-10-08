@@ -27,13 +27,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 func decoder(s string) *json.Decoder { return json.NewDecoder(strings.NewReader(s)) }
@@ -222,7 +222,7 @@ func TestPreRequest_NoFairnessID_FallsBackToDefault(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	_ = p.PreRequest(context.Background(), req, nil)
 
-	got, ok := p.programMetrics.Load(metadata.DefaultFairnessID)
+	got, ok := p.programMetrics.Load(reqcommon.DefaultFairnessID)
 	require.True(t, ok, "default fairness ID entry should be created")
 	m, ok := got.(*ProgramMetrics)
 	require.True(t, ok)

@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 )
@@ -184,8 +185,8 @@ func TestRedactBody(t *testing.T) {
 func TestClient_RequestReturnsReadableBody(t *testing.T) {
 	const want = `{"ok":true}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(ContentTypeHeader) != ContentTypeJSON {
-			t.Errorf("content-type = %q, want %q", r.Header.Get(ContentTypeHeader), ContentTypeJSON)
+		if r.Header.Get(ContentTypeHeader) != reqcommon.ContentTypeJSON {
+			t.Errorf("content-type = %q, want %q", r.Header.Get(ContentTypeHeader), reqcommon.ContentTypeJSON)
 		}
 		if got := r.Header.Get("X-Custom"); got != "v" {
 			t.Errorf("custom header not forwarded, got %q", got)

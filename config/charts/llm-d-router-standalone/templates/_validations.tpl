@@ -62,4 +62,42 @@ standalone validations
     {{- end -}}
   {{- end -}}
 {{- end -}}
+{{- $autoscaling := dig "autoscaling" dict .Values.router.proxy -}}
+{{- if $autoscaling.enabled -}}
+  {{- if not $proxy.enabled -}}
+    {{- fail "Proxy autoscaling (.Values.router.proxy.autoscaling.enabled=true) requires proxy to be enabled (.Values.router.proxy.enabled=true)" -}}
+  {{- end -}}
+  {{- if ne $proxyMode "service" -}}
+    {{- fail "Proxy autoscaling (.Values.router.proxy.autoscaling.enabled=true) is only supported when proxy mode is set to 'service' (.Values.router.proxy.mode=service)" -}}
+  {{- end -}}
+  {{- $minReplicas := 1 -}}
+  {{- if hasKey $autoscaling "minReplicas" -}}
+    {{- $minReplicas = int $autoscaling.minReplicas -}}
+    {{- if lt $minReplicas 1 -}}
+      {{- fail ".Values.router.proxy.autoscaling.minReplicas must be at least 1" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $maxReplicas := 5 -}}
+  {{- if hasKey $autoscaling "maxReplicas" -}}
+    {{- $maxReplicas = int $autoscaling.maxReplicas -}}
+    {{- if lt $maxReplicas 1 -}}
+      {{- fail ".Values.router.proxy.autoscaling.maxReplicas must be at least 1" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if lt $maxReplicas $minReplicas -}}
+    {{- fail ".Values.router.proxy.autoscaling.maxReplicas must be greater than or equal to minReplicas" -}}
+  {{- end -}}
+  {{- if and (hasKey $autoscaling "targetCPUUtilizationPercentage") (not (kindIs "invalid" $autoscaling.targetCPUUtilizationPercentage)) -}}
+    {{- $cpu := int $autoscaling.targetCPUUtilizationPercentage -}}
+    {{- if or (lt $cpu 1) (gt $cpu 100) -}}
+      {{- fail ".Values.router.proxy.autoscaling.targetCPUUtilizationPercentage must be between 1 and 100" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if and (hasKey $autoscaling "targetMemoryUtilizationPercentage") (not (kindIs "invalid" $autoscaling.targetMemoryUtilizationPercentage)) -}}
+    {{- $mem := int $autoscaling.targetMemoryUtilizationPercentage -}}
+    {{- if or (lt $mem 1) (gt $mem 100) -}}
+      {{- fail ".Values.router.proxy.autoscaling.targetMemoryUtilizationPercentage must be between 1 and 100" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
 {{- end -}}

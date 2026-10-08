@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -34,7 +35,7 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	var prefillBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
@@ -169,7 +170,7 @@ func TestEncodeToPrefill_PartialECResponse(t *testing.T) {
 	var prefillBody map[string]any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)

@@ -43,6 +43,25 @@ registered by EPP plugins, including the embedded KV-cache collectors. Metric au
 configurable via `--metrics-endpoint-auth` (default `true`). TLS is a separate setting, configurable
 via `--metrics-cert-dir`; mutual TLS additionally requires `--metrics-client-ca-file`.
 
+With authentication enabled, the EPP validates scrapes with a TokenReview and a
+SubjectAccessReview. The Helm charts grant the EPP ServiceAccount `create` on both resources through
+a ClusterRole when `router.monitoring.prometheus.auth.enabled` is `true`, so installing with that
+setting requires permission to create cluster-scoped RBAC. Setting it to `false` serves `/metrics`
+without authentication and renders no cluster-scoped RBAC.
+
+A scraper must send a bearer token for an identity that is allowed `get` on the `/metrics`
+non-resource URL. To grant that to a scraper ServiceAccount:
+
+```bash
+kubectl create clusterrole <release>-metrics-reader --verb=get --non-resource-url=/metrics
+kubectl create clusterrolebinding <release>-metrics-reader \
+    --clusterrole=<release>-metrics-reader \
+    --serviceaccount=<namespace>:<scraper-sa>
+```
+
+The charts create this grant themselves for the ServiceMonitor and GMP PodMonitoring they render
+when `router.monitoring.prometheus.enabled` is `true`.
+
 ### Model server / engine
 
 The `metrics-data-source` plugin sends an HTTP or HTTPS request (`scheme`, default `http`; TLS
@@ -300,6 +319,7 @@ only when that plugin is configured and records the related prediction, observat
 | `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
 | `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
+| `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
 ### Disaggregation
 

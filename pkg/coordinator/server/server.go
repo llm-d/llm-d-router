@@ -41,7 +41,7 @@ import (
 var serverLog = ctrl.Log.WithName("server")
 
 var (
-	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, gateway.EPPProfileHeader, "Prefer"}
+	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, reqcommon.EPPProfileHeaderKey, "Prefer"}
 	loggedResponseHeaders = []string{"Content-Type", reqcommon.RequestIDHeaderKey}
 )
 

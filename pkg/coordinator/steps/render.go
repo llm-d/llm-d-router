@@ -341,7 +341,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		return fmt.Errorf("creating render request: %w", err)
 	}
 	req.ContentLength = int64(len(body))
-	req.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+	req.Header.Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	for k, v := range reqCtx.ForwardedHeaders() {
 		req.Header.Set(k, v)
 	}

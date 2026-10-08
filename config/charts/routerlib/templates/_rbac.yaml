@@ -1,5 +1,6 @@
 {{- define "llm-d-router.rbac" -}}
-{{- if and .Values.router.monitoring.prometheus.enabled .Values.router.monitoring.prometheus.auth.enabled }}
+{{- $monitoringProviderName := include "llm-d-router.monitoring.provider.name" . | lower -}}
+{{- if .Values.router.monitoring.prometheus.auth.enabled }}
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
@@ -20,10 +21,12 @@ rules:
     - subjectaccessreviews
   verbs:
     - create
+{{- if and .Values.router.monitoring.prometheus.enabled (eq $monitoringProviderName "prometheusoperator") }}
 - nonResourceURLs:
     - "/metrics"
   verbs:
     - get
+{{- end }}
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

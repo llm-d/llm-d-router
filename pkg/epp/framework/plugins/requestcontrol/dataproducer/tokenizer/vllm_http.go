@@ -375,9 +375,9 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		}
 	}
 
+	start := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	start := time.Now()
 	defer func() { r.observeRender(ctx, path, timeout, time.Since(start), err) }()
 
 	baseURL, err := r.endpointPicker.Pick()

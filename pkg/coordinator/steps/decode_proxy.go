@@ -66,12 +66,12 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 		return nil, fmt.Errorf("%s: creating request: %w", step, err)
 	}
 	proxyReq.ContentLength = int64(len(bodyBytes))
-	proxyReq.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+	proxyReq.Header.Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	for k, v := range reqCtx.ForwardedHeaders() {
 		proxyReq.Header.Set(k, v)
 	}
 	proxyReq.Header.Set(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
-	proxyReq.Header.Set(gateway.EPPProfileHeader, gateway.PhaseDecode)
+	proxyReq.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 	for k, v := range extraHeaders {
 		proxyReq.Header.Set(k, v)
 	}

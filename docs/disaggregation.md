@@ -744,8 +744,8 @@ Enabling the flag requires:
 - `--inference-pool=<namespace>/<name>`, or the `INFERENCE_POOL` environment
   variable. A value without a namespace refers to the `default` namespace. The
   sidecar does not start when the pool is not set.
-- `--pool-group`, when the InferencePool is not in the default
-  `inference.networking.k8s.io` API group.
+- `--pool-group` (default `inference.networking.k8s.io`), the Kubernetes API
+  group of the InferencePool. Only `inference.networking.k8s.io` is supported.
 - `list` and `watch` permissions on `inferencepools` and on `pods` in the
   InferencePool's namespace, granted to the service account of the decode pods:
 

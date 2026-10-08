@@ -5,6 +5,7 @@ package externalversions
 import (
 	fmt "fmt"
 
+	v1 "github.com/llm-d/llm-d-router/apix/v1"
 	v1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
@@ -36,7 +37,11 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=llm-d.ai, Version=v1alpha2
+	// Group=llm-d.ai, Version=v1
+	case v1.SchemeGroupVersion.WithResource("inferenceobjectives"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.XInference().V1().InferenceObjectives().Informer()}, nil
+
+		// Group=llm-d.ai, Version=v1alpha2
 	case v1alpha2.SchemeGroupVersion.WithResource("inferencemodelrewrites"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.XInference().V1alpha2().InferenceModelRewrites().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("inferenceobjectives"):

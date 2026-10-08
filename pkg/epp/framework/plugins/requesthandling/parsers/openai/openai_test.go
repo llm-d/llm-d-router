@@ -29,6 +29,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -1496,7 +1497,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 			if tt.contentType != "" {
 				ct = tt.contentType
 			}
-			headers := map[string]string{":path": tt.path, request.HeaderContentType: ct}
+			headers := map[string]string{":path": tt.path, reqcommon.HeaderContentType: ct}
 			got, err := parser.ParseRequest(context.Background(), body, headers)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseRequest() error = %v, wantErr %v", err, tt.wantErr)
@@ -1763,7 +1764,7 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 		{
 			name:    "Audio stream chunk",
 			body:    []byte{0x52, 0x49, 0x46, 0x46},
-			headers: map[string]string{request.HeaderContentType: "audio/wav"},
+			headers: map[string]string{reqcommon.HeaderContentType: "audio/wav"},
 			want: &fwkrh.ParsedResponse{
 				Usage: nil,
 			},
@@ -1792,7 +1793,7 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			name: "Octet-stream response with malformed usage headers",
 			body: []byte{0x00, 0x01, 0x02},
 			headers: map[string]string{
-				request.HeaderContentType:        "application/octet-stream",
+				reqcommon.HeaderContentType:      "application/octet-stream",
 				"x-vllm-omni-input-tokens":       "invalid",
 				"x-vllm-omni-output-tokens":      "-1",
 				"x-vllm-omni-total-tokens":       "3.5",
@@ -1965,7 +1966,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{request.HeaderContentType: request.MediaTypeEventStream}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{reqcommon.HeaderContentType: request.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseStreamResponse() error = %v", err)
 			}

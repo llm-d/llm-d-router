@@ -26,15 +26,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
-
-// ingestedHeaderKey is the key request.Headers actually carries once the EPP's request
-// handler stores it (always lowercased, see pkg/epp/handlers/request.go). Handlers are
-// constructed with the mixed-case defaultHeaderName throughout these tests specifically
-// to exercise the constructor's normalization against this lowercase key.
-const ingestedHeaderKey = "epp-profile"
 
 type fakeSchedulerProfile struct{}
 
@@ -78,7 +73,7 @@ func (s *infoCaptureSink) value(key string) any {
 }
 
 func TestNewHeaderProfileHandler(t *testing.T) {
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
 
 	wantTypedName := fwkplugin.TypedName{
 		Type: HeaderProfileHandlerType,
@@ -95,8 +90,8 @@ func TestNewHeaderProfileHandlerEmptyFallsBackToDefault(t *testing.T) {
 	// never match any request (request.Headers[""] is always empty, and an empty
 	// defaultProfile could never name a real schedulingProfiles entry).
 	handler := NewHeaderProfileHandler("", "")
-	if handler.headerName != ingestedHeaderKey {
-		t.Errorf("Expected headerName %q, got %q", ingestedHeaderKey, handler.headerName)
+	if handler.headerName != reqcommon.EPPProfileHeaderKey {
+		t.Errorf("Expected headerName %q, got %q", reqcommon.EPPProfileHeaderKey, handler.headerName)
 	}
 	if handler.defaultProfile != defaultProfileName {
 		t.Errorf("Expected defaultProfile %q, got %q", defaultProfileName, handler.defaultProfile)
@@ -114,7 +109,7 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 		{
 			name:               "no parameters, uses default header and default profile",
 			rawParameters:      "",
-			wantHeaderName:     ingestedHeaderKey,
+			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: defaultProfileName,
 		},
 		{
@@ -132,19 +127,19 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 		{
 			name:               "whitespace-only header name falls back to the default",
 			rawParameters:      `{"headerName": "   "}`,
-			wantHeaderName:     ingestedHeaderKey,
+			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: defaultProfileName,
 		},
 		{
 			name:               "custom default profile",
 			rawParameters:      `{"defaultProfile": "prefill"}`,
-			wantHeaderName:     ingestedHeaderKey,
+			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: "prefill",
 		},
 		{
 			name:               "whitespace-only default profile falls back to the default",
 			rawParameters:      `{"defaultProfile": "   "}`,
-			wantHeaderName:     ingestedHeaderKey,
+			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: defaultProfileName,
 		},
 		{
@@ -194,7 +189,7 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 }
 
 func TestHeaderProfileNoMatchError(t *testing.T) {
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
 
 	tests := []struct {
 		name           string
@@ -204,12 +199,12 @@ func TestHeaderProfileNoMatchError(t *testing.T) {
 		{
 			name:           "empty profile name reports missing header",
 			profileName:    "",
-			wantErrContain: `missing "epp-profile" header`,
+			wantErrContain: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:           "non-empty profile name reports the unconfigured value",
 			profileName:    "prefill",
-			wantErrContain: `no scheduling profile configured for "epp-profile" header value "prefill"`,
+			wantErrContain: `no scheduling profile configured for "x-llm-d-epp-profile" header value "prefill"`,
 		},
 	}
 
@@ -227,7 +222,7 @@ func TestHeaderProfileNoMatchError(t *testing.T) {
 }
 
 func TestHeaderProfileDefaultProfileNotConfiguredError(t *testing.T) {
-	handler := NewHeaderProfileHandler(defaultHeaderName, "prefill")
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, "prefill")
 
 	err := handler.defaultProfileNotConfiguredError()
 	if err == nil {
@@ -240,7 +235,7 @@ func TestHeaderProfileDefaultProfileNotConfiguredError(t *testing.T) {
 }
 
 func TestHeaderProfileWithName(t *testing.T) {
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName).WithName("renamed")
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName).WithName("renamed")
 
 	if handler.TypedName().Name != "renamed" {
 		t.Errorf("Expected Name to be %q, got %q", "renamed", handler.TypedName().Name)
@@ -267,14 +262,14 @@ func TestHeaderProfilePick(t *testing.T) {
 	}{
 		{
 			name:           "header names a configured profile, not yet run",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "encode"}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "encode"}},
 			profiles:       profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{"encode": encodeProfile},
 		},
 		{
 			name:     "selected profile already ran",
-			request:  &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "encode"}},
+			request:  &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "encode"}},
 			profiles: profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{
 				"encode": {TargetEndpoints: nil},
@@ -292,14 +287,14 @@ func TestHeaderProfilePick(t *testing.T) {
 		},
 		{
 			name:           "header names an unconfigured profile",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "prefill"}},
 			profiles:       profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{},
 		},
 		{
 			name:           "header value has surrounding whitespace, still matches",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "  encode  "}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "  encode  "}},
 			profiles:       profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{"encode": encodeProfile},
@@ -308,7 +303,7 @@ func TestHeaderProfilePick(t *testing.T) {
 			// A whitespace-only value is treated as missing, so it also falls back to
 			// the default profile, same as a header that is absent entirely.
 			name:           "whitespace-only header value falls back to the default profile",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "   "}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "   "}},
 			profiles:       profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{"decode": decodeProfile},
@@ -320,7 +315,7 @@ func TestHeaderProfilePick(t *testing.T) {
 			// this plugin controls, but the value is caller-supplied and compared
 			// verbatim against schedulingProfiles names.
 			name:           "header value case does not match the configured profile name",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "Encode"}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "Encode"}},
 			profiles:       profiles,
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{},
@@ -341,14 +336,14 @@ func TestHeaderProfilePick(t *testing.T) {
 			// profile that isn't configured doesn't stop the one configured profile
 			// from running.
 			name:           "single configured profile runs even with an unrecognized header value",
-			request:        &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
+			request:        &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "prefill"}},
 			profiles:       map[string]fwksched.SchedulerProfile{"decode": decodeProfile},
 			profileResults: map[string]*fwksched.ProfileRunResult{},
 			wantProfiles:   map[string]fwksched.SchedulerProfile{"decode": decodeProfile},
 		},
 	}
 
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, tt.profiles, tt.profileResults)
@@ -364,8 +359,8 @@ func TestHeaderProfilePickLogsMismatchDiagnostics(t *testing.T) {
 		"encode": &fakeSchedulerProfile{},
 		"decode": &fakeSchedulerProfile{},
 	}
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
-	request := &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}}
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
+	request := &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "prefill"}}
 
 	sink := &infoCaptureSink{}
 	ctx := log.IntoContext(context.Background(), logr.New(sink))
@@ -411,14 +406,14 @@ func TestHeaderProfilePickCustomDefaultProfile(t *testing.T) {
 			// The default is only a fallback for a missing header; an explicit header
 			// still wins even when it names a different profile than the default.
 			name:         "explicit header overrides the custom default",
-			request:      &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "encode"}},
+			request:      &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "encode"}},
 			wantProfiles: map[string]fwksched.SchedulerProfile{"encode": encodeProfile},
 		},
 	}
 
 	// defaultProfile "prefill" is configured but is not itself named "decode", proving
 	// the fallback uses the configured value rather than the package default.
-	handler := NewHeaderProfileHandler(defaultHeaderName, "prefill")
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, "prefill")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := handler.Pick(context.Background(), tt.request, profiles, map[string]*fwksched.ProfileRunResult{})
@@ -438,7 +433,7 @@ func TestHeaderProfilePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 		"encode":  &fakeSchedulerProfile{},
 		"prefill": &fakeSchedulerProfile{},
 	}
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
 	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
 
 	got := handler.Pick(context.Background(), request, profiles, map[string]*fwksched.ProfileRunResult{})
@@ -450,7 +445,7 @@ func TestHeaderProfilePickDefaultProfileNotConfiguredStillErrors(t *testing.T) {
 	if err == nil {
 		t.Fatalf("ProcessResults() expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), `missing "epp-profile" header`) {
+	if !strings.Contains(err.Error(), `missing "x-llm-d-epp-profile" header`) {
 		t.Errorf("ProcessResults() error = %q, want it to report the missing header, not the failed default", err.Error())
 	}
 }
@@ -485,21 +480,21 @@ func TestHeaderProfileProcessResults(t *testing.T) {
 			request:         nil,
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-profile" header`,
+			wantErrContains: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, empty header, reports missing header",
 			request:         &fwksched.InferenceRequest{Headers: map[string]string{}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `missing "epp-profile" header`,
+			wantErrContains: `missing "x-llm-d-epp-profile" header`,
 		},
 		{
 			name:            "no profiles selected, unconfigured header value, reports the value",
-			request:         &fwksched.InferenceRequest{Headers: map[string]string{ingestedHeaderKey: "prefill"}},
+			request:         &fwksched.InferenceRequest{Headers: map[string]string{reqcommon.EPPProfileHeaderKey: "prefill"}},
 			profileResults:  map[string]*fwksched.ProfileRunResult{},
 			wantErr:         true,
-			wantErrContains: `no scheduling profile configured for "epp-profile" header value "prefill"`,
+			wantErrContains: `no scheduling profile configured for "x-llm-d-epp-profile" header value "prefill"`,
 		},
 		{
 			name: "multiple profiles returns error",
@@ -520,7 +515,7 @@ func TestHeaderProfileProcessResults(t *testing.T) {
 		},
 	}
 
-	handler := NewHeaderProfileHandler(defaultHeaderName, defaultProfileName)
+	handler := NewHeaderProfileHandler(reqcommon.EPPProfileHeaderKey, defaultProfileName)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := handler.ProcessResults(context.Background(), tt.request, tt.profileResults)

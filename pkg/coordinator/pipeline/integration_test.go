@@ -64,7 +64,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			var capturedPrefillBody map[string]any
 
 			gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				phase := r.Header.Get(gateway.EPPProfileHeader)
+				phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 				switch phase {
 				case gateway.PhaseEncode:
 					body, _ := io.ReadAll(r.Body)
@@ -204,7 +204,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 	var capturedDecodeBody map[string]any
 
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
@@ -393,7 +393,7 @@ func TestFullPipeline_ResponsesFormat(t *testing.T) {
 		var parsed map[string]any
 		_ = json.Unmarshal(body, &parsed)
 
-		switch phase := r.Header.Get(gateway.EPPProfileHeader); phase {
+		switch phase := r.Header.Get(reqcommon.EPPProfileHeaderKey); phase {
 		case gateway.PhaseEncode:
 			// The encode leg speaks the Responses format here, so the image it
 			// primes is in the body rather than in a top-level features map. Key
