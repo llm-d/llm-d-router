@@ -112,10 +112,11 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // If filtering is enabled, endpoints that don't support the request's context length are filtered out.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
-// The context length is the token count from InferenceRequestBody.TokenizedRequest.
-// When reusableTokensProducerName is configured, the request-wide reusable
-// prefix token floor is subtracted from that count. Missing tokens are treated
-// as 0 (unknown).
+// The context length is the token count of the longest prompt in
+// InferenceRequestBody.TokenizedRequest. When reusableTokensProducerName is
+// configured, it is the total token count across all prompts minus the
+// request-wide reusable prefix token floor. Missing tokens are treated as 0
+// (unknown).
 type ContextLengthAware struct {
 	// typedName defines the plugin typed name
 	typedName plugin.TypedName
@@ -251,12 +252,14 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// getContextLength returns the token count after subtracting the configured
-// producer's reusable prefix token floor. Positive token counts have at least
-// one token of prefill work. Missing reusable-token data leaves the total token
-// count unchanged. When tokens are unavailable it returns 0. With cache
-// subtraction enabled, the result is stored per request and plugin instance so
-// Filter and Score use the same value.
+// getContextLength returns the longest prompt's token count. With cache
+// subtraction enabled, it returns the total token count across all prompts
+// after subtracting the configured producer's reusable prefix token floor.
+// Positive token counts have at least one token of prefill work. Missing
+// reusable-token data leaves the total token count unchanged. When tokens are
+// unavailable it returns 0. With cache subtraction enabled, the result is
+// stored per request and plugin instance so Filter and Score use the same
+// value.
 func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil {
 		return 0
@@ -265,7 +268,7 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 		if request.Body == nil || request.Body.TokenizedRequest == nil {
 			return 0
 		}
-		return request.Body.TokenizedRequest.TokenCount()
+		return longestPromptTokens(request.Body.TokenizedRequest)
 	}
 	if routingLength, ok := scheduling.ReadRequestAttribute[int](request, p.routingLengthDataKey); ok {
 		return routingLength
@@ -283,6 +286,17 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 	}
 	request.PutAttribute(p.routingLengthDataKey, routingLength)
 	return routingLength
+}
+
+// longestPromptTokens returns the token count of the longest prompt. A model
+// server checks each prompt of a multi-prompt request against its maximum
+// model length separately.
+func longestPromptTokens(tp *scheduling.TokenizedRequest) int {
+	n := 0
+	for _, p := range tp.Prompts {
+		n = max(n, len(p.TokenIDs))
+	}
+	return n
 }
 
 // parseContextRange parses a label value into a single context range.
