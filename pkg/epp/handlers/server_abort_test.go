@@ -127,9 +127,12 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 func TestTerminationCause(t *testing.T) {
 	t.Parallel()
 
+	answer := &Answer{Status: envoyTypePb.StatusCode_NoContent, Headers: map[string]string{"x-answer": "yes"}}
 	tests := []struct {
 		name   string
 		state  streamRequestState
+		answer *Answer
+		reqErr error
 		ctxErr error
 		want   fwkrc.TerminationCause
 	}{
@@ -138,6 +141,28 @@ func TestTerminationCause(t *testing.T) {
 			state:  requestEvicted,
 			ctxErr: context.Canceled,
 			want:   fwkrc.TerminationCauseEvicted,
+		},
+		{
+			name:   "a delivered answer is answered",
+			state:  requestReceived,
+			answer: answer,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseAnswered,
+		},
+		{
+			name:   "an answer the caller never received is an error",
+			state:  requestReceived,
+			answer: answer,
+			reqErr: errors.New("send failed"),
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name:   "an answer lost to a client disconnect is a disconnect",
+			state:  requestReceived,
+			answer: answer,
+			reqErr: errors.New("send failed"),
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseClientDisconnect,
 		},
 		{
 			name:   "a cancelled context is the client going away",
@@ -160,8 +185,8 @@ func TestTerminationCause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			reqCtx := &RequestContext{requestState: tt.state}
-			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+			reqCtx := &RequestContext{requestState: tt.state, Answer: tt.answer}
+			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.reqErr, tt.ctxErr))
 		})
 	}
 }

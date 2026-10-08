@@ -177,11 +177,10 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 
-	primary := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
+	targetEndpoint := schedulingResult.PrimaryEndpoint()
+	if targetEndpoint == nil {
 		return nil
 	}
-	targetEndpoint := primary.TargetEndpoints[0]
 	targetMeta := targetEndpoint.GetMetadata()
 	if targetMeta == nil {
 		return nil
@@ -203,8 +202,8 @@ func (p *Producer) PreRequest(ctx context.Context,
 	allPodEntries := []kvblock.PodEntry{speculativePod}
 
 	// P/D disagg: seed the prefill endpoint too.
-	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
-		if prefillMeta := pr.TargetEndpoints[0].GetMetadata(); prefillMeta != nil {
+	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
+		if prefillMeta := prefill.GetMetadata(); prefillMeta != nil {
 			prefillPod := kvblock.PodEntry{
 				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
 				Speculative:   true,

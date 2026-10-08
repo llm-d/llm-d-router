@@ -26,6 +26,7 @@ import (
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -151,6 +152,10 @@ type RequestContext struct {
 	// (enqueue-and-wait). Meaningful only when FlowControlAdmitted is true.
 	FlowControlQueueDuration time.Duration
 
+	// Answer, when non-nil after HandleRequest, is sent to the caller as an
+	// immediate response instead of forwarding the request.
+	Answer *Answer
+
 	// Lifecycle bookkeeping.
 	firstTokenTimestamp        time.Time
 	lastChunkReceivedTimestamp time.Time
@@ -189,6 +194,13 @@ type Request struct {
 type Response struct {
 	Headers         map[string]string
 	DynamicMetadata *structpb.Struct
+}
+
+// Answer is a response the EPP sends to the caller in place of forwarding the
+// request to a model server. It has no body.
+type Answer struct {
+	Status  envoyTypePb.StatusCode
+	Headers map[string]string
 }
 type streamRequestState int
 
@@ -267,12 +279,25 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 	return tracing.BeginRequestAttribution(ctx, id)
 }
 
-// terminationCause classifies a stream that ended without completing. ctxErr is the request
-// context's error, which is non-nil once Envoy has torn the stream down under the EPP.
-func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+// sendImmediate sends an ImmediateResponse, which ends the request.
+func sendImmediate(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger, resp *extProcPb.ProcessingResponse) error {
+	if err := srv.Send(resp); err != nil {
+		logger.Error(err, "Send failed")
+		return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
+	}
+	return nil
+}
+
+// terminationCause classifies a stream that ended without completing. reqErr is the error
+// Process reports for the request, if any. ctxErr is the request context's error, which is
+// non-nil once Envoy has torn the stream down under the EPP.
+func terminationCause(reqCtx *RequestContext, reqErr, ctxErr error) fwkrc.TerminationCause {
 	switch {
 	case reqCtx.requestState == requestEvicted:
 		return fwkrc.TerminationCauseEvicted
+	case reqCtx.Answer != nil && reqErr == nil:
+		// A failed send leaves the caller without the answer, so the cause is the failure.
+		return fwkrc.TerminationCauseAnswered
 	case ctxErr != nil:
 		return fwkrc.TerminationCauseClientDisconnect
 	default:
@@ -426,7 +451,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
 		// panic), force the completion hooks to run.
 		if reqCtx.TargetPod != nil && !reqCtx.responseComplete {
-			reqCtx.TerminationCause = terminationCause(reqCtx, ctx.Err())
+			reqCtx.TerminationCause = terminationCause(reqCtx, err, ctx.Err())
 			// Use a fresh context as the request context might be canceled (Client Disconnect).
 			// We only need logging from the original context.
 			cleanupCtx := log.IntoContext(context.Background(), logger)
@@ -537,6 +562,19 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
+				if reqCtx.Answer != nil {
+					recordRequestProcessing()
+					// TargetPod stays set and the response is not marked complete, so the
+					// deferred cleanup releases per-request plugin state on return, with
+					// TerminationCauseAnswered. request_total does not count the answer.
+					resp := envoy.BuildImmediateResponse(reqCtx.Answer.Status, reqCtx.Answer.Headers, nil)
+					if err = sendImmediate(srv, logger, resp); err != nil {
+						return err
+					}
+					logger.V(logutil.DEFAULT).Info("Answered request without forwarding", "targetEndpoint", reqCtx.TargetEndpoint)
+					return nil
+				}
+
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
 				// eviction case in the main select.
@@ -643,11 +681,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if err != nil {
 				return err
 			}
-			if err := srv.Send(resp); err != nil {
-				logger.Error(err, "Send failed")
-				return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
-			}
-			return nil
+			return sendImmediate(srv, logger, resp)
 		}
 		loggerTrace.Info("checking", "request state", reqCtx.requestState)
 		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {

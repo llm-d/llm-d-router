@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -55,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	requtil "github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 const (
@@ -332,6 +334,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
 		reservationPending = false
 	}
+	if reqCtx.Answer != nil {
+		// An answered request is not forwarded: it is not tracked for eviction and
+		// its body is not rewritten.
+		return reqCtx, nil
+	}
+	if d.requestEvictor != nil {
+		// A tracking failure only costs evictability, so the request still proceeds.
+		if err := d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to track request for in-flight eviction")
+		}
+	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
@@ -541,14 +554,40 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		}
 	}
 
-	if d.requestEvictor != nil {
-		// A tracking failure only costs evictability, so the request still proceeds.
-		if err := d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result); err != nil {
-			log.FromContext(ctx).Error(err, "Failed to track request for in-flight eviction")
+	// "Prefer: reserve-endpoint" asks which endpoint EPP picks, without
+	// forwarding. Default-deny when no PreRequest plugin handled it, so an EPP
+	// without the plugin never sends the request to a model server.
+	if routing.HasPreference(reqCtx.SchedulingRequest.Headers, routing.PreferReserveEndpoint) {
+		endpoint, handled := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, fwkrc.ReservedEndpointAttributeKey)
+		if !handled || endpoint == "" {
+			return reqCtx, errcommon.Error{
+				Code: errcommon.Internal,
+				Msg:  "reserve-endpoint request received but no plugin handled it",
+			}
 		}
+		reqCtx.Answer = reserveEndpointAnswer(endpoint, reqCtx.SchedulingRequest.Headers)
 	}
 
 	return reqCtx, nil
+}
+
+// reserveEndpointAnswer builds the "Prefer: reserve-endpoint" answer: 204 with
+// the picked endpoint, Preference-Applied, and the internal routing headers
+// that the scheduling plugins set on the request. EPP drops those headers on
+// ingress, so every one present was set by a plugin and would have gone to
+// the model server on a forwarded request. The caller gets them instead, as
+// the sidecar does on the request EPP forwards to it.
+func reserveEndpointAnswer(endpoint string, requestHeaders map[string]string) *handlers.Answer {
+	headers := map[string]string{
+		routing.ReservedEndpointHeader:  endpoint,
+		routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+	}
+	for key := range requtil.InternalRoutingHeaders {
+		if value, ok := requestHeaders[key]; ok {
+			headers[key] = value
+		}
+	}
+	return &handlers.Answer{Status: envoyTypePb.StatusCode_NoContent, Headers: headers}
 }
 
 // SetRequestEvictor wires the in-flight eviction tracker into the request lifecycle.

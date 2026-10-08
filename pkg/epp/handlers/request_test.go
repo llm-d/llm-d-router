@@ -36,6 +36,7 @@ import (
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -474,10 +475,7 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
 				GetRequestHeaders().GetResponse().GetHeaderMutation()
 
-			gotSet := make(map[string]string)
-			for _, h := range mutation.GetSetHeaders() {
-				gotSet[h.Header.Key] = string(h.Header.RawValue)
-			}
+			gotSet := setHeadersMap(mutation.GetSetHeaders())
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
@@ -555,6 +553,66 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleRequestHeaders_Bodyless covers a request whose headers carry
+// EndOfStream. It is routed to a random endpoint, except a "Prefer:
+// reserve-endpoint" request, which is rejected: a reservation cannot be
+// scheduled without a body and must never reach a model server.
+func TestHandleRequestHeaders_Bodyless(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		prefer   string
+		wantCode string
+	}{
+		{name: "no preference falls back to a random endpoint"},
+		{name: "another preference falls back to a random endpoint", prefer: routing.PreferIfAvailable},
+		{name: "reserve-endpoint is rejected", prefer: routing.PreferReserveEndpoint, wantCode: errcommon.BadRequest},
+		{name: "reserve-endpoint among tokens is rejected", prefer: "if-available, Reserve-Endpoint", wantCode: errcommon.BadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{director: &mockDirectorRequest{}}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{Headers: make(map[string]string)},
+			}
+			var headers []*configPb.HeaderValue
+			if tc.prefer != "" {
+				headers = append(headers, &configPb.HeaderValue{Key: "Prefer", RawValue: []byte(tc.prefer)})
+			}
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers:     &configPb.HeaderMap{Headers: headers},
+					EndOfStream: true,
+				},
+			}
+
+			err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
+			if tc.wantCode == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tc.wantCode, e.Code)
+			assert.Empty(t, reqCtx.TargetEndpoint, "a rejected reservation picks no endpoint")
+			assert.Nil(t, reqCtx.reqHeaderResp, "a rejected reservation prepares no routing response")
+		})
+	}
+}
+
+// setHeadersMap flattens a header mutation's set headers into key-value pairs.
+func setHeadersMap(headers []*configPb.HeaderValueOption) map[string]string {
+	got := make(map[string]string, len(headers))
+	for _, h := range headers {
+		got[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
+	}
+	return got
 }
 
 type mockDirectorRequest struct {

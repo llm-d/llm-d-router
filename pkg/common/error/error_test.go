@@ -19,6 +19,7 @@ package error
 
 import (
 	"errors"
+	"maps"
 	"testing"
 
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
@@ -319,11 +320,17 @@ func TestBuildErrResponse(t *testing.T) {
 			wantGRPCErr: true,
 		},
 		{
-			name:           "headers follow content-type",
+			name:           "headers include content-type",
 			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)}},
 			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
 			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
 			wantHeaders:    map[string]string{RequestDroppedReasonHeaderKey: string(RequestDroppedReasonSaturated)},
+		},
+		{
+			name:           "content-type in the error's headers is replaced",
+			err:            Error{Code: ResourceExhausted, Msg: "no capacity", Headers: map[string]string{"content-type": "text/plain"}},
+			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
+			wantBody:       `{"error":{"message":"no capacity","type":"rate_limit_error","code":429}}`,
 		},
 	}
 
@@ -360,17 +367,14 @@ func TestBuildErrResponse(t *testing.T) {
 			}
 
 			setHeaders := ir.GetHeaders().GetSetHeaders()
-			if len(setHeaders) != len(tt.wantHeaders)+1 {
-				t.Fatalf("headers = %v, want content-type and %d more", setHeaders, len(tt.wantHeaders))
+			gotHeaders := make(map[string]string, len(setHeaders))
+			for _, h := range setHeaders {
+				gotHeaders[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
 			}
-			if key, value := setHeaders[0].GetHeader().GetKey(), string(setHeaders[0].GetHeader().GetRawValue()); key != "content-type" || value != "application/json" {
-				t.Errorf("first header = %s: %s, want content-type: application/json", key, value)
-			}
-			for _, h := range setHeaders[1:] {
-				key, value := h.GetHeader().GetKey(), string(h.GetHeader().GetRawValue())
-				if want := tt.wantHeaders[key]; value != want {
-					t.Errorf("header %q = %q, want %q", key, value, want)
-				}
+			wantHeaders := map[string]string{"content-type": "application/json"}
+			maps.Copy(wantHeaders, tt.wantHeaders)
+			if len(setHeaders) != len(wantHeaders) || !maps.Equal(gotHeaders, wantHeaders) {
+				t.Errorf("headers = %v, want %v", gotHeaders, wantHeaders)
 			}
 		})
 	}

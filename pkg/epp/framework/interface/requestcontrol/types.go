@@ -42,6 +42,9 @@ const (
 	TerminationCauseClientDisconnect TerminationCause = "client-disconnect"
 	// TerminationCauseEvicted is a stream the EPP terminated to reclaim capacity.
 	TerminationCauseEvicted TerminationCause = "evicted"
+	// TerminationCauseAnswered is a stream the EPP ended by answering the request itself, without
+	// forwarding it to a model server, such as a "Prefer: reserve-endpoint" ask.
+	TerminationCauseAnswered TerminationCause = "answered"
 	// TerminationCauseError is a stream that ended without completing for any reason not otherwise
 	// classified: a half-close that reaches the EPP before its cancellation propagates, or an
 	// EPP-side failure.
