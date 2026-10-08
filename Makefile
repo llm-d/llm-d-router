@@ -267,9 +267,8 @@ lint: image-build-builder ## Run lint (use LINT_NEW_ONLY=true to only check new 
 	@printf "\033[33;1m==== Running linting ====\033[0m\n"
 	$(BUILDER_RUN) 'GOFLAGS=-buildvcs=false golangci-lint run $(LINT_ARGS) && typos'
 
-# Reports findings without failing while the initial baseline is triaged.
-# Set to 1 to block merges on new findings.
-SECURITY_LINT_EXIT_CODE ?= 0
+# Set to 0 to report findings without failing.
+SECURITY_LINT_EXIT_CODE ?= 1
 
 .PHONY: lint-security
 lint-security: image-build-builder ## Run security linters and write gosec.sarif

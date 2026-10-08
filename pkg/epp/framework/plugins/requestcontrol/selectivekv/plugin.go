@@ -46,8 +46,8 @@ const (
 	// PluginType is the registered type name of the selective KV policy plugin.
 	PluginType = "selective-kv-policy"
 
-	fieldMaxLoadTokens    = "max_load_tokens"
-	fieldMaxOffloadTokens = "max_offload_tokens"
+	fieldMaxLoadTokens    = "max_load_tokens"    //#nosec G101 -- config field name, not a credential
+	fieldMaxOffloadTokens = "max_offload_tokens" //#nosec G101 -- config field name, not a credential
 
 	waitingQueueEWMAHalfLife = 2 * time.Second
 	waitingQueueReopenRatio  = 0.5

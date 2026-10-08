@@ -124,7 +124,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	// unread stream so large prefill/encode responses are not held in memory.
 	if v := logger.V(logutil.TRACE); v.Enabled() {
 		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("reading response from gateway: %w", err)
 		}
