@@ -93,11 +93,24 @@ reaches a pod and is rejected there.
 
 Configure the reservation in the decode profile, or in the only profile when
 P/D is not used. Prefill pods need room for the prompt and one output token.
+Without P/D a pod rejects such a request with 400 before doing any work, so
+the reservation there only adds routing to a pod with room. When no pod has
+room the EPP returns 503, which clients that retry 5xx responses will retry.
 
-The prompt length comes from the `token-producer`. With the `vllm` backend,
+Sidecar chunked decode (`--decode-chunk-size`) sends each chunk with a smaller
+output budget, so it can complete a Chat Completions request whose prompt plus
+cap exceeds the limit when generation stops early. The reservation rejects
+such a request with 503.
+
+The prompt length comes from the `token-producer`, and filtering against
+`--max-model-len` needs an exact count. When no `token-producer` is
+configured, the auto-created `estimate` backend approximates 4 bytes per
+token, so the filter can reject a request that fits. With the `vllm` backend,
 set `vllm.prefillOnly: true`; otherwise a renderer with the same maximum model
 length rejects the requests this filter should catch, no token count is
-published, and the routing length is the output cap alone.
+published, and the routing length is the output cap alone. `vllm.prefillOnly`
+leaves `max_output_tokens` unchanged, so a Responses request that exceeds the
+renderer's limit still publishes no token count and reaches prefill.
 
 ```yaml
 plugins:
@@ -107,6 +120,8 @@ plugins:
       vllm:
         url: http://vllm-render:8000
         prefillOnly: true
+  - type: decode-filter
+  - type: max-score-picker
   - type: context-length-aware
     name: decode-context-fit
     parameters:
