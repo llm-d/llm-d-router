@@ -63,9 +63,6 @@ and caches the prepared peer aggregate locally. The aggregate expires
 Redis and combines it with the contributor's live local value. If no peer value
 is available, `Get` aggregates the local value by itself.
 
-A publication already in progress when an endpoint is removed can finish after
-deletion. Its Redis field and local peer aggregate expire according to `stateTTL`.
-
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.
 

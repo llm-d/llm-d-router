@@ -48,7 +48,7 @@ type crossReplicaPublisher struct {
 	interval       time.Duration
 	publishTimeout time.Duration
 
-	// mu guards endpoints. Syncer calls run outside this lock.
+	// mu guards endpoints and orders syncer writes with endpoint removal.
 	mu        sync.RWMutex
 	endpoints sets.Set[types.NamespacedName]
 
@@ -148,7 +148,7 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
 	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
 		Get: func() fwkdl.Cloneable {
-			value, ok, err := p.syncer.Get(ctx, spec, endpointID)
+			value, ok, err := p.get(ctx, spec, endpointID)
 			if err != nil || !ok {
 				return spec.Read(endpointID)
 			}
@@ -162,23 +162,25 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 
 func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
 	p.mu.RLock()
-	registered := p.endpoints.Has(key)
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
 	// The endpoint may have been deleted after publishAll took its snapshot.
-	if !registered {
+	if !p.endpoints.Has(key) {
 		return nil
 	}
 	return p.syncer.Set(ctx, spec, key.String())
 }
 
+func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	return p.syncer.Get(ctx, spec, endpointID)
+}
+
 func (p *crossReplicaPublisher) delete(ctx context.Context, key types.NamespacedName) (bool, error) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if !p.endpoints.Has(key) {
-		p.mu.Unlock()
 		return false, nil
 	}
 	p.endpoints.Delete(key)
-	p.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(ctx, p.publishTimeout)
 	defer cancel()

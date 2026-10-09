@@ -555,7 +555,7 @@ func TestCrossReplicaPublisher_SetsPerPublishDeadline(t *testing.T) {
 	}
 }
 
-func TestCrossReplicaPublisher_DeleteDoesNotBlockReadsOrRegistration(t *testing.T) {
+func TestCrossReplicaPublisher_DeleteDoesNotBlockReads(t *testing.T) {
 	syncer := &blockingDeleteSyncer{
 		fakeSyncer: fakeSyncer{getValue: fakeLoad(7), getOK: true},
 		started:    make(chan struct{}),
@@ -600,16 +600,6 @@ func TestCrossReplicaPublisher_DeleteDoesNotBlockReadsOrRegistration(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("slow syncer delete blocked an endpoint attribute read")
 	}
-
-	registerDone := make(chan bool, 1)
-	go func() { registerDone <- pub.registerEndpoint(testEndpoint("ep-new").GetMetadata().GetID()) }()
-	select {
-	case registered := <-registerDone:
-		require.True(t, registered)
-	case <-time.After(time.Second):
-		t.Fatal("slow syncer delete blocked endpoint registration")
-	}
-	require.NotContains(t, pub.endpointSnapshot(), removedID)
 }
 
 func TestCrossReplicaPublisher_SharesDeleteDeadlineAcrossContributors(t *testing.T) {
@@ -666,7 +656,7 @@ func TestCrossReplicaPublisher_StopsAfterDelete(t *testing.T) {
 		"released endpoint must stop publishing")
 }
 
-func TestReleaseEndpointDoesNotWaitForInFlightPublish(t *testing.T) {
+func TestReleaseEndpointWaitsForInFlightPublish(t *testing.T) {
 	syncer := newBlockingSyncer()
 	contributor := fakeEndpointContributor{fakeContributor: fakeContributor{key: "inflight:test"}}
 	source := notifications.NewEndpointDataSource(notifications.EndpointNotificationSourceType, "endpoint-source")
@@ -693,23 +683,31 @@ func TestReleaseEndpointDoesNotWaitForInFlightPublish(t *testing.T) {
 		defer close(releaseDone)
 		r.ReleaseEndpoint(ep)
 	}()
-	t.Cleanup(func() {
-		close(syncer.allowSet)
-		<-publishDone
-		<-releaseDone
-	})
+	select {
+	case <-releaseDone:
+		t.Error("ReleaseEndpoint completed while a publish was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
 
+	close(syncer.allowSet)
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight publish did not complete")
+	}
 	select {
 	case <-releaseDone:
 	case <-time.After(time.Second):
-		t.Fatal("ReleaseEndpoint waited for an in-flight publish")
+		t.Fatal("ReleaseEndpoint did not complete")
 	}
 
 	require.Empty(t, r.crossReplicaPub.endpointSnapshot())
 	r.crossReplicaPub.publishAll(context.Background())
 	syncer.mu.Lock()
 	defer syncer.mu.Unlock()
-	assert.Equal(t, []string{"delete"}, syncer.events)
+	_, found := syncer.state["ns/ep-gone"]
+	assert.False(t, found, "released endpoint state must remain deleted")
+	assert.Equal(t, []string{"set", "delete"}, syncer.events)
 }
 
 func TestReleaseEndpointDispatchesDeleteOutsidePublisherLock(t *testing.T) {
