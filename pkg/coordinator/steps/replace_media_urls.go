@@ -142,6 +142,9 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		if err != nil {
 			return err
 		}
+		if len(imageURLs) > 0 {
+			setPromptItems(reqCtx.Body, apiType, items)
+		}
 	}
 
 	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(imageURLs))

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -147,4 +148,82 @@ func TestTextOnlyRequest_SkipsMediaDownloadAndEncode(t *testing.T) {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+func TestTextOnlyRequest_ForwardsRawFieldsVerbatim(t *testing.T) {
+	// The server decodes only the fields steps read and keeps the rest as raw
+	// bytes. Every leg must forward those bytes without reordering keys.
+	messages := `[{"role":"user","content":"What is the weather?"}]`
+	tools := `[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"zebra":{},"apple":{},"mango":{}}}}}]`
+
+	var mu sync.Mutex
+	legBodies := map[string]string{}
+	capture := func(leg string, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		legBodies[leg] = string(b)
+		mu.Unlock()
+	}
+
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capture("render", r)
+		_ = json.NewEncoder(w).Encode(map[string]any{"token_ids": []int{1, 2345, 6789}})
+	}))
+	defer renderServer.Close()
+
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
+		capture(phase, r)
+		switch phase {
+		case gateway.PhasePrefill:
+			_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{"block_id": "b1"}})
+		case gateway.PhaseDecode:
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{}})
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer gatewayServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gatewayServer.URL})
+	stepTypes := []string{"replace-media-urls", "render", "encode", "prefill", "decode"}
+	pipelineSteps := make([]pipeline.Step, 0, len(stepTypes))
+	for _, stepType := range stepTypes {
+		step, err := pipeline.Build(stepType, gwClient, map[string]any{})
+		if err != nil {
+			t.Fatalf("building step %s: %v", stepType, err)
+		}
+		if ra, ok := step.(renderAware); ok {
+			ra.SetServiceAddress(renderServer.URL)
+		}
+		pipelineSteps = append(pipelineSteps, step)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "raw-fields-test",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": json.RawMessage(messages),
+			"tools":    json.RawMessage(tools),
+		},
+		Model:            "llama-3",
+		KVTransferParams: make(map[string]any),
+		ResponseWriter:   httptest.NewRecorder(),
+	}
+	if err := pipeline.New(pipelineSteps).Execute(t.Context(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	for _, leg := range []string{"render", gateway.PhasePrefill, gateway.PhaseDecode} {
+		body, ok := legBodies[leg]
+		if !ok {
+			t.Fatalf("%s leg was not called", leg)
+		}
+		for _, want := range []string{`"messages":` + messages, `"tools":` + tools} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s body does not contain %s\nbody: %s", leg, want, body)
+			}
+		}
+	}
 }
