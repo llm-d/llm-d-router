@@ -194,7 +194,8 @@ type Runner struct {
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
-	rawConfig *configapiv1.EndpointPickerConfig
+	rawConfig    *configapiv1.EndpointPickerConfig
+	admissionCtx context.Context
 
 	// Populated by setup(); see runWithGracefulShutdown.
 	serverRunner     *runserver.ExtProcServerRunner
@@ -297,6 +298,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to get Kubernetes rest config")
 		return err
 	}
+
+	// Admission stays available until ext_proc finishes draining its streams.
+	admissionCtx, stopAdmission := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopAdmission()
+	r.admissionCtx = admissionCtx
 
 	mgr, _, err := r.setup(ctx, cfg, opts, nil)
 	if err != nil {
@@ -1071,6 +1077,9 @@ func (r *Runner) initAdmissionControl(
 			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
 			nil,
 			nil
+	}
+	if r.admissionCtx != nil {
+		ctx = r.admissionCtx
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing Flow Control layer")
