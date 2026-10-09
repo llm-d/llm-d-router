@@ -115,7 +115,7 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 
 func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	var called bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2345, 6789},
@@ -188,7 +188,7 @@ func TestRenderStep_Responses_CallsRender(t *testing.T) {
 }
 
 func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("render service should not be called for token array prompt")
 	}))
 	defer server.Close()
@@ -499,7 +499,7 @@ func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
 }
 
 func TestRenderStep_ServiceError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal error"))
 	}))

@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 )
 
 type mockStep struct {
@@ -252,11 +254,7 @@ func TestPipeline_RespectsContextCancellation(t *testing.T) {
 // isolation, and clears their state so concurrent tests do not see each
 // other's increments.
 func newMetricsRegistry(t *testing.T) *prometheus.Registry {
-	t.Helper()
-	reg := prometheus.NewRegistry()
-	require.NoError(t, coordmetrics.Register(reg))
-	coordmetrics.Reset()
-	return reg
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 }
 
 // stepErrorCount reads the error counter for the given step and error_code
@@ -575,4 +573,61 @@ func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[s
 	}
 	t.Fatalf("gauge %s%v not present", name, labels)
 	return 0
+}
+
+func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	return metricstest.HistogramCount(t, reg, name, labels)
+}
+
+func histogramSampleSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	return metricstest.HistogramSum(t, reg, name, labels)
+}
+
+func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Route: coordmetrics.RouteChatCompletions}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteChatCompletions}))
+	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteChatCompletions}), 1e-9)
+
+	reg = newMetricsRegistry(t)
+	steps = []Step{
+		&mockStep{name: "encode", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.EncodeFanout = 3
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	// Empty Route is normalized to RouteUnknown by boundRoute at record time.
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteUnknown}))
+	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteUnknown}), 1e-9)
+}
+
+func TestExecute_AccumulatesStepDuration(t *testing.T) {
+	reqCtx := &RequestContext{}
+	// Each step sleeps briefly: with instantly-returning fns the measured
+	// durations can round to zero on coarse clocks and make the test flaky.
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reqCtx.StepDuration <= 0 {
+		t.Fatalf("expected StepDuration > 0, got %s", reqCtx.StepDuration)
+	}
 }

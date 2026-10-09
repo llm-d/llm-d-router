@@ -144,6 +144,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		}
 	}
 
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(imageURLs))
+
 	if len(imageURLs) == 0 {
 		return nil
 	}
@@ -221,8 +223,9 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 // encoder primed from a part it cannot fetch, under a hash the prefiller then
 // looks up and misses.
 func collectImageRefs(items []any, apiType reqcommon.APIType) ([]imageRef, error) {
-	var refs []imageRef
-	for _, image := range collectImageParts(items, apiType) {
+	parts := collectImageParts(items, apiType)
+	refs := make([]imageRef, 0, len(parts))
+	for _, image := range parts {
 		url, setURL := reqcommon.MediaPartURLRef(image.part)
 		if setURL == nil || url == "" {
 			return nil, fmt.Errorf("%s: image part carries no fetchable URL: %w", image.location, pipeline.ErrBadRequest)
@@ -240,7 +243,7 @@ func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 str
 	})
 }
 
-func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]byte, string, error) {
+func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) (data []byte, contentType string, err error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid URL: %w: %w", err, pipeline.ErrBadRequest)
@@ -253,6 +256,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 			"rejecting media URL: host not in allowed_domains", "host", parsed.Hostname())
 		return nil, "", fmt.Errorf("host %q not allowed: %w", parsed.Hostname(), pipeline.ErrBadRequest)
 	}
+
+	// Timing starts after pre-dial validation: URL parse, scheme, and
+	// allowed_domains rejections are not download attempts, so they must not
+	// drag the error bucket's duration distribution toward zero.
+	start := time.Now()
+	defer func() {
+		coordmetrics.RecordMediaDownloadDuration(coordmetrics.ClassifyDownloadResult(ctx, err), time.Since(start))
+	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -279,14 +290,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("response too large: Content-Length %d exceeds max %d: %w", resp.ContentLength, s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if int64(len(data)) > s.maxDownloadSize {
 		return nil, "", fmt.Errorf("response too large: body exceeds max %d: %w", s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
-	contentType := resp.Header.Get("Content-Type")
+	contentType = resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = defaultContentType
 	}
