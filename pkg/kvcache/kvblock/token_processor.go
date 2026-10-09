@@ -243,8 +243,10 @@ func fnvCBORHead(h uint64, major byte, arg uint64) uint64 {
 	default:
 		h, n = fnvByte(h, m|27), 8
 	}
-	for i := n - 1; i >= 0; i-- {
-		h = fnvByte(h, byte(arg>>(8*i)))
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], arg)
+	for _, b := range buf[8-n:] {
+		h = fnvByte(h, b)
 	}
 	return h
 }
