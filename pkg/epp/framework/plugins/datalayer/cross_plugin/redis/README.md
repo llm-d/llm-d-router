@@ -1,6 +1,6 @@
-# Redis Cross-Replica Syncer
+# Redis Syncer
 
-**Type:** `redis-state-store`
+**Type:** `redis-syncer`
 **Interface:** `CrossReplicaSyncer`
 
 Shares endpoint and request coordination state between EPP replicas through
@@ -10,9 +10,11 @@ live local value and combines it with the cached peer aggregate.
 
 ## Configuration
 
+The plugin also accepts `redis-state-store` as a compatibility alias.
+
 ```yaml
 plugins:
-  - type: redis-state-store
+  - type: redis-syncer
     name: redis
     parameters:
       address: my-router-redis:6379

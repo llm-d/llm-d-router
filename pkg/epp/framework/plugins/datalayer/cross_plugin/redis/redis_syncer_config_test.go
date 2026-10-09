@@ -31,30 +31,30 @@ import (
 
 func TestFactoryUsesIndependentStateAndCoordinationTTLs(t *testing.T) {
 	server := miniredis.RunT(t)
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
+	plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
 		`{"address": %q, "stateTTL": "750ms", "coordinationTTL": "3m"}`,
 		server.Addr(),
 	))), nil)
 	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+	syncer := plugin.(*RedisSyncer)
+	t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
 
-	require.Equal(t, 750*time.Millisecond, store.stateTTL)
-	require.Equal(t, 3*time.Minute, store.coordinationTTL)
+	require.Equal(t, 750*time.Millisecond, syncer.stateTTL)
+	require.Equal(t, 3*time.Minute, syncer.coordinationTTL)
 }
 
 func TestFactoryReadsPasswordFromEnvironment(t *testing.T) {
 	server := miniredis.RunT(t)
 	t.Setenv("TEST_REDIS_PASSWORD", "environment-secret")
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
+	plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
 		`{"address": %q, "passwordEnv": "TEST_REDIS_PASSWORD"}`,
 		server.Addr(),
 	))), nil)
 	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+	syncer := plugin.(*RedisSyncer)
+	t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
 
-	require.Equal(t, "environment-secret", store.client.Options().Password)
+	require.Equal(t, "environment-secret", syncer.client.Options().Password)
 }
 
 func TestFactoryReadsPasswordFromFile(t *testing.T) {
@@ -74,16 +74,16 @@ func TestFactoryReadsPasswordFromFile(t *testing.T) {
 			server.RequireAuth(tc.password)
 			passwordPath := filepath.Join(t.TempDir(), "password")
 			require.NoError(t, os.WriteFile(passwordPath, []byte(tc.contents), 0o600))
-			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
+			plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
 				`{"address": %q, "passwordFile": %q}`,
 				server.Addr(), passwordPath,
 			))), nil)
 			require.NoError(t, err)
-			store := plugin.(*RedisStateStore)
-			t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+			syncer := plugin.(*RedisSyncer)
+			t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
 
-			require.Equal(t, tc.password, store.client.Options().Password)
-			require.NoError(t, store.client.Ping(t.Context()).Err())
+			require.Equal(t, tc.password, syncer.client.Options().Password)
+			require.NoError(t, syncer.client.Ping(t.Context()).Err())
 		})
 	}
 }
@@ -126,7 +126,7 @@ func TestFactoryRejectsUnsafeOrAmbiguousPasswordConfiguration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(tc.params)), nil)
+			plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(tc.params)), nil)
 			require.ErrorContains(t, err, tc.wantErr)
 			require.Nil(t, plugin)
 		})
@@ -136,9 +136,9 @@ func TestFactoryRejectsUnsafeOrAmbiguousPasswordConfiguration(t *testing.T) {
 func TestFactoryRejectsUnsupportedTLSAndACL(t *testing.T) {
 	for _, params := range []string{`{"tls": {}}`, `{"username": "router"}`} {
 		t.Run(params, func(t *testing.T) {
-			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(params)), nil)
+			plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(params)), nil)
 			if plugin != nil {
-				t.Cleanup(func() { require.NoError(t, plugin.(*RedisStateStore).client.Close()) })
+				t.Cleanup(func() { require.NoError(t, plugin.(*RedisSyncer).client.Close()) })
 			}
 			require.ErrorContains(t, err, "unknown field")
 			require.Nil(t, plugin)

@@ -72,7 +72,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
-	redisstore "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
@@ -667,7 +667,8 @@ func (r *Runner) registerInTreePlugins() {
 
 	// cross-replica syncers
 	// Beta
-	fwkplugin.Register(redisstore.RedisStateStoreType, fwkplugin.StabilityBeta, redisstore.RedisStateStoreFactory)
+	fwkplugin.Register(redis.RedisSyncerType, fwkplugin.StabilityBeta, redis.RedisSyncerFactory)
+	fwkplugin.Register("redis-state-store", fwkplugin.StabilityBeta, redis.RedisSyncerFactory)
 
 	// data layer DCGM source/extractor
 	// Alpha

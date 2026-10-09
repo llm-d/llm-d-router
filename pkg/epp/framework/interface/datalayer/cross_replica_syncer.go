@@ -54,7 +54,7 @@ type CrossReplicaSyncer interface {
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
-// and wires the store transparently. Prefer it for per-endpoint state that can
+// and wires the syncer transparently. Prefer it for per-endpoint state that can
 // tolerate periodic synchronization.
 type CrossReplicaContributor interface {
 	CrossReplicaState() CrossReplicaSpec
@@ -62,11 +62,11 @@ type CrossReplicaContributor interface {
 
 // CrossReplicaSpec declares what a CrossReplicaContributor publishes and where.
 type CrossReplicaSpec struct {
-	// StateKey namespaces this contributor's data in the store.
+	// StateKey namespaces this contributor's data in the syncer.
 	StateKey StateKey
 
 	// AttributeKey is the attribute map key the plugin installs in Extract.
-	// The runtime overwrites this key with a store-reading closure.
+	// The runtime overwrites this key with a syncer-reading closure.
 	AttributeKey fwkplugin.DataKey
 
 	// Read returns the live local value for the given endpoint.

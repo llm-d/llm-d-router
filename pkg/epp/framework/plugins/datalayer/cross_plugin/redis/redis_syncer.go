@@ -41,14 +41,14 @@ import (
 )
 
 const (
-	RedisStateStoreType    = "redis-state-store"
+	RedisSyncerType        = "redis-syncer"
 	defaultAddress         = "localhost:6379"
 	defaultStateTTL        = 2 * time.Second
 	defaultCoordinationTTL = 180 * time.Second
 	minimumTTL             = time.Millisecond
 )
 
-var _ fwkdl.CrossReplicaSyncer = (*RedisStateStore)(nil)
+var _ fwkdl.CrossReplicaSyncer = (*RedisSyncer)(nil)
 
 type redisConfig struct {
 	Address         string `json:"address"`
@@ -60,10 +60,10 @@ type redisConfig struct {
 	CoordinationTTL string `json:"coordinationTTL"`
 }
 
-// RedisStateStore is a CrossReplicaSyncer backed by Redis for cross-replica
+// RedisSyncer is a CrossReplicaSyncer backed by Redis for cross-replica
 // state sharing. Set prepares each endpoint's peer aggregate, and Get combines
 // it with the live local value.
-type RedisStateStore struct {
+type RedisSyncer struct {
 	typedName       fwkplugin.TypedName
 	replicaID       string
 	client          *goredis.Client
@@ -83,44 +83,44 @@ func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, erro
 	}
 	ttl, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("redis-state-store: invalid %s %q: %w", name, raw, err)
+		return 0, fmt.Errorf("redis-syncer: invalid %s %q: %w", name, raw, err)
 	}
 	if ttl < minimumTTL {
-		return 0, fmt.Errorf("redis-state-store: %s must be at least %s, got %s", name, minimumTTL, ttl)
+		return 0, fmt.Errorf("redis-syncer: %s must be at least %s, got %s", name, minimumTTL, ttl)
 	}
 	return ttl, nil
 }
 
 func resolvePassword(cfg redisConfig) (string, error) {
 	if cfg.Password != "" {
-		return "", errors.New("redis-state-store: password must use passwordEnv or passwordFile")
+		return "", errors.New("redis-syncer: password must use passwordEnv or passwordFile")
 	}
 	if cfg.PasswordEnv != "" && cfg.PasswordFile != "" {
-		return "", errors.New("redis-state-store: passwordEnv and passwordFile are mutually exclusive")
+		return "", errors.New("redis-syncer: passwordEnv and passwordFile are mutually exclusive")
 	}
 	if cfg.PasswordEnv != "" {
 		password, ok := os.LookupEnv(cfg.PasswordEnv)
 		if !ok {
-			return "", fmt.Errorf("redis-state-store: password environment variable %q is not set", cfg.PasswordEnv)
+			return "", fmt.Errorf("redis-syncer: password environment variable %q is not set", cfg.PasswordEnv)
 		}
 		return password, nil
 	}
 	if cfg.PasswordFile != "" {
 		password, err := os.ReadFile(cfg.PasswordFile)
 		if err != nil {
-			return "", fmt.Errorf("redis-state-store: read password file %q: %w", cfg.PasswordFile, err)
+			return "", fmt.Errorf("redis-syncer: read password file %q: %w", cfg.PasswordFile, err)
 		}
 		return strings.TrimRight(string(password), "\r\n"), nil
 	}
 	return "", nil
 }
 
-func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func RedisSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	var cfg redisConfig
 	if params != nil {
 		params.DisallowUnknownFields()
 		if err := params.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("redis-state-store: invalid parameters: %w", err)
+			return nil, fmt.Errorf("redis-syncer: invalid parameters: %w", err)
 		}
 	}
 	if cfg.Address == "" {
@@ -155,8 +155,8 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 		context.AfterFunc(handle.Context(), func() { _ = client.Close() })
 	}
 
-	return &RedisStateStore{
-		typedName:       fwkplugin.TypedName{Type: RedisStateStoreType, Name: name},
+	return &RedisSyncer{
+		typedName:       fwkplugin.TypedName{Type: RedisSyncerType, Name: name},
 		replicaID:       replicaID,
 		client:          client,
 		stateTTL:        stateTTL,
@@ -164,16 +164,16 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 	}, nil
 }
 
-func (s *RedisStateStore) TypedName() fwkplugin.TypedName {
+func (s *RedisSyncer) TypedName() fwkplugin.TypedName {
 	return s.typedName
 }
 
-func (s *RedisStateStore) hashKey(key fwkdl.StateKey, endpointID string) string {
+func (s *RedisSyncer) hashKey(key fwkdl.StateKey, endpointID string) string {
 	return string(key) + ":" + endpointID
 }
 
 // coordKey namespaces request-level values away from endpoint hashes.
-func (s *RedisStateStore) coordKey(key fwkdl.StateKey, id string) string {
+func (s *RedisSyncer) coordKey(key fwkdl.StateKey, id string) string {
 	return "coord:" + string(key) + ":" + id
 }
 
@@ -206,13 +206,13 @@ func gobDecode(data []byte, prototype any) (any, error) {
 
 // set publishes this replica's value and prepares the peer aggregate returned
 // by get.
-func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
+func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
 	now := time.Now()
 
 	data, err := encodeValue(value)
 	if err != nil {
-		return fmt.Errorf("redis-state-store: encode: %w", err)
+		return fmt.Errorf("redis-syncer: encode: %w", err)
 	}
 
 	hashKey := s.hashKey(key, endpointID)
@@ -222,12 +222,12 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	pipe.PExpire(ctx, hashKey, s.stateTTL)
 	result := pipe.HGetAll(ctx, hashKey)
 	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("redis-state-store: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
+		return fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
 	}
 
 	raw, err := result.Result()
 	if err != nil {
-		return fmt.Errorf("redis-state-store: hgetall: %w", err)
+		return fmt.Errorf("redis-syncer: hgetall: %w", err)
 	}
 	remoteValues := make([]any, 0, len(raw))
 	for _, field := range slices.Sorted(maps.Keys(raw)) {
@@ -238,7 +238,7 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 		remoteValue, err := gobDecode([]byte(encoded), value)
 		if err != nil {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
-				v.Info("redis-state-store: decode error", "field", field, "error", err)
+				v.Info("redis-syncer: decode error", "field", field, "error", err)
 			}
 			continue
 		}
@@ -255,17 +255,17 @@ func (s *RedisStateStore) set(ctx context.Context, key fwkdl.StateKey, endpointI
 	}
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("redis-state-store: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", len(remoteValues)+1)
+		v.Info("redis-syncer: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", len(remoteValues)+1)
 	}
 	return nil
 }
 
-func (s *RedisStateStore) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
+func (s *RedisSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
 	return s.set(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate)
 }
 
 // get combines the live local value with the peer aggregate prepared by set.
-func (s *RedisStateStore) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) any {
+func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) any {
 	hashKey := s.hashKey(key, endpointID)
 	cached, ok := s.cache.Load(hashKey)
 	if !ok {
@@ -279,30 +279,30 @@ func (s *RedisStateStore) get(_ context.Context, key fwkdl.StateKey, endpointID 
 	return aggregate([]any{local, entry.value})
 }
 
-func (s *RedisStateStore) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
 	return s.get(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate), true, nil
 }
 
-func (s *RedisStateStore) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
+func (s *RedisSyncer) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
 	hashKey := s.hashKey(key, endpointID)
 	s.cache.Delete(hashKey)
 	return s.client.HDel(ctx, hashKey, s.replicaID).Err()
 }
 
-func (s *RedisStateStore) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
+func (s *RedisSyncer) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
 	return s.delete(ctx, key, endpointID)
 }
 
 // GetOrSet atomically returns the existing request-level value or stores candidate.
 // The operation requires Redis 7.0 or newer for SET NX GET support.
-func (s *RedisStateStore) GetOrSet(ctx context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
+func (s *RedisSyncer) GetOrSet(ctx context.Context, key fwkdl.StateKey, id string, candidate any) (any, bool, error) {
 	if candidate == nil {
-		return nil, false, errors.New("redis-state-store: getorset candidate must not be nil")
+		return nil, false, errors.New("redis-syncer: getorset candidate must not be nil")
 	}
 
 	data, err := encodeValue(candidate)
 	if err != nil {
-		return nil, false, fmt.Errorf("redis-state-store: getorset encode: %w", err)
+		return nil, false, fmt.Errorf("redis-syncer: getorset encode: %w", err)
 	}
 
 	stored, err := s.client.SetArgs(ctx, s.coordKey(key, id), data, goredis.SetArgs{
@@ -314,12 +314,12 @@ func (s *RedisStateStore) GetOrSet(ctx context.Context, key fwkdl.StateKey, id s
 		return candidate, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("redis-state-store: getorset: %w", err)
+		return nil, false, fmt.Errorf("redis-syncer: getorset: %w", err)
 	}
 
 	actual, err := gobDecode([]byte(stored), candidate)
 	if err != nil {
-		return nil, false, fmt.Errorf("redis-state-store: getorset decode: %w", err)
+		return nil, false, fmt.Errorf("redis-syncer: getorset decode: %w", err)
 	}
 	return actual, true, nil
 }

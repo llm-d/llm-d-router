@@ -146,14 +146,14 @@ func (c *hgetallCounter) record(cmd goredis.Cmder) {
 	}
 }
 
-func newTestStore(t testing.TB, server *miniredis.Miniredis, replicaID string) (*RedisStateStore, *hgetallCounter) {
+func newTestSyncer(t testing.TB, server *miniredis.Miniredis, replicaID string) (*RedisSyncer, *hgetallCounter) {
 	t.Helper()
 	counter := &hgetallCounter{}
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
 	client.AddHook(&miniredisHExpireCompatibilityHook{})
 	client.AddHook(counter)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	return &RedisStateStore{
+	return &RedisSyncer{
 		replicaID:       replicaID,
 		client:          client,
 		stateTTL:        testStateTTL,
@@ -192,15 +192,15 @@ func sumCustomValues(values []any) any {
 	return total
 }
 
-func getSum(t testing.TB, store *RedisStateStore, key fwkdl.StateKey, endpointID string, local any) int {
+func getSum(t testing.TB, syncer *RedisSyncer, key fwkdl.StateKey, endpointID string, local any) int {
 	t.Helper()
-	value := store.get(context.Background(), key, endpointID, local, sumInts)
+	value := syncer.get(context.Background(), key, endpointID, local, sumInts)
 	return value.(int)
 }
 
 func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, counter := newTestStore(t, server, testReplicaID)
+	syncer, counter := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", cloneableInt(7))
 	local := cloneableInt(4)
 	var aggregateCalls atomic.Int64
@@ -214,20 +214,20 @@ func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 		Aggregate: aggregate,
 	}
 
-	require.NoError(t, store.Set(context.Background(), spec, testEndpointID))
+	require.NoError(t, syncer.Set(context.Background(), spec, testEndpointID))
 	require.Equal(t, int64(1), counter.count.Load())
 	require.Equal(t, int64(1), aggregateCalls.Load())
-	cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
+	cached, ok := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(7), cached.(*aggregateCacheEntry).value)
 
-	value, ok, err := store.Get(context.Background(), spec, testEndpointID)
+	value, ok, err := syncer.Get(context.Background(), spec, testEndpointID)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(11), value)
 
 	local = 5
-	value, ok, err = store.Get(context.Background(), spec, testEndpointID)
+	value, ok, err = syncer.Get(context.Background(), spec, testEndpointID)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, cloneableInt(12), value)
@@ -238,20 +238,20 @@ func TestSetPreparesPeerAggregateAndGetCombinesLiveLocal(t *testing.T) {
 
 func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
-	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
+	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
 
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	_, cached := store.cache.Load(hashKey)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	_, cached := syncer.cache.Load(hashKey)
 	require.False(t, cached)
-	total := getSum(t, store, testStateKey, testEndpointID, 5)
+	total := getSum(t, syncer, testStateKey, testEndpointID, 5)
 	require.Equal(t, 5, total)
 }
 
 func TestSetAndGetConcurrent(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	spec := fwkdl.CrossReplicaSpec{
 		StateKey:  testStateKey,
 		Read:      func(string) fwkdl.Cloneable { return cloneableInt(1) },
@@ -264,8 +264,8 @@ func TestSetAndGetConcurrent(t *testing.T) {
 	for range 2 {
 		wg.Go(func() {
 			for range iterations {
-				errs <- store.Set(context.Background(), spec, testEndpointID)
-				_, _, err := store.Get(context.Background(), spec, testEndpointID)
+				errs <- syncer.Set(context.Background(), spec, testEndpointID)
+				_, _, err := syncer.Get(context.Background(), spec, testEndpointID)
 				errs <- err
 			}
 		})
@@ -280,13 +280,13 @@ func TestSetAndGetConcurrent(t *testing.T) {
 
 func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", &customValue{Count: 7})
 
-	require.NoError(t, store.set(
+	require.NoError(t, syncer.set(
 		context.Background(), testStateKey, testEndpointID, &customValue{Count: 4}, sumCustomValues,
 	))
-	value := store.get(
+	value := syncer.get(
 		context.Background(), testStateKey, testEndpointID,
 		&customValue{Count: 4}, sumCustomValues,
 	)
@@ -316,23 +316,23 @@ func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
 
 func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, counter := newTestStore(t, server, testReplicaID)
+	syncer, counter := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", 7)
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	seedReplica(t, server, testStateKey, "epp-b", 9)
-	total := getSum(t, store, testStateKey, testEndpointID, 4)
+	total := getSum(t, syncer, testStateKey, testEndpointID, 4)
 	require.Equal(t, 11, total)
 
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	total = getSum(t, store, testStateKey, testEndpointID, 4)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	total = getSum(t, syncer, testStateKey, testEndpointID, 4)
 	require.Equal(t, 13, total)
 	require.Equal(t, int64(2), counter.count.Load())
 }
 
 func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-z", "third")
 	seedReplica(t, server, testStateKey, "epp-b", "first")
 	seedReplica(t, server, testStateKey, "epp-m", "second")
@@ -345,8 +345,8 @@ func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
 	}
 
 	for range 20 {
-		require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, "local", aggregate))
-		cached, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
+		require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, "local", aggregate))
+		cached, ok := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
 		require.True(t, ok)
 		require.Equal(t, "first,second,third", cached.(*aggregateCacheEntry).value)
 	}
@@ -354,14 +354,14 @@ func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
 
 func TestConcurrentSet(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	const callers = 16
 	errs := make(chan error, callers)
 
 	var wg sync.WaitGroup
 	for i := range callers {
 		wg.Go(func() {
-			errs <- store.set(context.Background(), testStateKey, fmt.Sprintf("endpoint-%d", i), i, sumInts)
+			errs <- syncer.set(context.Background(), testStateKey, fmt.Sprintf("endpoint-%d", i), i, sumInts)
 		})
 	}
 	wg.Wait()
@@ -373,9 +373,9 @@ func TestConcurrentSet(t *testing.T) {
 
 func TestGetReturnsLiveLocalBeforeSet(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, counter := newTestStore(t, server, testReplicaID)
+	syncer, counter := newTestSyncer(t, server, testReplicaID)
 
-	value := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
+	value := syncer.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
 
 	require.Equal(t, 4, value)
 	require.Zero(t, counter.count.Load())
@@ -383,42 +383,42 @@ func TestGetReturnsLiveLocalBeforeSet(t *testing.T) {
 
 func TestSetSkipsUndecodableFields(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "fresh", 7)
-	server.HSet(store.hashKey(testStateKey, testEndpointID), "corrupt", "not-gob")
+	server.HSet(syncer.hashKey(testStateKey, testEndpointID), "corrupt", "not-gob")
 
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	total := getSum(t, store, testStateKey, testEndpointID, 4)
+	total := getSum(t, syncer, testStateKey, testEndpointID, 4)
 	require.Equal(t, 11, total)
 }
 
 func TestExpiredPeerAggregateFallsBackToLiveLocal(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
-	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
+	syncer.cache.Store(hashKey, &aggregateCacheEntry{
 		value:     11,
 		expiresAt: time.Now().Add(-time.Second),
 	})
 
-	value := store.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
+	value := syncer.get(context.Background(), testStateKey, testEndpointID, 4, sumInts)
 
 	require.Equal(t, 4, value)
-	_, cached := store.cache.Load(hashKey)
+	_, cached := syncer.cache.Load(hashKey)
 	require.False(t, cached)
 }
 
 func TestSetExpiresAggregatesFromLocalRefreshTime(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
-	hashKey := store.hashKey(testStateKey, testEndpointID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
 	seedReplica(t, server, testStateKey, "epp-b", 7)
 	seedReplica(t, server, testStateKey, "epp-c", 9)
 
 	refreshedAt := time.Now()
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	cached, ok := store.cache.Load(hashKey)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	cached, ok := syncer.cache.Load(hashKey)
 	require.True(t, ok)
 	entry := cached.(*aggregateCacheEntry)
 
@@ -427,15 +427,15 @@ func TestSetExpiresAggregatesFromLocalRefreshTime(t *testing.T) {
 
 func TestDeleteInvalidatesAggregateAndReplicaField(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	seedReplica(t, server, testStateKey, "epp-b", 7)
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
-	require.NoError(t, store.Delete(context.Background(), testStateKey, testEndpointID))
+	require.NoError(t, syncer.Delete(context.Background(), testStateKey, testEndpointID))
 
-	_, ok := store.cache.Load(store.hashKey(testStateKey, testEndpointID))
+	_, ok := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
 	require.False(t, ok)
-	exists, err := store.client.HExists(context.Background(), store.hashKey(testStateKey, testEndpointID), testReplicaID).Result()
+	exists, err := syncer.client.HExists(context.Background(), syncer.hashKey(testStateKey, testEndpointID), testReplicaID).Result()
 	require.NoError(t, err)
 	require.False(t, exists)
 }
@@ -445,14 +445,14 @@ func TestDeleteInvalidatesAggregateWhenRedisFails(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
-	hashKey := store.hashKey(testStateKey, testEndpointID)
-	store.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
+	syncer := &RedisSyncer{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
+	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7, expiresAt: time.Now().Add(testStateTTL)})
 
-	err := store.Delete(context.Background(), testStateKey, testEndpointID)
+	err := syncer.Delete(context.Background(), testStateKey, testEndpointID)
 
 	require.ErrorContains(t, err, "redis unavailable")
-	_, ok := store.cache.Load(hashKey)
+	_, ok := syncer.cache.Load(hashKey)
 	require.False(t, ok)
 }
 
@@ -461,10 +461,10 @@ func TestSetWritesAndReadsAggregateInOneTransaction(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
-	hashKey := store.hashKey(testStateKey, testEndpointID)
+	syncer := &RedisSyncer{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
 
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	require.Len(t, recorder.commands, 6)
 	require.Equal(t, "multi", recorder.commands[0].Name())
@@ -478,34 +478,34 @@ func TestSetWritesAndReadsAggregateInOneTransaction(t *testing.T) {
 
 func TestSetAppliesFieldTTL(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
-	hashKey := store.hashKey(testStateKey, testEndpointID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
 
-	require.NoError(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	server.HSet(hashKey, "peer", "value")
 	server.SetTTL(hashKey, 2*testStateTTL)
 	server.FastForward(testStateTTL + time.Second)
 
-	exists, err := store.client.HExists(context.Background(), hashKey, testReplicaID).Result()
+	exists, err := syncer.client.HExists(context.Background(), hashKey, testReplicaID).Result()
 	require.NoError(t, err)
 	require.False(t, exists)
-	exists, err = store.client.HExists(context.Background(), hashKey, "peer").Result()
+	exists, err = syncer.client.HExists(context.Background(), hashKey, "peer").Result()
 	require.NoError(t, err)
 	require.True(t, exists)
 }
 
 func TestGetOrSetReturnsFirstValueAcrossStores(t *testing.T) {
 	server := miniredis.RunT(t)
-	storeA, _ := newTestStore(t, server, "epp-a")
-	storeB, _ := newTestStore(t, server, "epp-b")
+	syncerA, _ := newTestSyncer(t, server, "epp-a")
+	syncerB, _ := newTestSyncer(t, server, "epp-b")
 	ctx := context.Background()
 
-	actual, existed, err := storeA.GetOrSet(ctx, "request", "request-id", "a")
+	actual, existed, err := syncerA.GetOrSet(ctx, "request", "request-id", "a")
 	require.NoError(t, err)
 	require.False(t, existed)
 	require.Equal(t, "a", actual)
 
-	actual, existed, err = storeB.GetOrSet(ctx, "request", "request-id", "b")
+	actual, existed, err = syncerB.GetOrSet(ctx, "request", "request-id", "b")
 	require.NoError(t, err)
 	require.True(t, existed)
 	require.Equal(t, "a", actual)
@@ -513,16 +513,16 @@ func TestGetOrSetReturnsFirstValueAcrossStores(t *testing.T) {
 
 func TestGetOrSetSupportsUnregisteredConcreteValue(t *testing.T) {
 	server := miniredis.RunT(t)
-	storeA, _ := newTestStore(t, server, "epp-a")
-	storeB, _ := newTestStore(t, server, "epp-b")
+	syncerA, _ := newTestSyncer(t, server, "epp-a")
+	syncerB, _ := newTestSyncer(t, server, "epp-b")
 	ctx := context.Background()
 
-	actual, existed, err := storeA.GetOrSet(ctx, "request", "request-id", &customValue{Count: 1})
+	actual, existed, err := syncerA.GetOrSet(ctx, "request", "request-id", &customValue{Count: 1})
 	require.NoError(t, err)
 	require.False(t, existed)
 	require.Equal(t, &customValue{Count: 1}, actual)
 
-	actual, existed, err = storeB.GetOrSet(ctx, "request", "request-id", &customValue{Count: 2})
+	actual, existed, err = syncerB.GetOrSet(ctx, "request", "request-id", &customValue{Count: 2})
 	require.NoError(t, err)
 	require.True(t, existed)
 	require.Equal(t, &customValue{Count: 1}, actual)
@@ -540,10 +540,10 @@ func TestGetOrSetIsLinearizable(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range callers {
-		store, _ := newTestStore(t, server, fmt.Sprintf("epp-%d", i))
+		syncer, _ := newTestSyncer(t, server, fmt.Sprintf("epp-%d", i))
 		wg.Go(func() {
-			actual, existed, err := store.GetOrSet(
-				context.Background(), "request", "request-id", store.replicaID,
+			actual, existed, err := syncer.GetOrSet(
+				context.Background(), "request", "request-id", syncer.replicaID,
 			)
 			results <- result{actual: actual, existed: existed, err: err}
 		})
@@ -570,34 +570,34 @@ func TestGetOrSetIsLinearizable(t *testing.T) {
 
 func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	ctx := context.Background()
 
 	peer, err := encodeValue(7)
 	require.NoError(t, err)
-	server.HSet(store.hashKey("request", "request-id"), "epp-b", string(peer))
-	require.NoError(t, store.set(ctx, "request", "request-id", 4, sumInts))
-	actual, existed, err := store.GetOrSet(ctx, "request", "request-id", "decision")
+	server.HSet(syncer.hashKey("request", "request-id"), "epp-b", string(peer))
+	require.NoError(t, syncer.set(ctx, "request", "request-id", 4, sumInts))
+	actual, existed, err := syncer.GetOrSet(ctx, "request", "request-id", "decision")
 	require.NoError(t, err)
 	require.False(t, existed)
 	require.Equal(t, "decision", actual)
 
-	total := getSum(t, store, "request", "request-id", 4)
+	total := getSum(t, syncer, "request", "request-id", 4)
 	require.Equal(t, 11, total)
 }
 
 func TestGetOrSetExpires(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
-	store.coordinationTTL = time.Second
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	syncer.coordinationTTL = time.Second
 	ctx := context.Background()
 
-	_, existed, err := store.GetOrSet(ctx, "request", "request-id", "first")
+	_, existed, err := syncer.GetOrSet(ctx, "request", "request-id", "first")
 	require.NoError(t, err)
 	require.False(t, existed)
 
-	server.FastForward(2 * store.coordinationTTL)
-	actual, existed, err := store.GetOrSet(ctx, "request", "request-id", "second")
+	server.FastForward(2 * syncer.coordinationTTL)
+	actual, existed, err := syncer.GetOrSet(ctx, "request", "request-id", "second")
 	require.NoError(t, err)
 	require.False(t, existed)
 	require.Equal(t, "second", actual)
@@ -608,9 +608,9 @@ func TestGetOrSetPropagatesRedisErrors(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{client: client, coordinationTTL: testCoordinationTTL}
+	syncer := &RedisSyncer{client: client, coordinationTTL: testCoordinationTTL}
 
-	actual, existed, err := store.GetOrSet(context.Background(), "request", "request-id", "candidate")
+	actual, existed, err := syncer.GetOrSet(context.Background(), "request", "request-id", "candidate")
 
 	require.ErrorContains(t, err, "redis unavailable")
 	require.False(t, existed)
@@ -632,9 +632,9 @@ func TestSetRecoversAfterRedisBecomesAvailable(t *testing.T) {
 	})
 	client.AddHook(&miniredisHExpireCompatibilityHook{})
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
+	syncer := &RedisSyncer{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 
-	require.Error(t, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	require.Error(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	server := miniredis.NewMiniRedis()
 	require.NoError(t, server.StartAddr(address))
@@ -642,17 +642,17 @@ func TestSetRecoversAfterRedisBecomesAvailable(t *testing.T) {
 	seedReplica(t, server, testStateKey, "epp-b", 7)
 
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.NoError(collect, store.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+		assert.NoError(collect, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 	}, time.Second, 10*time.Millisecond)
-	total := getSum(t, store, testStateKey, testEndpointID, 4)
+	total := getSum(t, syncer, testStateKey, testEndpointID, 4)
 	require.Equal(t, 11, total)
 }
 
 func TestGetOrSetRejectsNilCandidate(t *testing.T) {
 	server := miniredis.RunT(t)
-	store, _ := newTestStore(t, server, testReplicaID)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
 
-	actual, existed, err := store.GetOrSet(context.Background(), "request", "request-id", nil)
+	actual, existed, err := syncer.GetOrSet(context.Background(), "request", "request-id", nil)
 
 	require.ErrorContains(t, err, "candidate must not be nil")
 	require.False(t, existed)
@@ -664,9 +664,9 @@ func TestGetOrSetUsesOneAtomicRedisCommand(t *testing.T) {
 	client := goredis.NewClient(&goredis.Options{})
 	client.AddHook(recorder)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
-	store := &RedisStateStore{client: client, coordinationTTL: testCoordinationTTL}
+	syncer := &RedisSyncer{client: client, coordinationTTL: testCoordinationTTL}
 
-	actual, existed, err := store.GetOrSet(context.Background(), "request", "request-id", "candidate")
+	actual, existed, err := syncer.GetOrSet(context.Background(), "request", "request-id", "candidate")
 
 	require.NoError(t, err)
 	require.False(t, existed)
@@ -675,7 +675,7 @@ func TestGetOrSetUsesOneAtomicRedisCommand(t *testing.T) {
 	args := recorder.commands[0].Args()
 	require.Len(t, args, 7)
 	require.Equal(t, "set", args[0])
-	require.Equal(t, store.coordKey("request", "request-id"), args[1])
+	require.Equal(t, syncer.coordKey("request", "request-id"), args[1])
 	_, ok := args[2].([]byte)
 	require.True(t, ok)
 	require.Equal(t, []any{"ex", int64(180), "NX", "get"}, args[3:])
@@ -726,18 +726,18 @@ func TestFactoryConfiguration(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(tc.params)), nil)
+			plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(tc.params)), nil)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			store := plugin.(*RedisStateStore)
-			t.Cleanup(func() { require.NoError(t, store.client.Close()) })
-			require.Equal(t, tc.wantStateTTL, store.stateTTL)
-			require.Equal(t, tc.wantCoordinationTTL, store.coordinationTTL)
-			require.Equal(t, RedisStateStoreType, store.TypedName().Type)
-			require.Equal(t, "redis", store.TypedName().Name)
+			syncer := plugin.(*RedisSyncer)
+			t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
+			require.Equal(t, tc.wantStateTTL, syncer.stateTTL)
+			require.Equal(t, tc.wantCoordinationTTL, syncer.coordinationTTL)
+			require.Equal(t, RedisSyncerType, syncer.TypedName().Type)
+			require.Equal(t, "redis", syncer.TypedName().Name)
 		})
 	}
 }
@@ -748,24 +748,24 @@ func TestFactoryDoesNotRequireRedisAvailability(t *testing.T) {
 	address := listener.Addr().String()
 	require.NoError(t, listener.Close())
 
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+	plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(
 		fmt.Sprintf(`{"address": %q}`, address),
 	)), nil)
 
 	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+	syncer := plugin.(*RedisSyncer)
+	t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
 }
 
 func TestFactoryHonorsDeleteDeadline(t *testing.T) {
 	server := miniredis.RunT(t)
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+	plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(
 		fmt.Sprintf(`{"address": %q}`, server.Addr()),
 	)), nil)
 	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
-	require.NoError(t, store.client.Ping(t.Context()).Err())
+	syncer := plugin.(*RedisSyncer)
+	t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
+	require.NoError(t, syncer.client.Ping(t.Context()).Err())
 
 	var received atomic.Bool
 	server.Server().SetPreHook(func(_ *miniredisserver.Peer, command string, _ ...string) bool {
@@ -778,7 +778,7 @@ func TestFactoryHonorsDeleteDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	err = store.Delete(ctx, testStateKey, testEndpointID)
+	err = syncer.Delete(ctx, testStateKey, testEndpointID)
 	require.Error(t, err)
 	require.True(t, received.Load(), "Redis must receive the command before its deadline")
 	require.Less(t, time.Since(started), time.Second, "Redis reads must respect the caller's deadline")
@@ -788,33 +788,33 @@ func TestFactoryClosesClientWithHandleContext(t *testing.T) {
 	server := miniredis.RunT(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := fwkplugin.NewEppHandle(ctx, nil)
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+	plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(
 		fmt.Sprintf(`{"address": %q}`, server.Addr()),
 	)), handle)
 	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
+	syncer := plugin.(*RedisSyncer)
 
 	cancel()
 
 	require.Eventually(t, func() bool {
-		return errors.Is(store.client.Ping(context.Background()).Err(), goredis.ErrClosed)
+		return errors.Is(syncer.client.Ping(context.Background()).Err(), goredis.ErrClosed)
 	}, time.Second, 10*time.Millisecond)
 }
 
 func TestFactoryGeneratesDistinctReplicaIDs(t *testing.T) {
 	server := miniredis.RunT(t)
-	newStore := func() *RedisStateStore {
-		plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+	newSyncer := func() *RedisSyncer {
+		plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(
 			fmt.Sprintf(`{"address": %q}`, server.Addr()),
 		)), nil)
 		require.NoError(t, err)
-		store := plugin.(*RedisStateStore)
-		t.Cleanup(func() { require.NoError(t, store.client.Close()) })
-		return store
+		syncer := plugin.(*RedisSyncer)
+		t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
+		return syncer
 	}
 
-	storeA := newStore()
-	storeB := newStore()
+	syncerA := newSyncer()
+	syncerB := newSyncer()
 
-	require.NotEqual(t, storeA.replicaID, storeB.replicaID)
+	require.NotEqual(t, syncerA.replicaID, syncerB.replicaID)
 }
