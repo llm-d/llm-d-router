@@ -64,6 +64,10 @@ const (
 	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
+
+	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled
+	// on. The endpoint-pin-screener keeps only that endpoint.
+	EndpointPinHeader = "x-llm-d-pin-host-port"
 )
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.

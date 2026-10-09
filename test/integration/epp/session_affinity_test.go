@@ -490,6 +490,18 @@ var routedRequestSeq int64
 func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]string) string {
 	t.Helper()
 
+	requests := append(newRoutedRequest(extraHeaders), ReqResponseOnly(
+		map[string]string{"content-type": "application/json", "status": "200"},
+		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
+	)...)
+	responses := streamRequests(t, h, requests, 4)
+
+	endpoint := headerValue(responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+	require.NotEmpty(t, endpoint, "request headers response must set the destination endpoint")
+	return endpoint
+}
+
+func newRoutedRequest(extraHeaders map[string]string) []*extProcPb.ProcessingRequest {
 	// Unique per call: the Choose->PreRequest boundPodPresence handoff is keyed by
 	// RequestID, so reusing one across sequential requests would couple their state.
 	reqHeaders := map[string]string{
@@ -500,21 +512,17 @@ func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]str
 	for k, v := range extraHeaders {
 		reqHeaders[k] = v
 	}
+	return integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+}
 
-	requests := integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
-	requests = append(requests, ReqResponseOnly(
-		map[string]string{"content-type": "application/json", "status": "200"},
-		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
-	)...)
+func streamRequests(t *testing.T, h *TestHarness, requests []*extProcPb.ProcessingRequest, expected int) []*extProcPb.ProcessingResponse {
+	t.Helper()
 
 	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
 	require.NoError(t, err)
 
-	responses, err := integration.StreamedRequest(t, client, requests, 4)
+	responses, err := integration.StreamedRequest(t, client, requests, expected)
 	require.NoError(t, err)
-	require.Len(t, responses, 4)
-
-	endpoint := headerValue(responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
-	require.NotEmpty(t, endpoint, "request headers response must set the destination endpoint")
-	return endpoint
+	require.Len(t, responses, expected)
+	return responses
 }
