@@ -392,7 +392,7 @@ func (s *Server) runPDPipeline(
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest) {
+	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, nil) {
 		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
 	}
 	decodeReturned = true

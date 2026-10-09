@@ -217,7 +217,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
-		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+		if !s.forwardDataParallel || !s.dataParallelHandler(w, r, nil) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
 				return

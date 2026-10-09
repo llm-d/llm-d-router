@@ -415,7 +415,9 @@ retryLoop:
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
+	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
+		_, _ = toolFields.compareDispatched(dbody)
+	})
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
 	if !dataParallelUsed {
@@ -732,11 +734,13 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 					"request_id", uuidStr)
 			}
 		}()
-		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
+		// The request goroutine reads the aggregate only after decodeDone closes.
+		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq, func() {
+			_, _ = toolFields.compareDispatched(dbody)
+		})
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
-			// The request goroutine reads the aggregate only after decodeDone closes.
 			_, _ = toolFields.compareDispatched(dbody)
 			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}

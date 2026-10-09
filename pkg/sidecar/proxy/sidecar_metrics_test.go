@@ -433,6 +433,7 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 		requestIDError  bool
 		denyTarget      bool
 		invalidTarget   bool
+		dataParallel    bool
 		wantCode        int
 		wantPrefill     int
 		wantDecode      int
@@ -440,6 +441,7 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 	}{
 		{name: "chat fields preserved across both stages", body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
 		{name: "messages ignores unsupported fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: messagesFields},
+		{name: "data-parallel decode preserves fields", body: chatBody, dataParallel: true, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
 		{name: "null and empty fields are observed", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: messagesFields},
 		{name: "non-tool request", body: `{"messages":[]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
 		{name: "nested tools are not observed", body: `{"messages":[{"tools":[]}]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
@@ -501,8 +503,17 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 			before := toolFieldCounters(t)
 			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
 			r.Header.Set(routing.PrefillEndpointHeader, target)
+			routes := s.createRoutes()
+			if tt.dataParallel {
+				s.forwardDataParallel = true
+				s.dataParallelProxies[decodeURL.Host] = s.decoderProxy
+				s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					t.Error("local decode must not run after data-parallel dispatch")
+				})
+				r.Header.Set(routing.DataParallelEndpointHeader, decodeURL.Host)
+			}
 			rw := httptest.NewRecorder()
-			s.createRoutes().ServeHTTP(rw, r)
+			routes.ServeHTTP(rw, r)
 			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 			require.Len(t, prefillBodies, tt.wantPrefill)
 			require.Len(t, decodeBodies, tt.wantDecode)
@@ -739,6 +750,8 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 		waitForDecode  bool
 		requestIDError bool
 		invalidTarget  bool
+		dataParallel   bool
+		missingReplica bool
 		prefillChoice  string
 		decodeChoice   string
 	}{
@@ -757,6 +770,10 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 		{name: "handler initialization failure", body: chatBody, invalidTarget: true, wantCode: 502},
 		{name: "only decode changes choice", body: chatBody, prefillChoice: "auto", decodeChoice: "none", wantCode: 200, wantFields: chatFields},
 		{name: "only prefill changes choice", body: chatBody, prefillChoice: "none", decodeChoice: "auto", wantCode: 200, wantFields: chatFields},
+		{name: "data-parallel decode changes choice", body: chatBody, dataParallel: true, prefillChoice: "auto", decodeChoice: "none", wantCode: 200, wantFields: chatFields},
+		{name: "Messages data-parallel decode changes choice", api: reqcommon.APITypeMessages, body: chatBody, dataParallel: true, prefillChoice: "auto", decodeChoice: "none", wantCode: 200, wantFields: messagesFields},
+		{name: "non-tool data-parallel request", body: `{"messages":[]}`, dataParallel: true, wantCode: 200},
+		{name: "missing replica supplies no decode evidence", body: chatBody, dataParallel: true, missingReplica: true, prefillChoice: "auto", decodeChoice: "none", wantCode: 400, wantFields: chatFields},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			prefillBodies, decodeBodies := make(chan []byte, 1), make(chan []byte, 1)
@@ -809,6 +826,16 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 			before := toolFieldCounters(t)
 			rw := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+			if tt.dataParallel {
+				s.forwardDataParallel = true
+				if !tt.missingReplica {
+					s.dataParallelProxies[prefillURL.Host] = s.decoderProxy
+				}
+				s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					t.Error("local decode must not run after data-parallel selection")
+				})
+				r.Header.Set(routing.DataParallelEndpointHeader, prefillURL.Host)
+			}
 			if tt.prefillChoice != "" {
 				// Supply different serialization results to verify each dispatch independently.
 				body, err := decodeRequestBody([]byte(tt.body))
@@ -831,13 +858,13 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				status := toolcalling.FieldStatusPreserved
-				if field == toolcalling.FieldToolChoice && tt.prefillChoice != "" {
+				if field == toolcalling.FieldToolChoice && tt.prefillChoice != "" && !tt.missingReplica {
 					status = toolcalling.FieldStatusChanged
 				}
 				want[[2]string{string(field), string(status)}] = 1
 			}
 			require.Equal(t, want, delta)
-			if tt.requestIDError || tt.invalidTarget || tt.wantCode == http.StatusBadRequest && tt.prefillCode == 0 {
+			if tt.requestIDError || tt.invalidTarget || tt.wantCode == http.StatusBadRequest && tt.prefillCode == 0 && !tt.missingReplica {
 				require.Empty(t, prefillBodies)
 				require.Empty(t, decodeBodies)
 				return
@@ -845,6 +872,10 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 			var original map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
 			for i, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+				if i == 1 && tt.missingReplica {
+					require.Empty(t, bodies)
+					continue
+				}
 				require.Len(t, bodies, 1)
 				var actual map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(<-bodies, &actual))
