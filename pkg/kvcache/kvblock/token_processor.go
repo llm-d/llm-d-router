@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/fxamacker/cbor/v2"
@@ -198,6 +199,56 @@ func (db *chunkedTokenDatabase) hash(parent uint64, tokens []uint32, extra inter
 	return h.Sum64()
 }
 
+// FNV-64a parameters, as in hash/fnv.
+const (
+	fnv64Offset = 14695981039346656037
+	fnv64Prime  = 1099511628211
+)
+
+// hashCBORFNVBlock returns hash(parent, tokens, nil). It feeds the canonical
+// CBOR encoding of [parent, tokens, null] to FNV-64a byte by byte instead of
+// marshaling it.
+func hashCBORFNVBlock(parent uint64, tokens []uint32) uint64 {
+	h := fnvByte(fnv64Offset, 0x83) // array of 3
+	h = fnvCBORHead(h, 0, parent)
+	if tokens == nil {
+		h = fnvByte(h, 0xf6) // the encoder writes a nil slice as null
+	} else {
+		h = fnvCBORHead(h, 4, uint64(len(tokens)))
+		for _, t := range tokens {
+			h = fnvCBORHead(h, 0, uint64(t))
+		}
+	}
+	return fnvByte(h, 0xf6) // null
+}
+
+func fnvByte(h uint64, b byte) uint64 {
+	return (h ^ uint64(b)) * fnv64Prime
+}
+
+// fnvCBORHead hashes a CBOR item head: the major type with its argument in
+// the shortest form, as canonical encoding requires.
+func fnvCBORHead(h uint64, major byte, arg uint64) uint64 {
+	m := major << 5
+	var n int
+	switch {
+	case arg < 24:
+		return fnvByte(h, m|byte(arg))
+	case arg <= math.MaxUint8:
+		h, n = fnvByte(h, m|24), 1
+	case arg <= math.MaxUint16:
+		h, n = fnvByte(h, m|25), 2
+	case arg <= math.MaxUint32:
+		h, n = fnvByte(h, m|26), 4
+	default:
+		h, n = fnvByte(h, m|27), 8
+	}
+	for i := n - 1; i >= 0; i-- {
+		h = fnvByte(h, byte(arg>>(8*i)))
+	}
+	return h
+}
+
 // hashXXH64 computes one XXH64 digest over the parent hash (8 bytes
 // little-endian), the token IDs (4 bytes little-endian each, so keys are
 // identical across architectures and shareable through a Redis-backed index),
@@ -240,9 +291,12 @@ func (db *chunkedTokenDatabase) prefixHashes(
 		if extraFeatures[i] != nil {
 			extras = extraFeatures[i].MMHashes
 		}
-		if digest != nil {
+		switch {
+		case digest != nil:
 			prefix = hashXXH64(digest, prefix, chunk, extras)
-		} else {
+		case extras == nil:
+			prefix = hashCBORFNVBlock(prefix, chunk)
+		default:
 			prefix = db.hash(prefix, chunk, extras)
 		}
 		hashes[i] = prefix
