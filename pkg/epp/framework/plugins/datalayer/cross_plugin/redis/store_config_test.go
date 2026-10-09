@@ -58,18 +58,34 @@ func TestFactoryReadsPasswordFromEnvironment(t *testing.T) {
 }
 
 func TestFactoryReadsPasswordFromFile(t *testing.T) {
-	server := miniredis.RunT(t)
-	passwordPath := filepath.Join(t.TempDir(), "password")
-	require.NoError(t, os.WriteFile(passwordPath, []byte("file-secret"), 0o600))
-	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
-		`{"address": %q, "passwordFile": %q}`,
-		server.Addr(), passwordPath,
-	))), nil)
-	require.NoError(t, err)
-	store := plugin.(*RedisStateStore)
-	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+	for _, tc := range []struct {
+		name     string
+		contents string
+		password string
+	}{
+		{name: "no line ending", contents: "file-secret", password: "file-secret"},
+		{name: "LF", contents: "file-secret\n", password: "file-secret"},
+		{name: "CRLF", contents: "file-secret\r\n", password: "file-secret"},
+		{name: "multiple line endings", contents: "file-secret\r\n\n", password: "file-secret"},
+		{name: "preserve other whitespace", contents: " \tfile-secret \t\r\n", password: " \tfile-secret \t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			server.RequireAuth(tc.password)
+			passwordPath := filepath.Join(t.TempDir(), "password")
+			require.NoError(t, os.WriteFile(passwordPath, []byte(tc.contents), 0o600))
+			plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(fmt.Sprintf(
+				`{"address": %q, "passwordFile": %q}`,
+				server.Addr(), passwordPath,
+			))), nil)
+			require.NoError(t, err)
+			store := plugin.(*RedisStateStore)
+			t.Cleanup(func() { require.NoError(t, store.client.Close()) })
 
-	require.Equal(t, "file-secret", store.client.Options().Password)
+			require.Equal(t, tc.password, store.client.Options().Password)
+			require.NoError(t, store.client.Ping(t.Context()).Err())
+		})
+	}
 }
 
 func TestFactoryRejectsUnsafeOrAmbiguousPasswordConfiguration(t *testing.T) {

@@ -31,6 +31,7 @@ Parameters:
 - `passwordEnv`: Optional name of an environment variable containing the Redis
   password.
 - `passwordFile`: Optional path to a file containing the Redis password.
+  Trailing carriage returns and newlines are removed.
   `passwordEnv` and `passwordFile` are mutually exclusive. Plaintext
   `password` configuration is rejected.
 - `db`: Redis database number. Defaults to `0`.
@@ -61,6 +62,9 @@ and caches the prepared peer aggregate locally. The aggregate expires
 `stateTTL` after the local refresh. `Get` reads the cache without accessing
 Redis and combines it with the contributor's live local value. If no peer value
 is available, `Get` aggregates the local value by itself.
+
+A publication already in progress when an endpoint is removed can finish after
+deletion. Its Redis field and local peer aggregate expire according to `stateTTL`.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.

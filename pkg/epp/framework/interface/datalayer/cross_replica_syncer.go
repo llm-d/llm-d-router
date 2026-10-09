@@ -27,7 +27,8 @@ type StateKey string
 
 // CrossReplicaSyncer synchronizes shared state across EPP replicas.
 // Implementations own the storage mechanism and must provide the atomic
-// consistency required by GetOrSet.
+// consistency required by GetOrSet. Methods can be called concurrently,
+// including Set and Delete for the same endpoint.
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 

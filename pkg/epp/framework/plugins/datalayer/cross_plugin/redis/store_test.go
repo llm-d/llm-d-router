@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	miniredisserver "github.com/alicebob/miniredis/v2/server"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -754,6 +755,33 @@ func TestFactoryDoesNotRequireRedisAvailability(t *testing.T) {
 	require.NoError(t, err)
 	store := plugin.(*RedisStateStore)
 	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+}
+
+func TestFactoryHonorsDeleteDeadline(t *testing.T) {
+	server := miniredis.RunT(t)
+	plugin, err := RedisStateStoreFactory("redis", json.NewDecoder(strings.NewReader(
+		fmt.Sprintf(`{"address": %q}`, server.Addr()),
+	)), nil)
+	require.NoError(t, err)
+	store := plugin.(*RedisStateStore)
+	t.Cleanup(func() { require.NoError(t, store.client.Close()) })
+	require.NoError(t, store.client.Ping(t.Context()).Err())
+
+	var received atomic.Bool
+	server.Server().SetPreHook(func(_ *miniredisserver.Peer, command string, _ ...string) bool {
+		if command == "HDEL" {
+			received.Store(true)
+			return true
+		}
+		return false
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = store.Delete(ctx, testStateKey, testEndpointID)
+	require.Error(t, err)
+	require.True(t, received.Load(), "Redis must receive the command before its deadline")
+	require.Less(t, time.Since(started), time.Second, "Redis reads must respect the caller's deadline")
 }
 
 func TestFactoryClosesClientWithHandleContext(t *testing.T) {

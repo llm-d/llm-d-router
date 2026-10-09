@@ -27,6 +27,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,7 @@ func resolvePassword(cfg redisConfig) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("redis-state-store: read password file %q: %w", cfg.PasswordFile, err)
 		}
-		return string(password), nil
+		return strings.TrimRight(string(password), "\r\n"), nil
 	}
 	return "", nil
 }
@@ -145,9 +146,10 @@ func RedisStateStoreFactory(name string, params *json.Decoder, handle fwkplugin.
 	replicaID := hostname + "-" + uuid.NewString()
 
 	client := goredis.NewClient(&goredis.Options{
-		Addr:     cfg.Address,
-		Password: password,
-		DB:       cfg.DB,
+		Addr:                  cfg.Address,
+		Password:              password,
+		DB:                    cfg.DB,
+		ContextTimeoutEnabled: true,
 	})
 	if handle != nil && handle.Context() != nil {
 		context.AfterFunc(handle.Context(), func() { _ = client.Close() })
