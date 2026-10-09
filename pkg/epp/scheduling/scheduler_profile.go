@@ -158,7 +158,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		debug.Info("Before running filter plugins", "endpoints", filteredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "filter_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanFilterEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -225,7 +225,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "scoring", internalSpanKind)
+	ctx, span := tracer.Start(ctx, semconv.LLMDEPPSpanScoring, internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
 	// skip all attribute and child-span construction so the scoring hot path
@@ -367,7 +367,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		debug.Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "pick_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanPickEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

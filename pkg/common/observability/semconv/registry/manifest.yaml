@@ -1,0 +1,4 @@
+file_format: definition_manifest/2.0
+name: llm_d
+description: Custom attributes and selected EPP spans emitted by llm-d-router.
+schema_url: https://llm-d.ai/semconv/router/0.1.0
