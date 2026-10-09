@@ -17,6 +17,9 @@ limitations under the License.
 package proxy
 
 import (
+	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,6 +27,118 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+func TestToolCallingJSONStream(t *testing.T) {
+	for _, body := range []string{
+		`{}`, ` { "tools" : null } `,
+		`{"tools":[{"a":9007199254740993,"b":-1.20e+3}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{}}`,
+		`{"messages":[{"tools":[],"content":"tools \\\" \\u1234"}],"to\u006fls":[]}`,
+		`{"tools":[1],"tools":null,"tool_choice":true}`,
+		`{"messages":["` + strings.Repeat("x", 1<<20) + `"],"tools":[]}`,
+		`{"` + strings.Repeat("x", 1<<20) + `":1,"tool_choice":"none"}`,
+		`{"unused":[{},[],true,false,null,-0,1.5e-2],"tools":[]}`,
+		`{"\u0070\u0061\u0072\u0061\u006c\u006c\u0065\u006c\u005f\u0074\u006f\u006f\u006c\u005f\u0063\u0061\u006c\u006c\u0073":true}`,
+		`{"tools":["` + strings.Repeat("x", 128<<10) + `"]}`,
+		`{"unused":` + strings.Repeat("9", 128<<10) + `,"tools":[]}`,
+		`{"unused":` + strings.Repeat("[", 9999) + `0` + strings.Repeat("]", 9999) + `,"tools":[]}`,
+		`{"unused":` + strings.Repeat("[", 10000) + `0` + strings.Repeat("]", 10000) + `,"tools":[]}`,
+		`{"tools":[],"unused":1.0E+20}`, `{"unused":"\ud800","tools":[]}`,
+		`{"unused":[],"tools":[],}`, `{"unused":[}`, `{"unused":{]}`,
+		`{"unused":truefalse}`, `{"unused":false null}`, `{"unused":-}`,
+		`{"unused":1.}`, `{"unused":1e+}`, `{"unused":+1}`, `{"unused":NaN}`,
+		"{\"unused\":\"\x00\",\"tools\":[]}",
+		`{"tools":`, `{"tools":[]} garbage`, `{"unused":"bad\q","tools":[]}`,
+		`{"unused":"bad\u12xz","tools":[]}`, `{"unused":[1,],"tools":[]}`,
+		`{"unused":{"a":1,},"tools":[]}`, `{"unused":01,"tools":[]}`,
+		`{"unused":1e,"tools":[]}`, `{"unused":tru,"tools":[]}`,
+		`[]`, `null`, `{} {}`, `{"tools":[],"unfinished":"`, "",
+	} {
+		for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+			before, wantErr := toolcalling.CaptureRequestJSON(api, []byte(body))
+			for _, chunkSize := range []int{1, 7, 32768} {
+				stream := newToolCallingJSONStream(api)
+				for offset := 0; offset < len(body); offset += chunkSize {
+					stream.feed([]byte(body[offset:min(offset+chunkSize, len(body))]))
+				}
+				raw, ok := stream.finish()
+				require.Equal(t, wantErr == nil, ok, "body prefix %q, chunk %d", body[:min(60, len(body))], chunkSize)
+				if !ok {
+					continue
+				}
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(raw, &fields))
+				for field := range fields {
+					require.Contains(t, []string{string(toolcalling.FieldTools), string(toolcalling.FieldToolChoice), string(toolcalling.FieldParallelToolCalls), string(toolcalling.FieldResponseFormat)}, field)
+				}
+				after, err := toolcalling.CaptureRequestJSON(api, raw)
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(before, after)
+				require.NoError(t, err)
+				for _, status := range statuses {
+					require.Equal(t, toolcalling.FieldStatusPreserved, status.Status)
+				}
+				require.Equal(t, before.Summary(), after.Summary())
+			}
+		}
+	}
+}
+
+func TestToolCallingJSONStreamSkipsUnsupportedAPI(t *testing.T) {
+	stream := newToolCallingJSONStream(reqcommon.APITypeResponses)
+	stream.feed([]byte(`{"tools":[]}`))
+	_, ok := stream.finish()
+	require.False(t, ok)
+}
+
+func FuzzToolCallingJSONStream(f *testing.F) {
+	for _, body := range []string{
+		`{}`, `{"tools":[],"tool_choice":"auto"}`, `{"text":"escaped\"","tools":null}`,
+		`{"a":[1,true,null]}`, `{"tools":[]}x`, `{"to\u006fls":[{"x":-0.123E+4}]}`,
+		`{"tools":[],"tools":null}`, `{"text":"\ud800\udc00","tool_choice":{"name":"f"}}`,
+	} {
+		f.Add(body, uint8(1))
+	}
+	f.Fuzz(func(t *testing.T, body string, split uint8) {
+		stream := newToolCallingJSONStream(reqcommon.APITypeChatCompletions)
+		chunkSize := int(split) + 1
+		for offset := 0; offset < len(body); offset += chunkSize {
+			stream.feed([]byte(body[offset:min(offset+chunkSize, len(body))]))
+		}
+		raw, ok := stream.finish()
+		before, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(body))
+		require.Equal(t, err == nil, ok)
+		if ok {
+			after, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, raw)
+			require.NoError(t, err)
+			statuses, err := toolcalling.CompareRequests(before, after)
+			require.NoError(t, err)
+			for _, status := range statuses {
+				require.Equal(t, toolcalling.FieldStatusPreserved, status.Status)
+			}
+		}
+	})
+}
+
+func BenchmarkToolCallingJSONStream(b *testing.B) {
+	for _, size := range []int{1024, 1 << 20} {
+		body, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", size)})
+		require.NoError(b, err)
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				stream := newToolCallingJSONStream(reqcommon.APITypeChatCompletions)
+				for offset := 0; offset < len(body); offset += 32768 {
+					stream.feed(body[offset:min(offset+32768, len(body))])
+				}
+				_, ok := stream.finish()
+				if !ok {
+					b.Fatal("valid body was not captured")
+				}
+			}
+		})
+	}
+}
 
 func TestToolCallingRequestComparisons(t *testing.T) {
 	tests := []struct {
