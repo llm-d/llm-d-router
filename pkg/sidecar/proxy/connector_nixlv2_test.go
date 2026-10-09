@@ -1491,6 +1491,70 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		By("sending decode the transfer_id of the attempt that succeeded")
 		Expect(kvParams(testInfo.decodeHandler, 0)).To(HaveKeyWithValue(requestFieldTransferID, last))
 	})
+
+	// pushPrefillAnswer returns a prefill answer shaped like one from vLLM's
+	// NixlPushConnector with transferMode as its transfer_mode. An empty
+	// transferMode leaves the field out.
+	pushPrefillAnswer := func(transferMode string) string {
+		kv := map[string]any{
+			reqcommon.FieldDoRemotePrefill: true,
+			reqcommon.FieldDoRemoteDecode:  false,
+			reqcommon.FieldRemoteBlockIDs:  []int{1, 2, 3},
+			reqcommon.FieldRemoteEngineID:  "prefill-engine",
+			"remote_request_id":            "cmpl-prefill",
+			reqcommon.FieldRemoteHost:      testPrefillHostIP1,
+			reqcommon.FieldRemotePort:      5600,
+			requestFieldTPSize:             2,
+			requestFieldPPSize:             1,
+			"remote_num_tokens":            64,
+		}
+		if transferMode != "" {
+			kv[requestFieldTransferMode] = transferMode
+		}
+		answer, err := json.Marshal(map[string]any{reqcommon.FieldKVTransferParams: kv})
+		Expect(err).ToNot(HaveOccurred())
+		return string(answer)
+	}
+
+	It("caches the prefill endpoint's identity from a NIXL push answer without changing the decode request", func() {
+		testInfo.proxy.config.NIXLPushMode = true
+		testInfo.prefillHandler.RawResponse = pushPrefillAnswer(nixlTransferModePush)
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		identity, ok := testInfo.proxy.nixlPushIdentities.get(testInfo.prefillBackend.URL[len("http://"):])
+		Expect(ok).To(BeTrue())
+		Expect(identity).To(Equal(nixlPushIdentity{
+			reqcommon.FieldRemoteEngineID: "prefill-engine",
+			reqcommon.FieldRemoteHost:     testPrefillHostIP1,
+			reqcommon.FieldRemotePort:     float64(5600),
+			requestFieldTPSize:            float64(2),
+			requestFieldPPSize:            float64(1),
+			requestFieldTransferMode:      nixlTransferModePush,
+		}))
+
+		By("forwarding the prefill answer's kv_transfer_params to decode with only the transfer_id added")
+		prefillResponseKV, ok := testInfo.prefillHandler.CompletionResponses[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		want := maps.Clone(prefillResponseKV)
+		want[requestFieldTransferID] = kvParams(testInfo.prefillHandler, 0)[requestFieldTransferID]
+		Expect(kvParams(testInfo.decodeHandler, 0)).To(Equal(want))
+	})
+
+	DescribeTable("does not cache a NIXL push identity",
+		func(pushMode bool, transferMode string) {
+			testInfo.proxy.config.NIXLPushMode = pushMode
+			testInfo.prefillHandler.RawResponse = pushPrefillAnswer(transferMode)
+			proxyBaseAddr := startProxy()
+			sendChatCompletionsRequest(proxyBaseAddr)
+
+			_, ok := testInfo.proxy.nixlPushIdentities.get(testInfo.prefillBackend.URL[len("http://"):])
+			Expect(ok).To(BeFalse())
+		},
+		Entry("from a prefill answer without transfer_mode", true, ""),
+		Entry("from a prefill answer in pull mode", true, "pull"),
+		Entry("when NIXL push mode is off", false, nixlTransferModePush),
+	)
 })
 
 // moriProxyEnv bundles a running MoRI-IO proxy with its mock prefill/decode

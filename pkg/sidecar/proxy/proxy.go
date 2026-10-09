@@ -267,6 +267,7 @@ type Server struct {
 	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
 	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
 	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
+	nixlPushIdentities  *nixlPushIdentityCache                // cached NIXL push identity per prefill host:port
 	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
 	forwardDataParallel bool                                  // Use special Data Parallel work around
 
@@ -371,12 +372,14 @@ func NewProxy(config Config) *Server {
 	prefillerCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
 	encoderCache, _ := lru.New[string, http.Handler](1024)           // nolint:errcheck
 	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024) // nolint:errcheck
+	nixlPushIdentities, _ := newNIXLPushIdentityCache(1024)          // nolint:errcheck
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
 		prefillerProxies:    prefillerCache,
 		encoderProxies:      encoderCache,
 		mooncakeEngineIDs:   mooncakeEngineIDs,
+		nixlPushIdentities:  nixlPushIdentities,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
 		config:              config,
@@ -463,6 +466,7 @@ func (s *Server) Clone() *Server {
 		prefillerProxies:    s.prefillerProxies,
 		encoderProxies:      s.encoderProxies,
 		mooncakeEngineIDs:   s.mooncakeEngineIDs,
+		nixlPushIdentities:  s.nixlPushIdentities,
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
