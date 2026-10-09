@@ -90,6 +90,14 @@ type Config struct {
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
 
+	// MaxInFlightRequestsDelta opens the gate when the least-loaded sticky
+	// endpoint holds more than this many in-flight requests above the
+	// least-loaded non-sticky endpoint and the request's estimated TTFT on the
+	// best non-sticky endpoint exceeds its TTFT on the best sticky endpoint by
+	// at most MaxTTFTPenaltyMs. Requires MaxTTFTPenaltyMs > 0. Default: 0
+	// (disabled).
+	MaxInFlightRequestsDelta int64 `json:"maxInFlightRequestsDelta,omitempty"`
+
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
@@ -111,6 +119,7 @@ type Plugin struct {
 	prefixMatchDataKey           fwkplugin.DataKey
 	latencyPredictionInfoDataKey fwkplugin.DataKey
 	inFlightLoadDataKey          fwkplugin.DataKey
+	uncachedRequestTokensDataKey fwkplugin.DataKey
 }
 
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -134,6 +143,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -146,6 +156,12 @@ func (c *Config) validate() error {
 	}
 	if c.MaxTTFTPenaltyMs < 0 {
 		return fmt.Errorf("maxTTFTPenaltyMs must be >= 0, got %f", c.MaxTTFTPenaltyMs)
+	}
+	if c.MaxInFlightRequestsDelta < 0 {
+		return fmt.Errorf("maxInFlightRequestsDelta must be >= 0, got %d", c.MaxInFlightRequestsDelta)
+	}
+	if c.MaxInFlightRequestsDelta > 0 && c.MaxTTFTPenaltyMs == 0 {
+		return errors.New("maxTTFTPenaltyMs must be > 0 when maxInFlightRequestsDelta is set")
 	}
 	if c.PeakPrefillThroughput < 0 {
 		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
@@ -252,6 +268,28 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		}
 	}
 
+	// In-flight request gate: break stickiness if sticky endpoints hold many
+	// more in-flight requests and serving the request elsewhere costs at most
+	// the penalty more than serving it on a sticky endpoint.
+	if p.config.MaxInFlightRequestsDelta > 0 && len(nonSticky) > 0 {
+		stickyRequests, stickyOk := p.leastInFlightRequests(sticky)
+		nonStickyRequests, nonStickyOk := p.leastInFlightRequests(nonSticky)
+		if stickyOk && nonStickyOk && stickyRequests-nonStickyRequests > p.config.MaxInFlightRequestsDelta {
+			stickyTTFT, stickyOk := p.bestRequestTTFT(sticky)
+			nonStickyTTFT, nonStickyOk := p.bestRequestTTFT(nonSticky)
+			if stickyOk && nonStickyOk && nonStickyTTFT-stickyTTFT <= p.config.MaxTTFTPenaltyMs {
+				logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: in-flight request gate broken",
+					"stickyRequests", stickyRequests, "nonStickyRequests", nonStickyRequests,
+					"maxDelta", p.config.MaxInFlightRequestsDelta,
+					"stickyRequestTTFT", stickyTTFT, "nonStickyRequestTTFT", nonStickyTTFT,
+					"maxPenalty", p.config.MaxTTFTPenaltyMs)
+				recordDecision(p.typedName.Name, outcomeRequestLoadOverride)
+				span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeRequestLoadOverride))
+				return endpoints
+			}
+		}
+	}
+
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	recordDecision(p.typedName.Name, outcomeSticky)
@@ -268,6 +306,12 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 			required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
 		} else {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+		}
+	}
+	if p.config.MaxInFlightRequestsDelta > 0 {
+		required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+		if !p.config.usesLatencyPredictor() {
+			required[p.uncachedRequestTokensDataKey] = attrconcurrency.UncachedRequestTokens{}
 		}
 	}
 	return fwkplugin.DataDependencies{Required: required}
@@ -318,12 +362,75 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
+// requestTTFT returns the estimated TTFT (ms) of the current request on an
+// endpoint. The predictor path already accounts for the request; the
+// throughput path adds the request's uncached tokens on the endpoint to the
+// endpoint TTFT. It returns false when a required attribute is absent.
+func (p *Plugin) requestTTFT(ep fwksched.Endpoint) (float64, bool) {
+	base, ok := p.endpointTTFT(ep)
+	if !ok {
+		return 0, false
+	}
+	if p.config.usesLatencyPredictor() {
+		return base, true
+	}
+	raw, ok := ep.Get(p.uncachedRequestTokensDataKey)
+	if !ok {
+		return 0, false
+	}
+	uncached, ok := raw.(*attrconcurrency.UncachedRequestTokens)
+	if !ok || uncached == nil {
+		return 0, false
+	}
+	return base + float64(uncached.Tokens)/p.config.PeakPrefillThroughput*1000, true
+}
+
+// bestRequestTTFT returns the lowest requestTTFT across endpoints, and false
+// when no endpoint carries the required attributes.
+func (p *Plugin) bestRequestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
+	best := math.MaxFloat64
+	found := false
+	for _, ep := range endpoints {
+		if ttft, ok := p.requestTTFT(ep); ok && ttft < best {
+			best = ttft
+			found = true
+		}
+	}
+	return best, found
+}
+
 // inFlightTokens returns an endpoint's in-flight token count. If the attribute is
 // absent, it returns ok=false so the caller can treat the signal as missing.
 func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Tokens, true
+		}
+	}
+	return 0, false
+}
+
+// leastInFlightRequests returns the lowest in-flight request count across
+// endpoints, and false when no endpoint carries InFlightLoad.
+func (p *Plugin) leastInFlightRequests(endpoints []fwksched.Endpoint) (int64, bool) {
+	best := int64(math.MaxInt64)
+	found := false
+	for _, ep := range endpoints {
+		if n, ok := p.inFlightRequests(ep); ok && n < best {
+			best = n
+			found = true
+		}
+	}
+	return best, found
+}
+
+// inFlightRequests returns an endpoint's in-flight request count. If the
+// attribute is absent, it returns ok=false so the caller can treat the signal
+// as missing.
+func (p *Plugin) inFlightRequests(ep fwksched.Endpoint) (int64, bool) {
+	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
+		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
+			return load.Requests, true
 		}
 	}
 	return 0, false

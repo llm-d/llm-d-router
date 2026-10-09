@@ -21,9 +21,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -58,7 +60,21 @@ func newTestPlugin(config Config) *Plugin {
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}
+}
+
+// makeLoadEndpoint creates a test endpoint with the given prefix cache match
+// ratio (prefixMatch out of 100 total blocks), in-flight requests and tokens,
+// and the uncached tokens of the request being scheduled. A negative uncached
+// value leaves the UncachedRequestTokens attribute unset.
+func makeLoadEndpoint(name string, prefixMatch int, requests, tokens, uncached int64) fwksched.Endpoint {
+	ep := makeEndpoint(name, prefixMatch, -1, -1)
+	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens, Requests: requests})
+	if uncached >= 0 {
+		ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: uncached})
+	}
+	return ep
 }
 
 func TestFilter_AffinityThresholdDisabled(t *testing.T) {
@@ -228,6 +244,167 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	assert.True(t, ok)
 	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.False(t, ok)
+
+	// In-flight request gate using peak prefill throughput.
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000, MaxInFlightRequestsDelta: 8})
+	consumed = p.Consumes()
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
+	assert.True(t, ok)
+	_, ok = consumed.Required[p.uncachedRequestTokensDataKey]
+	assert.True(t, ok)
+
+	// In-flight request gate using the latency predictor.
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor, MaxInFlightRequestsDelta: 8})
+	consumed = p.Consumes()
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
+	assert.True(t, ok)
+	_, ok = consumed.Required[p.uncachedRequestTokensDataKey]
+	assert.False(t, ok)
+}
+
+// With PeakPrefillThroughput=1000 tokens/sec, tokens map to TTFT as tokens ms,
+// so MaxTTFTPenaltyMs=5000 allows serving the request elsewhere at up to 5000
+// tokens more than on the sticky endpoint.
+func TestFilter_InFlightRequestGate(t *testing.T) {
+	config := Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000, MaxInFlightRequestsDelta: 8}
+	disabled := config
+	disabled.MaxInFlightRequestsDelta = 0
+
+	for _, tc := range []struct {
+		name      string
+		config    Config
+		endpoints []fwksched.Endpoint
+		want      []string
+	}{
+		{
+			name:   "gap above delta and cheap request breaks stickiness",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 2000),
+				makeLoadEndpoint("c", 0, 0, 0, 2000),
+			},
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name:   "gap at delta keeps sticky",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 8, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 2000),
+			},
+			want: []string{"a"},
+		},
+		{
+			name:   "costly request keeps sticky",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 200000),
+			},
+			want: []string{"a"},
+		},
+		{
+			name:   "backlog on the target counts toward the request TTFT",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 1, 4000, 2000),
+			},
+			want: []string{"a"},
+		},
+		{
+			name:   "backlog on the sticky endpoint makes the move relatively cheap",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 3000, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 7000),
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name:   "least-loaded sticky endpoint sets the gap",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 95, 2, 0, 100),
+				makeLoadEndpoint("c", 0, 0, 0, 2000),
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name:   "cheapest non-sticky endpoint sets the request TTFT",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 200000),
+				makeLoadEndpoint("c", 50, 0, 0, 3000),
+			},
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name:   "missing uncached tokens keeps sticky",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, -1),
+			},
+			want: []string{"a"},
+		},
+		{
+			name:   "disabled by default",
+			config: disabled,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 95, 20, 0, 100),
+				makeLoadEndpoint("b", 0, 0, 0, 2000),
+			},
+			want: []string{"a"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestPlugin(tc.config)
+			result := p.Filter(context.Background(), nil, tc.endpoints)
+			got := make([]string, 0, len(result))
+			for _, ep := range result {
+				got = append(got, ep.GetMetadata().ID.Name)
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// On the predictor path the request TTFT is the predicted TTFT, compared between
+// the best sticky and the best non-sticky endpoint.
+func TestFilter_InFlightRequestGateLatencyPredictor(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor, MaxInFlightRequestsDelta: 8})
+	endpoint := func(name string, prefixMatch int, ttft float64, requests int64) fwksched.Endpoint {
+		ep := makeEndpoint(name, prefixMatch, ttft, -1)
+		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
+		return ep
+	}
+
+	result := p.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", 95, 100, 20), endpoint("b", 0, 2000, 0)})
+	assert.Equal(t, 2, len(result), "predicted TTFT within the penalty should break stickiness")
+
+	result = p.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", 95, 100, 20), endpoint("b", 0, 5150, 0)})
+	assert.Equal(t, 1, len(result), "predicted TTFT more than the penalty above the sticky endpoint should keep sticky")
+
+	result = p.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", 95, 2000, 20), endpoint("b", 0, 6000, 0)})
+	assert.Equal(t, 2, len(result), "a slow sticky endpoint lowers the relative cost of moving")
+}
+
+func TestFactory_InvalidMaxInFlightRequestsDelta(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxInFlightRequestsDelta": -1}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "maxInFlightRequestsDelta must be >= 0")
+
+	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxInFlightRequestsDelta": 8, "maxTTFTPenaltyMs": 0}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "maxTTFTPenaltyMs must be > 0 when maxInFlightRequestsDelta is set")
+
+	plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxInFlightRequestsDelta": 8}`)), nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(8), plugin.(*Plugin).config.MaxInFlightRequestsDelta)
 }
 
 func TestFactory_ValidConfig(t *testing.T) {
@@ -357,4 +534,42 @@ func TestFactory_DefaultsToPrefillThroughput(t *testing.T) {
 	_, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"peakPrefillThroughput": 0}`)), nil)
 	assert.Error(t, err, "default throughput source needs a non-zero peakPrefillThroughput")
 	assert.Contains(t, err.Error(), "peakPrefillThroughput must be > 0")
+}
+
+// The scheduler confines a filter's reads to the keys it declares in Consumes,
+// and an undeclared read resolves as absent. The gate must therefore open when
+// its endpoints are scoped, on both TTFT sources.
+func TestFilter_InFlightRequestGateThroughScopedEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		endpoints []fwksched.Endpoint
+	}{
+		{
+			name:      "prefillThroughput",
+			raw:       `{"affinityThreshold": 0.8, "maxTTFTPenaltyMs": 5000, "ttftSource": "prefillThroughput", "peakPrefillThroughput": 1000, "maxInFlightRequestsDelta": 8}`,
+			endpoints: []fwksched.Endpoint{makeLoadEndpoint("a", 95, 20, 0, 100), makeLoadEndpoint("b", 0, 0, 0, 2000)},
+		},
+		{
+			name: "latencyPredictor",
+			raw:  `{"affinityThreshold": 0.8, "maxTTFTPenaltyMs": 5000, "ttftSource": "latencyPredictor", "maxInFlightRequestsDelta": 8}`,
+			endpoints: func() []fwksched.Endpoint {
+				a := makeEndpoint("a", 95, 100, -1)
+				a.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 20})
+				b := makeEndpoint("b", 0, 2000, -1)
+				b.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 0})
+				return []fwksched.Endpoint{a, b}
+			}(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plugin, err := Factory("test", fwkplugin.StrictDecoder([]byte(tc.raw)), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scoped, _ := datalayer.Scope(logr.Discard(), "Filter", plugin, tc.endpoints)
+			result := plugin.(*Plugin).Filter(context.Background(), nil, scoped)
+			assert.Equal(t, 2, len(result), "gate should open through scoped endpoints")
+		})
+	}
 }

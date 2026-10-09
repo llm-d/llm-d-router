@@ -90,9 +90,15 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0), makeEndpoint("b", 10, 50, 0)},
 			outcome: outcomeMissingSignal,
 		},
+		{
+			name:    "in-flight request gate reopens the set",
+			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000, MaxInFlightRequestsDelta: 8},
+			input:   []fwksched.Endpoint{makeLoadEndpoint("a", 90, 20, 0, 100), makeLoadEndpoint("b", 10, 0, 0, 2000)},
+			outcome: outcomeRequestLoadOverride,
+		},
 	}
 
-	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeExploration, outcomeNotApplicable, outcomeMissingSignal}
+	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeRequestLoadOverride, outcomeExploration, outcomeNotApplicable, outcomeMissingSignal}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

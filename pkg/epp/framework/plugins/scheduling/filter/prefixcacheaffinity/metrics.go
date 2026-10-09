@@ -38,6 +38,10 @@ const (
 	// outcomeLoadOverride: the TTFT load gate discarded a non-empty sticky set
 	// because those endpoints were too slow, reopening all endpoints.
 	outcomeLoadOverride = "load_override"
+	// outcomeRequestLoadOverride: the in-flight request gate discarded a
+	// non-empty sticky set because those endpoints held more in-flight requests
+	// and the request was cheap to serve elsewhere, reopening all endpoints.
+	outcomeRequestLoadOverride = "request_load_override"
 	// outcomeExploration: the gate was skipped for exploration.
 	outcomeExploration = "exploration"
 	// outcomeNotApplicable: the filter had nothing to decide (a single

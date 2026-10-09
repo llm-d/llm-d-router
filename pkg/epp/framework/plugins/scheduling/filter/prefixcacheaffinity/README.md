@@ -63,11 +63,20 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
   `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
   is `latencyPredictor`
+- In-flight request gate (`maxInFlightRequestsDelta` > 0): if the least-loaded sticky endpoint
+  holds more than that many in-flight requests above the least-loaded non-sticky endpoint, and
+  the request's estimated TTFT on the best non-sticky endpoint exceeds its TTFT on the best
+  sticky endpoint by at most `maxTTFTPenaltyMs`, keep all endpoints. In-flight requests are
+  held until the stream ends, so this gate counts decode. The request's TTFT on an endpoint is
+  `(inFlightTokens + uncachedRequestTokens) / peakPrefillThroughput * 1000` (ms) with
+  `prefillThroughput`, or the predicted TTFT with `latencyPredictor`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
   `PrefixCacheMatchInfo`, all prefix scores default to 0 and no endpoints pass the affinity
-  threshold, so all are kept (no-op)
+  threshold, so all are kept (no-op). The in-flight request gate keeps the sticky set when either
+  set lacks `InFlightLoad`, or when no non-sticky endpoint has `UncachedRequestTokens`
+  (`prefillThroughput`) or `LatencyPredictionInfo` (`latencyPredictor`) on either side
 
 ## Composition requirements
 
@@ -89,7 +98,8 @@ endpoint outright (at exact equality a tie, resolved at random, remains possible
 still moves requests to partially warm endpoints inside the bound, so a weighted
 `prefix-cache-scorer` with `max-score-picker` attenuates the gate in proportion to the prefix
 weight, up to full inertness for cold endpoints. Breaks are counted by
-`llm_d_epp_prefix_cache_affinity_filter_decisions_total` with `outcome="load_override"`. A
+`llm_d_epp_prefix_cache_affinity_filter_decisions_total` with `outcome="load_override"` for
+the TTFT load gate and `outcome="request_load_override"` for the in-flight request gate. A
 break that changed no routing decision shows as that counter climbing while the sticky
 endpoint's queue depth and TTFT hold; there is no counter for a break that left the request
 on the same endpoint.
@@ -118,6 +128,7 @@ documents the strategy and its calibration.
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
+| `maxInFlightRequestsDelta` | `int` | No | `0` | In-flight request gap between the least-loaded sticky and non-sticky endpoints that opens the gate when the request's estimated TTFT on the best non-sticky endpoint exceeds its TTFT on the best sticky endpoint by at most `maxTTFTPenaltyMs`. Requires `maxTTFTPenaltyMs` > 0. 0 = disabled |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -129,6 +140,7 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
 - Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `InFlightLoad` for the in-flight request gate, plus `UncachedRequestTokens` when `ttftSource` is `prefillThroughput` (both from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
