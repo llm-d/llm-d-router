@@ -480,6 +480,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	body map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
 	apiType reqcommon.APIType,
 ) {
+	toolFields, _ := captureToolCallingRequest(apiType, original)
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
 
@@ -669,6 +672,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// KV wait aborts immediately.
 	var prefillResp *bufferedResponseWriter
 	prefillDone := make(chan struct{})
+	_, _ = toolFields.compareDispatched(pbody)
 	prefillStartedAt := time.Now()
 	go func() {
 		defer close(prefillDone)
@@ -732,6 +736,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
+			// The request goroutine reads the aggregate only after decodeDone closes.
+			_, _ = toolFields.compareDispatched(dbody)
 			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))
@@ -839,8 +845,6 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			semconv.LLMDPDProxyParallelDispatch(true),
 		)
 	}
-	_ = original // kept for signature symmetry with the strictly-serial path
-
 	// Replay the decode abort here, on the request goroutine, so it reaches the
 	// client the way it does on the strictly-serial path. Skipped when the
 	// commit point already wrote the prefill error or the KV-wait timeout,
