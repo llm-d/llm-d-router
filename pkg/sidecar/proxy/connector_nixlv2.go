@@ -119,6 +119,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// Keeps the client's body intact for the decode request below.
 	prefillRequest := maps.Clone(body)
 
+	// transfer_id of the current prefill attempt in NIXL push mode, else empty.
+	var pushTransferID string
+
 	// WRITE mode populates the destination fields the prefill engine needs for
 	// its RDMA Write; READ mode leaves them nil per the standard NIXLv2 contract.
 	if s.config.MoRIIOWriteMode {
@@ -161,6 +164,10 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			reqcommon.FieldRemoteBlockIDs:  nil,
 			reqcommon.FieldRemoteHost:      nil,
 			reqcommon.FieldRemotePort:      nil,
+		}
+		if s.config.NIXLPushMode {
+			pushTransferID = newTransferID()
+			prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any)[requestFieldTransferID] = pushTransferID
 		}
 	}
 
@@ -227,6 +234,19 @@ retryLoop:
 		case <-time.After(s.config.PrefillRetryBackoff):
 		case <-preq.Context().Done():
 			break retryLoop
+		}
+
+		// A failed attempt may still finish on P, so each attempt gets its own
+		// transfer_id and D pairs only with the attempt that succeeded.
+		if pushTransferID != "" {
+			pushTransferID = newTransferID()
+			prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any)[requestFieldTransferID] = pushTransferID
+			if pbody, err = json.Marshal(prefillRequest); err != nil {
+				if err := errorJSONInvalid(err, w); err != nil {
+					s.logger.Error(err, "failed to send error response to client")
+				}
+				return
+			}
 		}
 	}
 
@@ -387,6 +407,10 @@ retryLoop:
 				}
 			}
 		}
+	}
+	// P's response carries no transfer_id.
+	if dKVParams, ok := pKVTransferParams.(map[string]any); ok && pushTransferID != "" {
+		dKVParams[requestFieldTransferID] = pushTransferID
 	}
 	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 

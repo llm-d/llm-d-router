@@ -53,6 +53,7 @@ ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
 enable-p2p-pull: true
+nixl-push-mode: true
 enable-tls:
 - prefiller
 - decoder
@@ -99,6 +100,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
 		enable-p2p-pull: true,
+		nixl-push-mode: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
 		secure-serving: false,
@@ -144,6 +146,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.NIXLPushMode = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -192,6 +195,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.NIXLPushMode = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -239,6 +243,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				inferencePool:           "ns/inference-pool",
 				poolGroup:               "pool-group",
 				enableP2PPull:           false, // overrides enable-p2p-pull: true in the inline YAML
+				nixlPushMode:            false, // overrides nixl-push-mode: true in the inline YAML
 				inlineConfiguration:     &inlineYAML,
 			},
 			expected: func(o *Options) {
@@ -254,6 +259,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = false
+				o.NIXLPushMode = false
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -329,6 +335,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.NIXLPushMode = true
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -505,6 +512,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
 	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
+	assertEqual(nixlPushMode, expected.NIXLPushMode, actual.NIXLPushMode)
 
 	assertEqual("UseTLSForPrefiller", expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
 	assertEqual("UseTLSForDecoder", expected.UseTLSForDecoder, actual.UseTLSForDecoder)
@@ -726,6 +734,37 @@ func TestValidateEnableP2PPull(t *testing.T) {
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
+	})
+}
+
+func TestValidateNIXLPushMode(t *testing.T) {
+	t.Run("rejects nixl-push-mode with non-NIXLv2 connector", func(t *testing.T) {
+		opts := NewOptions()
+		opts.KVConnector = constants.KVConnectorSharedStorage
+		opts.NIXLPushMode = true
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--nixl-push-mode requires --kv-connector=nixlv2")
+	})
+
+	t.Run("rejects nixl-push-mode with a MoRI-IO flag", func(t *testing.T) {
+		if !MoRIIOFeatureEnabled {
+			t.Skip("MoRI-IO feature is dormant; Complete rejects the MoRI-IO flag first")
+		}
+		opts := NewOptions()
+		opts.NIXLPushMode = true
+		opts.MoRIIODPSize = 8
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--nixl-push-mode cannot be combined with MoRI-IO WRITE-mode or Wide-EP settings")
+	})
+
+	t.Run("allows nixl-push-mode with NIXLv2 connector", func(t *testing.T) {
+		opts, fs := newTestOptions(t)
+		setFlag(t, fs, kvConnector, constants.KVConnectorNIXLV2)
+		setFlag(t, fs, nixlPushMode, true)
+		require.NoError(t, fs.Parse(nil))
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.True(t, opts.NIXLPushMode)
 	})
 }
 

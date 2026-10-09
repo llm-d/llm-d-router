@@ -64,6 +64,7 @@ const (
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
 	p2pConnectorPortFlag      = "p2p-connector-port"
 	enableP2PPull             = "enable-p2p-pull"
+	nixlPushMode              = "nixl-push-mode"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
 	enableTLS                 = "enable-tls"
@@ -124,6 +125,7 @@ type yamlConfiguration struct {
 	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
 	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
+	NIXLPushMode            *bool    `json:"nixl-push-mode,omitempty"`
 	SecureServing           *bool    `json:"secure-serving,omitempty"`
 	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
 	CertPath                string   `json:"cert-path,omitempty"`
@@ -285,6 +287,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
+	fs.BoolVar(&opts.NIXLPushMode, nixlPushMode, opts.NIXLPushMode,
+		"declare that the engines run vLLM's NixlPushConnector; the sidecar sets one transfer_id on the prefill and decode requests so vLLM pairs them by it. Requires --kv-connector=nixlv2; rejected with MoRI-IO WRITE-mode or Wide-EP settings.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
 	fs.BoolVar(&opts.SecureServing, secureProxy, opts.SecureServing, "Deprecated: use --secure-serving instead.")
 	_ = fs.MarkDeprecated(secureProxy, "use --secure-serving instead")
@@ -736,6 +740,14 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--enable-p2p-pull requires --kv-connector=%s (got %q)", constants.KVConnectorNIXLV2, opts.KVConnector)
 	}
 
+	if opts.NIXLPushMode && opts.KVConnector != constants.KVConnectorNIXLV2 {
+		return fmt.Errorf("--nixl-push-mode requires --kv-connector=%s (got %q)", constants.KVConnectorNIXLV2, opts.KVConnector)
+	}
+	// The --moriio-* flags configure engines that run MoRIIOConnector.
+	if opts.NIXLPushMode && opts.hasMoRIIOFlagsSet() {
+		return errors.New("--nixl-push-mode cannot be combined with MoRI-IO WRITE-mode or Wide-EP settings")
+	}
+
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
 		if opts.InferencePoolNamespace == "" || opts.InferencePoolName == "" {
@@ -849,6 +861,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
+	}
+	if cfg.NIXLPushMode != nil && !opts.isFlagSet(nixlPushMode) {
+		opts.NIXLPushMode = *cfg.NIXLPushMode
 	}
 
 	if !opts.isSecureServingFlagSet() {

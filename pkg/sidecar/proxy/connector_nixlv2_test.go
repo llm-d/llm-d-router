@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1433,6 +1434,62 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRankOverride))
 
 		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+	})
+
+	It("sets one transfer_id on the prefill and decode requests in NIXL push mode", func() {
+		testInfo.proxy.config.NIXLPushMode = true
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		transferID, ok := kvParams(testInfo.prefillHandler, 0)[requestFieldTransferID].(string)
+		Expect(ok).To(BeTrue())
+		Expect(transferID).To(MatchRegexp(`^xfer-[0-9a-f-]{36}$`))
+
+		By("forwarding the prefill response's kv_transfer_params to decode with the transfer_id added")
+		prefillResponseKV, ok := testInfo.prefillHandler.CompletionResponses[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		want := maps.Clone(prefillResponseKV)
+		want[requestFieldTransferID] = transferID
+		Expect(kvParams(testInfo.decodeHandler, 0)).To(Equal(want))
+	})
+
+	It("gives each prefill attempt its own transfer_id in NIXL push mode and sends decode the successful one", func() {
+		testInfo.proxy.config.NIXLPushMode = true
+		testInfo.proxy.config.PrefillMaxRetries = 2
+		testInfo.proxy.config.PrefillRetryBackoff = time.Millisecond
+		testInfo.prefillHandler.FailForFirstN = 2
+		testInfo.prefillHandler.FailStatusCode = http.StatusServiceUnavailable
+
+		// The mock rejects a failing attempt before reading its body, so the
+		// transfer_id of every attempt is recorded in front of it.
+		transferIDs := make(chan string, 3)
+		testInfo.prefillBackend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			var request map[string]any
+			_ = json.Unmarshal(body, &request)
+			kv, _ := request[reqcommon.FieldKVTransferParams].(map[string]any)
+			transferID, _ := kv[requestFieldTransferID].(string)
+			transferIDs <- transferID
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			testInfo.prefillHandler.ServeHTTP(w, r)
+		}))
+		DeferCleanup(testInfo.prefillBackend.Close)
+
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(transferIDs).To(HaveLen(3))
+		seen := map[string]bool{}
+		var last string
+		for range 3 {
+			last = <-transferIDs
+			Expect(last).To(HavePrefix("xfer-"))
+			seen[last] = true
+		}
+		Expect(seen).To(HaveLen(3))
+
+		By("sending decode the transfer_id of the attempt that succeeded")
+		Expect(kvParams(testInfo.decodeHandler, 0)).To(HaveKeyWithValue(requestFieldTransferID, last))
 	})
 })
 

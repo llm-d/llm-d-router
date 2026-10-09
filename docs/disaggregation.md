@@ -775,6 +775,7 @@ Enabling the flag requires:
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+| `nixlv2` | `--nixl-push-mode` | — | `false` | Declare that the engines run vLLM's `NixlPushConnector`, in which the prefill pod writes KV into the decode pod. Both the prefill and the decode pods must run it. The sidecar sets the same `transfer_id` in the `kv_transfer_params` of the prefill and decode requests so vLLM pairs the two requests by it. Pairing by `transfer_id` needs a vLLM version that includes [PR #59758](https://github.com/vllm-project/vllm/pull/59758); older versions ignore the field and pair the requests by request ID. Rejected at startup with any other connector. Also rejected with MoRI-IO WRITE-mode or Wide-EP settings. |
 
 ---
 
