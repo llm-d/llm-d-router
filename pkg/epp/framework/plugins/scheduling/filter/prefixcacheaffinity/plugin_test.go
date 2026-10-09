@@ -60,20 +60,22 @@ func newTestPlugin(config Config) *Plugin {
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
-		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}
 }
 
-// makeLoadEndpoint creates a test endpoint with the given prefix cache match
-// ratio (prefixMatch out of 100 total blocks), in-flight requests and tokens,
-// and the uncached tokens of the request being scheduled. A negative uncached
-// value leaves the UncachedRequestTokens attribute unset.
-func makeLoadEndpoint(name string, prefixMatch int, requests, tokens, uncached int64) fwksched.Endpoint {
-	ep := makeEndpoint(name, prefixMatch, -1, -1)
-	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens, Requests: requests})
-	if uncached >= 0 {
-		ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: uncached})
+// makeLoadEndpoint creates a test endpoint that has cached tokens of a
+// prompt tokens long request (one-token blocks), with the given in-flight
+// requests and tokens. A negative cached value leaves PrefixCacheMatchInfo
+// unset.
+func makeLoadEndpoint(name string, cached, prompt int, requests, tokens int64) fwksched.Endpoint {
+	meta := &fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{Name: name, Namespace: "default"},
 	}
+	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	if cached >= 0 {
+		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(cached, prompt, 1))
+	}
+	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens, Requests: requests})
 	return ep
 }
 
@@ -250,7 +252,7 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	consumed = p.Consumes()
 	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
-	_, ok = consumed.Required[p.uncachedRequestTokensDataKey]
+	_, ok = consumed.Required[p.prefixMatchDataKey]
 	assert.True(t, ok)
 
 	// In-flight request gate using the latency predictor.
@@ -258,8 +260,8 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	consumed = p.Consumes()
 	_, ok = consumed.Required[p.inFlightLoadDataKey]
 	assert.True(t, ok)
-	_, ok = consumed.Required[p.uncachedRequestTokensDataKey]
-	assert.False(t, ok)
+	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
+	assert.True(t, ok)
 }
 
 // With PeakPrefillThroughput=1000 tokens/sec, tokens map to TTFT as tokens ms,
@@ -277,12 +279,12 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 		want      []string
 	}{
 		{
-			name:   "gap above delta and cheap request breaks stickiness",
+			name:   "gap above delta and cheap move adds the non-sticky endpoints",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 2000),
-				makeLoadEndpoint("c", 0, 0, 0, 2000),
+				makeLoadEndpoint("a", 1900, 2000, 20, 0),
+				makeLoadEndpoint("b", 0, 2000, 0, 0),
+				makeLoadEndpoint("c", 0, 2000, 0, 0),
 			},
 			want: []string{"a", "b", "c"},
 		},
@@ -290,8 +292,8 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "gap at delta keeps sticky",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 8, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 2000),
+				makeLoadEndpoint("a", 1900, 2000, 8, 0),
+				makeLoadEndpoint("b", 0, 2000, 0, 0),
 			},
 			want: []string{"a"},
 		},
@@ -299,8 +301,8 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "costly request keeps sticky",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 200000),
+				makeLoadEndpoint("a", 199000, 200000, 20, 0),
+				makeLoadEndpoint("b", 0, 200000, 0, 0),
 			},
 			want: []string{"a"},
 		},
@@ -308,8 +310,8 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "backlog on the target counts toward the request TTFT",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 1, 4000, 2000),
+				makeLoadEndpoint("a", 1900, 2000, 20, 0),
+				makeLoadEndpoint("b", 0, 2000, 1, 4000),
 			},
 			want: []string{"a"},
 		},
@@ -317,8 +319,8 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "backlog on the sticky endpoint makes the move relatively cheap",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 3000, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 7000),
+				makeLoadEndpoint("a", 6900, 7000, 20, 3000),
+				makeLoadEndpoint("b", 0, 7000, 0, 0),
 			},
 			want: []string{"a", "b"},
 		},
@@ -326,28 +328,40 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "least-loaded sticky endpoint sets the gap",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 95, 2, 0, 100),
-				makeLoadEndpoint("c", 0, 0, 0, 2000),
+				makeLoadEndpoint("a", 1900, 2000, 20, 0),
+				makeLoadEndpoint("b", 1900, 2000, 2, 0),
+				makeLoadEndpoint("c", 0, 2000, 0, 0),
 			},
 			want: []string{"a", "b"},
 		},
 		{
-			name:   "cheapest non-sticky endpoint sets the request TTFT",
+			name:   "endpoints over the penalty are not added",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 200000),
-				makeLoadEndpoint("c", 50, 0, 0, 3000),
+				makeLoadEndpoint("a", 19000, 20000, 20, 0),
+				makeLoadEndpoint("b", 0, 20000, 0, 0),
+				makeLoadEndpoint("c", 15000, 20000, 0, 0),
 			},
-			want: []string{"a", "b", "c"},
+			want: []string{"a", "c"},
 		},
 		{
-			name:   "missing uncached tokens keeps sticky",
+			// b is idle but cold, c is warm but busy. Measuring the gap against b
+			// and the TTFT against c would release the request to b.
+			name:   "gap is measured against endpoints within the penalty",
 			config: config,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, -1),
+				makeLoadEndpoint("a", 19000, 20000, 20, 0),
+				makeLoadEndpoint("b", 0, 20000, 0, 0),
+				makeLoadEndpoint("c", 15000, 20000, 15, 0),
+			},
+			want: []string{"a"},
+		},
+		{
+			name:   "endpoint without prefix match info is not added",
+			config: config,
+			endpoints: []fwksched.Endpoint{
+				makeLoadEndpoint("a", 1900, 2000, 20, 0),
+				makeLoadEndpoint("b", -1, 2000, 0, 0),
 			},
 			want: []string{"a"},
 		},
@@ -355,8 +369,8 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 			name:   "disabled by default",
 			config: disabled,
 			endpoints: []fwksched.Endpoint{
-				makeLoadEndpoint("a", 95, 20, 0, 100),
-				makeLoadEndpoint("b", 0, 0, 0, 2000),
+				makeLoadEndpoint("a", 1900, 2000, 20, 0),
+				makeLoadEndpoint("b", 0, 2000, 0, 0),
 			},
 			want: []string{"a"},
 		},
@@ -374,7 +388,7 @@ func TestFilter_InFlightRequestGate(t *testing.T) {
 }
 
 // On the predictor path the request TTFT is the predicted TTFT, compared between
-// the best sticky and the best non-sticky endpoint.
+// each non-sticky endpoint and the best sticky endpoint.
 func TestFilter_InFlightRequestGateLatencyPredictor(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor, MaxInFlightRequestsDelta: 8})
 	endpoint := func(name string, prefixMatch int, ttft float64, requests int64) fwksched.Endpoint {
@@ -391,6 +405,9 @@ func TestFilter_InFlightRequestGateLatencyPredictor(t *testing.T) {
 
 	result = p.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", 95, 2000, 20), endpoint("b", 0, 6000, 0)})
 	assert.Equal(t, 2, len(result), "a slow sticky endpoint lowers the relative cost of moving")
+
+	result = p.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", 95, 100, 20), endpoint("b", 0, 9000, 0), endpoint("c", 50, 1000, 15)})
+	assert.Equal(t, 1, len(result), "an idle endpoint over the penalty should not set the gap")
 }
 
 func TestFactory_InvalidMaxInFlightRequestsDelta(t *testing.T) {
@@ -548,7 +565,7 @@ func TestFilter_InFlightRequestGateThroughScopedEndpoints(t *testing.T) {
 		{
 			name:      "prefillThroughput",
 			raw:       `{"affinityThreshold": 0.8, "maxTTFTPenaltyMs": 5000, "ttftSource": "prefillThroughput", "peakPrefillThroughput": 1000, "maxInFlightRequestsDelta": 8}`,
-			endpoints: []fwksched.Endpoint{makeLoadEndpoint("a", 95, 20, 0, 100), makeLoadEndpoint("b", 0, 0, 0, 2000)},
+			endpoints: []fwksched.Endpoint{makeLoadEndpoint("a", 1900, 2000, 20, 0), makeLoadEndpoint("b", 0, 2000, 0, 0)},
 		},
 		{
 			name: "latencyPredictor",

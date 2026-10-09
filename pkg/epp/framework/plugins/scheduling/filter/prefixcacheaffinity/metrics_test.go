@@ -91,9 +91,9 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			outcome: outcomeMissingSignal,
 		},
 		{
-			name:    "in-flight request gate reopens the set",
+			name:    "in-flight request gate adds non-sticky endpoints",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000, MaxInFlightRequestsDelta: 8},
-			input:   []fwksched.Endpoint{makeLoadEndpoint("a", 90, 20, 0, 100), makeLoadEndpoint("b", 10, 0, 0, 2000)},
+			input:   []fwksched.Endpoint{makeLoadEndpoint("a", 1800, 2000, 20, 0), makeLoadEndpoint("b", 200, 2000, 0, 0)},
 			outcome: outcomeRequestLoadOverride,
 		},
 	}

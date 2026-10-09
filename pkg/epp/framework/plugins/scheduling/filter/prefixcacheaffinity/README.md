@@ -63,20 +63,22 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
   `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
   is `latencyPredictor`
-- In-flight request gate (`maxInFlightRequestsDelta` > 0): if the least-loaded sticky endpoint
-  holds more than that many in-flight requests above the least-loaded non-sticky endpoint, and
-  the request's estimated TTFT on the best non-sticky endpoint exceeds its TTFT on the best
-  sticky endpoint by at most `maxTTFTPenaltyMs`, keep all endpoints. In-flight requests are
-  held until the stream ends, so this gate counts decode. The request's TTFT on an endpoint is
-  `(inFlightTokens + uncachedRequestTokens) / peakPrefillThroughput * 1000` (ms) with
-  `prefillThroughput`, or the predicted TTFT with `latencyPredictor`
+- In-flight request gate (`maxInFlightRequestsDelta` > 0): take the non-sticky endpoints where
+  the request's estimated TTFT exceeds its best TTFT on a sticky endpoint by at most
+  `maxTTFTPenaltyMs`. If the least-loaded sticky endpoint holds more than
+  `maxInFlightRequestsDelta` in-flight requests above the least-loaded of them, keep the sticky
+  endpoints plus those endpoints. In-flight requests are held until the stream ends, so this gate
+  counts decode. The request's TTFT on an endpoint is
+  `(inFlightTokens + uncachedPromptTokens) / peakPrefillThroughput * 1000` (ms) with
+  `prefillThroughput`, where the uncached prompt tokens come from the same
+  `PrefixCacheMatchInfo` that forms the sticky set, or the predicted TTFT with `latencyPredictor`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
   `PrefixCacheMatchInfo`, all prefix scores default to 0 and no endpoints pass the affinity
-  threshold, so all are kept (no-op). The in-flight request gate keeps the sticky set when either
-  set lacks `InFlightLoad`, or when no non-sticky endpoint has `UncachedRequestTokens`
-  (`prefillThroughput`) or `LatencyPredictionInfo` (`latencyPredictor`) on either side
+  threshold, so all are kept (no-op). The in-flight request gate leaves out endpoints that lack
+  `InFlightLoad`, `PrefixCacheMatchInfo` (`prefillThroughput`) or `LatencyPredictionInfo`
+  (`latencyPredictor`), and keeps the sticky set when none remain on either side
 
 ## Composition requirements
 
@@ -128,7 +130,7 @@ documents the strategy and its calibration.
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
-| `maxInFlightRequestsDelta` | `int` | No | `0` | In-flight request gap between the least-loaded sticky and non-sticky endpoints that opens the gate when the request's estimated TTFT on the best non-sticky endpoint exceeds its TTFT on the best sticky endpoint by at most `maxTTFTPenaltyMs`. Requires `maxTTFTPenaltyMs` > 0. 0 = disabled |
+| `maxInFlightRequestsDelta` | `int` | No | `0` | Adds the non-sticky endpoints where the request's TTFT is within `maxTTFTPenaltyMs` of its best sticky TTFT, once the least-loaded sticky endpoint holds more than this many in-flight requests above the least-loaded of them. Requires `maxTTFTPenaltyMs` > 0. 0 = disabled |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -140,7 +142,7 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
 - Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
-- Reads `InFlightLoad` for the in-flight request gate, plus `UncachedRequestTokens` when `ttftSource` is `prefillThroughput` (both from `in-flight-load-producer`)
+- Reads `InFlightLoad` for the in-flight request gate (from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
