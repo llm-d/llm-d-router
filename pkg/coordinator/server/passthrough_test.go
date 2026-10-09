@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -177,6 +178,26 @@ func TestPassthrough_ValidRequestIDPreserved(t *testing.T) {
 	_, _, _, headers, _ := cap.get()
 	if got := headers.Get(reqcommon.RequestIDHeaderKey); got != "req-abc-123" {
 		t.Fatalf("request_id: got %q want %q", got, "req-abc-123")
+	}
+}
+
+func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
+	// EPP schedules a request only on the endpoint x-llm-d-pin-host-port names, so a
+	// client must not reach EPP with one through the passthrough.
+	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
+	srv := newTestServerWithGateway(nil, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set(routing.EndpointPinHeader, "10.0.3.7:8000")
+	req.Header.Set("X-Keep", "kept")
+	doPassthrough(t, srv, req)
+
+	_, _, _, headers, _ := cap.get()
+	if got := headers.Values(routing.EndpointPinHeader); len(got) != 0 {
+		t.Fatalf("client %s reached the gateway: %q", routing.EndpointPinHeader, got)
+	}
+	if got := headers.Get("X-Keep"); got != "kept" {
+		t.Fatalf("X-Keep: got %q want %q, other client headers must still be forwarded", got, "kept")
 	}
 }
 

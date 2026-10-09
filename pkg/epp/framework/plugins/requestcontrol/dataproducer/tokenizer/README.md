@@ -104,7 +104,9 @@ It does not substitute the model, translate protocols, rewrite messages or
 tools, or reconstruct content from routing projections. Model rewrites happen
 before token production and apply to both rendering and forwarding.
 `vllm.prefillOnly` rewrites only the output budget fields of the render copy;
-see [Render-only output budget](#render-only-output-budget).
+see [Render-only output budget](#render-only-output-budget). `vllm.omitMMKwargs`
+adds one field to the render copy; see
+[Render responses without multimodal tensors](#render-responses-without-multimodal-tensors).
 
 The parsed payload keeps nested objects, arrays, Completions `prompt`, and
 Messages `system` as `json.RawMessage`.
@@ -161,6 +163,7 @@ EPP contract does not establish parity for them.
 | `vllm.endpointDiscovery.minModelLen` | `0` | Minimum eligible renderer context capacity. |
 | `vllm.endpointDiscovery.contextLimitLabel` | unset | Label supplying a positive context capacity, optionally bounded by probes. |
 | `vllm.prefillOnly` | `false` | Use a one-token output budget only for rendering; see [Render-only output budget](#render-only-output-budget). |
+| `vllm.omitMMKwargs` | `false` | Ask vLLM to leave processed multimodal tensors out of render responses; see [Render responses without multimodal tensors](#render-responses-without-multimodal-tensors). |
 | `vllm.timeout`             | `5s`                    | Completions timeout and minimum Chat/Messages/Responses timeout.            |
 | `vllm.mmTimeout`           | `30s`                   | Chat/Messages/Responses timeout budget, including multimodal processing.     |
 | `vllm.caCertPath`          | system CA pool          | PEM CA bundle for verifying the render endpoint when using `https://`.       |
@@ -484,6 +487,18 @@ this option does not enable partial matching or extend inference context limits.
 
 Requests with a non-null `truncate_prompt_tokens` retain their original output
 budget because automatic truncation depends on it.
+
+#### Render responses without multimodal tensors
+
+The producer reads token IDs, `mm_hashes`, and `mm_placeholders` from a render
+response. By default vLLM also returns the processed multimodal tensors in
+`features.kwargs_data`, which the producer discards and which can reach tens of
+megabytes per request. Set `vllm.omitMMKwargs: true` to add
+`"return_mm_kwargs": false` to the render copy, so vLLM leaves the tensors out
+and skips serializing them. The inference payload is unchanged. The option
+requires a vLLM version with the `return_mm_kwargs` render field; other
+versions ignore the field and return the tensors. It is false by default and
+works with `vllm.url` and `vllm.endpointDiscovery`.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 

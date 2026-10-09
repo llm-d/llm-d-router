@@ -22,6 +22,7 @@ import (
 	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 var hopByHopHeaders = map[string]bool{
@@ -35,10 +36,14 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
+// internalForwardingHeaders are set only by the coordinator; a client copy is
+// dropped, and so is a value of forward_response_headers under these names.
+// EPP routes on epp-profile and x-llm-d-pin-host-port.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
+	routing.EndpointPinHeader:             true,
 }
 
 func isForwardableHeader(name string) bool {

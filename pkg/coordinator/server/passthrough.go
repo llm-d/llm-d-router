@@ -32,6 +32,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -106,8 +107,9 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // newPassthroughProxy builds the reverse proxy that streams to the gateway.
-// The director rewrites the outbound scheme/host to the gateway and stamps the
-// decode profile and sanitized request id. Transport errors return 502; a
+// The director rewrites the outbound scheme/host to the gateway, stamps the
+// decode profile and sanitized request id, and drops a client endpoint pin,
+// which EPP routes on. Transport errors return 502; a
 // failure after the upstream response has started can only surface through
 // ErrorLog, so it is wired to the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
@@ -118,6 +120,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			r.Host = gatewayURL.Host
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
 			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
+			r.Header.Del(routing.EndpointPinHeader)
 		},
 		FlushInterval: -1,
 		Transport:     transport,
