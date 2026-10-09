@@ -165,6 +165,8 @@ func RecordError(stage string) {
 	errorsTotal.WithLabelValues(stage).Inc()
 }
 
+const toolCallingComponent = "routing_sidecar"
+
 // RecordToolCallingFieldStatuses counts observed outcomes with bounded labels.
 func RecordToolCallingFieldStatuses(statuses []toolcalling.FieldStatus) {
 	for _, result := range statuses {
@@ -182,7 +184,7 @@ func RecordToolCallingFieldStatuses(statuses []toolcalling.FieldStatus) {
 			continue
 		}
 		toolCallingFieldStatusTotal.WithLabelValues(
-			toolcalling.ComponentRoutingSidecar,
+			toolCallingComponent,
 			toolcalling.DirectionRequest,
 			string(result.Field),
 			string(result.Status),

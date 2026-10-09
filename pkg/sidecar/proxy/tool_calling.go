@@ -27,27 +27,23 @@ import (
 // asynchronous prefill must be aggregated before starting its goroutine, so
 // reporting does not require waiting for prefill to finish.
 type toolCallingRequest struct {
-	surface  toolcalling.APISurface
+	surface  reqcommon.APIType
 	original toolcalling.RequestSnapshot
 	statuses []toolcalling.FieldStatus
 }
 
 // Capture errors disable observation; callers must preserve routing behavior.
 func captureToolCallingRequest(apiType reqcommon.APIType, body []byte) (*toolCallingRequest, error) {
-	var surface toolcalling.APISurface
 	switch apiType {
-	case reqcommon.APITypeChatCompletions:
-		surface = toolcalling.APISurfaceChatCompletions
-	case reqcommon.APITypeMessages:
-		surface = toolcalling.APISurfaceMessages
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages:
 	default:
 		return nil, fmt.Errorf("unsupported tool-calling API type %s", apiType)
 	}
-	original, err := toolcalling.CaptureRequestJSON(surface, body)
+	original, err := toolcalling.CaptureRequestJSON(apiType, body)
 	if err != nil {
 		return nil, err
 	}
-	return &toolCallingRequest{surface: surface, original: original}, nil
+	return &toolCallingRequest{surface: apiType, original: original}, nil
 }
 
 // compareDispatched must be called at dispatch, after local routing checks.
@@ -72,9 +68,9 @@ func (r *toolCallingRequest) compareDispatched(body []byte) ([]toolcalling.Field
 
 // rejectFields is only for explicit rejection of the captured client fields.
 // Network failures, cancellation, and generic HTTP errors do not establish it.
-func (r *toolCallingRequest) rejectFields() {
+func (r *toolCallingRequest) rejectFields(fields ...toolcalling.Field) {
 	if r != nil {
-		r.mergeStatuses(toolcalling.RejectedFieldStatuses(r.original))
+		r.mergeStatuses(toolcalling.RejectedFieldStatuses(r.original, fields...))
 	}
 }
 
@@ -86,7 +82,7 @@ func (r *toolCallingRequest) mergeStatuses(statuses []toolcalling.FieldStatus) {
 		found := false
 		for i := range r.statuses {
 			if r.statuses[i].Field == result.Field {
-				r.statuses[i].Status = toolcalling.WorstFieldStatus(r.statuses[i].Status, result.Status)
+				r.statuses[i].Status = worstToolCallingFieldStatus(r.statuses[i].Status, result.Status)
 				found = true
 				break
 			}
@@ -102,4 +98,14 @@ func (r *toolCallingRequest) fieldStatuses() []toolcalling.FieldStatus {
 		return nil
 	}
 	return append([]toolcalling.FieldStatus(nil), r.statuses...)
+}
+
+func worstToolCallingFieldStatus(first, second toolcalling.FieldStatusValue) toolcalling.FieldStatusValue {
+	worst := toolcalling.FieldStatusPreserved
+	for _, status := range []toolcalling.FieldStatusValue{toolcalling.FieldStatusChanged, toolcalling.FieldStatusDropped, toolcalling.FieldStatusRejected} {
+		if first == status || second == status {
+			worst = status
+		}
+	}
+	return worst
 }

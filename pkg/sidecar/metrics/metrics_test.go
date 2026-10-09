@@ -143,7 +143,7 @@ func TestMetricNames(t *testing.T) {
 	requestsTotal.WithLabelValues("x")
 	disaggRequestsTotal.WithLabelValues("x")
 	errorsTotal.WithLabelValues("x")
-	toolCallingFieldStatusTotal.WithLabelValues(toolcalling.ComponentRoutingSidecar, toolcalling.DirectionRequest, string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved))
+	toolCallingFieldStatusTotal.WithLabelValues("routing_sidecar", toolcalling.DirectionRequest, string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved))
 	t.Cleanup(toolCallingFieldStatusTotal.Reset)
 
 	mfs, err := reg.Gather()

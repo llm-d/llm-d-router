@@ -113,7 +113,7 @@ func TestToolCallingRequestExplicitRejection(t *testing.T) {
 	require.NoError(t, err)
 	_, err = request.compareDispatched([]byte(`{}`))
 	require.NoError(t, err)
-	request.rejectFields()
+	request.rejectFields(toolcalling.FieldTools, toolcalling.FieldToolChoice)
 	_, err = request.compareDispatched([]byte(`{"tools":[],"tool_choice":null}`))
 	require.NoError(t, err)
 	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
@@ -121,7 +121,7 @@ func TestToolCallingRequestExplicitRejection(t *testing.T) {
 	})
 	plain, err := captureToolCallingRequest(reqcommon.APITypeMessages, []byte(`{"messages":[]}`))
 	require.NoError(t, err)
-	plain.rejectFields()
+	plain.rejectFields(toolcalling.FieldTools)
 	require.Empty(t, plain.fieldStatuses())
 }
 
@@ -132,7 +132,7 @@ func TestToolCallingRequestCaptureFailures(t *testing.T) {
 		require.Nil(t, request)
 		_, err = request.compareDispatched([]byte(`{"tools":[]}`))
 		require.NoError(t, err)
-		request.rejectFields()
+		request.rejectFields(toolcalling.FieldTools)
 		require.Empty(t, request.fieldStatuses())
 	}
 	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[]}`))
@@ -151,6 +151,46 @@ func TestToolCallingRequestUnsupportedAPI(t *testing.T) {
 	request, err := captureToolCallingRequest(reqcommon.APITypeResponses, []byte(`{"tools":[]}`))
 	require.Error(t, err)
 	require.Nil(t, request)
+}
+
+func TestToolCallingRequestRejectsOnlyIdentifiedFields(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		body   string
+		fields []toolcalling.Field
+		want   map[toolcalling.Field]toolcalling.FieldStatusValue
+	}{
+		{name: "unspecified"},
+		{name: "absent field", body: `{"tool_choice":null}`, fields: []toolcalling.Field{toolcalling.FieldTools}},
+		{name: "unsupported field", fields: []toolcalling.Field{toolcalling.FieldResponseFormat}},
+		{name: "one identified field", fields: []toolcalling.Field{toolcalling.FieldTools}, want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusRejected}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := tt.body
+			if body == "" {
+				body = `{"tools":[],"tool_choice":null,"response_format":null}`
+			}
+			request, err := captureToolCallingRequest(reqcommon.APITypeMessages, []byte(body))
+			require.NoError(t, err)
+			request.rejectFields(tt.fields...)
+			assertToolCallingStatuses(t, request.fieldStatuses(), tt.want)
+		})
+	}
+}
+
+func TestToolCallingRequestStatusPrecedence(t *testing.T) {
+	statuses := []toolcalling.FieldStatusValue{toolcalling.FieldStatusPreserved, toolcalling.FieldStatusChanged, toolcalling.FieldStatusDropped, toolcalling.FieldStatusRejected}
+	for i, first := range statuses {
+		for j, second := range statuses {
+			t.Run(string(first)+"/"+string(second), func(t *testing.T) {
+				request := &toolCallingRequest{}
+				for _, status := range []toolcalling.FieldStatusValue{first, second} {
+					request.mergeStatuses([]toolcalling.FieldStatus{{Field: toolcalling.FieldTools, Status: status, Observed: true}})
+				}
+				assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: statuses[max(i, j)]})
+			})
+		}
+	}
 }
 
 func TestToolCallingRequestOwnsSnapshot(t *testing.T) {

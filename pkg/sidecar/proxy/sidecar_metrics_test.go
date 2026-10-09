@@ -420,10 +420,8 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 
 func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 	chatBody := `{"model":"test-model","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
-	chatFields, err := toolcalling.FieldsForSurface(toolcalling.APISurfaceChatCompletions)
-	require.NoError(t, err)
-	messagesFields, err := toolcalling.FieldsForSurface(toolcalling.APISurfaceMessages)
-	require.NoError(t, err)
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	messagesFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}
 	tests := []struct {
 		name            string
 		api             reqcommon.APIType

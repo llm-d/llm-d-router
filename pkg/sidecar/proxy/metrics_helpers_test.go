@@ -51,7 +51,7 @@ func toolFieldCounters(t *testing.T) map[[2]string]float64 {
 			labels[label.GetName()] = label.GetValue()
 		}
 		require.Len(t, labels, 4)
-		require.Equal(t, toolcalling.ComponentRoutingSidecar, labels[toolcalling.MetricLabelComponent])
+		require.Equal(t, "routing_sidecar", labels[toolcalling.MetricLabelComponent])
 		require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
 		values[[2]string{labels[toolcalling.MetricLabelField], labels[toolcalling.MetricLabelStatus]}] = metric.GetCounter().GetValue()
 	}
