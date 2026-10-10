@@ -306,14 +306,16 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte
-// stream, recording multimodal placeholders on aligned boundaries.
+// stream, recording multimodal placeholders on aligned boundaries. Assistant
+// tool_calls follow the content, matching tool_use blocks in messagesBytes and
+// function_call items in appendResponsesItem.
 func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	if msg.Role != "" {
 		out = append(out, []byte(msg.Role)...)
 	}
 	if msg.Content.Raw != "" {
 		out = append(out, []byte(msg.Content.Raw)...)
-		return out, features
+		return appendChatToolCalls(out, msg.ToolCalls), features
 	}
 	for _, block := range msg.Content.Structured {
 		switch block.Type {
@@ -331,7 +333,36 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(block.InputAudio.Data, meta.audio))
 		}
 	}
-	return out, features
+	return appendChatToolCalls(out, msg.ToolCalls), features
+}
+
+// appendChatToolCalls flattens an assistant message's tool_calls: the function
+// name and its arguments. Arguments are a JSON string on the wire; an object is
+// accepted too and contributes its JSON encoding. A call of any other shape
+// contributes nothing.
+func appendChatToolCalls(out []byte, toolCalls []any) []byte {
+	for _, call := range toolCalls {
+		c, ok := call.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := c["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := fn["name"].(string); ok {
+			out = append(out, []byte(name)...)
+		}
+		switch args := fn["arguments"].(type) {
+		case string:
+			out = append(out, []byte(args)...)
+		case map[string]any:
+			if raw, err := json.Marshal(args); err == nil {
+				out = append(out, raw...)
+			}
+		}
+	}
+	return out
 }
 
 // messagesBytes flattens an Anthropic /v1/messages request into pseudo-token

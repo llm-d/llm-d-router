@@ -1267,3 +1267,40 @@ func TestEstimateBackend_MessagesToolBlocksAffectPrefix(t *testing.T) {
 	assert.NotEqual(t, hashTokens(baseOut.Prompts[0].TokenIDs), hashTokens(toolResultOut.Prompts[0].TokenIDs),
 		"tool_result content was ignored by the prefix estimator")
 }
+
+// chatEstimate decodes a /v1/chat/completions body the way the parser does and
+// runs the estimate backend on it.
+func chatEstimate(t *testing.T, raw string) []uint32 {
+	t.Helper()
+	var chat fwkrh.ChatCompletionsRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &chat))
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{ChatCompletions: &chat})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	return tp.Prompts[0].TokenIDs
+}
+
+// TestEstimateBackend_ChatToolCallsAffectPrefix asserts assistant tool_calls
+// participate in the prefix stream, as tool_use blocks do for /v1/messages and
+// function_call items do for /v1/responses.
+func TestEstimateBackend_ChatToolCallsAffectPrefix(t *testing.T) {
+	turn := func(name, args string) string {
+		call, err := json.Marshal(map[string]any{
+			"id": "call_1", "type": "function",
+			"function": map[string]any{"name": name, "arguments": args},
+		})
+		require.NoError(t, err)
+		return `{"messages":[{"role":"user","content":"run"},{"role":"assistant","content":null,"tool_calls":[` + string(call) + `]}]}`
+	}
+	noCall := chatEstimate(t, `{"messages":[{"role":"user","content":"run"},{"role":"assistant","content":null}]}`)
+	zurich := chatEstimate(t, turn("get_weather", `{"city":"Zurich"}`))
+	paris := chatEstimate(t, turn("get_weather", `{"city":"Paris"}`))
+	other := chatEstimate(t, turn("get_time", `{"city":"Zurich"}`))
+
+	assert.NotEqual(t, hashTokens(noCall), hashTokens(zurich), "tool_calls were ignored by the prefix estimator")
+	assert.NotEqual(t, hashTokens(zurich), hashTokens(paris), "tool call arguments were ignored by the prefix estimator")
+	assert.NotEqual(t, hashTokens(zurich), hashTokens(other), "tool call name was ignored by the prefix estimator")
+
+	long := chatEstimate(t, turn("write_file", strings.Repeat("x", 4000)))
+	assert.Greater(t, len(long), len(noCall)+900, "tool call arguments must count toward the estimate")
+}
