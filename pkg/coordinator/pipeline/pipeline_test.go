@@ -375,6 +375,30 @@ func TestExecute_ErrPipelineDoneIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestExecute_ResponseWrittenErrorClassified(t *testing.T) {
+	cases := []struct {
+		name     string
+		cause    error
+		wantCode string
+	}{
+		{"bad request", ErrBadRequest, coordmetrics.ErrorCodeBadRequest},
+		{"upstream", &UpstreamError{Step: "async-broker", StatusCode: http.StatusGatewayTimeout}, coordmetrics.ErrorCodeUpstream5xx},
+		{"internal", errors.New("redis down"), coordmetrics.ErrorCodeInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			stepErr := &ResponseWrittenError{Step: "async-broker", StatusCode: http.StatusServiceUnavailable, Cause: tc.cause}
+			steps := []Step{
+				&mockStep{name: "async-broker", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+			}
+			err := New(steps).Execute(context.Background(), &RequestContext{})
+			require.ErrorIs(t, err, stepErr)
+			require.InDelta(t, 1.0, stepErrorCount(t, reg, "async-broker", tc.wantCode), 1e-9)
+		})
+	}
+}
+
 // pathCount reads the execution_path_total counter for the given path under
 // the test's canonical model_name "m".
 func pathCount(t *testing.T, reg *prometheus.Registry, path string) float64 {

@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 )
@@ -234,7 +235,9 @@ func TestAsyncBrokerRejections(t *testing.T) {
 			step, _ := newAsyncTestStep(t, nil)
 			reqCtx, rec := asyncReqCtx(t, tc.body, tc.headers)
 			err := step.Execute(t.Context(), reqCtx)
-			require.True(t, errors.Is(err, pipeline.ErrPipelineDone), "want ErrPipelineDone, got %v", err)
+			require.Error(t, err)
+			require.False(t, errors.Is(err, pipeline.ErrPipelineDone), "want a step error, got %v", err)
+			assert.Equal(t, coordmetrics.ErrorCodeBadRequest, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
 			assert.Contains(t, rec.Body.String(), tc.wantMsg)
 		})
@@ -293,6 +296,20 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	assert.Equal(t, int64(1), exists)
 }
 
+func TestAsyncBrokerEnqueueFailure(t *testing.T) {
+	step, _ := newAsyncTestStep(t, nil)
+	require.NoError(t, step.rdb.Close())
+	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+		map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
+
+	err := step.Execute(t.Context(), reqCtx)
+	require.Error(t, err)
+	require.False(t, errors.Is(err, pipeline.ErrPipelineDone), "want a step error, got %v", err)
+	assert.Equal(t, coordmetrics.ErrorCodeInternal, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ENQUEUE_FAILED")
+}
+
 func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
@@ -313,6 +330,90 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	exists, err := rdb.Exists(t.Context(), key).Result()
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists)
+}
+
+func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {
+	tests := []struct {
+		name       string
+		res        api.ResultMessage
+		wantStatus int
+		wantBody   string
+		wantCode   string
+	}{
+		{
+			name:       "upstream 4xx",
+			res:        api.ResultMessage{StatusCode: http.StatusNotFound, Payload: `{"error":"model not found"}`},
+			wantStatus: http.StatusNotFound,
+			wantBody:   "model not found",
+			wantCode:   coordmetrics.ErrorCodeUpstream4xx,
+		},
+		{
+			name:       "upstream 5xx",
+			res:        api.ResultMessage{StatusCode: http.StatusInternalServerError, Payload: `{"error":"worker failed"}`},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   "worker failed",
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "malformed status",
+			res:        api.ResultMessage{StatusCode: 42, Payload: `{}`},
+			wantStatus: http.StatusBadGateway,
+			wantBody:   "MALFORMED_RESULT",
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "gate dropped",
+			res:        api.ResultMessage{ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "dropped"},
+			wantStatus: http.StatusTooManyRequests,
+			wantBody:   api.ErrCodeGateDropped,
+			wantCode:   coordmetrics.ErrorCodeUpstream4xx,
+		},
+		{
+			name:       "deadline exceeded",
+			res:        api.ResultMessage{ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "too slow"},
+			wantStatus: http.StatusGatewayTimeout,
+			wantBody:   api.ErrCodeDeadlineExceeded,
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "invalid request",
+			res:        api.ResultMessage{ErrorCode: api.ErrCodeInvalidRequest, ErrorMessage: "bad payload"},
+			wantStatus: http.StatusBadRequest,
+			wantBody:   api.ErrCodeInvalidRequest,
+			wantCode:   coordmetrics.ErrorCodeUpstream4xx,
+		},
+		{
+			name:       "cancelled",
+			res:        api.ResultMessage{ErrorCode: api.ErrCodeCancelled, ErrorMessage: "cancelled"},
+			wantStatus: 499,
+			wantBody:   api.ErrCodeCancelled,
+			wantCode:   coordmetrics.ErrorCodeUpstream4xx,
+		},
+		{
+			name:       "inference error",
+			res:        api.ResultMessage{ErrorCode: api.ErrCodeInferenceError, ErrorMessage: "worker crashed"},
+			wantStatus: http.StatusBadGateway,
+			wantBody:   api.ErrCodeInferenceError,
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+				map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
+			res, err := json.Marshal(tc.res)
+			require.NoError(t, err)
+			require.NoError(t, rdb.LPush(t.Context(), resultKey("team-a", "req-test-1"), string(res)).Err())
+
+			err = step.Execute(t.Context(), reqCtx)
+			require.Error(t, err)
+			require.False(t, errors.Is(err, pipeline.ErrPipelineDone), "want a step error, got %v", err)
+			assert.Equal(t, tc.wantCode, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
+			assert.Equal(t, tc.wantStatus, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.wantBody)
+		})
+	}
 }
 
 func TestAsyncBrokerWaitCapFallsBackToPending(t *testing.T) {
@@ -337,7 +438,9 @@ func TestAsyncBrokerWaitDeadlineAnswersTimeout(t *testing.T) {
 
 	start := time.Now()
 	err := step.Execute(t.Context(), reqCtx)
-	require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
+	require.Error(t, err)
+	require.False(t, errors.Is(err, pipeline.ErrPipelineDone), "want a step error, got %v", err)
+	assert.Equal(t, coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 	assert.GreaterOrEqual(t, time.Since(start), time.Second)
 	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
 	assert.Contains(t, rec.Body.String(), api.ErrCodeDeadlineExceeded)
@@ -671,6 +774,23 @@ func TestAsyncBrokerRetryReattaches(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists, "retry should clear the tombstone")
 		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("wait retry delivers a stored error", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		res, err := json.Marshal(api.ResultMessage{StatusCode: http.StatusInternalServerError, Payload: `{"error":"worker failed"}`})
+		require.NoError(t, err)
+		require.NoError(t, rdb.LPush(t.Context(), resultKey("team-a", "job-r5"), string(res)).Err())
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
+			defaultModeHeader: "wait", defaultTenantHeader: "team-a", "X-Request-Id": "job-r5",
+		})
+		reqCtx.RequestID = "job-r5"
+		err = step.Execute(t.Context(), reqCtx)
+		require.Error(t, err)
+		require.False(t, errors.Is(err, pipeline.ErrPipelineDone), "want a step error, got %v", err)
+		assert.Equal(t, coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assert.Equal(t, int64(0), queueLen(t, rdb), "no enqueue for a completed request")
 	})
 
 	t.Run("wait retry delivers the stored result", func(t *testing.T) {
