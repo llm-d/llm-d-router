@@ -1,0 +1,96 @@
+# Automatically adds open, non-draft PRs to the GitHub merge queue once all required
+# status checks pass, the PR has an APPROVED review decision, and no blocking labels
+# (`hold`, `do-not-merge/hold`, `do-not-merge/work-in-progress`, `needs-rebase`,
+# `re-approve`) are present.
+
+name: Auto Merge Queue
+
+on:
+  workflow_run:
+    workflows:
+      - "CI - Lint"
+      - "CI - Test"
+      - "CI - Coordinator Test"
+      - "CI - Dependency Review"
+      - "Check Typos"
+      - "Check Signed Commits in PR"
+      - "Markdown Link Checker"
+      - "Validate Release Note"
+      - "Hold gate"
+      - "PR Needs Rebase"
+      - "PR Review Gate"
+    types: [completed]
+  pull_request_target:
+    types: [labeled, unlabeled, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to evaluate"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-merge-queue-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  enqueue:
+    name: Enqueue ready PR to merge queue
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'
+      ) ||
+      (
+        github.event_name == 'pull_request_target' &&
+        github.event.pull_request.draft == false &&
+        (
+          github.event.action == 'unlabeled' ||
+          github.event.action == 'ready_for_review' ||
+          github.event.action == 'reopened' ||
+          (
+            github.event.action == 'labeled' &&
+            (github.event.label.name == 'lgtm' || github.event.label.name == 'approved')
+          )
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        (contains(github.event.comment.body, '/lgtm') || contains(github.event.comment.body, '/approve'))
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: |
+            .github/scripts/pr-merge-queue.cjs
+            .github/scripts/pr-needs-rebase.cjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: ${{ secrets.RELEASE_NOTES_APP_ID != '' && secrets.RELEASE_NOTES_APP_PRIVATE_KEY != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
+
+      - name: Evaluate and enqueue pull request
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          script: |
+            const { runMergeQueueCheck } = require('./.github/scripts/pr-merge-queue.cjs');
+            await runMergeQueueCheck({ github, context });
