@@ -1648,3 +1648,71 @@ func TestBlockStoredEvent_LoRAExtraKeysMatchRequestKeys(t *testing.T) {
 		})
 	}
 }
+
+// A store whose engine blocks are smaller than the canonical block and whose
+// parent ended mid canonical block cannot be chained. It is counted as skipped
+// rather than logged as an error; a canonical-size store with an unknown parent
+// is not counted under that reason.
+func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
+	groupIdx := 5
+	tests := []struct {
+		name        string
+		events      []GenericEvent
+		childHash   uint64
+		wantSkipped float64
+	}{
+		{
+			name: "sub-canonical child of a mid-block parent",
+			events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{7001},
+					Tokens:          makeTokens(16),
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{7002},
+					Tokens:          makeTokens(32)[16:],
+					ParentHash:      7001,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+			},
+			childHash:   7002,
+			wantSkipped: 1,
+		},
+		{
+			name: "canonical-size child of an unknown parent",
+			events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{8002},
+					Tokens:          makeTokens(64),
+					ParentHash:      8001,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       64,
+				},
+			},
+			childHash:   8002,
+			wantSkipped: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, _ := newTestPool(t, 64)
+			skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+				cacheKindLabel(KVCacheSpecKindFullAttention), "unresolved_sub_canonical_parent")
+			before := counterValue(t, skipped)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: tt.events}, "pod-a", "test-model")
+
+			assert.Equal(t, tt.wantSkipped, counterValue(t, skipped)-before)
+			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(tt.childHash))
+			assert.Error(t, err, "a store with an unresolved parent is not indexed")
+		})
+	}
+}
