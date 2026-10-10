@@ -59,6 +59,7 @@ var (
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
 	_ fwkdl.Registrant            = &ThunderAgent{}
 	_ fwkdl.EndpointExtractor     = &ThunderAgent{}
+	_ fwksched.Scorer             = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
