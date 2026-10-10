@@ -352,9 +352,10 @@ type Plugin struct {
 
 // compile-time assertions.
 var (
-	_ requestcontrol.DataProducer         = &Plugin{}
-	_ requestcontrol.TimeoutAwareProducer = &Plugin{}
-	_ datalayer.Registrant                = &Plugin{}
+	_ requestcontrol.DataProducer          = &Plugin{}
+	_ requestcontrol.AdmissionDataProducer = &Plugin{}
+	_ requestcontrol.TimeoutAwareProducer  = &Plugin{}
+	_ datalayer.Registrant                 = &Plugin{}
 )
 
 // TypedName returns the typed name of the plugin.
@@ -388,6 +389,10 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 		return ta.produceTimeout()
 	}
 	return 0
+}
+
+func (p *Plugin) PrepareForAdmission(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
+	return p.Produce(ctx, request, endpoints)
 }
 
 // Produce derives the request's TokenizedRequest via the configured backend and

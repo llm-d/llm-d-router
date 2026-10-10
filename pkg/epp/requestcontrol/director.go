@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -260,8 +261,18 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
 
-	// Admit may block until flow control admits the request.
-	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
+	var prepared *contracts.PreparedRequest
+	if fc, ok := d.admissionController.(*FlowControlAdmissionController); ok {
+		if _, ok := fc.flowController.(preparingFlowController); ok {
+			prepared, err = fc.admitPrepared(ctx, reqCtx, priority,
+				d.queuedPreparation(reqCtx.SchedulingRequest, reqCtx.Request.Metadata))
+		} else {
+			err = fc.Admit(ctx, reqCtx, priority)
+		}
+	} else {
+		err = d.admissionController.Admit(ctx, reqCtx, priority)
+	}
+	if err != nil {
 		return reqCtx, err
 	}
 	reservationPending := false
@@ -275,28 +286,51 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}()
 	}
 
-	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
-	if len(endpointCandidates) == 0 {
-		return reqCtx, errcommon.Error{
-			Code:    errcommon.ServiceUnavailable,
-			Msg:     "failed to find endpoint candidates for serving the request",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	var snapshotOfCandidatePods []fwksched.Endpoint
+	if prepared != nil {
+		if prepared.Err != nil {
+			return reqCtx, prepared.Err
 		}
-	}
+		if prepared.Request.Body != nil {
+			inferenceRequestBody.TokenizedRequest = prepared.Request.Body.TokenizedRequest
+		}
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = make(map[string]string)
+		}
+		for key, value := range prepared.Request.Headers {
+			reqCtx.Request.Headers[key] = value
+		}
+		reqCtx.SchedulingRequest = prepared.Request
+		reqCtx.SchedulingRequest.Headers = reqCtx.Request.Headers
+		reqCtx.SchedulingRequest.Body = inferenceRequestBody
+		snapshotOfCandidatePods = prepared.Endpoints
+	} else {
 
-	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
-	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if len(snapshotOfCandidatePods) == 0 {
-		return reqCtx, errcommon.Error{
-			Code:    errcommon.ServiceUnavailable,
-			Msg:     "screeners eliminated all endpoint candidates",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
+		if len(endpointCandidates) == 0 {
+			return reqCtx, errcommon.Error{
+				Code:    errcommon.ServiceUnavailable,
+				Msg:     "failed to find endpoint candidates for serving the request",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+			}
+		}
+
+		snapshotOfCandidatePods = d.toSchedulerEndpoints(endpointCandidates)
+		snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+		if len(snapshotOfCandidatePods) == 0 {
+			return reqCtx, errcommon.Error{
+				Code:    errcommon.ServiceUnavailable,
+				Msg:     "screeners eliminated all endpoint candidates",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+			}
 		}
 	}
-	// Prepare per request data by running DataProducer plugins.
-	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if err != nil {
-		// Don't fail the request if DataProducer plugins fail.
+	// Ordinary producer hooks retain their scheduling-time lifecycle.
+	var preparationErrors map[fwkplugin.TypedName]error
+	if prepared != nil {
+		preparationErrors = prepared.ProducerErrors
+	}
+	if err := d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods, preparationErrors); err != nil {
 		logger.Error(err, "failed to prepare per request data")
 	}
 
@@ -305,7 +339,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 
-	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	var result *fwksched.SchedulingResult
+	if scheduler, ok := d.scheduler.(interface {
+		ScheduleWithAdmission(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint,
+			map[string][]fwksched.Endpoint) (*fwksched.SchedulingResult, error)
+	}); ok && prepared != nil {
+		result, err = scheduler.ScheduleWithAdmission(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods, prepared.ProfileEndpoints)
+	} else {
+		result, err = d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	}
 	if err != nil {
 		// Preserve typed errcommon.Error from the scheduler so its status code
 		// (e.g. PreconditionFailed) reaches Envoy intact, even if the error
@@ -738,7 +780,7 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 }
 
 func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, preparationErrors ...map[fwkplugin.TypedName]error) error {
 	plugins := d.requestControlPlugins.dataProducerPlugins
 	if len(plugins) == 0 {
 		return nil
@@ -746,6 +788,9 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	// Each producer runs under its own timeout so a slow one does not extend the
 	// budget of the others.
 	for _, p := range plugins {
+		if len(preparationErrors) > 0 && preparationErrors[0][p.TypedName()] != nil {
+			return preparationErrors[0][p.TypedName()]
+		}
 		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			return err
 		}

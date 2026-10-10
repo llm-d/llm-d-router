@@ -38,6 +38,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -200,6 +201,44 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 		evaluated = true
 	}
 	return maxSat
+}
+
+// RequestCostRequired reports whether a detector or any of its composite
+// children requires preparation of the queued request's projected cost.
+func RequestCostRequired(sd flowcontrol.SaturationDetector) bool {
+	if d, ok := sd.(*detector); ok {
+		for _, child := range d.children {
+			if RequestCostRequired(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if d, ok := sd.(interface{ RequiresRequestCost() bool }); ok {
+		return d.RequiresRequestCost()
+	}
+	return false
+}
+
+// FilterForDispatch applies the detector's scheduling limits to prepared
+// candidates. Composite children retain their configured stage scope without
+// making the composite a scheduling Filter.
+func FilterForDispatch(ctx context.Context, sd flowcontrol.SaturationDetector,
+	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+	if d, ok := sd.(*detector); ok {
+		stage := flowcontrol.SaturationStageFromContext(ctx)
+		for i, child := range d.children {
+			if stage != "" && d.childStages[i] != nil && !slices.Contains(d.childStages[i], stage) {
+				continue
+			}
+			endpoints = FilterForDispatch(ctx, child, request, endpoints)
+		}
+		return endpoints
+	}
+	if filter, ok := sd.(scheduling.Filter); ok {
+		return filter.Filter(ctx, request, endpoints)
+	}
+	return endpoints
 }
 
 // ReserveDispatch forwards a flow-control dispatch reservation to every child that tracks

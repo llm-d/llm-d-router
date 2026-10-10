@@ -38,6 +38,28 @@ import (
 
 const cleanEndpoint = "clean-endpoint"
 
+func TestRequiresRequestCost(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{name: "defaults", config: `{}`},
+		{name: "requests-open", config: `{"concurrencyMode":"requests","failOpen":true}`},
+		{name: "requests-closed", config: `{"concurrencyMode":"requests","failOpen":false}`},
+		{name: "tokens-open", config: `{"concurrencyMode":"tokens","failOpen":true}`},
+		{name: "tokens-closed", config: `{"concurrencyMode":"tokens","failOpen":false}`, want: true},
+		{name: "hybrid-open", config: `{"concurrencyMode":"hybrid","failOpen":true}`},
+		{name: "hybrid-closed", config: `{"concurrencyMode":"hybrid","failOpen":false}`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := ConcurrencyDetectorFactory("request-cost", fwkplugin.StrictDecoder([]byte(tc.config)), fwkplugin.NewEppHandle(t.Context(), nil))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, p.(*detector).RequiresRequestCost())
+		})
+	}
+}
+
 // localRegistry is a thread-safe storage for simulated endpoint load.
 type localRegistry struct {
 	mu     sync.RWMutex

@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -248,6 +249,18 @@ func (fc *FlowController) EnqueueAndWait(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
 ) (types.QueueOutcome, error) {
+	_, outcome, err := fc.EnqueueAndWaitPrepared(ctx, req, nil)
+	return outcome, err
+}
+
+// EnqueueAndWaitPrepared prepares request data while the request stays
+// queued. The returned snapshot is valid only for a dispatched outcome.
+func (fc *FlowController) EnqueueAndWaitPrepared(ctx context.Context, req flowcontrol.FlowControlRequest,
+	prepare contracts.PrepareRequest) (*contracts.PreparedRequest, types.QueueOutcome, error) {
+	if !composite.RequestCostRequired(fc.saturationDetector) {
+		prepare = nil
+	}
+	var prepared *contracts.PreparedRequest
 	flowKey := req.FlowKey()
 	priority := strconv.Itoa(flowKey.Priority)
 	reqBytes := req.ByteSize()
@@ -290,7 +303,7 @@ func (fc *FlowController) EnqueueAndWait(
 		// Attempt to distribute the request once, passing the active connection.
 		// effectiveReq carries the fallback flow key when the requested band was not provisioned, so the
 		// item is enqueued under the band that was actually leased.
-		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, saturationTTL, conn)
+		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, saturationTTL, conn, prepare)
 		if err != nil {
 			// Distribution failed terminally (e.g., context cancelled during blocking submit).
 			// The item has already been finalized by tryDistribution, and err is its finalized error.
@@ -300,7 +313,11 @@ func (fc *FlowController) EnqueueAndWait(
 		// Distribution was successful; ownership of the item has been transferred to a processor.
 		// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
 		// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
-		return fc.awaitFinalization(reqCtx, item)
+		err = fc.awaitFinalization(reqCtx, item)
+		if err == nil {
+			prepared = item.PreparedRequest()
+		}
+		return err
 	})
 
 	// Every finalization path wraps a family sentinel. An error without one comes from the lease machinery
@@ -318,7 +335,7 @@ func (fc *FlowController) EnqueueAndWait(
 
 	metrics.IncFlowControlRequestsTotal(finalOutcome.String(), priority, req.InferencePoolName())
 
-	return finalOutcome, err
+	return prepared, finalOutcome, err
 }
 
 // ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
@@ -385,9 +402,13 @@ func (fc *FlowController) tryDistribution(
 	enqueueTime time.Time,
 	saturationTTL time.Duration,
 	conn contracts.ActiveFlowConnection,
+	preparation ...contracts.PrepareRequest,
 ) (*internal.FlowItem, error) {
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
 	item := internal.NewItem(req, saturationTTL, enqueueTime, fc.logger)
+	if len(preparation) > 0 {
+		item.SetPreparation(reqCtx, preparation[0])
+	}
 
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())

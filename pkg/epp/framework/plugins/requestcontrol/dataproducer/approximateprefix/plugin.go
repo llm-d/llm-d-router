@@ -56,9 +56,10 @@ const (
 var minBlockSizeTokens = 64
 
 var (
-	_ requestcontrol.DataProducer = &dataProducer{}
-	_ requestcontrol.PreRequest   = &dataProducer{}
-	_ plugin.StateDumper          = &dataProducer{}
+	_ requestcontrol.DataProducer          = &dataProducer{}
+	_ requestcontrol.AdmissionDataProducer = &dataProducer{}
+	_ requestcontrol.PreRequest            = &dataProducer{}
+	_ plugin.StateDumper                   = &dataProducer{}
 )
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
@@ -127,7 +128,10 @@ func (p *dataProducer) snapshotState() prefixIndexState {
 
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	return map[plugin.DataKey]any{
+		p.dk:             attrprefix.PrefixCacheMatchInfo{},
+		p.admissionKey(): admissionPrefix{},
+	}
 }
 
 // Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
@@ -232,6 +236,25 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
+	prepared, ok := fwksched.ReadRequestAttribute[*admissionPrefix](request, p.admissionKey())
+	if !ok || prepared == nil {
+		prepared = p.matchPrefix(ctx, request, pods)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.publishPrefix(prepared, pods)
+	state := *prepared.state
+	state.BestAvailableCachedTokens = 0
+	for _, pod := range pods {
+		state.BestAvailableCachedTokens = max(state.BestAvailableCachedTokens,
+			state.PredictedCachedTokens[ServerID(pod.GetMetadata().ID)])
+	}
+	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), &state)
+	return nil
+}
+
+func (p *dataProducer) matchPrefix(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) *admissionPrefix {
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
@@ -260,23 +283,13 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		v.Info("Prefix cache match", "matchedBlocks", matched, "totalBlocks", totalBlocks)
 	}
 
-	bestAvailable := 0
-	for _, pod := range pods {
-		id := ServerID(pod.GetMetadata().ID)
-		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(prefixCacheServers[id], totalBlocks, blockSize))
-		bestAvailable = max(bestAvailable, predictedCachedTokens[id])
-	}
-
 	state := &SchedulingContextState{
-		PerPromptHashes:           perPromptHashes,
-		PrefixCacheServers:        prefixCacheServers,
-		PredictedCachedTokens:     predictedCachedTokens,
-		BestAvailableCachedTokens: bestAvailable,
+		PerPromptHashes:       perPromptHashes,
+		PrefixCacheServers:    prefixCacheServers,
+		PredictedCachedTokens: predictedCachedTokens,
 	}
 
-	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
-
-	return nil
+	return &admissionPrefix{state: state, totalBlocks: totalBlocks, blockSize: blockSize}
 }
 
 // PreRequest records in the shared indexer the result of the scheduling selection.

@@ -126,6 +126,7 @@ var (
 	_ requestcontrol.PreRequest            = &InFlightLoadProducer{}
 	_ requestcontrol.ResponseBodyProcessor = &InFlightLoadProducer{}
 	_ requestcontrol.DataProducer          = &InFlightLoadProducer{}
+	_ requestcontrol.AdmissionCostProducer = &InFlightLoadProducer{}
 	_ datalayer.EndpointExtractor          = (*InFlightLoadProducer)(nil)
 	_ datalayer.Registrant                 = &InFlightLoadProducer{}
 	_ datalayer.CrossReplicaContributor    = (*InFlightLoadProducer)(nil)
@@ -384,6 +385,18 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 }
 
 func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	return p.prepareCosts(request, endpoints, true)
+}
+
+func (p *InFlightLoadProducer) PrepareForAdmission(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	return p.Produce(ctx, request, endpoints)
+}
+
+func (p *InFlightLoadProducer) PrepareWithoutPrefix(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	return p.prepareCosts(request, endpoints, false)
+}
+
+func (p *InFlightLoadProducer) prepareCosts(request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, usePrefix bool) error {
 	var inputTokens int64
 	if request != nil {
 		inputTokens = p.tokenEstimator.EstimateInput(request)
@@ -394,7 +407,11 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			continue
 		}
 		if request != nil {
-			tokens := p.estimateRequestTokens(e, request, inputTokens)
+			adjustedInput := nonNeg(inputTokens)
+			if usePrefix {
+				adjustedInput = uncachedInputTokens(e, inputTokens, p.prefixMatchInfoDK)
+			}
+			tokens := p.roleRequestTokens(e, request, adjustedInput)
 			p.uncachedRequestTokensSlot.Put(e, &attrconcurrency.UncachedRequestTokens{
 				Tokens: tokens,
 			})
@@ -509,7 +526,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
+	return p.roleRequestTokens(endpoint, request, adjustedInput)
+}
 
+func (p *InFlightLoadProducer) roleRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, adjustedInput int64) int64 {
 	// In P/D disaggregation the load is role-specific:
 	//   prefill-only endpoint -> input tokens (it processes the prompt, not the output)
 	//   decode-only endpoint  -> estimated output tokens (it generates the output; the
@@ -727,7 +747,9 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 		tail = 0
 	}
 
-	return uncachedIndexed + tail
+	// Approximate prefix matching includes partial final blocks. Their rounded
+	// block length cannot add work beyond the complete tokenized prompt.
+	return min(nonNeg(inputTokens), uncachedIndexed+tail)
 }
 
 func nonNeg(v int64) int64 {
