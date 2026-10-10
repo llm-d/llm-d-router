@@ -38,6 +38,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	partTypeAnthropicImage      = "image"
+	partTypeAnthropicToolResult = "tool_result"
+)
+
 // Multimodal content types that need encoder processing.
 var mmTypes = map[string]bool{
 	reqcommon.PartTypeImageURL:   true,
@@ -132,7 +137,8 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 	// messages entry and a Responses input item land here, so the line names
 	// neither field and carries apiType instead.
 	droppedTurns := 0
-	collect := func(parts []any) {
+	var collect func(parts []any, role string, inToolResult bool)
+	collect = func(parts []any, role string, inToolResult bool) {
 		for _, part := range parts {
 			partMap, ok := part.(map[string]any)
 			if !ok {
@@ -140,6 +146,39 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			}
 			partType, ok := partMap[reqcommon.FieldType].(string)
 			if !ok {
+				continue
+			}
+
+			if apiType == reqcommon.APITypeMessages {
+				// Anthropic image blocks are not a chat part. The encoder is
+				// posted at /v1/chat/completions, which only primes image_url,
+				// so reshape before the part is forwarded as-is. vLLM loads
+				// tool_result images only on user turns and only one level
+				// deep, keeps nothing but text on system turns, and rejects
+				// chat part types on /v1/messages, so priming any of those
+				// would add an encoder call or turn a served request into a 502.
+				switch {
+				case partType == partTypeAnthropicToolResult:
+					if role == "user" && !inToolResult {
+						if nested, ok := partMap[reqcommon.FieldContent].([]any); ok {
+							collect(nested, role, true)
+						}
+					}
+				case partType == partTypeAnthropicImage:
+					if role == "system" {
+						continue
+					}
+					converted, ok := anthropicImagePart(partMap)
+					if !ok {
+						logger.V(logging.DEBUG).Info("skipping anthropic image the encoder cannot be primed with")
+						droppedParts++
+						continue
+					}
+					items = append(items, converted)
+				case !inToolResult && (mmTypes[partType] || partType == reqcommon.PartTypeInputImage):
+					logger.V(logging.DEBUG).Info("skipping content part the Messages API does not define", "type", partType, "apiType", apiType)
+					droppedParts++
+				}
 				continue
 			}
 
@@ -182,8 +221,9 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			droppedTurns++
 			continue
 		}
+		role, _ := turn[reqcommon.FieldRole].(string)
 		for _, array := range reqcommon.ItemPartArrays(turn, apiType) {
-			collect(array.Parts)
+			collect(array.Parts, role, false)
 		}
 	}
 
@@ -201,6 +241,39 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 
 // mmItemsForFanout extracts the fanout items for one request, tagging the
 // extraction logs with requestID.
+// anthropicImagePart turns a Messages API image block into the image_url
+// part vLLM's chat-completions encoder parser primes. A url source is copied
+// through. vLLM reads any other source as base64, so one with data becomes a
+// data URL whatever its type says.
+func anthropicImagePart(part map[string]any) (map[string]any, bool) {
+	source, ok := part["source"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if source["type"] == "url" {
+		rawURL, _ := source["url"].(string)
+		if rawURL == "" {
+			return nil, false
+		}
+		return map[string]any{
+			"type":      reqcommon.PartTypeImageURL,
+			"image_url": map[string]any{"url": rawURL},
+		}, true
+	}
+	data, _ := source["data"].(string)
+	if data == "" {
+		return nil, false
+	}
+	mediaType, _ := source["media_type"].(string)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return map[string]any{
+		"type":      reqcommon.PartTypeImageURL,
+		"image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data},
+	}, true
+}
+
 func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
 	return extractMMItems(s.logger.WithValues("requestID", requestID), originalRequest, apiType)
 }
