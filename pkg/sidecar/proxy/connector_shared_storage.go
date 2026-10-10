@@ -234,6 +234,15 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 // hasCacheThresholdFinishReason checks if a parsed response contains cache_threshold finish reason.
 func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
+	if stop, ok := response["stop_reason"].(string); ok && stop == finishReasonCacheThreshold {
+		return true
+	}
+	if delta, ok := response["delta"].(map[string]any); ok {
+		if stop, ok := delta["stop_reason"].(string); ok && stop == finishReasonCacheThreshold {
+			return true
+		}
+	}
+
 	choices, ok := response[responseFieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return false
