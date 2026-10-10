@@ -133,7 +133,11 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	_, execErr := pipe.Exec(ctx)
-	if execErr != nil {
+	if execErr != nil && isPipelineFailure(results) {
+		// At least one command failed with something other than a per-key
+		// type conflict: the pipeline round-trip itself broke (for example
+		// the connection dropped), not just one key. There is no partial
+		// result worth salvaging.
 		return nil, fmt.Errorf("redis pipeline execution failed: %w", execErr)
 	}
 
@@ -172,6 +176,21 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	return podsPerKey, nil
+}
+
+// isPipelineFailure reports whether a non-nil pipe.Exec error is a
+// transport/server-level failure rather than per-key type conflicts. A
+// connection, timeout, or server-wide failure fails at least one command
+// with an error other than WRONGTYPE; a key-type collision (for example a
+// stale key of the wrong type sharing the request-key namespace) only ever
+// produces WRONGTYPE, even when it is the only key in the batch.
+func isPipelineFailure(results []*redis.StringSliceCmd) bool {
+	for _, cmd := range results {
+		if err := cmd.Err(); err != nil && !redis.HasErrorPrefix(err, "WRONGTYPE") {
+			return true
+		}
+	}
+	return false
 }
 
 // Add adds a set of keys and their associated pod entries to the index backend.

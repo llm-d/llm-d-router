@@ -21,6 +21,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	. "github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -106,4 +107,93 @@ func TestRedisBatchEvictPreservesMappingAndPrunesNext(t *testing.T) {
 	require.NoError(t, err)
 	_, err = index.GetRequestKey(ctx, 12)
 	require.Error(t, err)
+}
+
+// TestRedisLookup_OneBadKeyDoesNotDiscardOtherMatches verifies that a single
+// key with a Redis type conflict (for example a stale key of the wrong type
+// sharing the request-key namespace) does not fail keys elsewhere in the
+// same Lookup call.
+func TestRedisLookup_OneBadKeyDoesNotDiscardOtherMatches(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	goodKey := BlockHash(111)
+	err = index.Add(t.Context(), nil, []BlockHash{goodKey},
+		[]PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}})
+	require.NoError(t, err)
+
+	// Request keys carry no namespace prefix, so a key of the wrong Redis
+	// type can collide with one.
+	badKey := BlockHash(222)
+	require.NoError(t, server.Set(badKey.String(), "not-a-hash"))
+
+	result, err := index.Lookup(t.Context(), []BlockHash{goodKey, badKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Contains(t, result, goodKey)
+	require.NotContains(t, result, badKey)
+}
+
+// TestRedisLookup_ConnectionFailureReturnsError verifies that a Lookup call
+// still reports an error when the pipeline round-trip fails outright, rather
+// than silently returning an empty result.
+func TestRedisLookup_ConnectionFailureReturnsError(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	server.Close()
+
+	result, err := index.Lookup(t.Context(), []BlockHash{111, 222}, sets.Set[string]{})
+	require.Error(t, err)
+	require.Empty(t, result)
+}
+
+// TestRedisLookup_SingleBadKeyIsNotAPipelineFailure verifies that a Lookup
+// call for exactly one key -- the shape every single-block prompt uses --
+// does not misclassify that key's own WRONGTYPE conflict as a pipeline
+// round-trip failure. len(results) == 1 made every result error, which is
+// exactly the shape a genuine connection failure also produces.
+func TestRedisLookup_SingleBadKeyIsNotAPipelineFailure(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	badKey := BlockHash(222)
+	require.NoError(t, server.Set(badKey.String(), "not-a-hash"))
+
+	result, err := index.Lookup(t.Context(), []BlockHash{badKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Empty(t, result)
+}
+
+// TestRedisLookup_AllKeysBadIsNotAPipelineFailure verifies that a Lookup
+// call where every key hits a WRONGTYPE conflict reports the same outcome
+// as a normal zero-block cache miss (no error, empty result), not a
+// pipeline failure -- the same prefix-chain shape as
+// TestRedisLookup_SingleBadKeyIsNotAPipelineFailure, just with more than
+// one key all erroring the same way.
+func TestRedisLookup_AllKeysBadIsNotAPipelineFailure(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	badKey1, badKey2 := BlockHash(222), BlockHash(333)
+	require.NoError(t, server.Set(badKey1.String(), "not-a-hash"))
+	require.NoError(t, server.Set(badKey2.String(), "not-a-hash"))
+
+	result, err := index.Lookup(t.Context(), []BlockHash{badKey1, badKey2}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Empty(t, result)
 }
