@@ -48,9 +48,9 @@ func TestSpeculativePrefillWarmsSelectedDataParallelDecoder(t *testing.T) {
 	}
 
 	originalBody := map[string]any{
-		requestFieldMessages:  json.RawMessage(`[{"role":"user","content":"Hi"}]`),
-		requestFieldMaxTokens: float64(128),
-		requestFieldStream:    true,
+		reqcommon.FieldMessages:  json.RawMessage(`[{"role":"user","content":"Hi"}]`),
+		reqcommon.FieldMaxTokens: float64(128),
+		reqcommon.FieldStream:    true,
 	}
 	var released atomic.Bool
 	s.triggerSpeculativePrefill(context.Background(), originalBody, "Hello from decode", nil, selectedHostPort, func() { released.Store(true) }, nil)
@@ -64,15 +64,15 @@ func TestSpeculativePrefillWarmsSelectedDataParallelDecoder(t *testing.T) {
 	if got := selectedRankRequests.Load(); got != 1 {
 		t.Fatalf("expected selected data-parallel decoder to be warmed once, got %d requests", got)
 	}
-	if warmupBody[requestFieldMaxTokens] != float64(1) {
-		t.Fatalf("expected max_tokens to be capped to 1, got %#v", warmupBody[requestFieldMaxTokens])
+	if warmupBody[reqcommon.FieldMaxTokens] != float64(1) {
+		t.Fatalf("expected max_tokens to be capped to 1, got %#v", warmupBody[reqcommon.FieldMaxTokens])
 	}
-	if warmupBody[requestFieldStream] != false {
-		t.Fatalf("expected stream to be disabled, got %#v", warmupBody[requestFieldStream])
+	if warmupBody[reqcommon.FieldStream] != false {
+		t.Fatalf("expected stream to be disabled, got %#v", warmupBody[reqcommon.FieldStream])
 	}
-	messages, ok := warmupBody[requestFieldMessages].([]any)
+	messages, ok := warmupBody[reqcommon.FieldMessages].([]any)
 	if !ok {
-		t.Fatalf("expected messages array, got %T", warmupBody[requestFieldMessages])
+		t.Fatalf("expected messages array, got %T", warmupBody[reqcommon.FieldMessages])
 	}
 	if len(messages) != 3 {
 		t.Fatalf("expected original, assistant, and placeholder messages, got %d", len(messages))
@@ -81,7 +81,7 @@ func TestSpeculativePrefillWarmsSelectedDataParallelDecoder(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected assistant message object, got %T", messages[1])
 	}
-	if assistantMessage[requestFieldRole] != roleAssistant || assistantMessage[requestFieldContent] != "Hello from decode" {
+	if assistantMessage[reqcommon.FieldRole] != roleAssistant || assistantMessage[reqcommon.FieldContent] != "Hello from decode" {
 		t.Fatalf("unexpected assistant message: %#v", assistantMessage)
 	}
 }
@@ -96,7 +96,7 @@ func TestSpeculativePrefillSkipsMissingDataParallelDecoder(t *testing.T) {
 	})
 
 	originalBody := map[string]any{
-		requestFieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
+		reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
 	}
 	var released atomic.Bool
 	s.triggerSpeculativePrefill(context.Background(), originalBody, "Hello from decode", nil, "127.0.0.1:9002", func() { released.Store(true) }, nil)
@@ -122,7 +122,7 @@ func TestSpeculativePrefillDataParallelWarmupUsesChatCompletionsPath(t *testing.
 	}
 
 	originalBody := map[string]any{
-		requestFieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
+		reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
 	}
 	s.triggerSpeculativePrefill(context.Background(), originalBody, "Hello from decode", nil, selectedHostPort, func() {}, nil)
 

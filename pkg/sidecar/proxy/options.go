@@ -225,7 +225,7 @@ func NewOptions() *Options {
 	return &Options{
 		Config: Config{
 			Port:                     defaultPort,
-			KVConnector:              KVConnectorNIXLV2,
+			KVConnector:              constants.KVConnectorNIXLV2,
 			DataParallelSize:         defaultDataParallelSize,
 			SecureServing:            true,
 			EnablePrefillerSampling:  enablePrefillerSampling,

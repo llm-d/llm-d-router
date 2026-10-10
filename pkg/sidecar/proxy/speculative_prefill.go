@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 const (
@@ -141,8 +142,8 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 	}
 
 	assistantMsg, err := json.Marshal(map[string]any{
-		requestFieldRole:    roleAssistant,
-		requestFieldContent: answer,
+		reqcommon.FieldRole:    roleAssistant,
+		reqcommon.FieldContent: answer,
 	})
 	if err != nil {
 		logger.V(logging.DEBUG).Info("skip speculative prefill: cannot marshal assistant message", "error", err)
@@ -155,8 +156,8 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 	// first answer token so the warmed KV never hits. As history there is no
 	// scaffold and the warmed prefix matches the real next turn.
 	placeholderUserMsg, err := json.Marshal(map[string]any{
-		requestFieldRole:    "user",
-		requestFieldContent: " ",
+		reqcommon.FieldRole:    "user",
+		reqcommon.FieldContent: " ",
 	})
 	if err != nil {
 		logger.V(logging.DEBUG).Info("skip speculative prefill: cannot marshal placeholder message", "error", err)
@@ -165,20 +166,20 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 	nextMessages := append(append([]json.RawMessage{}, messages...), assistantMsg, placeholderUserMsg)
 
 	prefillBody := maps.Clone(originalBody)
-	prefillBody[requestFieldMessages] = nextMessages
+	prefillBody[reqcommon.FieldMessages] = nextMessages
 	reqcommon.CapSingleToken(prefillBody, reqcommon.APITypeChatCompletions)
 	// Send [prior messages + assistant answer] as a normal chat request so both
 	// vLLM and SGLang render the answer as a completed history turn, matching
 	// the [prior + answer] prefix the real next turn reuses. Engine-specific
 	// render controls (continue_final_message/add_generation_prompt) are avoided
 	// for portability; the trailing generation prompt is past the shared prefix.
-	delete(prefillBody, requestFieldKVTransferParams)
+	delete(prefillBody, reqcommon.FieldKVTransferParams)
 
 	// P/D: warm the prefill worker that served this turn (and that the next
 	// turn's prefill will reuse).
 	host := firstAllowedHostPort(s, prefillHostPorts)
 	logger.Info("start speculative prefill warmup", "messages", len(nextMessages), "answerChars", len(answer), "target", host, "viaPrefiller", host != "")
-	if host != "" && s.config.KVConnector == KVConnectorSGLang {
+	if host != "" && s.config.KVConnector == constants.KVConnectorSGLang {
 		prefillBody = s.addSGLangBootstrapInfo(prefillBody, host, s.generateSGLangRoomID())
 	}
 
@@ -191,7 +192,7 @@ func (s *Server) triggerSpeculativePrefill(ctx context.Context, originalBody map
 	// P/D normally warms only the selected prefill worker. SGLang bootstrap
 	// requires a matching decode peer, so it uses a paired P/D warmup.
 	if host != "" {
-		if s.config.KVConnector == KVConnectorSGLang {
+		if s.config.KVConnector == constants.KVConnectorSGLang {
 			s.sendPairedPDWarmup(ctx, logger, host, payload)
 			return
 		}
@@ -414,10 +415,10 @@ func accumulateSSEText(body []byte) string {
 	var out strings.Builder
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, sseDataPrefix) {
+		if !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
 			continue
 		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, sseDataPrefix))
+		data := strings.TrimSpace(strings.TrimPrefix(line, reqcommon.SSEDataPrefix))
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -430,7 +431,7 @@ func accumulateSSEText(body []byte) string {
 			continue
 		}
 		if delta, ok := choice[responseFieldDelta].(map[string]any); ok {
-			if content, ok := delta[requestFieldContent].(string); ok {
+			if content, ok := delta[reqcommon.FieldContent].(string); ok {
 				out.WriteString(content)
 			}
 		}
