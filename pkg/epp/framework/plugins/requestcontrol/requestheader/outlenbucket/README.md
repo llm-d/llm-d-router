@@ -39,12 +39,12 @@ Classification (first match wins):
 8. *(bin ceiling, applied last)* `max_output_tokens < 2000` downgrades a tentative **LONG** to **UNKNOWN** (a cap below the LONG floor makes a long generation physically impossible).
 
 The `enable_thinking`, `thinking_budget`, and tools signals are read from the
-chat-completions body (`chat_template_kwargs` and `tools`); `tool_choice` is
-read from the raw request payload. Other body shapes
-(Claude `/v1/messages`, OpenAI `/v1/responses`) are not inspected for these:
-their thinking signals are not surfaced, so a tool-call there could not be told
-apart from a reasoning request and is left UNKNOWN. `max_output_tokens` is the
-normalized client cap and applies regardless of shape.
+chat-completions body (`chat_template_kwargs` and `tools`). The Responses API
+reads tools from `tools` on the typed body, and thinking activation from
+`reasoning.effort` on the raw request payload. Claude `/v1/messages` is not
+inspected for these: its thinking signals are not surfaced, so a tool-call there
+could not be told apart from a reasoning request and is left UNKNOWN.
+`max_output_tokens` is the normalized client cap and applies regardless of shape.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
 explicit UNKNOWN read the same. The plugin is stateless and safe under
@@ -57,8 +57,11 @@ concurrent use.
   Vendor aliases: `reasoning_budget` (Nemotron), `thinking.type` (DeepSeek V4).
   Chat-completions only.
 - `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
+- `request.Body.Responses.Tools` -- presence implies `has_tools`.
 - `request.Body.ChatCompletions.ContinueFinalMessage` -- `continue_final_message`.
 - `request.Body.Payload["tool_choice"]` -- string or named-function object.
+- `request.Body.Payload["reasoning"]["effort"]` -- `reasoning.effort` on `/v1/responses`
+  (`"none"` disables thinking; any other non-empty value enables it).
 - `request.Body.MaxOutputTokens` -- normalized client output cap.
 
 Input length is intentionally *not* consumed -- it has no correlation with

@@ -154,9 +154,9 @@ func TestEstimateOutlen(t *testing.T) {
 			want: Unknown,
 		},
 		{
-			name: "tools only on responses shape -> UNKNOWN (not inspected)",
+			name: "tools on responses shape -> SHORT",
 			body: &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{Tools: oneTool}},
-			want: Unknown,
+			want: Short,
 		},
 	}
 
@@ -390,4 +390,207 @@ func TestToolChoiceKind(t *testing.T) {
 	require.Equal(t, "none", toolChoiceKind(json.RawMessage(`"none"`)))
 	require.Equal(t, "", toolChoiceKind(json.RawMessage("")))
 	require.Equal(t, "", toolChoiceKind(json.RawMessage(`123`)))
+}
+
+func TestEstimateOutlen_ResponsesSignals(t *testing.T) {
+	proofTool := []any{map[string]any{
+		"type":       "function",
+		"name":       "get_weather",
+		"parameters": map[string]any{"type": "object"},
+	}}
+
+	tests := []struct {
+		name string
+		body *fwkrh.InferenceRequestBody
+		want Bucket
+	}{
+		{
+			name: "responses with tools -> SHORT",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "tools": proofTool},
+			},
+			want: Short,
+		},
+		{
+			name: "responses with empty tools -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: []any{}},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "tools": []any{}},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses with nil tools -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi"},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses reasoning.effort=high -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "high"}},
+			},
+			want: Long,
+		},
+		{
+			name: "responses reasoning.effort=medium -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "medium"}},
+			},
+			want: Long,
+		},
+		{
+			name: "responses reasoning.effort=low -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "low"}},
+			},
+			want: Long,
+		},
+		{
+			name: "responses reasoning.effort=none -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "none"}},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses reasoning.effort=none + tools -> SHORT",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload: fwkrh.PayloadMap{
+					"input":     "hi",
+					"tools":     proofTool,
+					"reasoning": map[string]any{"effort": "none"},
+				},
+			},
+			want: Short,
+		},
+		{
+			name: "responses reasoning.effort=high + tools -> LONG (thinking overrides)",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload: fwkrh.PayloadMap{
+					"input":     "hi",
+					"tools":     proofTool,
+					"reasoning": map[string]any{"effort": "high"},
+				},
+			},
+			want: Long,
+		},
+		{
+			name: "responses reasoning.effort=high + max_output=100 -> SHORT (ceiling vetoes LONG)",
+			body: &fwkrh.InferenceRequestBody{
+				Responses:       &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:         fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "high"}},
+				MaxOutputTokens: ptr.To(int64(100)),
+			},
+			want: Short,
+		},
+		{
+			name: "responses reasoning.effort=high + max_output=1500 -> UNKNOWN (ceiling vetoes LONG)",
+			body: &fwkrh.InferenceRequestBody{
+				Responses:       &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:         fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{"effort": "high"}},
+				MaxOutputTokens: ptr.To(int64(1500)),
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses tools + tool_choice=none -> UNKNOWN (veto)",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "tools": proofTool, "tool_choice": "none"},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses tools + tool_choice=required -> SHORT",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "tools": proofTool, "tool_choice": "required"},
+			},
+			want: Short,
+		},
+		{
+			name: "responses malformed reasoning (scalar) -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": "invalid"},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses malformed reasoning (number) -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": 42},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses empty reasoning map -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": map[string]any{}},
+			},
+			want: Unknown,
+		},
+		{
+			name: "responses reasoning as RawMessage high -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": json.RawMessage(`{"effort":"high"}`)},
+			},
+			want: Long,
+		},
+		{
+			name: "responses reasoning as RawMessage none -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": "hi", "reasoning": json.RawMessage(`{"effort":"none"}`)},
+			},
+			want: Unknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EstimateOutlen(tc.body)
+			require.Equal(t, tc.want, got, "got %s want %s", got, tc.want)
+		})
+	}
+}
+
+func TestHasResponsesTools(t *testing.T) {
+	require.True(t, hasResponsesTools([]any{map[string]any{"type": "function"}}))
+	require.True(t, hasResponsesTools([]map[string]any{{"type": "function"}}))
+	require.False(t, hasResponsesTools([]any{}))
+	require.False(t, hasResponsesTools([]map[string]any{}))
+	require.False(t, hasResponsesTools(nil))
+	require.False(t, hasResponsesTools("not-tools"))
+	require.False(t, hasResponsesTools(123))
+}
+
+func TestResponsesThinking(t *testing.T) {
+	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "high"}))
+	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "medium"}))
+	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "low"}))
+	require.Equal(t, false, *responsesThinking(map[string]any{"effort": "none"}))
+	require.Equal(t, true, *responsesThinking(json.RawMessage(`{"effort":"high"}`)))
+	require.Equal(t, false, *responsesThinking(json.RawMessage(`{"effort":"none"}`)))
+	require.Nil(t, responsesThinking(map[string]any{}))
+	require.Nil(t, responsesThinking(map[string]any{"effort": ""}))
+	require.Nil(t, responsesThinking(map[string]any{"effort": 123}))
+	require.Nil(t, responsesThinking(json.RawMessage(`{}`)))
+	require.Nil(t, responsesThinking(json.RawMessage(`"not-an-object"`)))
+	require.Nil(t, responsesThinking(nil))
+	require.Nil(t, responsesThinking("invalid"))
+	require.Nil(t, responsesThinking(123))
 }

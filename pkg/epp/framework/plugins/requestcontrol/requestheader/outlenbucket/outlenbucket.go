@@ -89,7 +89,7 @@ func (b Bucket) String() string {
 }
 
 // EstimateOutlen predicts the output-length bin using request-time signals.
-// Precedence (first match wins): LONG pushers (enable_thinking,
+// Precedence (first match wins): LONG pushers (enable_thinking / reasoning.effort,
 // DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
 // are checked first; SHORT pushers (tool_choice, has_tools,
 // continue_final_message, max_output_tokens<500)
@@ -105,9 +105,10 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	var thinkingBudget *int64
 	hasTools := false
 	continueFinalMessage := false
-	// has_tools, continue_final_message, enable_thinking, thinking_budget, and the
-	// vendor-specific DeepSeek/Nemotron signals are only carried on the chat-completions
-	// shape (vLLM populates them from the client's chat_template_kwargs / extra_body).
+	// continue_final_message, thinking_budget, and vendor-specific DeepSeek/Nemotron
+	// signals are only carried on the chat-completions shape (vLLM populates them from
+	// the client's chat_template_kwargs / extra_body). Responses API carries tools
+	// on the typed body, and reasoning.effort on the raw payload.
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
@@ -131,13 +132,18 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 			// Nemotron uses reasoning_budget as the budget key.
 			thinkingBudget = int64PtrFromAny(kwArgs["reasoning_budget"])
 		}
+	} else if body.Responses != nil {
+		hasTools = hasResponsesTools(body.Responses.Tools)
 	}
 
-	// tool_choice is an OpenAI top-level body field, not typed on the request —
-	// read it from the raw payload map.
+	// tool_choice and reasoning.effort are OpenAI top-level body fields not typed on
+	// the request body -- read them from the raw payload map.
 	var toolChoice string
 	if payload, ok := payloadMap(body); ok {
 		toolChoice = toolChoiceKind(payload["tool_choice"])
+		if enableThinking == nil {
+			enableThinking = responsesThinking(payload["reasoning"])
+		}
 	}
 
 	bucket := classifyOutlen(classifyInput{
@@ -357,4 +363,39 @@ func int64PtrFromAny(v any) *int64 {
 		}
 	}
 	return nil
+}
+
+// hasResponsesTools reports whether the Responses API's tools slice contains
+// at least one tool.
+func hasResponsesTools(v any) bool {
+	switch t := v.(type) {
+	case []any:
+		return len(t) > 0
+	case []map[string]any:
+		return len(t) > 0
+	}
+	return false
+}
+
+// responsesThinking maps the Responses API's reasoning.effort to an enable_thinking
+// boolean pointer. vLLM treats reasoning.effort != "none" as enable_thinking=true,
+// and "none" as enable_thinking=false.
+func responsesThinking(v any) *bool {
+	var effort string
+	switch t := v.(type) {
+	case map[string]any:
+		effort = stringFromAny(t["effort"])
+	case json.RawMessage:
+		var m struct {
+			Effort string `json:"effort"`
+		}
+		if err := json.Unmarshal(t, &m); err == nil {
+			effort = m.Effort
+		}
+	}
+	if effort == "" {
+		return nil
+	}
+	t := effort != "none"
+	return &t
 }
