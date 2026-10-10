@@ -95,6 +95,9 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(configReloadTotal)
+		metrics.Registry.MustRegister(configActiveGeneration)
+		metrics.Registry.MustRegister(configLastReloadSuccess)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -104,6 +107,9 @@ func Register(customCollectors ...prometheus.Collector) {
 // Just for integration test
 func Reset() {
 	// Reset other metrics
+	configReloadTotal.Reset()
+	configActiveGeneration.Set(0)
+	configLastReloadSuccess.Set(0)
 	llmdRequestCounter.Reset()
 	llmdRequestErrCounter.Reset()
 	llmdRequestLatencies.Reset()

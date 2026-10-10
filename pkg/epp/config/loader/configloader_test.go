@@ -1208,6 +1208,12 @@ type mockSource struct{ mockPlugin }
 // Mock SaturationDetector
 type mockSaturationDetector struct{ mockPlugin }
 
+type mockSaturationFilter struct{ mockSaturationDetector }
+
+func (*mockSaturationFilter) Filter(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) []fwksched.Endpoint {
+	return nil
+}
+
 // compile-time type assertion
 var _ fwkfc.SaturationDetector = &mockSaturationDetector{}
 
