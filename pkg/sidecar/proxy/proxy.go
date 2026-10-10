@@ -417,8 +417,12 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// The server logs this so it appears once: every data parallel rank starts the shared validator.
-	if !s.allowlistValidator.enabled {
+	if s.allowlistValidator.enabled {
+		defer s.allowlistValidator.Stop()
+		if err := s.allowlistValidator.Start(ctx); err != nil {
+			return err
+		}
+	} else {
 		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
 			"flag", "--"+enableSSRFProtection,
 			"headers", slices.Concat(

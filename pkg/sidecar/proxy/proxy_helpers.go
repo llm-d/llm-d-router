@@ -44,12 +44,6 @@ import (
 
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
-	// Start SSRF protection validator
-	if err := s.allowlistValidator.Start(ctx); err != nil {
-		s.logger.Error(err, "Failed to start allowlist validator")
-		return err
-	}
-
 	ln := s.HTTPListener
 	var err error
 	if ln == nil {
@@ -134,9 +128,6 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		s.logger.Info("shutting down")
-
-		// Stop allowlist validator
-		s.allowlistValidator.Stop()
 
 		ctx, cancelFn := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancelFn()

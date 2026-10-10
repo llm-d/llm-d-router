@@ -60,6 +60,51 @@ var _ = Describe("Data Parallel support", func() {
 	})
 
 	When("configured with --data-parallel-size > 1", func() {
+		It("should start and stop multiple ranks with SSRF protection enabled", func() {
+			listeners := make([]net.Listener, testDataParallelSize)
+			for rank := range listeners {
+				listener, err := fwknet.ReserveListener()
+				Expect(err).ToNot(HaveOccurred())
+				listeners[rank] = listener
+				DeferCleanup(func() { _ = listener.Close() })
+			}
+			decoderURL, err := url.Parse("http://localhost:8000")
+			Expect(err).ToNot(HaveOccurred())
+			proxy := NewProxy(Config{
+				Port:                 "0",
+				DecoderURL:           decoderURL,
+				DataParallelSize:     testDataParallelSize,
+				EnableSSRFProtection: true,
+			})
+			proxy.allowlistValidator = newTestAllowlistValidator()
+			proxy.HTTPListener = listeners[0]
+			proxy.DataParallelListeners = listeners[1:]
+			ctx, cancel := context.WithCancel(newTestContext())
+			done := make(chan error, 1)
+			go func() { done <- proxy.Start(ctx) }()
+			DeferCleanup(func() {
+				cancel()
+				var serveErr error
+				Eventually(done, 3*time.Second).Should(Receive(&serveErr))
+				Expect(serveErr).ToNot(HaveOccurred())
+			})
+
+			Eventually(proxy.readyCh, 3*time.Second).Should(BeClosed())
+			client := &http.Client{Timeout: time.Second}
+			for _, listener := range listeners {
+				baseURL := "http://" + listener.Addr().String()
+				Eventually(func() bool {
+					response, err := client.Get(baseURL + "/health")
+					if err != nil {
+						return false
+					}
+					defer response.Body.Close()
+					return response.StatusCode == http.StatusOK
+				}, 3*time.Second, 10*time.Millisecond).Should(BeTrue())
+			}
+			cancel()
+		})
+
 		DescribeTable("keeps inference on the selected rank", func(ecConnector string, withPrefill bool) {
 			var rank0Requests, rank1Requests, encoderRequests, prefillRequests atomic.Int32
 			rank1Backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
