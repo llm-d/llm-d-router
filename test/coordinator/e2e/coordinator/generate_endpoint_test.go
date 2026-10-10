@@ -40,12 +40,10 @@ const generateTestKwargs = "dGVuc29y"
 // Client token limits every generate spec sends inside sampling_params. The
 // generate wire format nests its limits there rather than at the top level, so
 // these drive the capping contract on the native path: prefill pins max_tokens
-// to 1 and drops min_tokens, decode keeps both. generateMaxTokens clears the
-// decode worker's echo-mode floor, which refuses an output limit below the
-// prompt length; generateTokenIDs sends 20 tokens for a text-only request.
+// to 1 and drops min_tokens, decode keeps both.
 const (
 	generateMinTokens = 3
-	generateMaxTokens = 512
+	generateMaxTokens = 5
 )
 
 // generateSteps lists the pipeline steps a generate request drives that do real
@@ -125,8 +123,8 @@ func generateTokenIDs(images []genImage) []int {
 	// placeholderTokenID fills each image's placeholder span in the prompt. The
 	// real value is model-dependent (each multimodal model reserves its own
 	// image placeholder/pad token ID); this stand-in is arbitrary because the
-	// sim backend echoes and only the placeholder positions, not their token
-	// value, drive the coordinator's parse and encode fan-out.
+	// sim backend does not interpret token values, and only the placeholder
+	// positions drive the coordinator's parse and encode fan-out.
 	const placeholderTokenID = 32000
 	maxEnd := 1
 	for _, img := range images {
