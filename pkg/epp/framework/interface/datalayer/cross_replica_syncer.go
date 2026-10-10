@@ -27,21 +27,19 @@ type StateKey string
 
 // CrossReplicaSyncer synchronizes shared state across EPP replicas.
 // Implementations own the storage mechanism and must provide the atomic
-// consistency required by GetOrSet.
+// consistency required by GetOrSet. Get can run concurrently with Set and Delete.
 type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
-	// Set writes a value for the given key and endpoint and prepares the
-	// aggregate returned by Get. The runtime calls this periodically, once per
-	// live endpoint, with a fresh local snapshot.
-	Set(ctx context.Context, key StateKey, endpointID string, value any, aggregate func([]any) any) error
+	// Set publishes the live local value for endpointID and refreshes the peer
+	// aggregate used by Get.
+	Set(ctx context.Context, spec CrossReplicaSpec, endpointID string) error
 
-	// Get returns the prepared aggregate for the given key and endpoint across
-	// all replicas. Returns (value, true, nil) on hit, (nil, false, nil) on
-	// miss, or (nil, false, err) on failure.
-	Get(ctx context.Context, key StateKey, endpointID string) (any, bool, error)
+	// Get reads the live local value for endpointID and combines it with the
+	// prepared peer aggregate.
+	Get(ctx context.Context, spec CrossReplicaSpec, endpointID string) (any, bool, error)
 
-	// Delete removes the value for the given key and endpoint.
+	// Delete removes this replica's value for endpointID.
 	Delete(ctx context.Context, key StateKey, endpointID string) error
 
 	// GetOrSet atomically returns the value already stored for key and id, or
@@ -56,7 +54,7 @@ type CrossReplicaSyncer interface {
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
-// and wires the store transparently. Prefer it for per-endpoint state that can
+// and wires the syncer transparently. Prefer it for per-endpoint state that can
 // tolerate periodic synchronization.
 type CrossReplicaContributor interface {
 	CrossReplicaState() CrossReplicaSpec
@@ -64,20 +62,19 @@ type CrossReplicaContributor interface {
 
 // CrossReplicaSpec declares what a CrossReplicaContributor publishes and where.
 type CrossReplicaSpec struct {
-	// StateKey namespaces this contributor's data in the store.
+	// StateKey namespaces this contributor's data in the syncer.
 	StateKey StateKey
 
 	// AttributeKey is the attribute map key the plugin installs in Extract.
-	// The runtime overwrites this key with a store-reading closure.
+	// The runtime overwrites this key with a syncer-reading closure.
 	AttributeKey fwkplugin.DataKey
 
-	// Supply returns a closure that reads the live local value for the given
-	// endpoint. The runtime calls this closure after Produce to snapshot
-	// the current local state and Set it into the store.
-	Supply func(endpointID string) func() Cloneable
+	// Read returns the live local value for the given endpoint.
+	Read func(endpointID string) Cloneable
 
-	// Aggregate combines per-replica values into a single aggregate.
-	// Called by the store's Set to fold values from all replicas.
+	// Aggregate combines per-replica values into a single aggregate. Its output
+	// must have the same type and may be passed back as an input when Get combines
+	// the cached peer aggregate with the live local value.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization

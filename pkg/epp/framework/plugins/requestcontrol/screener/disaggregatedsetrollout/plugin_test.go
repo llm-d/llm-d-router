@@ -494,11 +494,9 @@ func (s *decisionSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "decision-syncer", Name: "decision-syncer"}
 }
 
-func (s *decisionSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
-	return nil
-}
+func (s *decisionSyncer) Set(context.Context, fwkdl.CrossReplicaSpec, string) error { return nil }
 
-func (s *decisionSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+func (s *decisionSyncer) Get(context.Context, fwkdl.CrossReplicaSpec, string) (any, bool, error) {
 	return nil, false, nil
 }
 
