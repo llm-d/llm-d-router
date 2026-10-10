@@ -1602,6 +1602,21 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(kvParams(testInfo.decodeHandler, 0)).To(Equal(serialPushDecodeKV(0)))
 	})
+
+	It("removes the cached NIXL push identity of a prefill endpoint that answers in pull mode", func() {
+		testInfo.proxy.config.NIXLPushMode = true
+		// Chunked decode keeps the request serial although the identity is cached.
+		testInfo.proxy.config.DecodeChunkSize = 64
+		testInfo.prefillHandler.RawResponse = pushPrefillAnswer("pull")
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		testInfo.proxy.nixlPushIdentities.put(prefillHostPort, testNIXLPushIdentity(testNIXLPushEngineID))
+		proxyBaseAddr := startProxy()
+
+		sendChatCompletionsRequest(proxyBaseAddr)
+
+		_, ok := testInfo.proxy.nixlPushIdentities.get(prefillHostPort)
+		Expect(ok).To(BeFalse())
+	})
 })
 
 // moriProxyEnv bundles a running MoRI-IO proxy with its mock prefill/decode

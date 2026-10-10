@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -199,11 +200,74 @@ func TestNIXLPushIdentityCache_EvictsLeastRecentlyUsed(t *testing.T) {
 	require.True(t, ok)
 }
 
+// newTestNIXLPushIdentityCacheWithClock returns a cache whose clock starts at
+// a fixed time and the function that advances it.
+func newTestNIXLPushIdentityCacheWithClock(t *testing.T) (*nixlPushIdentityCache, func(time.Duration)) {
+	t.Helper()
+	cache := newTestNIXLPushIdentityCache(t, 4)
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	cache.now = func() time.Time { return now }
+	return cache, func(d time.Duration) { now = now.Add(d) }
+}
+
+func TestNIXLPushIdentityCache_SerialOnly(t *testing.T) {
+	type put struct {
+		after    time.Duration
+		engineID string
+	}
+	tests := []struct {
+		name           string
+		puts           []put
+		wantSerialOnly bool
+	}{
+		{
+			name:           "marks an endpoint whose identity changes again within the window",
+			puts:           []put{{0, "prefill-engine_dp0"}, {time.Second, "prefill-engine_dp1"}, {nixlPushIdentityChangeWindow, "prefill-engine_dp0"}},
+			wantSerialOnly: true,
+		},
+		{
+			name:           "does not mark an endpoint whose identity changes once, as on a restart",
+			puts:           []put{{0, "prefill-engine"}, {time.Second, "restarted-engine"}, {time.Second, "restarted-engine"}, {time.Second, "restarted-engine"}},
+			wantSerialOnly: false,
+		},
+		{
+			name:           "does not mark an endpoint whose identity changes again after the window",
+			puts:           []put{{0, "prefill-engine"}, {time.Second, "restarted-engine"}, {nixlPushIdentityChangeWindow + time.Second, "prefill-engine"}},
+			wantSerialOnly: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, advance := newTestNIXLPushIdentityCacheWithClock(t)
+			var marked bool
+			for _, p := range tt.puts {
+				advance(p.after)
+				marked = cache.put(testNIXLPushEndpoint, testNIXLPushIdentity(p.engineID))
+			}
+			require.Equal(t, tt.wantSerialOnly, marked)
+			require.Equal(t, tt.wantSerialOnly, cache.serialOnly(testNIXLPushEndpoint))
+		})
+	}
+}
+
+func TestNIXLPushIdentityCache_SerialOnlyExpires(t *testing.T) {
+	cache, advance := newTestNIXLPushIdentityCacheWithClock(t)
+	cache.put(testNIXLPushEndpoint, testNIXLPushIdentity("prefill-engine_dp0"))
+	cache.put(testNIXLPushEndpoint, testNIXLPushIdentity("prefill-engine_dp1"))
+	require.True(t, cache.put(testNIXLPushEndpoint, testNIXLPushIdentity("prefill-engine_dp0")))
+
+	advance(nixlPushSerialOnlyDuration - time.Second)
+	require.True(t, cache.serialOnly(testNIXLPushEndpoint))
+	advance(time.Second)
+	require.False(t, cache.serialOnly(testNIXLPushEndpoint))
+}
+
 // Request goroutines and the data-parallel rank servers share one cache, so
 // the race detector must find no unguarded access.
 func TestNIXLPushIdentityCache_ConcurrentUse(t *testing.T) {
 	cache := newTestNIXLPushIdentityCache(t, 4)
 	identity := testNIXLPushIdentity("prefill-engine")
+	restarted := testNIXLPushIdentity("restarted-engine")
 	// Goroutines that run one after another are ordered by the WaitGroup and
 	// would hide a missing lock from the race detector.
 	start := make(chan struct{})
@@ -213,8 +277,11 @@ func TestNIXLPushIdentityCache_ConcurrentUse(t *testing.T) {
 			<-start
 			for range 100 {
 				cache.put(testNIXLPushEndpoint, identity)
+				cache.put(testNIXLPushEndpoint, restarted)
 				_, _ = cache.get(testNIXLPushEndpoint)
+				cache.serialOnly(testNIXLPushEndpoint)
 				cache.dropIfMatches(testNIXLPushEndpoint, identity)
+				cache.remove(testNIXLPushEndpoint)
 			}
 		})
 	}

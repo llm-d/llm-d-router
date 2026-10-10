@@ -19,6 +19,7 @@ package proxy
 import (
 	"maps"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 
@@ -34,6 +35,17 @@ const (
 	requestFieldTransferMode = "transfer_mode"
 
 	nixlTransferModePush = "push"
+)
+
+// A vLLM restart changes the NIXL push identity of a prefill endpoint once.
+// Data-parallel ranks behind one HTTP port change it on most requests, so
+// parallel dispatches to that endpoint keep sending their decode requests
+// twice. An endpoint whose identity changes again within
+// nixlPushIdentityChangeWindow of the previous change is therefore dispatched
+// serially for nixlPushSerialOnlyDuration.
+const (
+	nixlPushIdentityChangeWindow = 5 * time.Minute
+	nixlPushSerialOnlyDuration   = 10 * time.Minute
 )
 
 // nixlPushIdentityFields maps each identity field to whether a prefill answer
@@ -82,20 +94,31 @@ func extractNIXLPushIdentity(kvTransferParams any) (nixlPushIdentity, bool) {
 	return identity, true
 }
 
+// nixlPushIdentityEntry is a cached identity with the serial-only state of its
+// endpoint.
+type nixlPushIdentityEntry struct {
+	identity nixlPushIdentity
+	// changedAt is when identity replaced a different one, zero if it never did.
+	changedAt time.Time
+	// serialUntil is when the endpoint may be dispatched in parallel again.
+	serialUntil time.Time
+}
+
 // nixlPushIdentityCache maps a prefill endpoint (host:port) to the NIXL push
 // identity it last answered with, so a later dispatch to it can build the
 // decode request before the prefill answers. Safe for concurrent use.
 type nixlPushIdentityCache struct {
 	mu  sync.Mutex
-	lru *simplelru.LRU[string, nixlPushIdentity]
+	lru *simplelru.LRU[string, nixlPushIdentityEntry]
+	now func() time.Time // allow test override
 }
 
 func newNIXLPushIdentityCache(size int) (*nixlPushIdentityCache, error) {
-	lru, err := simplelru.NewLRU[string, nixlPushIdentity](size, nil)
+	lru, err := simplelru.NewLRU[string, nixlPushIdentityEntry](size, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &nixlPushIdentityCache{lru: lru}, nil
+	return &nixlPushIdentityCache{lru: lru, now: time.Now}, nil
 }
 
 // get returns a copy of the identity cached for hostPort, which the caller may
@@ -103,18 +126,51 @@ func newNIXLPushIdentityCache(size int) (*nixlPushIdentityCache, error) {
 func (c *nixlPushIdentityCache) get(hostPort string) (nixlPushIdentity, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	identity, ok := c.lru.Get(hostPort)
+	entry, ok := c.lru.Get(hostPort)
 	if !ok {
 		return nil, false
 	}
-	return maps.Clone(identity), true
+	return maps.Clone(entry.identity), true
 }
 
-// put caches a copy of identity for hostPort, replacing the older entry.
-func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) {
+// put caches a copy of identity for hostPort, replacing the older entry. It
+// reports whether the change of identity marked hostPort serial-only.
+func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.lru.Add(hostPort, maps.Clone(identity))
+	entry, ok := c.lru.Peek(hostPort)
+	if !ok {
+		c.lru.Add(hostPort, nixlPushIdentityEntry{identity: maps.Clone(identity)})
+		return false
+	}
+	if entry.identity.equal(identity) {
+		c.lru.Add(hostPort, entry)
+		return false
+	}
+	now := c.now()
+	marked := !entry.changedAt.IsZero() && now.Sub(entry.changedAt) <= nixlPushIdentityChangeWindow
+	if marked {
+		entry.serialUntil = now.Add(nixlPushSerialOnlyDuration)
+	}
+	entry.identity = maps.Clone(identity)
+	entry.changedAt = now
+	c.lru.Add(hostPort, entry)
+	return marked
+}
+
+// serialOnly reports whether hostPort is marked serial-only.
+func (c *nixlPushIdentityCache) serialOnly(hostPort string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.lru.Peek(hostPort)
+	return ok && c.now().Before(entry.serialUntil)
+}
+
+// remove removes the entry for hostPort. It reports whether there was one.
+func (c *nixlPushIdentityCache) remove(hostPort string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Remove(hostPort)
 }
 
 // dropIfMatches removes the entry for hostPort only while it holds identity,
@@ -123,21 +179,27 @@ func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) 
 func (c *nixlPushIdentityCache) dropIfMatches(hostPort string, identity nixlPushIdentity) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cached, ok := c.lru.Peek(hostPort)
-	if !ok || !cached.equal(identity) {
+	entry, ok := c.lru.Peek(hostPort)
+	if !ok || !entry.identity.equal(identity) {
 		return false
 	}
 	return c.lru.Remove(hostPort)
 }
 
 // storeNIXLPushIdentity caches the NIXL push identity in a prefill answer's
-// kv_transfer_params under the endpoint that answered. An answer without one
-// leaves the cache unchanged.
-func (s *Server) storeNIXLPushIdentity(prefillPodHostPort string, kvTransferParams any) {
+// kv_transfer_params under the endpoint that answered and returns it. An
+// answer without one removes the endpoint's entry.
+func (s *Server) storeNIXLPushIdentity(prefillPodHostPort string, kvTransferParams any) (nixlPushIdentity, bool) {
 	identity, ok := extractNIXLPushIdentity(kvTransferParams)
 	if !ok {
-		return
+		removed := s.nixlPushIdentities.remove(prefillPodHostPort)
+		s.logger.V(logging.TRACE).Info("prefill answer carries no NIXL push identity", "target", prefillPodHostPort, "removed", removed)
+		return nil, false
 	}
-	s.nixlPushIdentities.put(prefillPodHostPort, identity)
+	if s.nixlPushIdentities.put(prefillPodHostPort, identity) {
+		s.logger.Info("NIXL push identity of the prefill endpoint keeps changing; dispatching its requests serially",
+			"target", prefillPodHostPort, "duration", nixlPushSerialOnlyDuration.String())
+	}
 	s.logger.V(logging.TRACE).Info("stored NIXL push identity", "target", prefillPodHostPort, "identity", identity)
+	return identity, true
 }
