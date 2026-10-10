@@ -30,6 +30,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -95,6 +96,7 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
 		}
@@ -152,6 +154,7 @@ func Reset() {
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	LlmdDataLayerPollErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	llmdToolCallingFieldStatusTotal.Reset()
 }
 
 // RecordRequestCounter records the number of requests.
@@ -665,4 +668,20 @@ func RecordDataLayerPollError(sourceType string) {
 // RecordDataLayerExtractError increments the extract error counter for a source/extractor type.
 func RecordDataLayerExtractError(sourceType, extractorType string) {
 	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+}
+
+// RecordToolCallingFieldStatuses records outcomes only for fields present on at
+// least one side of the comparison.
+func RecordToolCallingFieldStatuses(component, direction string, statuses []toolcalling.FieldStatus) {
+	for _, fieldStatus := range statuses {
+		if !fieldStatus.Observed {
+			continue
+		}
+		llmdToolCallingFieldStatusTotal.WithLabelValues(
+			component,
+			direction,
+			string(fieldStatus.Field),
+			string(fieldStatus.Status),
+		).Inc()
+	}
 }

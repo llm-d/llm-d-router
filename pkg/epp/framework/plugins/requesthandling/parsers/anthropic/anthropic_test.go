@@ -19,6 +19,8 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -32,6 +34,32 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
+
+func TestAnthropicParser_RequestFieldErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools"},
+		{name: "nested tool name type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":[{"name":123}]}`, wantField: "tools"},
+		{name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages"},
+		{name: "missing messages", body: `{"tools":[]}`},
+		{name: "malformed JSON", body: `{"tools":[`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewAnthropicParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": reqcommon.PathMessages})
+			require.Error(t, err)
+			var fieldErr *fwkrh.RequestFieldError
+			require.Equal(t, tt.wantField != "", errors.As(err, &fieldErr))
+			if tt.wantField != "" {
+				field, _, _ := strings.Cut(fieldErr.Field, ".")
+				require.Equal(t, tt.wantField, field)
+				require.ErrorIs(t, err, fieldErr.Err)
+			}
+		})
+	}
+}
 
 func TestAnthropicParser_NoPriorityRewrite(t *testing.T) {
 	// The Anthropic messages schema has no priority field and ignores extra keys.

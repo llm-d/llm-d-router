@@ -20,6 +20,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -160,6 +162,15 @@ type RequestContext struct {
 	responseStatusCode         string
 	requestRunning             bool
 
+	toolCallingSurface             reqcommon.APIType
+	toolCallingRequest             bool
+	toolCallingResponseEventStream bool
+	toolCallingUpstreamDetector    *toolcalling.ResponseDetector
+	toolCallingForwardedDetector   *toolcalling.ResponseDetector
+	toolCallingUpstreamPresent     bool
+	toolCallingForwardedPresent    bool
+	toolCallingResponseRecorded    bool
+
 	// responseProcessingDuration is the EPP cost of handling the response. For a
 	// streamed response it is the sum of the per-chunk handler slices, since the
 	// gaps between chunks are model server generation time. For a non-streaming
@@ -241,6 +252,34 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 		headers = r.Request.Headers
 	}
 	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(headers))
+}
+
+func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
+	path, _, _ = strings.Cut(path, "?")
+	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages, reqcommon.APITypeResponses} {
+		// Keep the slash boundary while allowing provider-specific prefixes.
+		suffix := strings.TrimPrefix(apiType.Path(), "/v1")
+		if strings.HasSuffix(path, suffix) {
+			return apiType, true
+		}
+	}
+	return 0, false
+}
+
+func compareEPPToolCallingSnapshotToBody(surface reqcommon.APIType, inbound toolcalling.RequestSnapshot, inboundBody, outboundBody []byte) ([]toolcalling.FieldStatus, error) {
+	if bytes.Equal(inboundBody, outboundBody) {
+		return toolcalling.CompareRequests(inbound, inbound)
+	}
+	outbound, err := toolcalling.CaptureRequestJSON(surface, outboundBody)
+	if err != nil {
+		return nil, err
+	}
+	statuses, err := toolcalling.CompareRequests(inbound, outbound)
+	if err != nil {
+		return nil, err
+	}
+	return statuses, nil
 }
 
 // extractTraceContext returns ctx augmented with the upstream trace context
@@ -339,6 +378,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
+	defer func() {
+		// Finalize observations before detector cleanup and span.End on early exit.
+		if !reqCtx.responseHeadersReceivedAt.IsZero() {
+			reqCtx.recordToolCallingResponse(span, true)
+		}
+		reqCtx.clearToolCallingResponseDetectors()
+	}()
 
 	// Request-phase failures (parser resolution, body parsing, admission
 	// rejection) leave the switch before the success path, so both call this.
@@ -510,8 +556,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
+				// Reset does not overwrite the buffer's bytes, and RawBody is a
+				// separate copy. This baseline stays unchanged until processing
+				// finishes and the next body chunk can write to the buffer.
+				inboundBody := buf.Bytes()
 				reqCtx.Request.RawBody = make([]byte, buf.Len())
-				copy(reqCtx.Request.RawBody, buf.Bytes())
+				copy(reqCtx.Request.RawBody, inboundBody)
 
 				// Body stream complete. Capture raw size for flow control.
 				reqCtx.RequestSize = buf.Len()
@@ -522,11 +572,36 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: resolveErr.Error()}
 					break
 				}
+				apiType, hasToolCallingAPI := toolCallingAPIForPath(fwkrequest.GetRequestPath(reqCtx.Request.Headers))
+				var inboundToolSnapshot toolcalling.RequestSnapshot
+				hasInboundToolSnapshot := false
+				if hasToolCallingAPI {
+					inboundToolSnapshot, err = toolcalling.CaptureRequestJSON(apiType, reqCtx.Request.RawBody)
+					if err != nil {
+						// A malformed body has no trustworthy field snapshot. The
+						// request parser controls the client error response.
+						hasToolCallingAPI = false
+					} else {
+						hasInboundToolSnapshot = true
+					}
+				}
 				before := time.Now()
 				parseResult, parseErr := parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				metrics.RecordPluginProcessingLatency(fwkrh.RequestParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
+					if hasInboundToolSnapshot {
+						var statuses []toolcalling.FieldStatus
+						var fieldErr *fwkrh.RequestFieldError
+						if errors.As(parseErr, &fieldErr) {
+							field, _, _ := strings.Cut(fieldErr.Field, ".")
+							statuses = toolcalling.RejectedFieldStatuses(inboundToolSnapshot, toolcalling.Field(field))
+						}
+						metrics.RecordToolCallingFieldStatuses(toolcalling.ComponentEPP, toolcalling.DirectionRequest, statuses)
+						if span != nil {
+							span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
+						}
+					}
 					break
 				}
 
@@ -534,7 +609,24 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// The Director may resolve agent identity after this request span opened.
 				tracing.AttributeRequest(ctx, span)
 				if err != nil {
+					if hasInboundToolSnapshot && span != nil {
+						span.SetAttributes(inboundToolSnapshot.SpanAttributes(nil)...)
+					}
 					break
+				}
+
+				if hasToolCallingAPI && hasInboundToolSnapshot {
+					reqCtx.toolCallingSurface = apiType
+					reqCtx.toolCallingRequest = inboundToolSnapshot.Summary().ToolCallingPresent &&
+						(apiType == reqcommon.APITypeChatCompletions || apiType == reqcommon.APITypeMessages)
+					statuses, compareErr := compareEPPToolCallingSnapshotToBody(apiType, inboundToolSnapshot, inboundBody, reqCtx.Request.RawBody)
+					if compareErr != nil {
+						logger.Error(compareErr, "Error comparing tool-calling request fields")
+					}
+					metrics.RecordToolCallingFieldStatuses(toolcalling.ComponentEPP, toolcalling.DirectionRequest, statuses)
+					if span != nil {
+						span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
+					}
 				}
 
 				// After scheduling, look up the eviction channel for eviction support.
@@ -582,6 +674,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType && strings.Contains(string(header.RawValue), fwkrequest.MediaTypeEventStream) {
 					reqCtx.modelServerStreaming = true
+					reqCtx.toolCallingResponseEventStream = true
 					if traceEnabled {
 						loggerTrace.Info("model server is streaming response")
 					}
@@ -598,6 +691,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			chunk := v.ResponseBody.Body
 
 			if reqCtx.modelServerStreaming {
+				upstreamChunk := chunk
 				respBodyStart := time.Now()
 				if endOfStream {
 					reqCtx.responseComplete = true
@@ -605,14 +699,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				reqCtx.observeToolCallingResponse(upstreamChunk, chunk, endOfStream, span)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
-					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
+					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true, span)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
@@ -623,7 +718,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
 				reqCtx.TerminationCause = cause
 			}
-			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
+			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
@@ -634,11 +729,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		// Handle the err and fire an immediate response.
 		if err != nil {
 			recordRequestProcessing()
-			if logger.V(logutil.DEBUG).Enabled() {
-				logger.V(logutil.DEBUG).Error(err, "Failed to process request", "request", req)
-			} else {
-				logger.Error(err, "Failed to process request")
-			}
+			logger.Error(err, "Failed to process request")
 			resp, err := errcommon.BuildErrResponse(err, reqCtx.apiType())
 			if err != nil {
 				return err
@@ -667,7 +758,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 // finishResponse ensures all post-response logic, such as metric recording
 // and state updates, is executed exactly once for the request lifecycle.
-func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool) {
+func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool, span trace.Span) {
 	// Return early if the response has already been finished to prevent
 	// duplicate execution of side effects and metrics.
 	if reqCtx.responseComplete {
@@ -677,6 +768,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	start := time.Now()
 	reqCtx.responseComplete = true
 	reqCtx.responseCompleteTimestamp = time.Now()
+	upstreamBody := body
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
@@ -684,12 +776,68 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
+	reqCtx.observeToolCallingResponse(upstreamBody, body, true, span)
 	if modelStreaming || reqCtx.responseHeadersReceivedAt.IsZero() {
 		reqCtx.responseProcessingDuration += time.Since(start)
 	} else {
 		// Supersedes the header slice already accumulated: the interval since the
 		// response headers arrived covers it and the body wait in between.
 		reqCtx.responseProcessingDuration = time.Since(reqCtx.responseHeadersReceivedAt)
+	}
+}
+
+func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
+		return
+	}
+	if r.toolCallingUpstreamDetector == nil || r.toolCallingForwardedDetector == nil {
+		upstreamDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
+		if err != nil {
+			return
+		}
+		forwardedDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
+		if err != nil {
+			return
+		}
+		r.toolCallingUpstreamDetector = upstreamDetector
+		r.toolCallingForwardedDetector = forwardedDetector
+	}
+
+	r.toolCallingUpstreamPresent = r.toolCallingUpstreamDetector.Observe(upstream, endOfStream)
+	r.toolCallingForwardedPresent = r.toolCallingForwardedDetector.Observe(forwarded, endOfStream)
+	if !endOfStream {
+		return
+	}
+	r.recordToolCallingResponse(span, false)
+}
+
+func (r *RequestContext) recordToolCallingResponse(span trace.Span, interrupted bool) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
+		return
+	}
+	r.toolCallingResponseRecorded = true
+	if span != nil {
+		span.SetAttributes((toolcalling.ResponseSummary{
+			ToolCallingRequested:         true,
+			UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
+			ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
+			UpstreamDetectionIncomplete:  interrupted || r.toolCallingUpstreamDetector.DetectionIncomplete(),
+			ForwardedDetectionIncomplete: interrupted || r.toolCallingForwardedDetector.DetectionIncomplete(),
+		}).SpanAttributes()...)
+	}
+}
+
+func (r *RequestContext) clearToolCallingResponseDetectors() {
+	if r == nil {
+		return
+	}
+	if r.toolCallingUpstreamDetector != nil {
+		r.toolCallingUpstreamDetector.Close()
+		r.toolCallingUpstreamDetector = nil
+	}
+	if r.toolCallingForwardedDetector != nil {
+		r.toolCallingForwardedDetector.Close()
+		r.toolCallingForwardedDetector = nil
 	}
 }
 

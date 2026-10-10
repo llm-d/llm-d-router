@@ -23,6 +23,16 @@ import (
 // Internal llm-d specific attribute keys.
 // All custom router, scheduler, scorer, and sidecar attributes are namespaced under "llm_d.*".
 const (
+	// Tool-calling request attributes
+	LLMDToolCallingAPISurfaceKey                   = attribute.Key("llm_d.tool_calling.api_surface")
+	LLMDToolCallingPresentKey                      = attribute.Key("llm_d.tool_calling.present")
+	LLMDToolCallingToolChoiceKey                   = attribute.Key("llm_d.tool_calling.tool_choice")
+	LLMDToolCallingToolCountKey                    = attribute.Key("llm_d.tool_calling.tool_count")
+	LLMDToolCallingFieldToolsStatusKey             = attribute.Key("llm_d.tool_calling.field.tools.status")
+	LLMDToolCallingFieldToolChoiceStatusKey        = attribute.Key("llm_d.tool_calling.field.tool_choice.status")
+	LLMDToolCallingFieldParallelToolCallsStatusKey = attribute.Key("llm_d.tool_calling.field.parallel_tool_calls.status")
+	LLMDToolCallingFieldResponseFormatStatusKey    = attribute.Key("llm_d.tool_calling.field.response_format.status")
+
 	// EPP Scheduling attributes
 	LLMDEPPProfileNameKey               = attribute.Key("llm_d.epp.scheduling.profile.name")
 	LLMDEPPFilterDecisionKey            = attribute.Key("llm_d.epp.filter.decision")

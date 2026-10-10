@@ -19,18 +19,26 @@ package handlers
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/go-cmp/cmp"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -215,6 +223,221 @@ func TestHandleResponseBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+type terminatedProcessServer struct {
+	replayProcessServer
+	terminalErr error
+}
+
+func (srv *terminatedProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
+	if len(srv.reqs) == 0 {
+		return nil, srv.terminalErr
+	}
+	return srv.replayProcessServer.Recv()
+}
+
+func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
+	toolEvent := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}` + "\n\n"
+	toolJSON := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`
+	for _, tt := range []struct {
+		name         string
+		eventStream  bool
+		body         string
+		endOfStream  bool
+		terminalErr  error
+		wantPresent  bool
+		wantErr      bool
+		nonTool      bool
+		skipResponse bool
+		unreadable   bool
+	}{
+		{name: "SSE EOF after tool call", eventStream: true, body: toolEvent, terminalErr: io.EOF, wantPresent: true},
+		{name: "SSE cancelled after tool call", eventStream: true, body: toolEvent, terminalErr: status.Error(codes.Canceled, "cancelled"), wantPresent: true},
+		{name: "SSE receive failure after tool call", eventStream: true, body: toolEvent, terminalErr: status.Error(codes.Unavailable, "upstream disconnected"), wantPresent: true, wantErr: true},
+		{name: "SSE incomplete event", eventStream: true, body: `data: {"choices":[{"delta":{"tool_calls":[`, terminalErr: io.EOF},
+		{name: "JSON incomplete response", body: `{"choices":[`, terminalErr: io.EOF},
+		{name: "response headers only", terminalErr: io.EOF},
+		{name: "completed SSE", eventStream: true, body: toolEvent, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
+		{name: "completed JSON", body: toolJSON, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
+		{name: "malformed SSE at EOS", eventStream: true, body: "data: {invalid json}\n\n", endOfStream: true, terminalErr: io.EOF, unreadable: true},
+		{name: "truncated JSON at EOS", body: `{"choices":[`, endOfStream: true, terminalErr: io.EOF, unreadable: true},
+		{name: "non-tool request", body: `{"choices":[]}`, terminalErr: io.EOF, nonTool: true},
+		{name: "request phase only", terminalErr: io.EOF, skipResponse: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			useTracerProvider(t, provider)
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+
+			contentType := "application/json"
+			if tt.eventStream {
+				contentType = "text/event-stream"
+			}
+			requestBody := `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
+			if !tt.nonTool {
+				requestBody = `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[]}`
+			}
+			srv := &terminatedProcessServer{
+				replayProcessServer: replayProcessServer{
+					ctx: context.Background(),
+					reqs: []*extProcPb.ProcessingRequest{
+						newRequestHeaders(map[string]string{":path": "/v1/chat/completions"}),
+						{Request: &extProcPb.ProcessingRequest_RequestBody{
+							RequestBody: &extProcPb.HttpBody{Body: []byte(requestBody), EndOfStream: true},
+						}},
+					},
+				},
+				terminalErr: tt.terminalErr,
+			}
+			if !tt.skipResponse {
+				srv.reqs = append(srv.reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+					ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+						{Key: "content-type", RawValue: []byte(contentType)},
+					}}},
+				}})
+			}
+			if tt.body != "" {
+				srv.reqs = append(srv.reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseBody{
+					ResponseBody: &extProcPb.HttpBody{Body: []byte(tt.body), EndOfStream: tt.endOfStream},
+				}})
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			err := NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			ended := recorder.Ended()
+			require.Len(t, ended, 1)
+			attributes := make(map[string]bool)
+			for _, attr := range ended[0].Attributes() {
+				attributes[string(attr.Key)] = attr.Value.AsBool()
+				require.NotContains(t, attr.Value.String(), "sentinel_")
+			}
+			for key, want := range map[string]bool{
+				toolcalling.ResponseAttributeUpstreamToolCallPresent:      tt.wantPresent,
+				toolcalling.ResponseAttributeForwardedToolCallPresent:     tt.wantPresent,
+				toolcalling.ResponseAttributeUpstreamDetectionIncomplete:  !tt.endOfStream || tt.unreadable,
+				toolcalling.ResponseAttributeForwardedDetectionIncomplete: !tt.endOfStream || tt.unreadable,
+			} {
+				if tt.nonTool || tt.skipResponse {
+					require.NotContains(t, attributes, key)
+					continue
+				}
+				require.Contains(t, attributes, key)
+				require.Equal(t, want, attributes[key], key)
+			}
+		})
+	}
+}
+
+func TestObserveToolCallingResponseRecordsUpstreamAndForwardedPresence(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+
+	reqCtx := &RequestContext{
+		toolCallingSurface: reqcommon.APITypeChatCompletions,
+		toolCallingRequest: true,
+	}
+	upstream := []byte(`{"model":"internal","choices":[{"message":{"tool_calls":[{"function":{"name":"sentinel_name","arguments":"sentinel_arguments"}}]}}]}`)
+	forwarded := []byte(`{"model":"public","choices":[{"message":{"content":"no tool call"}}]}`)
+	reqCtx.observeToolCallingResponse(upstream, forwarded, true, span)
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attributes := make(map[string]bool, len(ended[0].Attributes()))
+	for _, attribute := range ended[0].Attributes() {
+		attributes[string(attribute.Key)] = attribute.Value.AsBool()
+		assert.NotContains(t, attribute.Value.String(), "sentinel_")
+	}
+	assert.True(t, attributes[toolcalling.ResponseAttributeUpstreamToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeUpstreamDetectionIncomplete])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedDetectionIncomplete])
+}
+
+func TestObserveToolCallingResponseReportsOversizedSSEDetection(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+
+	reqCtx := &RequestContext{
+		toolCallingSurface:             reqcommon.APITypeChatCompletions,
+		toolCallingRequest:             true,
+		toolCallingResponseEventStream: true,
+	}
+	oversized := make([]byte, 2<<20)
+	copy(oversized, "data: ")
+	for i := len("data: "); i < len(oversized); i++ {
+		oversized[i] = 'x'
+	}
+	reqCtx.observeToolCallingResponse(oversized, oversized, true, span)
+	span.End()
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attributes := make(map[string]bool, len(ended[0].Attributes()))
+	for _, attribute := range ended[0].Attributes() {
+		attributes[string(attribute.Key)] = attribute.Value.AsBool()
+	}
+	assert.False(t, attributes[toolcalling.ResponseAttributeUpstreamToolCallPresent])
+	assert.False(t, attributes[toolcalling.ResponseAttributeForwardedToolCallPresent])
+	assert.True(t, attributes[toolcalling.ResponseAttributeUpstreamDetectionIncomplete])
+	assert.True(t, attributes[toolcalling.ResponseAttributeForwardedDetectionIncomplete])
+}
+
+func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
+	reqCtx := &RequestContext{
+		toolCallingSurface:             reqcommon.APITypeMessages,
+		toolCallingRequest:             true,
+		toolCallingResponseEventStream: true,
+	}
+	first := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",")
+	second := []byte("\"content_block\":{\"type\":\"tool_use\"}}\n")
+	reqCtx.observeToolCallingResponse(first, first, false, nil)
+	reqCtx.observeToolCallingResponse(second, second, true, nil)
+
+	require.True(t, reqCtx.toolCallingResponseRecorded)
+	require.True(t, reqCtx.toolCallingUpstreamPresent)
+	require.True(t, reqCtx.toolCallingForwardedPresent)
+}
+
+func TestObserveToolCallingResponseSkipsNonToolRequest(t *testing.T) {
+	reqCtx := &RequestContext{toolCallingSurface: reqcommon.APITypeChatCompletions}
+	reqCtx.observeToolCallingResponse([]byte(`{"choices":[]}`), []byte(`{"choices":[]}`), true, nil)
+
+	assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+	assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+	assert.False(t, reqCtx.toolCallingResponseRecorded)
+}
+
+func TestClearToolCallingResponseDetectors(t *testing.T) {
+	upstreamDetector, err := toolcalling.NewResponseDetector(reqcommon.APITypeChatCompletions, true)
+	require.NoError(t, err)
+	forwardedDetector, err := toolcalling.NewResponseDetector(reqcommon.APITypeChatCompletions, true)
+	require.NoError(t, err)
+	partial := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"sentinel_arguments"}}]}}]}`)
+	upstreamDetector.Observe(partial, false)
+	forwardedDetector.Observe(partial, false)
+
+	reqCtx := &RequestContext{
+		toolCallingUpstreamDetector:  upstreamDetector,
+		toolCallingForwardedDetector: forwardedDetector,
+	}
+	reqCtx.clearToolCallingResponseDetectors()
+
+	assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+	assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+	assert.False(t, upstreamDetector.Observe(nil, true), "closed upstream detector must discard the partial event")
+	assert.False(t, forwardedDetector.Observe(nil, true), "closed forwarded detector must discard the partial event")
 }
 
 func TestHandleStreamedResponseBody(t *testing.T) {
