@@ -103,6 +103,16 @@ func extractFamily(spec *Spec, families sourcemetrics.PrometheusMetricMap) (*dto
 
 // getLatestMetric retrieves the latest metric based on Spec.
 func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*dto.Metric, error) {
+	return spec.getLatestMetricMatching(families, false)
+}
+
+// getLatestSecondaryTierMetric returns the newest matching series, excluding
+// the primary tier's lookup metrics.
+func (spec *Spec) getLatestSecondaryTierMetric(families sourcemetrics.PrometheusMetricMap) (*dto.Metric, error) {
+	return spec.getLatestMetricMatching(families, true)
+}
+
+func (spec *Spec) getLatestMetricMatching(families sourcemetrics.PrometheusMetricMap, excludePrimaryTier bool) (*dto.Metric, error) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return nil, err
@@ -112,12 +122,14 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 	var recent int64 = -1
 
 	for _, metric := range family.GetMetric() {
-		if spec.labelsMatch(metric.GetLabel()) {
-			ts := metric.GetTimestampMs()
-			if ts > recent {
-				recent = ts
-				latest = metric
-			}
+		labels := metric.GetLabel()
+		if !spec.labelsMatch(labels) || (excludePrimaryTier && isPrimaryTier(labels)) {
+			continue
+		}
+		ts := metric.GetTimestampMs()
+		if ts > recent {
+			recent = ts
+			latest = metric
 		}
 	}
 
@@ -176,6 +188,15 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 		return 0, fmt.Errorf("no matching metric found for %q with labels %v", spec.Name, spec.Labels)
 	}
 	return result, nil
+}
+
+func isPrimaryTier(labels []*dto.LabelPair) bool {
+	for _, label := range labels {
+		if label.GetName() == "tier" && label.GetValue() == "0:primary" {
+			return true
+		}
+	}
+	return false
 }
 
 // labelsMatch checks if metric labels match the specification labels.
