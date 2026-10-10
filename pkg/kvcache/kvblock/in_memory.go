@@ -154,7 +154,7 @@ func (pc *PodCache) addAll(recs []EntryRef) {
 	for _, rec := range recs {
 		found := false
 		for i := range pc.entries {
-			if pc.entries[i].PodEntry == rec.PodEntry {
+			if pc.entries[i].SameIdentity(rec.PodEntry) {
 				copy(pc.entries[i:], pc.entries[i+1:])
 				pc.entries[len(pc.entries)-1] = rec
 				found = true
@@ -180,7 +180,7 @@ func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
 	defer pc.mu.Unlock()
 	for _, entry := range entries {
 		for i := range pc.entries {
-			if pc.entries[i].PodEntry == entry {
+			if pc.entries[i].SameIdentity(entry) {
 				pc.entries = append(pc.entries[:i], pc.entries[i+1:]...)
 				break
 			}
@@ -345,8 +345,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
 
 	// Intern once per call, before anything is written: a rejected batch
-	// leaves no mapping and no ordinal behind. The same records apply to
-	// every request key.
+	// leaves no mapping and no ordinal behind. RetrievalSpan is stamped on
+	// copies of these records, so pod and tier ordinals are not re-interned
+	// for every request key.
 	records, err := m.internRecords(entries)
 	if err != nil {
 		return err
@@ -372,6 +373,8 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		}
 	}
 
+	spans := requestKeyRetrievalSpans(engineKeys, requestKeys)
+
 	// Store requestKey -> PodCache mappings for all request keys.
 
 	for _, requestKey := range requestKeys {
@@ -395,7 +398,11 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			}
 		}
 
-		podCache.addAll(records)
+		if spans != nil {
+			podCache.addAll(recordsWithRetrievalSpan(records, spans[requestKey]))
+		} else {
+			podCache.addAll(records)
+		}
 
 		if traceLogger.Enabled() {
 			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
