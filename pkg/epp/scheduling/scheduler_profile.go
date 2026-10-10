@@ -32,6 +32,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -333,8 +334,8 @@ func requestSpanAttributes(request *fwksched.InferenceRequest) []attribute.KeyVa
 	if request.TargetModel != "" {
 		attributes = append(attributes, semconv.GenAIRequestModel(request.TargetModel))
 	}
-	if request.RequestID != "" {
-		attributes = append(attributes, semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		attributes = append(attributes, semconv.GenAIRequestID(clientRequestID))
 	}
 	return attributes
 }

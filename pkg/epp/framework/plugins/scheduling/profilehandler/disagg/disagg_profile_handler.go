@@ -30,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -356,7 +357,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	span.SetAttributes(semconv.GenAIRequestID(request.Headers[reqcommon.RequestIDHeaderKey]))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	if h.stageOrder == StageOrderPrefillFirst {
@@ -580,7 +581,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	span.SetAttributes(semconv.GenAIRequestID(request.Headers[reqcommon.RequestIDHeaderKey]))
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header

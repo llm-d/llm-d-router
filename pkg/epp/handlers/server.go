@@ -181,7 +181,13 @@ type RequestContext struct {
 	respTrailerResp *extProcPb.ProcessingResponse
 }
 
+// logKeyEPPRequestID is the log key for Request.ID.
+const logKeyEPPRequestID = "eppRequestID"
+
 type Request struct {
+	// ID is assigned by the EPP and unique per ext_proc stream. It keys per-request state, so
+	// requests sharing a client-supplied x-request-id (kept in Headers) do not collide.
+	ID       string
 	Headers  map[string]string
 	RawBody  []byte // This field will be updated when request body is modified (e.g. model mutation in requestBody)
 	Metadata map[string]any
@@ -476,15 +482,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
+			reqCtx.Request.ID = uuid.NewString()
 			requestID := envoy.ExtractHeaderValue(v, reqcommon.RequestIDHeaderKey)
-			// request ID is a must for maintaining a state per request in plugins that hold internal state and use PluginState.
-			// if request id was not supplied as a header, we generate it ourselves.
 			if len(requestID) == 0 {
-				requestID = uuid.NewString()
+				requestID = reqCtx.Request.ID
 				loggerTrace.Info("RequestID header is not found in the request, generated a request id")
-				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID // update in headers so director can consume it
+				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID
 			}
-			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID)
+			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID, logKeyEPPRequestID, reqCtx.Request.ID)
 			ctx = log.IntoContext(ctx, logger)
 
 			// Re-parent the server span to the upstream trace context (e.g. the
@@ -541,7 +546,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// Setting evictCh from nil to a real channel dynamically enables the
 				// eviction case in the main select.
 				if s.evictionLookup != nil {
-					evictionRequestID = reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey]
+					evictionRequestID = reqCtx.Request.ID
 					evictCh = s.evictionLookup.Get(evictionRequestID)
 				}
 

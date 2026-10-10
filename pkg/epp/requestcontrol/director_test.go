@@ -61,6 +61,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -70,6 +71,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
 var (
@@ -1281,6 +1283,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 
 				reqCtx := &handlers.RequestContext{
 					Request: &handlers.Request{
+						ID: "epp-req-id-" + test.name,
 						Headers: map[string]string{
 							reqcommon.RequestIDHeaderKey: "test-req-id-" + test.name, // Ensure a default request ID
 						},
@@ -1353,6 +1356,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 
 				assert.NoError(t, err, "HandleRequest() returned unexpected error")
+				if returnedReqCtx.SchedulingRequest != nil {
+					assert.Equal(t, reqCtx.Request.ID, returnedReqCtx.SchedulingRequest.RequestID,
+						"SchedulingRequest.RequestID should be the EPP request ID, not the x-request-id header")
+				}
 
 				if test.wantReqCtx != nil {
 					assert.Equal(t, test.wantReqCtx.ObjectiveKey, returnedReqCtx.ObjectiveKey, "reqCtx.Model mismatch")
@@ -1756,6 +1763,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
+			ID: "epp-req-id-for-response",
 			Headers: map[string]string{
 				reqcommon.RequestIDHeaderKey: "test-req-id-for-response",
 			},
@@ -1769,7 +1777,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 
 	director.HandleResponseHeader(ctx, reqCtx)
 
-	if diff := cmp.Diff("test-req-id-for-response", pr1.lastRespOnResponse.RequestID); diff != "" {
+	if diff := cmp.Diff("epp-req-id-for-response", pr1.lastRespOnResponse.RequestID); diff != "" {
 		t.Errorf("Scheduler.OnResponse RequestId mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff(reqCtx.Response.Headers, pr1.lastRespOnResponse.Headers); diff != "" {
@@ -1854,6 +1862,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
+			ID: "epp-req-id-for-streaming",
 			Headers: map[string]string{
 				reqcommon.RequestIDHeaderKey: "test-req-id-for-streaming",
 			},
@@ -1891,7 +1900,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	assert.Equal(t, 3, len(resps), "Should have received 3 streaming calls")
 
 	for i, resp := range resps {
-		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
+		assert.Equal(t, "epp-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
 		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
@@ -2258,6 +2267,7 @@ func TestDirector_ReleasesDispatchReservationAfterPreRequest(t *testing.T) {
 	require.NoError(t, err)
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
+			ID: "test-reservation",
 			Headers: map[string]string{
 				reqcommon.RequestIDHeaderKey: "test-reservation",
 				":path":                      "/v1/completions",
@@ -2272,6 +2282,57 @@ func TestDirector_ReleasesDispatchReservationAfterPreRequest(t *testing.T) {
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 	require.NoError(t, err)
 	require.True(t, released)
+}
+
+// TestDirector_SharedRequestIDHeaderReleasesInFlightLoad verifies that two
+// overlapping requests sharing an x-request-id each release their in-flight
+// load in the inflight-load-producer when they complete.
+func TestDirector_SharedRequestIDHeaderReleasesInFlightLoad(t *testing.T) {
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "192.168.1.100",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	}, nil, fwkdl.NewAttributes())
+	endpointID := endpoint.GetMetadata().ID.String()
+	dir, ctx := newSinglePodDirector(t, &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	})
+	plugin, err := inflightload.InFlightLoadProducerFactory("inflight-load-producer", nil, testutils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	producer := plugin.(*inflightload.InFlightLoadProducer)
+	dir.requestControlPlugins = *NewConfig().WithPreRequestPlugins(producer).WithResponseStreamingPlugins(producer)
+
+	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
+	require.NoError(t, err)
+	reqCtxs := make([]*handlers.RequestContext, 2)
+	for i := range reqCtxs {
+		reqCtx := &handlers.RequestContext{
+			Request: &handlers.Request{
+				ID: fmt.Sprintf("epp-req-%d", i),
+				Headers: map[string]string{
+					reqcommon.RequestIDHeaderKey: "test-shared-id",
+					":path":                      "/v1/completions",
+				},
+				RawBody: body,
+			},
+			Response: &handlers.Response{Headers: map[string]string{}},
+			Parser:   openai.NewOpenAIParser(),
+		}
+		parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
+		require.NoError(t, err)
+		reqCtxs[i], err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+		require.NoError(t, err)
+	}
+	require.Equal(t, int64(2), producer.GetRequests(endpointID))
+
+	dir.HandleResponseBody(ctx, reqCtxs[0], true)
+	require.Equal(t, int64(1), producer.GetRequests(endpointID), "completing one request must not release the other")
+
+	dir.HandleResponseBody(ctx, reqCtxs[1], true)
+	require.Equal(t, int64(0), producer.GetRequests(endpointID), "in-flight requests leaked")
 }
 
 // TestRunPreRequestPlugins_NoPlugins verifies that runPreRequestPlugins returns

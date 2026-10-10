@@ -45,7 +45,7 @@ type RequestObjectives struct {
 
 // InferenceRequest is a structured representation of the fields we parse out of the InferenceRequest body.
 type InferenceRequest struct {
-	// RequestID is the Envoy generated Id for the request being processed
+	// RequestID is assigned by the EPP and unique per request. Use it to key per-request state.
 	RequestID string
 	// TargetModel is the final target model after traffic split.
 	TargetModel string

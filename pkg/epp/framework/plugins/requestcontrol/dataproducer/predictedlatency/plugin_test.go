@@ -186,8 +186,9 @@ func createTestInferenceRequestWithBody(reqID string, ttftSLO, tpotSLO float64, 
 	}
 
 	return &fwksched.InferenceRequest{
-		Headers: headers,
-		Body:    body,
+		RequestID: reqID,
+		Headers:   headers,
+		Body:      body,
 	}
 }
 
@@ -473,6 +474,7 @@ func TestSloContextStoreEviction(t *testing.T) {
 	endpointName := types.NamespacedName{Name: "test-model", Namespace: "default"}
 
 	req := &fwksched.InferenceRequest{
+		RequestID: requestID,
 		Headers: map[string]string{
 			reqcommon.RequestIDHeaderKey: requestID,
 		},
