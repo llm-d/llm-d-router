@@ -626,6 +626,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					PromptTokens: 25,
 					TotalTokens:  25,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -636,6 +637,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      15,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -649,6 +651,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      40,
 				},
+				StreamedEvents: 3,
 			},
 		},
 		{
@@ -664,6 +667,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 80,
 					},
 				},
+				StreamedEvents: 2,
 			},
 		},
 		{
@@ -676,6 +680,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 510,
 					TotalTokens:      11192,
 				},
+				StreamedEvents: 2,
 			},
 		},
 		{
@@ -690,27 +695,31 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 100000,
 					},
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "content delta without usage",
 			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "content delta with usage text but no usage object",
 			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"usage\"}}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "message_stop without usage",
 			chunk: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 	}

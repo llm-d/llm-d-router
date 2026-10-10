@@ -215,7 +215,20 @@ func jsonInt(m map[string]any, key string) int {
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
+	}, nil
+}
+
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		if _, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix)); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
