@@ -112,7 +112,7 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // If filtering is enabled, endpoints that don't support the request's context length are filtered out.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
-// The context length is the token count from InferenceRequestBody.TokenizedRequest.
+// The context length is the token count from the per-request TokenizedPrompt attribute.
 // When reusableTokensProducerName is configured, the request-wide reusable
 // prefix token floor is subtracted from that count. Missing tokens are treated
 // as 0 (unknown).
@@ -154,7 +154,7 @@ func (p *ContextLengthAware) Produces() map[plugin.DataKey]any {
 // before this plugin runs.
 func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
 	required := map[plugin.DataKey]any{
-		tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+		tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil),
 	}
 	if p.reusableTokensProducerName != "" {
 		required[p.reusableTokensDataKey] = attrprefix.ReusablePrefixTokens(0)
@@ -262,18 +262,19 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 		return 0
 	}
 	if p.reusableTokensProducerName == "" {
-		if request.Body == nil || request.Body.TokenizedRequest == nil {
+		tp, ok := scheduling.ReadRequestAttribute[*scheduling.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+		if !ok {
 			return 0
 		}
-		return request.Body.TokenizedRequest.TokenCount()
+		return tp.TokenCount()
 	}
 	if routingLength, ok := scheduling.ReadRequestAttribute[int](request, p.routingLengthDataKey); ok {
 		return routingLength
 	}
 
 	routingLength := 0
-	if request.Body != nil && request.Body.TokenizedRequest != nil {
-		total := request.Body.TokenizedRequest.TokenCount()
+	if tp, ok := scheduling.ReadRequestAttribute[*scheduling.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey); ok {
+		total := tp.TokenCount()
 		routingLength = total
 		if total > 0 {
 			if reusable, ok := scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](request, p.reusableTokensDataKey); ok {

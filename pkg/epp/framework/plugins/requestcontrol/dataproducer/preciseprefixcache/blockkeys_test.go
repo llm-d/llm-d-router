@@ -26,6 +26,7 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -55,17 +56,16 @@ func TestComputeBlockKeys_PerPromptMMContent(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{
-					{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{img}},
-					{TokenIDs: short},
-					{TokenIDs: twoBlocks},
-					{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{audio}},
-				},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{
+			{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{img}},
+			{TokenIDs: short},
+			{TokenIDs: twoBlocks},
+			{TokenIDs: twoBlocks, MultiModalFeatures: []fwkrh.MultiModalFeature{audio}},
+		},
+	})
 
 	keys, mmContent, err := computeBlockKeys(ctx, idx, req, testBlockSize)
 	require.NoError(t, err)

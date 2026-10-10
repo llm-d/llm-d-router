@@ -24,8 +24,10 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -88,8 +90,16 @@ var benchLayouts = map[string]func(p *dataProducer, pods []server) []uint32{
 }
 
 func benchHashes(p *dataProducer, tokens []uint32) []blockHash {
-	req := &fwksched.InferenceRequest{TargetModel: "bench-model", Body: tokenizedBody(tokens)}
+	req := tokenizedBenchmarkRequest(tokens)
 	return prefixhash.GetBlockHashes(context.Background(), req, benchBlockSize, p.resolveMaxBlocks(benchBlockSize))[0]
+}
+
+func tokenizedBenchmarkRequest(tokens []uint32) *fwksched.InferenceRequest {
+	req := &fwksched.InferenceRequest{TargetModel: "bench-model", Body: &fwkrh.InferenceRequestBody{}}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}},
+	})
+	return req
 }
 
 // benchPods returns n pods sized to the default LRU capacity and their
@@ -115,7 +125,8 @@ func BenchmarkProduce(b *testing.B) {
 				}
 				pods, endpoints := benchPods(numPods)
 				query := benchLayouts[layout](p, pods)
-				req := &fwksched.InferenceRequest{RequestID: "bench", TargetModel: "bench-model", Body: tokenizedBody(query)}
+				req := tokenizedBenchmarkRequest(query)
+				req.RequestID = "bench"
 
 				b.ReportAllocs()
 				for b.Loop() {

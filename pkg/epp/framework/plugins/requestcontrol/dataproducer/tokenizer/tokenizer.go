@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package tokenizer provides a DataProducer plugin that tokenizes the request
-// prompt and publishes the result on InferenceRequestBody.TokenizedRequest for
+// prompt and publishes the result on the per-request TokenizedPrompt attribute for
 // downstream consumers (scorers, filters, other data producers).
 package tokenizer
 
@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -41,7 +42,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -328,7 +328,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		typedName:   typedName,
 		backend:     backend,
 		backendName: backendName,
-		dk:          TokenizedPromptDataKey.WithNonEmptyProducerName(name),
+		dk:          TokenizedPromptDataKey,
 	}
 	if endpointPicker != nil {
 		p.endpointDiscovery = newEndpointDiscoveryHandler(typedName, endpointPicker)
@@ -340,7 +340,7 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 }
 
 // Plugin tokenizes the prompt in the incoming request and writes the result to
-// InferenceRequestBody.TokenizedRequest for downstream DataProducer / scoring plugins.
+// the per-request TokenizedPrompt attribute for downstream DataProducer and scoring plugins.
 type Plugin struct {
 	typedName plugin.TypedName
 	backend   tokenInputProducer
@@ -364,7 +364,7 @@ func (p *Plugin) TypedName() plugin.TypedName {
 
 // Produces returns the data keys this plugin produces.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+	return map[plugin.DataKey]any{p.dk: (*fwkrh.TokenizedRequest)(nil)}
 }
 
 // RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
@@ -391,11 +391,8 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 }
 
 // Produce derives the request's TokenizedRequest via the configured backend and
-// stores it on the body. Skips when one is already present; errors propagate to
-// the Director, which logs and continues.
-//
-// The tokenize span opens below the already-tokenized skip path, so it is
-// emitted only when the backend is actually invoked.
+// stores it in the request attribute store. Errors propagate to the Director,
+// which logs and continues.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
@@ -403,15 +400,6 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	if request.Body.RenderRequest {
 		return nil
 	}
-	if request.Body.TokenizedRequest != nil {
-		// A parser (e.g. vLLM gRPC) may pre-populate tokens without a salt;
-		// ensure cache-salt isolation still applies on the skip path.
-		if request.Body.TokenizedRequest.CacheSalt == "" {
-			request.Body.TokenizedRequest.CacheSalt = CacheSaltFromBody(request.Body)
-		}
-		return nil
-	}
-
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
 	if auth, ok := metadata.GetLowerCaseHeaderValue(request.Headers, "authorization"); ok {
 		ctx = withAuthHeader(ctx, auth)
@@ -449,14 +437,40 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		return nil
 	}
 	tp.CacheSalt = CacheSaltFromBody(request.Body)
-	request.Body.TokenizedRequest = tp
+	request.PutAttribute(p.dk, tp)
 
 	if tracingActive {
-		span.SetAttributes(append(mmobs.SpanAttributes(request),
+		span.SetAttributes(append(tokenizedMMSpanAttributes(tp),
 			semconv.LLMDEPPTokenProducerTokenCount(tp.TokenCount()),
 		)...)
 	}
 	return nil
+}
+
+func tokenizedMMSpanAttributes(tp *fwkrh.TokenizedRequest) []attribute.KeyValue {
+	modalities := map[string]struct{}{}
+	hashCount := 0
+	for _, prompt := range tp.Prompts {
+		for _, feature := range prompt.MultiModalFeatures {
+			hashCount++
+			if feature.Modality != "" {
+				modalities[string(feature.Modality)] = struct{}{}
+			}
+		}
+	}
+	names := make([]string, 0, len(modalities))
+	for modality := range modalities {
+		names = append(names, modality)
+	}
+	sort.Strings(names)
+	modality := "none"
+	if len(names) > 0 {
+		modality = strings.Join(names, ",")
+	}
+	return []attribute.KeyValue{
+		attribute.String("mm.modality", modality),
+		attribute.Int("mm.hash_count", hashCount),
+	}
 }
 
 // convertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal

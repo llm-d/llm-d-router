@@ -114,7 +114,7 @@ func TestMessagesRenderMode(t *testing.T) {
 						TokenIDs:           []uint32{1, 2, 3},
 						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
 					}},
-				}, req.Body.TokenizedRequest)
+				}, tokenizedPrompt(t, req))
 				require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
 				require.False(t, req.Body.Mutated)
 				unchanged, err := json.Marshal(req.Body.Messages)
@@ -185,13 +185,13 @@ func TestMessagesRenderModeChatOnlyRenderer(t *testing.T) {
 			err = p.Produce(context.Background(), req, nil)
 			if mode == messagesRenderModeLegacy {
 				require.NoError(t, err)
-				require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+				require.Equal(t, []uint32{1, 2, 3}, tokenizedPrompt(t, req).Prompts[0].TokenIDs)
 				require.Equal(t, []string{chatRenderPath}, paths)
 			} else {
 				var statusErr *renderStatusError
 				require.ErrorAs(t, err, &statusErr)
 				require.Equal(t, http.StatusNotFound, statusErr.StatusCode)
-				require.Nil(t, req.Body.TokenizedRequest)
+				assertNoTokenizedPrompt(t, req)
 				require.Equal(t, []string{messagesRenderPath}, paths)
 			}
 			require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
@@ -253,7 +253,7 @@ func TestMessagesRenderModeDoesNotFallback(t *testing.T) {
 				} else {
 					require.NoError(t, err)
 				}
-				require.Nil(t, req.Body.TokenizedRequest)
+				assertNoTokenizedPrompt(t, req)
 				require.Equal(t, 1, calls)
 			})
 		}
@@ -302,9 +302,9 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 				req := &scheduling.InferenceRequest{Body: parsed.Body}
 				require.NoError(t, p.Produce(context.Background(), req, nil))
 				if tc.direct {
-					require.Nil(t, req.Body.TokenizedRequest)
+					assertNoTokenizedPrompt(t, req)
 				} else {
-					require.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}, req.Body.TokenizedRequest.Prompts)
+					require.Equal(t, []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}, tokenizedPrompt(t, req).Prompts)
 				}
 				after, err := json.Marshal(req.Body.Payload)
 				require.NoError(t, err)
@@ -318,20 +318,6 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestLegacyMessagesPreservesPrepopulatedTokens(t *testing.T) {
-	p := newTestPlugin(&mockTokenizer{})
-	p.backend = renderBackend{tk: &mockTokenizer{}, legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
-	tokens := &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}}
-	req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{
-		Messages:         &fwkrh.MessagesRequest{CacheSalt: "tenant-a"},
-		Payload:          fwkrh.RawPayload(`{"cache_salt":"tenant-a"}`),
-		TokenizedRequest: tokens,
-	}}
-	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.Same(t, tokens, req.Body.TokenizedRequest)
-	require.Equal(t, "tenant-a", tokens.CacheSalt)
 }
 
 func TestLegacyMessagesPayloadWire(t *testing.T) {
@@ -451,10 +437,10 @@ func TestAutoMessagesRendering(t *testing.T) {
 					err = p.Produce(context.Background(), req, nil)
 					if tc.discoveryErr || tc.userStatus != 0 {
 						require.Error(t, err)
-						require.Nil(t, req.Body.TokenizedRequest)
+						assertNoTokenizedPrompt(t, req)
 					} else {
 						require.NoError(t, err)
-						require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+						require.Equal(t, []uint32{1, 2, 3}, tokenizedPrompt(t, req).Prompts[0].TokenIDs)
 					}
 					require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
 				}
@@ -637,10 +623,10 @@ func TestMessagesDiscoveryLive(t *testing.T) {
 					var status *renderStatusError
 					require.ErrorAs(t, err, &status)
 					require.Equal(t, http.StatusNotFound, status.StatusCode)
-					require.Nil(t, req.Body.TokenizedRequest)
+					assertNoTokenizedPrompt(t, req)
 				} else {
 					require.NoError(t, err)
-					require.Equal(t, want, req.Body.TokenizedRequest.Prompts)
+					require.Equal(t, want, tokenizedPrompt(t, req).Prompts)
 				}
 				require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
 			}
@@ -686,7 +672,7 @@ func TestLegacyMessagesRenderLive(t *testing.T) {
 			require.NoError(t, err)
 			req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": e.auth}}
 			require.NoError(t, p.Produce(t.Context(), req, nil))
-			require.Equal(t, e.render(t, chatRenderPath, []byte(fmt.Sprintf(`{"model":%q,%s}`, e.model, tc.chat))), req.Body.TokenizedRequest.Prompts)
+			require.Equal(t, e.render(t, chatRenderPath, []byte(fmt.Sprintf(`{"model":%q,%s}`, e.model, tc.chat))), tokenizedPrompt(t, req).Prompts)
 			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
 			mu.Lock()
 			defer mu.Unlock()
@@ -964,8 +950,7 @@ func TestLegacyProduceMessages(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, req.Body.TokenizedRequest.Prompts)
+	assert.Equal(t, []fwkrh.PromptTokens{{TokenIDs: wantTokens}}, tokenizedPrompt(t, req).Prompts)
 
 	pm, ok := gotPayload.AsMap()
 	require.True(t, ok, "RenderChat payload must be a map")

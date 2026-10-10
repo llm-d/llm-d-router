@@ -62,14 +62,14 @@ func createRequest() *scheduling.InferenceRequest {
 }
 
 func createHundredTokenRequest() *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
+	request := &scheduling.InferenceRequest{
 		RequestID: "test-request",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 100)}},
-			},
-		},
+		Body:      &fwkrh.InferenceRequestBody{},
 	}
+	request.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 100)}},
+	})
+	return request
 }
 
 func TestFactory(t *testing.T) {
@@ -314,10 +314,9 @@ func TestReusableTokensFilter(t *testing.T) {
 		})
 		request := &scheduling.InferenceRequest{
 			RequestID: "unknown-token-count",
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{},
-			},
+			Body:      &fwkrh.InferenceRequestBody{},
 		}
+		request.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{})
 		request.PutAttribute(
 			attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
 			attrprefix.ReusablePrefixTokens(120),
@@ -517,7 +516,7 @@ func TestCalculateRangeScoreFallback(t *testing.T) {
 	})
 }
 
-// TokenizedRequest tests — plugin reads tokens from InferenceRequestBody.TokenizedRequest
+// TokenizedRequest tests verify that the plugin reads the per-request TokenizedPrompt attribute
 // as populated by the tokenizer DataProducer plugin.
 
 func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
@@ -548,10 +547,11 @@ func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	request.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}},
+	})
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))

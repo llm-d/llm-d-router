@@ -125,10 +125,6 @@ type InferenceRequestBody struct {
 	RawBody []byte `json:"-"`
 	// RenderRequest bypasses token production while retaining model routing.
 	RenderRequest bool `json:"-"`
-	// TokenizedRequest contains parser-derived tokenization results when available.
-	// It is nil when the request was not already tokenized.
-	TokenizedRequest *TokenizedRequest `json:"-"`
-
 	// Stream indicates whether the request specifies a streaming response (e.g., via a stream field).
 	// This typically implies the model server's response will be streamed.
 	Stream bool `json:"-"`

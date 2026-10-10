@@ -298,7 +298,7 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil),
 		},
 		Optional: map[plugin.DataKey]any{},
 	}

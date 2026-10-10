@@ -31,6 +31,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const mmProducerName = "precise-prefix-cache-producer"
@@ -48,13 +49,11 @@ func mmEndpoint(name string, info *attrprefix.PrefixCacheMatchInfo) fwksched.End
 }
 
 func requestWithMMFeatures(features ...fwkrh.MultiModalFeature) *fwksched.InferenceRequest {
-	return &fwksched.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}},
-			},
-		},
-	}
+	req := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}},
+	})
+	return req
 }
 
 func TestAnyMMHit(t *testing.T) {

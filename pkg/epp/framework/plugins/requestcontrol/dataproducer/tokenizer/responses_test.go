@@ -260,9 +260,9 @@ func TestProduce_ResponsesPopulatesTokenizedRequest(t *testing.T) {
 		},
 	}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{5, 6, 7}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-	assert.Equal(t, "tenant-a", req.Body.TokenizedRequest.CacheSalt)
+	tokenized := tokenizedPrompt(t, req)
+	assert.Equal(t, []uint32{5, 6, 7}, tokenized.Prompts[0].TokenIDs)
+	assert.Equal(t, "tenant-a", tokenized.CacheSalt)
 
 	pm, ok := gotPayload.(fwkrh.PayloadMap)
 	require.True(t, ok)
@@ -285,7 +285,7 @@ func TestProduce_ResponsesTokenizerError(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tokenization failed")
-	assert.Nil(t, req.Body.TokenizedRequest)
+	assertNoTokenizedPrompt(t, req)
 }
 
 // TestProduce_ResponsesUnsupportedInputErrors exercises the legacy
@@ -314,7 +314,7 @@ func TestProduce_ResponsesUnsupportedInputErrors(t *testing.T) {
 	err := p.Produce(context.Background(), req, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"function_call"`)
-	assert.Nil(t, req.Body.TokenizedRequest)
+	assertNoTokenizedPrompt(t, req)
 }
 
 func TestResponsesRenderMode(t *testing.T) {
@@ -375,10 +375,10 @@ func TestResponsesRenderMode(t *testing.T) {
 				require.NoError(t, perr)
 				req := &scheduling.InferenceRequest{Body: parsed.Body}
 				require.NoError(t, p.Produce(context.Background(), req, nil))
-				require.NotNil(t, req.Body.TokenizedRequest)
-				assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+				tokenized := tokenizedPrompt(t, req)
+				assert.Equal(t, []uint32{1, 2, 3}, tokenized.Prompts[0].TokenIDs)
 				assert.Equal(t, []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
-					req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
+					tokenized.Prompts[0].MultiModalFeatures)
 			}
 			wantCalls := 2
 			if auto {
@@ -447,13 +447,13 @@ func TestResponsesRenderModeChatOnlyRenderer(t *testing.T) {
 			err = p.Produce(context.Background(), req, nil)
 			if mode == responsesRenderModeLegacy {
 				require.NoError(t, err)
-				require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+				require.Equal(t, []uint32{1, 2, 3}, tokenizedPrompt(t, req).Prompts[0].TokenIDs)
 				require.Equal(t, []string{chatRenderPath}, paths)
 			} else {
 				var statusErr *renderStatusError
 				require.ErrorAs(t, err, &statusErr)
 				require.Equal(t, http.StatusNotFound, statusErr.StatusCode)
-				require.Nil(t, req.Body.TokenizedRequest)
+				assertNoTokenizedPrompt(t, req)
 				require.Equal(t, []string{responsesRenderPath}, paths)
 			}
 		})
@@ -493,8 +493,7 @@ func TestResponsesAutoDiscoveryFallsBackOnUnsupportedStatus(t *testing.T) {
 				},
 			}
 			require.NoError(t, p.Produce(context.Background(), req, nil))
-			require.NotNil(t, req.Body.TokenizedRequest)
-			assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+			assert.Equal(t, []uint32{1, 2, 3}, tokenizedPrompt(t, req).Prompts[0].TokenIDs)
 			// One chat call confirms the legacy path renders during discovery,
 			// a second serves the request itself.
 			assert.Equal(t, []string{responsesRenderPath, chatRenderPath, chatRenderPath}, paths)

@@ -4,14 +4,13 @@
 
 `DataProducer` plugin that tokenizes the request prompt and publishes
 `TokenIDs` (and a flat sorted `MultiModalFeatures` list) on
-`InferenceRequestBody.TokenizedRequest` for downstream consumers (scorers,
-filters, other data producers).
+the request's `TokenizedPromptDataKey` attribute for downstream consumers
+(scorers, filters, other data producers).
 
 Implements `requestcontrol.DataProducer` and runs in the `PrepareRequestData`
-phase, before filters and scorers. The plugin is idempotent: if
-`InferenceRequestBody.TokenizedRequest` is already populated by an earlier
-producer, tokenization is skipped. Multi-modal features are flattened into the
-upstream list shape, sorted by placeholder offset.
+phase, before filters and scorers. Multi-modal features are flattened into the
+upstream list shape, sorted by placeholder offset. Protocol-level token IDs are
+normalized into the same request attribute.
 
 ## Backend
 

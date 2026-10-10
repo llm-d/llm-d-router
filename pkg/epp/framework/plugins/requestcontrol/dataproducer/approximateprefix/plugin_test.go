@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -54,11 +55,15 @@ func disableMinBlockSizeClamp(t *testing.T) {
 	t.Cleanup(func() { minBlockSizeTokens = prev })
 }
 
-// tokenizedBody returns a request body carrying only a tokenized prompt.
-func tokenizedBody(tokenIDs []uint32) *fwkrh.InferenceRequestBody {
-	return &fwkrh.InferenceRequestBody{
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
+func inferenceRequest(targetModel string, tokenIDs []uint32) *fwksched.InferenceRequest {
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: targetModel,
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey,
+		&fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}})
+	return req
 }
 
 func TestProduce(t *testing.T) {
@@ -78,11 +83,7 @@ func TestProduce(t *testing.T) {
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2}
 
 	// First request to populate cache.
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body:        tokenizedBody([]uint32{1, 2}),
-	}
+	req1 := inferenceRequest("test-model1", []uint32{1, 2})
 
 	// We need to simulate the PreRequest logic since Produce only reads from the indexer.
 	// But first let's see if Produce correctly handles an empty indexer.
@@ -117,12 +118,7 @@ func TestPreRequest(t *testing.T) {
 		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config, testHandle())
 
 		endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
-		req1 := &fwksched.InferenceRequest{
-			RequestID:   uuid.NewString(),
-			TargetModel: "test-model1",
-			Body:        tokenizedBody([]uint32{1, 2}),
-		}
-
+		req1 := inferenceRequest("test-model1", []uint32{1, 2})
 		// 1. Produce data (this saves state)
 		_ = p.Produce(context.Background(), req1, []fwksched.Endpoint{endpoint1})
 
@@ -169,11 +165,7 @@ func TestPreRequest(t *testing.T) {
 		allHashes := make([][]blockHash, 0, len(tokenSets))
 
 		for _, tokenIDs := range tokenSets {
-			req := &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "test-model1",
-				Body:        tokenizedBody(tokenIDs),
-			}
+			req := inferenceRequest("test-model1", tokenIDs)
 			_ = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint1})
 
 			res := &fwksched.SchedulingResult{
@@ -186,7 +178,6 @@ func TestPreRequest(t *testing.T) {
 			}
 			_ = p.PreRequest(context.Background(), req, res)
 			p.wg.Wait()
-
 			perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 			allHashes = append(allHashes, perPromptHashes[0])
 		}
@@ -249,11 +240,7 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 	endpoints := []fwksched.Endpoint{endpoint1, endpoint2, endpoint3}
 
 	// First request: tokens [1, 2].
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body:        tokenizedBody([]uint32{1, 2}),
-	}
+	req1 := inferenceRequest("test-model1", []uint32{1, 2})
 	_ = p.Produce(context.Background(), req1, endpoints)
 	state, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	assert.Equal(t, 2, len(state.PerPromptHashes[0]))
@@ -270,11 +257,7 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 	p.wg.Wait()
 
 	// Second request shares the first token but diverges on the second.
-	req3 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body:        tokenizedBody([]uint32{1, 3}),
-	}
+	req3 := inferenceRequest("test-model1", []uint32{1, 3})
 	_ = p.Produce(context.Background(), req3, endpoints)
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
@@ -309,11 +292,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 	endpoints := []fwksched.Endpoint{endpoint1}
 
 	// First request with an initial token prefix.
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body:        tokenizedBody([]uint32{1, 2, 3, 4, 5, 6}),
-	}
+	req1 := inferenceRequest("test-model1", []uint32{1, 2, 3, 4, 5, 6})
 	_ = p.Produce(context.Background(), req1, endpoints)
 	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	initialHashCount := len(state1.PerPromptHashes[0])
@@ -330,11 +309,7 @@ func TestPrefixPluginPrefixGrowth(t *testing.T) {
 	p.wg.Wait()
 
 	// Second request extends the first one's token prefix.
-	req2 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model1",
-		Body:        tokenizedBody([]uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}),
-	}
+	req2 := inferenceRequest("test-model1", []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
 	_ = p.Produce(context.Background(), req2, endpoints)
 	state2, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req2.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 	extendedHashCount := len(state2.PerPromptHashes[0])
@@ -364,12 +339,7 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	for i := range tokenIDs {
 		tokenIDs[i] = uint32(i + 1)
 	}
-	req := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody(tokenIDs),
-	}
-
+	req := inferenceRequest("test-model", tokenIDs)
 	config := config{
 		AutoTune:               true,
 		BlockSizeTokens:        256, // Should be ignored in favor of pod metrics (128)
@@ -414,12 +384,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	)
 
 	// 4 token IDs = 4 blocks at blockSize 1, but should be capped to 2.
-	req := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody([]uint32{1, 2, 3, 4}),
-	}
-
+	req := inferenceRequest("test-model", []uint32{1, 2, 3, 4})
 	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
 	assert.NoError(t, err)
 
@@ -437,12 +402,7 @@ func TestMaxPrefixTokensToMatch(t *testing.T) {
 	p2, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg2, testHandle())
 	assert.NoError(t, err)
 
-	req2 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody([]uint32{1, 2, 3, 4}),
-	}
-
+	req2 := inferenceRequest("test-model", []uint32{1, 2, 3, 4})
 	err = p2.Produce(context.Background(), req2, []fwksched.Endpoint{endpoint})
 	assert.NoError(t, err)
 
@@ -471,12 +431,7 @@ func TestMaxPrefixBothCapsZeroMatchesEverything(t *testing.T) {
 		fwkdl.NewMetrics(), fwkdl.NewAttributes(),
 	)
 
-	req := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody([]uint32{1, 2, 3, 4}),
-	}
-
+	req := inferenceRequest("test-model", []uint32{1, 2, 3, 4})
 	err = p.Produce(context.Background(), req, []fwksched.Endpoint{endpoint})
 	assert.NoError(t, err)
 
@@ -602,12 +557,7 @@ func BenchmarkPrefixPluginStress(b *testing.B) {
 				ID: k8stypes.NamespacedName{Name: "pod1"},
 			}, nil, fwkdl.NewAttributes())
 			endpoints := []fwksched.Endpoint{endpoint}
-			req := &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "model-stress",
-				Body:        tokenizedBody(tokenIDs),
-			}
-
+			req := inferenceRequest("model-stress", tokenIDs)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = p.Produce(context.Background(), req, endpoints)
@@ -726,13 +676,11 @@ func TestProduce_MultiPrompt(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
-
+	req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
+	})
 	err = p.Produce(context.Background(), req, endpoints)
 	assert.NoError(t, err)
 
@@ -769,12 +717,11 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 	req1 := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req1.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
+	})
 	_ = p.Produce(context.Background(), req1, endpoints)
 	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
@@ -788,12 +735,11 @@ func TestMultiPromptMatchAggregation(t *testing.T) {
 	req2 := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req2.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5}}},
+	})
 	_ = p.Produce(context.Background(), req2, endpoints)
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
@@ -822,12 +768,11 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 	req1 := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req1.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{3, 4}}},
+	})
 	_ = p.Produce(context.Background(), req1, endpoints)
 	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
@@ -841,12 +786,11 @@ func TestMultiPromptPartialMatch(t *testing.T) {
 	req2 := &fwksched.InferenceRequest{
 		RequestID:   uuid.NewString(),
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{5, 6}}},
-			},
-		},
+		Body:        &fwkrh.InferenceRequestBody{},
 	}
+	req2.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{
+		Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2}}, {TokenIDs: []uint32{5, 6}}}},
+	)
 	_ = p.Produce(context.Background(), req2, endpoints)
 
 	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
@@ -873,12 +817,7 @@ func TestPrefixPluginTokenizedRequest(t *testing.T) {
 	endpoints := []fwksched.Endpoint{endpoint}
 
 	// 4 token IDs -> 4 blocks at blockSize 1.
-	req := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody([]uint32{10, 20, 30, 40}),
-	}
-
+	req := inferenceRequest("test-model", []uint32{10, 20, 30, 40})
 	err = p.Produce(context.Background(), req, endpoints)
 	assert.NoError(t, err)
 
@@ -912,17 +851,8 @@ func TestPrefixPluginMatchesSameTokens(t *testing.T) {
 
 	tokenIDs := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
 
-	req1 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody(tokenIDs),
-	}
-	req2 := &fwksched.InferenceRequest{
-		RequestID:   uuid.NewString(),
-		TargetModel: "test-model",
-		Body:        tokenizedBody(tokenIDs),
-	}
-
+	req1 := inferenceRequest("test-model", tokenIDs)
+	req2 := inferenceRequest("test-model", tokenIDs)
 	_ = p.Produce(context.Background(), req1, endpoints)
 	state1, _ := plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), req1.RequestID, plugin.StateKey(ApproxPrefixCachePluginType))
 

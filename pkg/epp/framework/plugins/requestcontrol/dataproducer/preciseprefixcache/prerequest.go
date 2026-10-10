@@ -30,11 +30,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 const (
@@ -119,7 +121,11 @@ func (p *Producer) recordPrediction(ctx context.Context, request *scheduling.Inf
 	if !ok {
 		return
 	}
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	if request == nil || request.Body == nil {
+		return
+	}
+	tokenized, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+	if !ok {
 		return
 	}
 	selected := predictedCachedTokens(info)
@@ -147,7 +153,7 @@ func (p *Producer) recordPrediction(ctx context.Context, request *scheduling.Inf
 		Selected:      selected,
 		BestPredicted: bestPredicted,
 		BestAvailable: bestAvailable,
-		PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
+		PromptTokens:  tokenized.TokenCount(),
 	})
 	p.recordMMPrediction(ctx, request, role, info)
 }
@@ -171,7 +177,11 @@ func (p *Producer) recordMMPrediction(ctx context.Context, request *scheduling.I
 		)
 	}
 	mmPromptTokens := 0
-	for _, prompt := range request.Body.TokenizedRequest.Prompts {
+	tokenized, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+	if !ok {
+		return
+	}
+	for _, prompt := range tokenized.Prompts {
 		for _, feature := range prompt.MultiModalFeatures {
 			mmPromptTokens += feature.Length
 		}

@@ -30,6 +30,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 // referenceIndex models the indexer contract: one LRU per pod, filled
@@ -125,11 +126,13 @@ func TestProduceMatchesReferenceModel(t *testing.T) {
 				for i := range prompts {
 					prompts[i] = fwkrh.PromptTokens{TokenIDs: prompt()}
 				}
-				return &fwksched.InferenceRequest{
+				req := &fwksched.InferenceRequest{
 					RequestID:   "q",
 					TargetModel: "m",
-					Body:        &fwkrh.InferenceRequestBody{TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: prompts}},
+					Body:        &fwkrh.InferenceRequestBody{},
 				}
+				req.PutAttribute(tokenproducer.TokenizedPromptDataKey, &fwkrh.TokenizedRequest{Prompts: prompts})
+				return req
 			}
 			hashesOf := func(req *fwksched.InferenceRequest) ([][]blockHash, []int) {
 				return prefixhash.GetBlockHashesWithPromptTokens(t.Context(), req, blockSize, cfg.MaxPrefixBlocksToMatch)

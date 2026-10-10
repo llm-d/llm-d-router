@@ -283,7 +283,7 @@ func (p *Producer) Produces() map[plugin.DataKey]any {
 // fallback extraction is used.
 func (p *Producer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Optional: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}},
+		Optional: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*scheduling.TokenizedRequest)(nil)},
 	}
 }
 
@@ -331,18 +331,21 @@ func ExtractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
 }
 
 func extractMMItems(request *scheduling.InferenceRequest) []attrmm.MatchItem {
-	if request == nil || request.Body == nil {
+	if request == nil {
 		return nil
 	}
 
-	if request.Body.TokenizedRequest != nil {
+	if tokenized, ok := scheduling.ReadRequestAttribute[*fwkrh.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey); ok {
 		var features []fwkrh.MultiModalFeature
-		for _, prompt := range request.Body.TokenizedRequest.Prompts {
+		for _, prompt := range tokenized.Prompts {
 			features = append(features, prompt.MultiModalFeatures...)
 		}
 		if len(features) > 0 {
 			return itemsFromTokenizedFeatures(features)
 		}
+	}
+	if request.Body == nil {
+		return nil
 	}
 
 	if g := request.Body.Generate; g != nil && g.Features != nil && len(g.Features.MMHashes) > 0 {

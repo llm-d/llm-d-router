@@ -135,7 +135,7 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // is configured.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: (*fwksched.TokenizedRequest)(nil)},
 	}
 }
 
@@ -322,6 +322,10 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	blockSize := p.GetBlockSize(primaryProfileResult.TargetEndpoints)
 	recordPrefixCacheMatch(p.typedName.Name, p.typedName.Type, matchLen*blockSize*fwkrh.BytesPerToken, total*blockSize*fwkrh.BytesPerToken)
 	if request.Body != nil {
+		tokenized, ok := fwksched.ReadRequestAttribute[*fwksched.TokenizedRequest](request, tokenproducer.TokenizedPromptDataKey)
+		if !ok {
+			return nil
+		}
 		predictionProfile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalDefaultPrefillProfile)
 		selected := state.PredictedCachedTokens[ServerID(predictionProfile.TargetEndpoints[0].GetMetadata().ID)]
 		// A profile that reports no scored candidates leaves only the chosen
@@ -338,7 +342,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 			Selected:      selected,
 			BestPredicted: bestPredicted,
 			BestAvailable: bestAvailable,
-			PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
+			PromptTokens:  tokenized.TokenCount(),
 		})
 	}
 	return nil

@@ -96,7 +96,7 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 			require.NoError(t, p.Produce(context.Background(), req, nil))
 			require.Equal(t, tt.path+"/render", path)
 			require.Equal(t, tt.body, string(got))
-			require.Equal(t, [][]uint32{{3, 4}}, [][]uint32{req.Body.TokenizedRequest.Prompts[0].TokenIDs})
+			require.Equal(t, [][]uint32{{3, 4}}, [][]uint32{tokenizedPrompt(t, req).Prompts[0].TokenIDs})
 
 			unrewritten, err := tt.parser.ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": tt.path})
 			require.NoError(t, err)
@@ -108,7 +108,6 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 			assertNativeFieldsUnchanged(t, []byte(tt.body), lateBody)
 
 			// A resolved model and late routing metadata must not reorder content.
-			parsed.Body.TokenizedRequest = nil
 			rewriter := tt.parser.(fwkrh.ModelNameRewriter)
 			parsed.Body.Payload, err = rewriter.RewriteModelName(parsed.Body.Payload.(fwkrh.MarshalablePayload), "resolved-adapter")
 			require.NoError(t, err)
@@ -173,7 +172,7 @@ func TestNativeRenderFailureDoesNotConvertOrEstimate(t *testing.T) {
 			} else {
 				require.Error(t, err)
 			}
-			require.Nil(t, req.Body.TokenizedRequest)
+			assertNoTokenizedPrompt(t, req)
 			require.Equal(t, 1, calls)
 		})
 	}
@@ -198,7 +197,7 @@ func TestDirectRenderRequestsPassThrough(t *testing.T) {
 			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
 			req := &scheduling.InferenceRequest{Body: parsed.Body}
 			require.NoError(t, newTestPlugin(&mockTokenizer{}).Produce(context.Background(), req, nil))
-			require.Nil(t, req.Body.TokenizedRequest)
+			assertNoTokenizedPrompt(t, req)
 		})
 	}
 }
@@ -211,8 +210,9 @@ func TestNativeRenderDoesNotReconstructNonHTTPInput(t *testing.T) {
 		{Messages: &fwkrh.MessagesRequest{}},
 		{Completions: &fwkrh.CompletionsRequest{}},
 	} {
-		err := newTestPlugin(newHTTPRenderer(t, srv)).Produce(context.Background(), &scheduling.InferenceRequest{Body: body}, nil)
+		req := &scheduling.InferenceRequest{Body: body}
+		err := newTestPlugin(newHTTPRenderer(t, srv)).Produce(context.Background(), req, nil)
 		require.ErrorContains(t, err, "requires an HTTP JSON payload")
-		require.Nil(t, body.TokenizedRequest)
+		assertNoTokenizedPrompt(t, req)
 	}
 }

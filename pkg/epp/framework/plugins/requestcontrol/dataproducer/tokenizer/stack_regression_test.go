@@ -76,7 +76,6 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 				require.NoError(t, err)
 				before, err := json.Marshal(parsed.Body.Payload)
 				require.NoError(t, err)
-				existing := parsed.Body.TokenizedRequest
 				p := newTestPlugin(&mockTokenizer{})
 				if backend == backendEstimate {
 					p.backend = estimateBackend{}
@@ -87,10 +86,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 				require.Equal(t, &fwkrh.TokenizedRequest{
 					Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}, MultiModalFeatures: tc.features}},
 					CacheSalt: tc.salt,
-				}, req.Body.TokenizedRequest)
-				if existing != nil {
-					require.Same(t, existing, req.Body.TokenizedRequest)
-				}
+				}, tokenizedPrompt(t, req))
 				after, err := json.Marshal(req.Body.Payload)
 				require.NoError(t, err)
 				require.Equal(t, before, after)
@@ -104,7 +100,6 @@ func TestCompletionTokenBatchesUseRenderedTokens(t *testing.T) {
 	const raw = ` {"model":"m","prompt":[[1,2,3],[4,5,6]],"truncate_prompt_tokens":2,"cache_salt":"tenant-a"} `
 	parsed, err := openai.NewOpenAIParser().ParseRequest(context.Background(), []byte(raw), map[string]string{":path": "/v1/completions"})
 	require.NoError(t, err)
-	require.Nil(t, parsed.Body.TokenizedRequest)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/completions/render", r.URL.Path)
 		body, err := io.ReadAll(r.Body)
@@ -118,7 +113,7 @@ func TestCompletionTokenBatchesUseRenderedTokens(t *testing.T) {
 	require.Equal(t, &fwkrh.TokenizedRequest{
 		Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{2, 3}}, {TokenIDs: []uint32{5, 6}}},
 		CacheSalt: "tenant-a",
-	}, req.Body.TokenizedRequest)
+	}, tokenizedPrompt(t, req))
 	require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
 }
 
@@ -143,8 +138,7 @@ func TestGRPCTextProducesTokens(t *testing.T) {
 	p := newTestPlugin(renderer)
 	p.backend = renderBackend{tk: renderer, modelName: "grpc-model"}
 	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	require.Equal(t, []uint32{1, 2, 3}, tokenizedPrompt(t, req).Prompts[0].TokenIDs)
 	require.Equal(t, "Hello world", req.Body.Payload.(fwkrh.PayloadProto).Message.(*pb.GenerateRequest).GetText())
 }
 
@@ -170,7 +164,7 @@ func TestDirectRenderKeepsModel(t *testing.T) {
 			parsed.Body.Mutated = true
 			req := &scheduling.InferenceRequest{Body: parsed.Body}
 			require.NoError(t, newTestPlugin(&mockTokenizer{}).Produce(context.Background(), req, nil))
-			require.Nil(t, req.Body.TokenizedRequest)
+			assertNoTokenizedPrompt(t, req)
 			forwarded, err := parsed.Body.WirePayload().(fwkrh.Marshaler).Marshal()
 			require.NoError(t, err)
 			assertNativeFieldsUnchanged(t, raw, forwarded, "model")
