@@ -234,8 +234,12 @@ func (av *AllowlistValidator) onInferencePoolUpdate(_, newObj interface{}) {
 
 // onInferencePoolDelete handles deleted InferencePool resources
 func (av *AllowlistValidator) onInferencePoolDelete(obj interface{}) {
-	pool := obj.(*unstructured.Unstructured)
-	poolName := pool.GetName()
+	name, err := cache.DeletionHandlingObjectToName(obj)
+	if err != nil {
+		av.logger.Error(err, "failed to process InferencePool deletion", "objectType", fmt.Sprintf("%T", obj))
+		return
+	}
+	poolName := name.Name
 	av.logger.Info("InferencePool deleted", "name", poolName)
 
 	// Stop watching pods for this pool
@@ -388,8 +392,12 @@ func (av *AllowlistValidator) onPodUpdate(_, newObj interface{}) {
 
 // onPodDelete handles deleted pods
 func (av *AllowlistValidator) onPodDelete(obj interface{}) {
-	pod := obj.(*unstructured.Unstructured)
-	av.logger.V(logging.DEBUG).Info("Pod deleted", "name", pod.GetName())
+	name, err := cache.DeletionHandlingObjectToName(obj)
+	if err != nil {
+		av.logger.Error(err, "failed to process Pod deletion", "objectType", fmt.Sprintf("%T", obj))
+		return
+	}
+	av.logger.V(logging.DEBUG).Info("Pod deleted", "name", name.Name)
 	av.rebuildAllowlist()
 }
 
