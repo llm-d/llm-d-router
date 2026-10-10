@@ -53,7 +53,8 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 			"features": map[string]any{
 				"mm_hashes":       map[string][]string{ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
 				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
+				"kwargs_data":     map[string][]string{ModalityImage: {testKwargsA, testKwargsB}},
+				"mm_metadata":     map[string][]string{ModalityImage: {testMetadataA, testMetadataB}},
 			},
 		})
 	}))
@@ -97,11 +98,14 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}
 
 	// Verify kwargs_data
-	if reqCtx.MultimodalEntries[0].KwargsData != "dGVuc29yLWE=" {
+	if reqCtx.MultimodalEntries[0].KwargsData != testKwargsA {
 		t.Fatalf("expected kwargs_data for entry 0, got %s", reqCtx.MultimodalEntries[0].KwargsData)
 	}
-	if reqCtx.MultimodalEntries[1].KwargsData != "dGVuc29yLWI=" {
+	if reqCtx.MultimodalEntries[1].KwargsData != testKwargsB {
 		t.Fatalf("expected kwargs_data for entry 1, got %s", reqCtx.MultimodalEntries[1].KwargsData)
+	}
+	if reqCtx.MultimodalEntries[0].MMMetadata != testMetadataA || reqCtx.MultimodalEntries[1].MMMetadata != testMetadataB {
+		t.Fatalf("unexpected mm_metadata: %q / %q", reqCtx.MultimodalEntries[0].MMMetadata, reqCtx.MultimodalEntries[1].MMMetadata)
 	}
 
 	// Verify placeholders
@@ -110,6 +114,50 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}
 	if reqCtx.MultimodalEntries[1].Placeholder.Offset != 4 || reqCtx.MultimodalEntries[1].Placeholder.Length != 3 {
 		t.Fatalf("unexpected placeholder for entry 1: %+v", reqCtx.MultimodalEntries[1].Placeholder)
+	}
+}
+
+func TestRenderStep_MismatchedMMMetadata_DegradesInsteadOfFailing(t *testing.T) {
+	// mm_metadata is an optimization-only field: the response already carries
+	// the kwargs_data fallback, so a renderer that emits a mismatched metadata
+	// array costs the optimization, not the request.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 2345, 6789},
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
+				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 1}, map[string]any{"offset": 2, "length": 1}}},
+				"kwargs_data":     map[string][]string{ModalityImage: {testKwargsA, testKwargsB}},
+				// One metadata item for two entries: wrong shape, must degrade.
+				"mm_metadata": map[string][]string{ModalityImage: {testMetadataA}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath:      reqcommon.PathChatCompletions,
+		Body:              map[string]any{"model": "gpt-4o", "messages": []any{}},
+		Model:             "gpt-4o",
+		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0}, {Index: 1}},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected the request to succeed with degraded mm_metadata, got %v", err)
+	}
+	// The degradation drops the whole metadata array: no entry may keep a
+	// half-populated metadata slot, since prefill's per-entry choice would
+	// then ship mm_metadata without a matching EC guarantee.
+	for i, e := range reqCtx.MultimodalEntries {
+		if e.MMMetadata != "" {
+			t.Fatalf("entry %d metadata: got %q, want empty after degradation", i, e.MMMetadata)
+		}
+		if e.KwargsData != testKwargsA && e.KwargsData != testKwargsB {
+			t.Fatalf("entry %d lost its kwargs_data fallback: %q", i, e.KwargsData)
+		}
 	}
 }
 

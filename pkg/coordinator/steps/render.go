@@ -294,6 +294,7 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	imageHashes := renderResp.Features.MMHashes[ModalityImage]
 	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
 	imageKwargs := renderResp.Features.KwargsData[ModalityImage]
+	imageMetadata := renderResp.Features.MMMetadata[ModalityImage]
 
 	expected := len(reqCtx.MultimodalEntries)
 	if len(imageHashes) != expected {
@@ -305,18 +306,32 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	if len(imageKwargs) != expected {
 		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
 	}
+	// mm_metadata is optional for backward compatibility with older renderers.
+	// A mismatched length degrades rather than fails: the field is an
+	// optimization whose fallback (kwargs_data, validated just above) is on
+	// the same response, so a misbehaving renderer costs the optimization,
+	// not the request. mm_hashes/mm_placeholders/kwargs_data stay strict
+	// because they have no fallback.
+	if len(imageMetadata) > 0 && len(imageMetadata) != expected {
+		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; degrading to kwargs_data",
+			"got", len(imageMetadata), "expected", expected)
+		imageMetadata = nil
+	}
 
 	for i := range reqCtx.MultimodalEntries {
 		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
 		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+		if i < len(imageMetadata) {
+			reqCtx.MultimodalEntries[i].MMMetadata = imageMetadata[i]
+		}
 	}
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
 
-	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
+	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs), "mm_metadata_len", len(imageMetadata))
 	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
 	return nil
 }
@@ -375,6 +390,7 @@ type renderFeatures struct {
 	MMHashes       map[string][]string                    `json:"mm_hashes"`
 	MMPlaceholders map[string][]pipeline.PlaceholderRange `json:"mm_placeholders"`
 	KwargsData     map[string][]string                    `json:"kwargs_data"`
+	MMMetadata     map[string][]string                    `json:"mm_metadata"`
 }
 
 // completionsRenderResponse is a minimal view of the per-prompt object returned

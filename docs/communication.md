@@ -941,37 +941,77 @@ Identical to Option B.
 
 ### Optimization: avoid sending pixel data to prefill
 
-Currently the full `kwargs_data` blobs (containing both `pixel_values` and `image_grid_thw`) are forwarded to the prefill worker. The prefill worker only needs `image_grid_thw` for mRoPE -- the `pixel_values` are redundant since the encoder already consumed them. For large images, the pixel tensors dominate the payload size, so stripping them would significantly reduce the data sent to prefill.
+With a renderer that emits `features.mm_metadata` (see vLLM
+[#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
+`kwargs_data` for an entry when `ec_transfer_params` covers that entry.
 
-**Required changes:**
+This applies to prefill legs that carry a `features` map: the completions and
+generate wire formats. A chat-completions client reaches those legs when
+`use_openai_format` is `false`, which routes prefill through
+`/inference/v1/generate`; with the default `true`, prefill forwards the client
+body, which carries no `features`. A client calling `/inference/v1/generate`
+directly runs no encode stage (see
+[Generate Requests](#generate-requests-inferencev1generate)), so
+`ec_transfer_params` stays empty and every entry falls back to `kwargs_data`.
 
-1. **vLLM render endpoint** (`vllm/entrypoints/openai/render/serving.py`): return `image_grid_thw` as a separate top-level field in the render response, alongside `kwargs_data`. The render step already computes it during image preprocessing (`get_image_grid_thw()` in the vision processor). Example response:
-   ```json
-   {
-     "token_ids": [1, 32000, 32000, 32000, ...],
-     "features": {
-       "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-       "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-       "kwargs_data": {"image": ["<full-msgpack-blob-1>", "<full-msgpack-blob-2>"]},
-       "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-     }
-   }
-   ```
+`kwargs_data` mixes encoder tensors (`pixel_values`) with lightweight fields
+(`image_grid_thw` and other `keep_on_cpu` / placeholder-metadata fields). Encode
+already consumes the tensors and publishes embeddings through the EC connector.
+Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
+embeddings. For large images the pixel tensors dominate payload size, so dropping
+`kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
-2. **vLLM prefill worker**: accept `image_grid_thw` directly in the features dict (as plain JSON arrays) instead of extracting it from the msgpack `kwargs_data` blob.
+The choice is per entry: an entry whose hash has a matching descriptor in
+`ec_transfer_params` and carries non-empty metadata ships `mm_metadata[i]`;
+every other entry keeps `kwargs_data[i]`. Both fields are
+always present in the prefill body with complementary nulls so vLLM's
+per-item zip merge (`merge_mm_kwargs_items`) reconstructs each entry from
+whichever side is non-null.
 
-3. **Coordinator render step** (`pkg/steps/render.go`): parse `image_grid_thw` from the render response and store it per `MultimodalEntry`.
+A single encode sub-request can return no descriptor for one image while
+another image in the same batch is covered (`nixlEC.MergeEncodeResponse`
+logs a warning and continues rather than failing the request). The per-entry
+decision handles this: the covered entry takes the metadata path and the
+uncovered entry keeps its pixel tensor. vLLM's `_require_ec_for_metadata_only`
+is a request-level check and does not catch partial coverage, so the
+reconciliation has to be coordinator-side.
 
-4. **Coordinator prefill step** (`pkg/steps/prefill.go`): send `image_grid_thw` instead of `kwargs_data` in the prefill request features:
-   ```json
-   "features": {
-     "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-     "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-     "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-   }
-   ```
+The multimodal data each stage sends:
 
-5. **Coordinator encode step** (`pkg/steps/encode.go`): no change -- encode continues to send the full `kwargs_data` (pixel values needed for ViT).
+```text
+Encode              = kwargs_data
+Prefill (optimized) = mm_metadata[i] (covered entries) + ec_transfer_params
+                   + kwargs_data[i] (uncovered entries), both arrays present
+Prefill (fallback)  = kwargs_data + mm_metadata (all null)
+```
+
+**Coordinator behavior:**
+
+1. **Render step** (`pkg/coordinator/steps/render.go`): parse optional
+   `features.mm_metadata` from the render response (same per-modality item order
+   as `mm_hashes` / `kwargs_data`) and store it on each `MultimodalEntry`.
+2. **Encode step** (`pkg/coordinator/steps/encode.go`): unchanged; encode still
+   sends full `kwargs_data`.
+3. **Prefill step** (`pkg/coordinator/steps/prefill.go`): per entry, ship
+   `mm_metadata[i]` with a null `kwargs_data[i]` when the entry has both an EC
+   descriptor and render metadata; ship `kwargs_data[i]` with a null
+   `mm_metadata[i]` otherwise. Both fields stay present so vLLM's per-item
+   merge can reassemble each entry.
+
+Example prefill features with mixed coverage (entry 0 covered, entry 1 not):
+
+```json
+"features": {
+  "mm_hashes": {"image": ["abc123hash", "def456hash"]},
+  "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
+  "kwargs_data": {"image": [null, "<base64-pixel-tensor-2>"]},
+  "mm_metadata": {"image": ["<base64-metadata-only-msgpack-1>", null]}
+}
+```
+
+vLLM rejects metadata-only entries without `ec_transfer_params`, so the
+per-entry decision never sends `mm_metadata[i]` to a non-null slot without an
+EC descriptor for `mm_hashes.image[i]`.
 
 ### Output (mutates RequestContext)
 
