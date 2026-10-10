@@ -22,7 +22,7 @@ echo "Using container tool: ${CONTAINER_RUNTIME}"
 # Set a default EPP_TAG if not provided
 EPP_TAG="${EPP_TAG:-dev}"
 # Set a default VLLM_SIMULATOR_TAG if not provided
-VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.10.2}"
+VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.12.0}"
 # Set the default routing side car image tag
 SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 

@@ -67,7 +67,7 @@ Variables substituted at deploy time via `envsubst` or Go test `substituteMany`:
 | `DISAGG_E` | Deploy a separate Encoder pod (`true`/`false`) | `false` |
 | `DISAGG_P` | Deploy a separate Prefill pod (`true`/`false`) | `false` |
 | `VLLM_SIM_MODE` | Simulator response mode: `echo` (returns input) or `random` (random sentences) | `echo` |
-| `VLLM_IMAGE` | vLLM container image (simulator or real) | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` |
+| `VLLM_IMAGE` | vLLM container image (simulator or real) | `ghcr.io/llm-d/llm-d-inference-sim:v0.12.0` |
 | `SIDECAR_IMAGE` | Routing sidecar image | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` |
 | `VLLM_RENDER_IMAGE` | vLLM render sidecar image | `vllm/vllm-openai-cpu:v0.21.0` |
 | `VLLM_RENDER_PORT` | Port the vllm-render Service listens on | `8082` |

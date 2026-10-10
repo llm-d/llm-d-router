@@ -50,6 +50,14 @@ const (
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"
 
+	// echoOutputTokens is the output limit every request that reaches a decode
+	// worker carries. The decode simulator runs in echo mode, which returns the
+	// prompt as the response and rejects a request whose output limit is below
+	// the prompt length. One value above every prompt in the suite keeps the
+	// limit off each spec's critical path; echo still stops at the prompt, so a
+	// generous cap does not lengthen any response.
+	echoOutputTokens = 512
+
 	// testImageURL and testImageURL2 are architecture diagrams stored in docs/images/ and served via GitHub raw content.
 	testImageURL  = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 	testImageURL2 = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/flycatcher.jpeg"

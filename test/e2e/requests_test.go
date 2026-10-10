@@ -143,7 +143,7 @@ func runCompletion(prompt string, theModel openai.CompletionNewParamsModel) (str
 // name the model server recognizes on its own, so a 200 response with the rewritten model
 // echoed back proves EPP actually rewrote the body rather than passing it through.
 func runCompletionWithModelRewrite(prompt, incomingModel, targetModel string) string {
-	body := fmt.Sprintf(`{"model":%q,"prompt":%q,"max_tokens":10}`, incomingModel, prompt)
+	body := fmt.Sprintf(`{"model":%q,"prompt":%q,"max_tokens":%d}`, incomingModel, prompt, echoOutputTokens)
 	headers := map[string]string{}
 	if targetModel != "" {
 		headers[metadata.ModelNameRewriteKey] = targetModel
@@ -369,7 +369,7 @@ func runStreamingChatCompletion(prompt string) (string, string) {
 // Returns namespace header, pod header, and the finish reason from the response.
 func runCompletionWithCacheThreshold(prompt string, cacheHitThreshold float64, forceCacheThresholdFinishReason bool) (string, string, string) {
 	ginkgo.By(fmt.Sprintf("Sending Completion Request with cache_hit_threshold=%v, forceCacheThreshold=%v", cacheHitThreshold, forceCacheThresholdFinishReason))
-	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
+	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":%d,"cache_hit_threshold":%v}`, simModelName, prompt, echoOutputTokens, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
 	finishReason := utils.ExtractFinishReason(string(respBody))
@@ -380,7 +380,7 @@ func runCompletionWithCacheThreshold(prompt string, cacheHitThreshold float64, f
 // runStreamingCompletionWithCacheThreshold sends a streaming completion request with cache_hit_threshold.
 func runStreamingCompletionWithCacheThreshold(prompt string, cacheHitThreshold float64, forceCacheThresholdFinishReason bool) (string, string, string) {
 	ginkgo.By(fmt.Sprintf("Sending Streaming Completion Request with cache_hit_threshold=%v, forceCacheThreshold=%v", cacheHitThreshold, forceCacheThresholdFinishReason))
-	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10,"stream":true,"cache_hit_threshold":%v}`, simModelName, prompt, cacheHitThreshold)
+	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":%d,"stream":true,"cache_hit_threshold":%v}`, simModelName, prompt, echoOutputTokens, cacheHitThreshold)
 	extraHeaders := cacheThresholdHeaders(forceCacheThresholdFinishReason)
 	ns, pod, respBody := doPost("/v1/completions", body, extraHeaders)
 	finishReason := utils.ExtractFinishReasonFromStreaming(string(respBody))

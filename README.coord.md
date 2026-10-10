@@ -146,7 +146,7 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM image loaded into the Kind cluster |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.12.0` | vLLM image loaded into the Kind cluster |
 | `VLLM_RENDER_IMAGE` | same as `VLLM_IMAGE` | vLLM render image loaded into the Kind cluster |
 | `VLLM_RENDER_PORT` | `8082` | Port the vllm-render service listens on |
 | `COORDINATOR_IMAGE` | _(empty)_ | Coordinator image loaded into the Kind cluster |

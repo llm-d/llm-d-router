@@ -121,7 +121,7 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 		resp, raw := doResponses(map[string]any{
 			"model":             simModelName,
 			"input":             responsesTextInput,
-			"max_output_tokens": 20,
+			"max_output_tokens": echoOutputTokens,
 		})
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
@@ -163,7 +163,7 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 					map[string]any{"type": "input_image", "image_url": testImageURL, "detail": "auto"},
 				},
 			}},
-			"max_output_tokens": 20,
+			"max_output_tokens": echoOutputTokens,
 		})
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))

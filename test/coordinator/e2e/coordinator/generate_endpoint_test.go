@@ -40,10 +40,12 @@ const generateTestKwargs = "dGVuc29y"
 // Client token limits every generate spec sends inside sampling_params. The
 // generate wire format nests its limits there rather than at the top level, so
 // these drive the capping contract on the native path: prefill pins max_tokens
-// to 1 and drops min_tokens, decode keeps both.
+// to 1 and drops min_tokens, decode keeps both. generateMaxTokens clears the
+// decode worker's echo-mode floor, which refuses an output limit below the
+// prompt length; generateTokenIDs sends 20 tokens for a text-only request.
 const (
 	generateMinTokens = 3
-	generateMaxTokens = 5
+	generateMaxTokens = 512
 )
 
 // generateSteps lists the pipeline steps a generate request drives that do real

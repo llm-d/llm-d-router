@@ -300,7 +300,7 @@ func simpleTokenGenerateBody() []byte {
 		"model":     simModelName,
 		"token_ids": tokenIDs,
 		"sampling_params": map[string]any{
-			"max_tokens": 1,
+			"max_tokens": echoOutputTokens,
 		},
 	})
 }
