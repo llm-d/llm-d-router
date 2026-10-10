@@ -40,7 +40,20 @@ import (
 const (
 	testNIXLPushEngineID  = "prefill-engine"
 	testNIXLPushRequestID = "00000000-0000-0000-0000-000000000003"
+	// Cached tokens of the prefill responses; the mock decode engine reports
+	// another number.
+	testNIXLPushCachedTokens = 7
 )
+
+const streamingChatCompletionsRequestBody = `{
+				"model": "Qwen/Qwen2-0.5B",
+				"messages": [
+				  {"role": "user", "content": "Hello"}
+				],
+				"max_tokens": 50,
+				"stream": true,
+				"stream_options": {"include_usage": true}
+			}`
 
 // startNIXLPushParallelProxy runs startParallelCommitProxy in NIXL push mode
 // with testNIXLPushIdentity cached for the prefill endpoint, so every request
@@ -65,14 +78,19 @@ func nixlPushPrefillAnswer(engineID string) string {
 }
 
 // nixlPushPrefillAnswerWith is a prefill response of vLLM's NixlPushConnector
-// that carries identity.
+// that carries identity and reports testNIXLPushCachedTokens cached tokens.
 func nixlPushPrefillAnswerWith(identity nixlPushIdentity) string {
 	kv := map[string]any(maps.Clone(identity))
 	kv[reqcommon.FieldDoRemotePrefill] = true
 	kv[reqcommon.FieldDoRemoteDecode] = false
 	kv[reqcommon.FieldRemoteBlockIDs] = []int{1, 2, 3}
 	kv[requestFieldRemoteRequestID] = "cmpl-prefill"
-	answer, err := json.Marshal(map[string]any{reqcommon.FieldKVTransferParams: kv})
+	answer, err := json.Marshal(map[string]any{
+		reqcommon.FieldKVTransferParams: kv,
+		reqcommon.FieldUsage: map[string]any{
+			reqcommon.FieldPromptTokensDetails: map[string]any{reqcommon.FieldCachedTokens: testNIXLPushCachedTokens},
+		},
+	})
 	Expect(err).ToNot(HaveOccurred())
 	return string(answer)
 }
@@ -126,11 +144,12 @@ func newNIXLPushMocks() (prefill, decode *mock.ChatCompletionHandler) {
 // that is sent again.
 const resentDecodeBody = `{"id":"resent-decode","choices":[]}`
 
-// staleThenResentDecode stands in for a decode engine whose first request names
-// an engine that does not run the prefill. It sends the kv_transfer_params of
-// every request to kvParams. The first request writes the start of a response,
-// closes arrived and blocks until it is cancelled, which closes cancelled, or
-// until stop is closed. Later requests get resentDecodeBody.
+// staleThenResentDecode stands in for a decode engine whose first request is
+// cancelled and sent again, as when it names an engine that does not run the
+// prefill. It sends the kv_transfer_params of every request to kvParams. The
+// first request writes the start of a response, closes arrived and blocks until
+// it is cancelled, which closes cancelled, or until stop is closed. Later
+// requests get resentDecodeBody.
 func staleThenResentDecode(arrived, cancelled, stop chan struct{}, kvParams chan<- map[string]any) http.Handler {
 	var requests atomic.Int32
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -246,7 +265,9 @@ var _ = Describe("NIXL Connector (v2) NIXL push parallel dispatch", func() {
 
 	It("returns the prefill error, cancels decode and drops the cached identity when prefill fails", func() {
 		decodeArrived, decodeCancelled, stop := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var prefillRequests atomic.Int32
 		prefill := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			prefillRequests.Add(1)
 			select {
 			case <-decodeArrived:
 			case <-stop:
@@ -255,7 +276,9 @@ var _ = Describe("NIXL Connector (v2) NIXL push parallel dispatch", func() {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"prefill boom"}`))
 		})
-		env := startNIXLPushParallelProxy(prefill, blockUntilCancelled(decodeArrived, decodeCancelled, stop), nil)
+		// A status that is not retryable is returned although retries are left.
+		env := startNIXLPushParallelProxy(prefill, blockUntilCancelled(decodeArrived, decodeCancelled, stop),
+			func(cfg *Config) { cfg.PrefillMaxRetries = 2 })
 		// Runs before the backends close, so blocked handlers return.
 		DeferCleanup(func() { close(stop) })
 
@@ -263,6 +286,7 @@ var _ = Describe("NIXL Connector (v2) NIXL push parallel dispatch", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(status).To(Equal(http.StatusInternalServerError))
 		Expect(body).To(ContainSubstring("prefill boom"))
+		Expect(prefillRequests.Load()).To(BeEquivalentTo(1))
 		Eventually(decodeCancelled).Should(BeClosed())
 		expectDropped(env)
 	})
@@ -468,4 +492,178 @@ var _ = Describe("NIXL Connector (v2) NIXL push parallel dispatch", func() {
 		Entry("in parallel after its NIXL push identity changed once",
 			[]string{"restarted-engine", "restarted-engine"}, false),
 	)
+
+	DescribeTable("reports the cached tokens of the prefill response in the usage of the decode response",
+		func(requestBody, decodeResponseType, decodeResponse string) {
+			prefillMock, decodeMock := newNIXLPushMocks()
+			decodeMock.RawResponseType = decodeResponseType
+			decodeMock.RawResponse = decodeResponse
+			prefill, decode := overlapping(prefillMock, decodeMock)
+			env := startNIXLPushParallelProxy(prefill, decode, nil)
+
+			status, _, body, err := env.sendBody(requestBody, 10*time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(status).To(Equal(http.StatusOK), body)
+			Expect(body).To(ContainSubstring(fmt.Sprintf(`"cached_tokens":%d`, testNIXLPushCachedTokens)))
+		},
+		Entry("in a JSON response", chatCompletionsRequestBody, "", ""),
+		Entry("in a streamed response", streamingChatCompletionsRequestBody, eventStreamContentType,
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"+
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\n"+
+				"data: [DONE]\n\n"),
+	)
+
+	It("sends a request with chunked decode in parallel and the NIXL push kv_transfer_params with its first decode chunk only", func() {
+		chunks := []string{chatResponse("hello ", "length", 8, 5), chatResponse("world", "stop", 9, 5)}
+		decodeKV := make(chan any, len(chunks)+1)
+		var decodeRequests atomic.Int32
+		decodeChunks := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			decodeKV <- request[reqcommon.FieldKVTransferParams]
+			chunk := int(decodeRequests.Add(1)) - 1
+			if chunk >= len(chunks) {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			statusHandler(http.StatusOK, chunks[chunk]).ServeHTTP(w, r)
+		})
+		prefillMock, _ := newNIXLPushMocks()
+		prefill, decode := overlapping(prefillMock, decodeChunks)
+		env := startNIXLPushParallelProxy(prefill, decode, func(cfg *Config) { cfg.DecodeChunkSize = 5 })
+		env.proxy.nixlRequestIDFn = func() (string, error) { return testNIXLPushRequestID, nil }
+
+		status, _, body, err := env.send(10 * time.Second)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(status).To(Equal(http.StatusOK), body)
+		var response map[string]any
+		Expect(json.Unmarshal([]byte(body), &response)).To(Succeed())
+		Expect(extractChoiceText(firstChoice(response))).To(Equal("hello world"))
+
+		By("sending the NIXL push kv_transfer_params with the first decode chunk only")
+		want := map[string]any(testNIXLPushIdentity(testNIXLPushEngineID))
+		want[reqcommon.FieldDoRemotePrefill] = true
+		want[reqcommon.FieldDoRemoteDecode] = false
+		want[requestFieldRemoteRequestID] = testNIXLPushRequestID
+		want[requestFieldTransferID] = kvParams(prefillMock, 0)[requestFieldTransferID]
+		Expect(<-decodeKV).To(Equal(want))
+		Expect(<-decodeKV).To(BeNil())
+	})
+
+	DescribeTable("retries prefill on the serial path after it answers a retryable status",
+		func(prefillStatuses []int, wantAttempts, wantStatus int, wantBody string) {
+			decodeArrived, decodeCancelled, stop := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var mu sync.Mutex
+			var transferIDs []any
+			prefill := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&request)
+				kv, _ := request[reqcommon.FieldKVTransferParams].(map[string]any)
+				mu.Lock()
+				transferIDs = append(transferIDs, kv[requestFieldTransferID])
+				attempt := len(transferIDs)
+				mu.Unlock()
+				if attempt == 1 {
+					// Fails the parallel attempt once its decode request arrived, so
+					// that request is seen cancelled.
+					select {
+					case <-decodeArrived:
+					case <-stop:
+						return
+					}
+				}
+				if attempt > len(prefillStatuses) {
+					statusHandler(http.StatusOK, nixlPushPrefillAnswer(testNIXLPushEngineID)).ServeHTTP(w, r)
+					return
+				}
+				statusHandler(prefillStatuses[attempt-1], fmt.Sprintf(`{"error":"prefill attempt %d"}`, attempt)).ServeHTTP(w, r)
+			})
+			decode := staleThenResentDecode(decodeArrived, decodeCancelled, stop, make(chan map[string]any, 4))
+			env := startNIXLPushParallelProxy(prefill, decode, func(cfg *Config) {
+				cfg.PrefillMaxRetries = 2
+				cfg.PrefillRetryBackoff = time.Millisecond
+			})
+			DeferCleanup(func() { close(stop) })
+
+			status, _, body, err := env.send(10 * time.Second)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(status).To(Equal(wantStatus))
+			Expect(body).To(Equal(wantBody))
+			Eventually(decodeCancelled).Should(BeClosed())
+
+			By("giving every prefill attempt its own transfer_id")
+			mu.Lock()
+			defer mu.Unlock()
+			Expect(transferIDs).To(HaveLen(wantAttempts))
+			seen := map[any]bool{}
+			for _, transferID := range transferIDs {
+				Expect(transferID).To(HavePrefix("xfer-"))
+				seen[transferID] = true
+			}
+			Expect(seen).To(HaveLen(wantAttempts))
+
+			By("keeping the cached identity")
+			identity, cached := cachedIdentity(env)
+			Expect(cached).To(BeTrue())
+			Expect(identity).To(Equal(testNIXLPushIdentity(testNIXLPushEngineID)))
+		},
+		Entry("and returns the response of the attempt that succeeds",
+			[]int{http.StatusServiceUnavailable}, 2, http.StatusOK, resentDecodeBody),
+		Entry("no more often than --prefill-max-retries allows",
+			[]int{http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout}, 3,
+			http.StatusGatewayTimeout, `{"error":"prefill attempt 3"}`),
+		Entry("until prefill answers a status that is not retryable",
+			[]int{http.StatusServiceUnavailable, http.StatusInternalServerError}, 2,
+			http.StatusInternalServerError, `{"error":"prefill attempt 2"}`),
+	)
+
+	It("retries prefill with the client's messages after chunked decode of the cancelled attempt produced a chunk", func() {
+		secondChunkArrived, stop := make(chan struct{}), make(chan struct{})
+		var decodeRequests atomic.Int32
+		decode := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			switch decodeRequests.Add(1) {
+			case 1:
+				statusHandler(http.StatusOK, chatResponse("hello ", "length", 8, 5)).ServeHTTP(w, r)
+			case 2:
+				close(secondChunkArrived)
+				select {
+				case <-r.Context().Done():
+				case <-stop:
+				}
+			default:
+				statusHandler(http.StatusOK, chatResponse("hi", "stop", 8, 1)).ServeHTTP(w, r)
+			}
+		})
+		prefillMessages := make(chan string, 4)
+		var prefillRequests atomic.Int32
+		prefill := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request map[string]json.RawMessage
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			prefillMessages <- string(request[reqcommon.FieldMessages])
+			if prefillRequests.Add(1) > 1 {
+				statusHandler(http.StatusOK, nixlPushPrefillAnswer(testNIXLPushEngineID)).ServeHTTP(w, r)
+				return
+			}
+			// Chunked decode has added the first chunk to its request by now.
+			select {
+			case <-secondChunkArrived:
+			case <-stop:
+				return
+			}
+			statusHandler(http.StatusServiceUnavailable, `{"error":"prefill overloaded"}`).ServeHTTP(w, r)
+		})
+		env := startNIXLPushParallelProxy(prefill, decode, func(cfg *Config) {
+			cfg.DecodeChunkSize = 5
+			cfg.PrefillMaxRetries = 1
+			cfg.PrefillRetryBackoff = time.Millisecond
+		})
+		DeferCleanup(func() { close(stop) })
+
+		status, _, body, err := env.send(10 * time.Second)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(status).To(Equal(http.StatusOK), body)
+		parallelAttempt, retry := <-prefillMessages, <-prefillMessages
+		Expect(retry).To(Equal(parallelAttempt))
+	})
 })

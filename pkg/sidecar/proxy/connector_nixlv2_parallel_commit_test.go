@@ -99,7 +99,12 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 // the proxy surfaces as a client error and fails the test deterministically
 // rather than blocking the suite forever.
 func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Header, string, error) {
-	req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody))
+	return env.sendBody(chatCompletionsRequestBody, clientTimeout)
+}
+
+// sendBody is send with a caller-supplied chat-completions request body.
+func (env *parallelCommitEnv) sendBody(requestBody string, clientTimeout time.Duration) (int, http.Header, string, error) {
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, strings.NewReader(requestBody))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, env.prefillHost)
 

@@ -1590,30 +1590,20 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(prefillRequests[1]).To(Equal(prefillRequests[0]))
 	})
 
-	It("keeps a NIXL push request with chunked decode serial on a cache hit", func() {
+	It("removes the cached NIXL push identity of a prefill endpoint that answers in pull mode", func() {
 		testInfo.proxy.config.NIXLPushMode = true
-		// Above the request's max_tokens, so decode still gets a single request.
-		testInfo.proxy.config.DecodeChunkSize = 64
-		testInfo.prefillHandler.RawResponse = pushPrefillAnswer(nixlTransferModePush)
-		testInfo.proxy.nixlPushIdentities.put(testInfo.prefillBackend.URL[len("http://"):], testNIXLPushIdentity(testNIXLPushEngineID))
+		testInfo.prefillHandler.RawResponse = pushPrefillAnswer("pull")
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		// An identity that changes twice marks the endpoint serial-only, so the
+		// request runs serially although the identity is cached.
+		for _, engineID := range []string{"prefill-engine_dp0", "prefill-engine_dp1", "prefill-engine_dp0"} {
+			testInfo.proxy.nixlPushIdentities.put(prefillHostPort, testNIXLPushIdentity(engineID))
+		}
 		proxyBaseAddr := startProxy()
 
 		sendChatCompletionsRequest(proxyBaseAddr)
 
 		Expect(kvParams(testInfo.decodeHandler, 0)).To(Equal(serialPushDecodeKV(0)))
-	})
-
-	It("removes the cached NIXL push identity of a prefill endpoint that answers in pull mode", func() {
-		testInfo.proxy.config.NIXLPushMode = true
-		// Chunked decode keeps the request serial although the identity is cached.
-		testInfo.proxy.config.DecodeChunkSize = 64
-		testInfo.prefillHandler.RawResponse = pushPrefillAnswer("pull")
-		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		testInfo.proxy.nixlPushIdentities.put(prefillHostPort, testNIXLPushIdentity(testNIXLPushEngineID))
-		proxyBaseAddr := startProxy()
-
-		sendChatCompletionsRequest(proxyBaseAddr)
-
 		_, ok := testInfo.proxy.nixlPushIdentities.get(prefillHostPort)
 		Expect(ok).To(BeFalse())
 	})

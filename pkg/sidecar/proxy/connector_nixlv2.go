@@ -91,9 +91,14 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		return
 	}
 
+	// A parallel dispatch that hands the request to the serial path below for a
+	// retry used the first prefill attempt.
+	firstAttempt := 0
 	if identity, ok := s.nixlPushParallelIdentity(prefillPodHostPort); ok {
-		s.runNIXLProtocolV2PushParallel(w, r, body, uuidStr, prefillPodHostPort, kvCacheSource, apiType, identity)
-		return
+		if !s.runNIXLProtocolV2PushParallel(w, r, body, uuidStr, prefillPodHostPort, kvCacheSource, apiType, identity) {
+			return
+		}
+		firstAttempt = 1
 	}
 
 	// Prefill Stage
@@ -217,7 +222,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// decode. Non-transient errors (500/501) fail immediately.
 	var pw *bufferedResponseWriter
 retryLoop:
-	for attempt := 0; ; attempt++ {
+	for attempt := firstAttempt; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
@@ -906,8 +911,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 // at once. On a cache miss the serial path runs and learns the identity; so
 // does a request to an endpoint marked serial-only.
 func (s *Server) nixlPushParallelIdentity(prefillPodHostPort string) (nixlPushIdentity, bool) {
-	// Chunked decode runs only on the serial path.
-	if !s.config.NIXLPushMode || s.config.DecodeChunkSize > 0 {
+	if !s.config.NIXLPushMode {
 		return nil, false
 	}
 	if s.nixlPushIdentities.serialOnly(prefillPodHostPort) {
@@ -922,12 +926,15 @@ func (s *Server) nixlPushParallelIdentity(prefillPodHostPort string) (nixlPushId
 // once, so decode registers its KV blocks while prefill runs. Decode's response
 // reaches the client only after a successful prefill response that carries
 // identity. A successful prefill response with another identity cancels decode
-// and sends it again the way the serial path does.
+// and sends it again the way the serial path does. When prefill answers a
+// retryable status and --prefill-max-retries allows another attempt, it cancels
+// decode and reports true without writing a response; the caller then retries
+// on the serial path.
 func (s *Server) runNIXLProtocolV2PushParallel(
 	w http.ResponseWriter, r *http.Request, body map[string]any,
 	uuidStr, prefillPodHostPort, kvCacheSource string,
 	apiType reqcommon.APIType, identity nixlPushIdentity,
-) {
+) bool {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (NIXL push concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
 
@@ -958,7 +965,7 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
-		return
+		return false
 	}
 
 	// Decode sets remote_block_ids itself and reads remote_num_tokens as
@@ -975,15 +982,19 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
-		return
+		return false
 	}
+	// Chunked decode appends its output to the body it is given, while body is
+	// read during decode and reused when decode is sent again or prefill is
+	// retried.
+	decodeBody := maps.Clone(body)
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
-		return
+		return false
 	}
 
 	// One context for both requests: cancelling decode must also cancel
@@ -1097,7 +1108,7 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
-			s.decoderProxy.ServeHTTP(dcw, dreq)
+			s.dispatchDecode(dcw, dreq, decodeBody)
 		}
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))
 	}()
@@ -1119,6 +1130,12 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 	// Set to the prefill response when it does not carry identity; decode is
 	// then sent again with it.
 	var resendWith map[string]any
+	// Set when decode's response is committed through a cached-tokens rewriter,
+	// which may hold back the end of the response until it is called.
+	var finalizeDecodeWriter func() error
+	// Set when prefill answered a retryable status and the request is retried
+	// on the serial path.
+	retrySerially := false
 
 	select {
 	case <-prefillDone:
@@ -1140,15 +1157,37 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 					"request_id", uuidStr, "target", prefillPodHostPort)
 				break
 			}
-			if !dcw.commit() {
+			// As in the serial decode stage, a prefill response without cached
+			// tokens reports zero.
+			pCachedTokens, _ := extractCachedTokens(prefillerResponse)
+			streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+			var decodeWriter http.ResponseWriter
+			decodeWriter, finalizeDecodeWriter = newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
+			if !dcw.commitThrough(decodeWriter) {
 				s.logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
 					"request_id", uuidStr)
 			}
 			break
 		}
-		// Prefill failed: cancel decode and return the prefill error verbatim.
+		// Prefill failed: cancel decode, then retry on the serial path or return
+		// the prefill error verbatim.
 		cancel()
 		dcw.abort()
+		if prefillResp != nil && isRetryableStatus(prefillResp.statusCode) && s.config.PrefillMaxRetries > 0 {
+			s.logger.Info("retrying prefill request",
+				"attempt", 1,
+				"target", prefillPodHostPort,
+				"request_id", uuidStr,
+				"previous_code", prefillResp.statusCode)
+			select {
+			case <-time.After(s.config.PrefillRetryBackoff):
+				retrySerially = true
+			case <-parentCtx.Done():
+			}
+		}
+		if retrySerially {
+			break
+		}
 		metrics.RecordError(metrics.StagePrefill)
 		dispatchFailed = true
 		status := http.StatusBadGateway
@@ -1198,6 +1237,12 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
 
+	// A retryable status reports an overloaded or unreachable prefill endpoint,
+	// not a changed identity, so the cached identity stays.
+	if retrySerially {
+		return true
+	}
+
 	if resendWith != nil {
 		// The resent decode request gets its own span.
 		decodeSpan.End()
@@ -1205,12 +1250,21 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 			transferID, prefillStartedAt, prefillDuration)
 	}
 
+	// The response of an aborted decode is replaced or torn down below, so what
+	// the rewriter holds is dropped.
+	var finalizeErr error
+	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
+		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
+			s.logger.Error(finalizeErr, "failed to flush cached token response writer")
+		}
+	}
+
 	// Decode errors are attributed only when the commit point let decode's
 	// response reach the client. The prefill timeout samples the decode
 	// duration too.
 	if !clientResponded {
 		metrics.RecordDecodeDuration(decodeDuration)
-		if decodeAborted.Load() || dcw.failed() {
+		if decodeAborted.Load() || dcw.failed() || finalizeErr != nil {
 			metrics.RecordError(metrics.StageDecode)
 			dispatchFailed = true
 		}
@@ -1240,7 +1294,7 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 	// Replay the decode abort on the request goroutine, unless the commit point
 	// already wrote the response.
 	if !decodeAborted.Load() || clientResponded {
-		return
+		return false
 	}
 	if dcw.responseStarted() {
 		// Decode's response is already on the wire, so the status cannot be
@@ -1250,6 +1304,7 @@ func (s *Server) runNIXLProtocolV2PushParallel(
 	if err := errorBadGateway(errDecodeAborted, w); err != nil {
 		s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
 	}
+	return false
 }
 
 // truncate shortens s to at most n characters, appending "..." if truncated.
