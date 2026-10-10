@@ -592,6 +592,96 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 	})
 }
 
+var errClientGone = errors.New("client gone")
+
+// failingWriter accepts headers and status but fails every body write, as a
+// connection dropped mid-response does.
+type failingWriter struct {
+	header http.Header
+}
+
+func newFailingWriter() *failingWriter { return &failingWriter{header: http.Header{}} }
+
+func (f *failingWriter) Header() http.Header       { return f.header }
+func (f *failingWriter) WriteHeader(int)           {}
+func (f *failingWriter) Write([]byte) (int, error) { return 0, errClientGone }
+
+func TestWriteResultReportsWriteFailure(t *testing.T) {
+	cases := map[string]api.ResultMessage{
+		"upstream payload":       {StatusCode: 200, Payload: `{"done":true}`},
+		"invalid stored status":  {StatusCode: 42, Payload: `{}`},
+		"gate dropped":           {ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "dropped"},
+		"deadline exceeded":      {ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "late"},
+		"invalid request":        {ErrorCode: api.ErrCodeInvalidRequest, ErrorMessage: "bad"},
+		"cancelled":              {ErrorCode: api.ErrCodeCancelled, ErrorMessage: "cancelled"},
+		"unmapped producer code": {ErrorCode: "SOMETHING_ELSE", ErrorMessage: "failed"},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.ErrorIs(t, writeResult(newFailingWriter(), &res), errClientGone)
+		})
+	}
+}
+
+// TestAsyncBrokerUndeliveredErrorResultIsRetained covers the cleanup paths
+// that reclaim the mailbox only after confirmed delivery: a stored error
+// result whose body write fails must stay fetchable by id.
+func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
+	seed := func(t *testing.T, rdb *redis.Client, id string) string {
+		t.Helper()
+		res, err := json.Marshal(api.ResultMessage{ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "dropped"})
+		require.NoError(t, err)
+		key := resultKey("team-a", id)
+		require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+		require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
+		return key
+	}
+	assertRetained := func(t *testing.T, rdb *redis.Client, key string) {
+		t.Helper()
+		exists, err := rdb.Exists(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), exists)
+	}
+
+	t.Run("held wait", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
+		reqCtx.ResponseWriter = newFailingWriter()
+		key := seed(t, rdb, "req-test-1")
+
+		err := step.Execute(t.Context(), reqCtx)
+		require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
+		assertRetained(t, rdb, key)
+	})
+
+	t.Run("fetch with zero grace", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 0})
+		key := seed(t, rdb, "eager-id")
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/eager-id", nil)
+		req.Header.Set(defaultTenantHeader, "team-a")
+
+		r.ServeHTTP(newFailingWriter(), req)
+		assertRetained(t, rdb, key)
+	})
+
+	t.Run("fetch with grace", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 5})
+		key := seed(t, rdb, "grace-id")
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/grace-id", nil)
+		req.Header.Set(defaultTenantHeader, "team-a")
+
+		r.ServeHTTP(newFailingWriter(), req)
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, time.Hour, ttl)
+	})
+}
+
 // TestAsyncQuotaFailsOpen covers the Redis-error branch: a limited tenant is
 // classified reserved (with the error surfaced) when the quota check cannot
 // run, so an outage never blocks live traffic.
