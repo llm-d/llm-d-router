@@ -44,6 +44,12 @@ func TestCostAwareIndexBehavior(t *testing.T) {
 	testCommonIndexBehavior(t, createCostAwareIndexForTesting)
 }
 
+// TestCostAwareRetrievalSpanAddLookupEvict covers CostPodCache identity
+// replacement and eviction for a multi-canonical engine block.
+func TestCostAwareRetrievalSpanAddLookupEvict(t *testing.T) {
+	testRetrievalSpanAddLookupEvict(t, createCostAwareIndexForTesting(t))
+}
+
 func TestCostAwareIndexSize(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
 

@@ -175,18 +175,52 @@ type CostPodCache struct {
 	key string
 }
 
-// Add adds a PodEntry to the cache.
+// Add inserts entry into the cache.
+//
+// An exact record, including RetrievalSpan, takes the atomic LoadOrStore fast
+// path and does not change the size. A same-identity record whose span
+// differs is replaced: the map is scanned and the older key is deleted.
+// That scan is correct only when same-identity adds are serialized.
+// CostAwareMemoryIndex.Add and Evict hold m.mu across every call, which
+// provides that serialization. Concurrent unsynchronized adds of the same
+// identity with different spans can drop both records.
 func (c *CostPodCache) Add(entry PodEntry) {
-	if _, loaded := c.cache.LoadOrStore(entry, struct{}{}); !loaded {
-		c.size.Add(1)
+	if _, loaded := c.cache.LoadOrStore(entry, struct{}{}); loaded {
+		return
+	}
+	c.size.Add(1)
+
+	var stale []PodEntry
+	c.cache.Range(func(k, _ interface{}) bool {
+		existing, ok := k.(PodEntry)
+		if !ok || existing == entry {
+			return true
+		}
+		if existing.SameIdentity(entry) {
+			stale = append(stale, existing)
+		}
+		return true
+	})
+	for _, old := range stale {
+		if _, loaded := c.cache.LoadAndDelete(old); loaded {
+			c.size.Add(-1)
+		}
 	}
 }
 
-// Delete removes a PodEntry from the cache.
+// Delete removes every record with entry's identity. Evict passes entries
+// without RetrievalSpan, so the span-bearing key cannot be deleted by value.
+// Callers serialize this with Add via CostAwareMemoryIndex.m.mu.
 func (c *CostPodCache) Delete(entry PodEntry) {
-	if _, loaded := c.cache.LoadAndDelete(entry); loaded {
-		c.size.Add(-1)
-	}
+	c.cache.Range(func(k, _ interface{}) bool {
+		existing, ok := k.(PodEntry)
+		if ok && existing.SameIdentity(entry) {
+			if _, loaded := c.cache.LoadAndDelete(existing); loaded {
+				c.size.Add(-1)
+			}
+		}
+		return true
+	})
 }
 
 // Len returns the number of entries in the cache.
@@ -258,6 +292,8 @@ func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys 
 		}
 	}
 
+	spans := requestKeyRetrievalSpans(engineKeys, requestKeys)
+
 	// Store requestKey -> PodCache mappings for all request keys.
 	for _, requestKey := range requestKeys {
 		keyStr := requestKey.String()
@@ -266,7 +302,11 @@ func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys 
 			podCache = &CostPodCache{key: keyStr}
 		}
 
-		for _, entry := range entries {
+		span := 1
+		if spans != nil {
+			span = spans[requestKey]
+		}
+		for _, entry := range withRetrievalSpan(entries, span) {
 			podCache.Add(entry)
 		}
 

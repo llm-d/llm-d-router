@@ -49,6 +49,12 @@ func TestRedisIndexBehavior(t *testing.T) {
 	testCommonIndexBehavior(t, createRedisIndexForTesting)
 }
 
+// TestRedisRetrievalSpanAddLookupEvict covers HGetAll span decoding and
+// identity-field eviction for a multi-canonical engine block.
+func TestRedisRetrievalSpanAddLookupEvict(t *testing.T) {
+	testRetrievalSpanAddLookupEvict(t, createRedisIndexForTesting(t))
+}
+
 // TestRedisIndexEvictLookupFailure verifies that a lookup failure (e.g. lost
 // connectivity) is propagated instead of being reported as a successful no-op,
 // so callers and metrics do not treat a failed eviction as completed.
