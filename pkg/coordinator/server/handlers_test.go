@@ -207,6 +207,50 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	}
 }
 
+func TestHandleInference_InvalidJSONReturnsOpenAIError(t *testing.T) {
+	for _, path := range []string{
+		reqcommon.PathChatCompletions,
+		reqcommon.PathCompletions,
+		reqcommon.PathResponses,
+		reqcommon.PathVLLMGenerate,
+	} {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				body string
+			}{
+				{name: "empty", body: ""},
+				{name: "truncated", body: `{"model":"m","messages":[`},
+				{name: "unescaped quotes", body: `{"model":"m","messages":[{"role":"user","content":"say "hello""}]}`},
+				{name: "null", body: "null"},
+				{name: "array", body: "[]"},
+				{name: "string", body: `"hello"`},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					reached := false
+					p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+						reached = true
+						return nil
+					}}})
+					srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+					require.NoError(t, err)
+
+					req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(tc.body))
+					req.Header.Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+					rec := httptest.NewRecorder()
+					srv.httpServer.Handler.ServeHTTP(rec, req)
+
+					require.Equal(t, http.StatusBadRequest, rec.Code)
+					require.False(t, reached, "invalid request must not reach the pipeline")
+					require.Equal(t, reqcommon.ContentTypeJSON, rec.Header().Get(reqcommon.HeaderContentType))
+					require.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+					require.JSONEq(t, `{"error":{"message":"invalid JSON body","type":"invalid_request_error","code":400}}`, rec.Body.String())
+				})
+			}
+		})
+	}
+}
+
 func TestHandleInference_ResponsesRejectsStatefulFields(t *testing.T) {
 	// Locks in that the handler refuses a Responses request depending on state
 	// it does not keep, before the pipeline sees the body; see

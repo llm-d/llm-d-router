@@ -122,14 +122,20 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var parsed map[string]any
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed == nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if parsed == nil {
-		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
+		cw.Header().Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+		cw.Header().Set("X-Content-Type-Options", "nosniff")
+		cw.WriteHeader(http.StatusBadRequest)
+		if err := json.NewEncoder(cw).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "invalid JSON body",
+				"type":    "invalid_request_error",
+				"code":    http.StatusBadRequest,
+			},
+		}); err != nil {
+			log.FromContext(r.Context()).Error(err, "failed to write error response")
+		}
 		return
 	}
 	parseDuration = time.Since(parseStart)
