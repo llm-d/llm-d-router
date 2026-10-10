@@ -167,12 +167,9 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		bytes.NewReader(body))
 	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
-	// Envoy's pipeline listener preserves a client-supplied x-request-id
-	// (preserve_external_request_id) and the coordinator propagates it to every
-	// pipeline request, so a unique id here scopes the per-role routing check to this
-	// one request. Envoy outlives the per-spec workload and its access log
-	// accumulates every request and readiness probe the group sends, so an unscoped
-	// parse would match unrelated entries on since-recycled pod IPs.
+	// Envoy preserves the client-supplied x-request-id. Encode sub-requests append
+	// their indices; the other phases retain it. This scopes access-log checks
+	// to this request despite Envoy outliving the per-spec workload.
 	reqID := uuid.NewString()
 	req.Header.Set("X-Request-Id", reqID)
 
@@ -199,9 +196,11 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate {
 		verifyToplevelTransferParams(logs)
 	}
-	if threeEPP {
-		verifyPerRoleRouting(nsName, slices.Contains(expectedSteps, "encode"), reqID)
+	expectedEncodes := 0
+	if slices.Contains(expectedSteps, "encode") {
+		expectedEncodes = expectedImages
 	}
+	verifyPerRoleRouting(nsName, expectedEncodes, reqID)
 	if limits.max > 0 {
 		// Prefill is always capped; encode is capped only when the request carries
 		// images, since it fires one sub-request per image.
@@ -371,62 +370,72 @@ func extractJSONObject(s, key string) string {
 	return s[start:]
 }
 
-// verifyPerRoleRouting asserts the Envoy x-llm-d-epp-profile dispatch (envoy-3-epp.yaml)
-// delivered each pipeline request to a worker of its own role. The Envoy access log
-// records the x-llm-d-epp-profile value and the upstream pod for every request, so each
-// request must land on a pod whose role matches its profile. This is echo-mode
-// independent and catches a misrouted or swapped x-llm-d-epp-profile route, which a
-// status-code check (all workers echo a plausible 200) cannot.
-//
-// reqID scopes the access-log parse to this request (see parseEnvoyProfileRoutes).
-//
-// The check is on where each request landed, not how many: the coordinator propagates
-// the one shared request id (reqID) to every request, so the per-image encode sub-requests
-// are indistinguishable in the access log. Their count is already asserted from the
-// coordinator logs (see "all sub-requests complete" in verifyCoordinatorSteps);
-// here we require the encode profile to appear only when the pipeline runs the
-// encode step (expectEncode), and prefill and decode to always appear. The
-// generate path carries images but encodes inline on prefill, so it runs no
-// encode request despite the images.
-func verifyPerRoleRouting(nsName string, expectEncode bool, reqID string) {
-	ginkgo.By("Verifying each pipeline request was routed to its own role's worker")
+// verifyPerRoleRouting checks worker roles, distinct encode request IDs, and the
+// shared revision decision ID from Envoy access logs in both EPP topologies.
+func verifyPerRoleRouting(nsName string, expectedEncodes int, reqID string) {
+	ginkgo.By("Verifying worker roles, distinct encode request IDs, and the shared revision decision ID")
 
 	roleIPs := map[string]map[string]bool{}
-	for _, e := range eppsToCreate() {
-		roleIPs[e.role] = podIPs(roleSelector(e.role))
+	for _, role := range []string{"encode", "prefill", "decode"} {
+		roleIPs[role] = podIPs(roleSelector(role))
 	}
 
 	// Envoy flushes access logs asynchronously, so poll until every expected role
 	// request is recorded before asserting where each was routed.
 	gomega.Eventually(func(g gomega.Gomega) {
 		routes := parseEnvoyProfileRoutes(fetchDeploymentLogs(nsName, "envoy", "envoy"), roleIPs, reqID)
-		for _, e := range eppsToCreate() {
-			role := e.role
-			if role == "encode" && !expectEncode {
+		decisionID := ""
+		for _, role := range []string{"encode", "prefill", "decode"} {
+			if role == "encode" && expectedEncodes == 0 {
 				g.Expect(routes[role]).To(gomega.BeEmpty(),
 					"request produced an encode request in the Envoy access log but the pipeline runs no encode step")
 				continue
 			}
 			g.Expect(routes[role]).ToNot(gomega.BeEmpty(),
 				"no %s request recorded in the Envoy access log", role)
-			for _, upstream := range routes[role] {
-				g.Expect(roleIPs[role]).To(gomega.HaveKey(upstream),
+			wantIDs := []string{reqID}
+			if role == "encode" {
+				wantIDs = make([]string, expectedEncodes)
+				for i := range wantIDs {
+					wantIDs[i] = fmt.Sprintf("%s-enc-%d", reqID, i)
+				}
+			}
+			// Periodic access-log entries can repeat a request ID.
+			seenIDs := map[string]bool{}
+			for _, route := range routes[role] {
+				seenIDs[route.requestID] = true
+				g.Expect(route.revisionDecisionID).ToNot(gomega.BeElementOf("", "-"),
+					"%s request has no revision decision ID", role)
+				if decisionID == "" {
+					decisionID = route.revisionDecisionID
+				}
+				g.Expect(route.revisionDecisionID).To(gomega.Equal(decisionID),
+					"%s request does not share the routing decision", role)
+				g.Expect(roleIPs[role]).To(gomega.HaveKey(route.upstream),
 					"%s request routed to upstream %s, not a %s-role pod; x-llm-d-epp-profile routing is wrong",
-					role, upstream, role)
+					role, route.upstream, role)
+			}
+			g.Expect(seenIDs).To(gomega.HaveLen(len(wantIDs)),
+				"unexpected distinct %s request IDs: %v", role, seenIDs)
+			for _, id := range wantIDs {
+				g.Expect(seenIDs).To(gomega.HaveKey(id),
+					"missing %s request ID %s in Envoy access logs", role, id)
 			}
 		}
 	}, readyTimeout, defaultInterval).Should(gomega.Succeed())
 }
 
+type envoyProfileRoute struct {
+	requestID          string
+	revisionDecisionID string
+	upstream           string
+}
+
 // parseEnvoyProfileRoutes extracts the per-role pipeline requests from the Envoy access
-// log (format defined in envoy-3-epp.yaml). It returns, per x-llm-d-epp-profile value in
-// roles, the upstream pod IPs Envoy routed those requests to. Only lines carrying
-// reqID are considered: Envoy outlives the per-spec workload and its access log
-// accumulates, so scoping by request id keeps unrelated requests (on
-// since-recycled pod IPs) out. Lines whose profile is not a known role (the
-// external client request and readiness probes take the default route) are ignored.
-func parseEnvoyProfileRoutes(logs string, roles map[string]map[string]bool, reqID string) map[string][]string {
-	out := map[string][]string{}
+// log, including encode sub-request IDs derived from reqID. Only known roles
+// with an assigned upstream are included.
+func parseEnvoyProfileRoutes(logs string, roles map[string]map[string]bool, reqID string) map[string][]envoyProfileRoute {
+	out := map[string][]envoyProfileRoute{}
 	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, "[envoy]") {
 			continue
@@ -437,7 +446,8 @@ func parseEnvoyProfileRoutes(logs string, roles map[string]map[string]bool, reqI
 				fields[k] = v
 			}
 		}
-		if fields["id"] != reqID {
+		isEncodeSubRequest := fields["epp-profile"] == "encode" && strings.HasPrefix(fields["id"], reqID+"-enc-")
+		if fields["id"] != reqID && !isEncodeSubRequest {
 			continue
 		}
 		profile := fields["epp-profile"]
@@ -454,7 +464,11 @@ func parseEnvoyProfileRoutes(logs string, roles map[string]map[string]bool, reqI
 		if i := strings.LastIndex(upstream, ":"); i >= 0 {
 			upstream = upstream[:i]
 		}
-		out[profile] = append(out[profile], upstream)
+		out[profile] = append(out[profile], envoyProfileRoute{
+			requestID:          fields["id"],
+			revisionDecisionID: fields["decision-id"],
+			upstream:           upstream,
+		})
 	}
 	return out
 }

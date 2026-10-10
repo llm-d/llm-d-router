@@ -19,6 +19,7 @@ package coordinate2e
 import (
 	"fmt"
 	"strings"
+	"testing"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -28,6 +29,29 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestParseEnvoyProfileRoutes(t *testing.T) {
+	g := gomega.NewWithT(t)
+	logs := `[envoy] epp-profile=encode id=req-1-enc-0 decision-id=decision-1 upstream=10.0.0.1:8000
+[envoy] epp-profile=encode id=req-1-enc-1 decision-id=decision-1 upstream=10.0.0.1:8000
+[envoy] epp-profile=encode id=req-1-enc-0 decision-id=decision-1 upstream=10.0.0.1:8000
+[envoy] epp-profile=prefill id=req-1 decision-id=decision-1 upstream=10.0.0.2:8000
+[envoy] epp-profile=decode id=req-1 decision-id=decision-1 upstream=10.0.0.3:8000
+[envoy] epp-profile=encode id=req-2-enc-0 decision-id=decision-2 upstream=10.0.0.1:8000
+[envoy] epp-profile=prefill id=req-1-enc-0 decision-id=decision-1 upstream=10.0.0.2:8000
+[envoy] epp-profile=encode id=req-1-enc-2 decision-id=decision-1 upstream=-
+[envoy] epp-profile=- id=req-1 decision-id=- upstream=10.0.0.4:8080`
+	roles := map[string]map[string]bool{"encode": nil, "prefill": nil, "decode": nil}
+	g.Expect(parseEnvoyProfileRoutes(logs, roles, "req-1")).To(gomega.Equal(map[string][]envoyProfileRoute{
+		"encode": {
+			{requestID: "req-1-enc-0", revisionDecisionID: "decision-1", upstream: "10.0.0.1"},
+			{requestID: "req-1-enc-1", revisionDecisionID: "decision-1", upstream: "10.0.0.1"},
+			{requestID: "req-1-enc-0", revisionDecisionID: "decision-1", upstream: "10.0.0.1"},
+		},
+		"prefill": {{requestID: "req-1", revisionDecisionID: "decision-1", upstream: "10.0.0.2"}},
+		"decode":  {{requestID: "req-1", revisionDecisionID: "decision-1", upstream: "10.0.0.3"}},
+	}))
+}
 
 // roleSelector returns the pod selector for a single model-server role.
 func roleSelector(role string) map[string]string {

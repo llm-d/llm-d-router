@@ -156,6 +156,8 @@ func (s *EncodeStep) executeOne(
 	}
 
 	path := format.Path()
+	headers := gatewayHeaders(reqCtx, gateway.PhaseEncode)
+	headers[reqcommon.RequestIDHeaderKey] = fmt.Sprintf("%s-enc-%d", reqCtx.RequestID, index)
 	logger.V(logutil.DEFAULT).Info("sending sub-request", "path", path)
 	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
 		logMsg:   "sub-request body",
@@ -163,7 +165,7 @@ func (s *EncodeStep) executeOne(
 		upstream: coordmetrics.UpstreamEncode,
 		path:     path,
 		body:     bodyBytes,
-		headers:  gatewayHeaders(reqCtx, gateway.PhaseEncode),
+		headers:  headers,
 	})
 	if err != nil {
 		var upstream *pipeline.UpstreamError

@@ -40,6 +40,84 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
+func TestEncodeStep_SubRequestIDs(t *testing.T) {
+	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses} {
+		t.Run(apiType.String(), func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				RequestID:          "req-images",
+				RevisionDecisionID: "decision-images",
+				OriginalPath:       apiType.Path(),
+				OriginalHeaders:    http.Header{"X-Request-Id": {"req-images"}},
+				Model:              testModelName,
+				Body:               map[string]any{"model": testModelName},
+			}
+			content := make([]any, 0, 2)
+			for i, url := range []string{"https://cdn.example.com/front.jpg", "https://cdn.example.com/back.jpg"} {
+				part := map[string]any{
+					"type":      reqcommon.PartTypeImageURL,
+					"image_url": map[string]any{"url": url},
+				}
+				if apiType == reqcommon.APITypeResponses {
+					part["type"] = reqcommon.PartTypeInputImage
+					part["image_url"] = url
+				}
+				content = append(content, part)
+				reqCtx.MultimodalEntries = append(reqCtx.MultimodalEntries, pipeline.MultimodalEntry{Index: i})
+			}
+			items := []any{map[string]any{"role": "user", "content": content}}
+			if apiType == reqcommon.APITypeResponses {
+				reqCtx.Body["input"] = items
+			} else {
+				reqCtx.Body["messages"] = items
+			}
+
+			requestIDs := make(chan string, len(reqCtx.MultimodalEntries))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestIDs <- r.Header.Get(reqcommon.RequestIDHeaderKey)
+				if got := r.Header.Get(reqcommon.RevisionDecisionIDHeaderKey); got != reqCtx.RevisionDecisionID {
+					t.Errorf("revision decision ID = %q, want %q", got, reqCtx.RevisionDecisionID)
+				}
+				if got := r.Header.Get(reqcommon.EPPProfileHeaderKey); got != gateway.PhaseEncode {
+					t.Errorf("EPP profile = %q, want %q", got, gateway.PhaseEncode)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+			}))
+			defer server.Close()
+
+			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("encode failed: %v", err)
+			}
+			if got := len(requestIDs); got != len(reqCtx.MultimodalEntries) {
+				t.Fatalf("encode request count = %d, want %d", got, len(reqCtx.MultimodalEntries))
+			}
+			seen := make(map[string]bool)
+			for range reqCtx.MultimodalEntries {
+				id := <-requestIDs
+				if seen[id] {
+					t.Errorf("duplicate encode request ID %q", id)
+				}
+				seen[id] = true
+			}
+			for _, want := range []string{"req-images-enc-0", "req-images-enc-1"} {
+				if !seen[want] {
+					t.Errorf("missing encode request ID %q, got %v", want, seen)
+				}
+			}
+			headers := gatewayHeaders(reqCtx, gateway.PhasePrefill)
+			if got := headers[reqcommon.RequestIDHeaderKey]; got != "req-images" {
+				t.Errorf("prefill request ID = %q, want %q", got, "req-images")
+			}
+			if got := reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey); got != "req-images" {
+				t.Errorf("original request ID = %q, want %q", got, "req-images")
+			}
+		})
+	}
+}
+
 func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	var requestCount atomic.Int32
 
