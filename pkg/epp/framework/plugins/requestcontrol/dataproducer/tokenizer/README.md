@@ -475,18 +475,21 @@ the existing token-producer error behavior.
 
 Set `vllm.prefillOnly: true` when the renderer should validate the full prompt
 without reserving the client's generation budget. The render copy uses
-`max_tokens: 1`, caps `max_completion_tokens` at one when present, and sets
-`min_tokens` to zero when present. The inference payload, prompt, and requested
-generation budget are unchanged. The render copy re-serializes the JSON
-envelope; nested content such as messages and tool schemas keeps its key order.
-This option is false by default and also works with `vllm.url`.
+`max_tokens: 1`, caps `max_completion_tokens` and `max_output_tokens` at one
+when present, and sets `min_tokens` to zero when present. The inference
+payload, prompt, and requested generation budget are unchanged. The render
+copy re-serializes the JSON envelope; nested content such as messages and tool
+schemas keeps its key order. This option is false by default and also works
+with `vllm.url`.
 
 This avoids rejecting a prompt solely because its requested output would
 exceed the renderer's context capacity. The prompt itself must still fit;
 this option does not enable partial matching or extend inference context limits.
 
 Requests with a non-null `truncate_prompt_tokens` retain their original output
-budget because automatic truncation depends on it.
+budget because automatic truncation depends on it. Responses requests with a
+`truncation` value other than `"disabled"`, including `null`, retain their
+`max_output_tokens` for the same reason.
 
 #### Render responses without multimodal tensors
 

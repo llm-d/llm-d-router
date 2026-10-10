@@ -425,6 +425,12 @@ func renderOnlyBudget(payload []byte) ([]byte, error) {
 	if _, ok := envelope["max_completion_tokens"]; ok {
 		envelope["max_completion_tokens"] = json.RawMessage("1")
 	}
+	// vLLM truncates a Responses prompt for any truncation value except "disabled", including null.
+	if _, ok := envelope["max_output_tokens"]; ok {
+		if truncation, set := envelope["truncation"]; !set || bytes.Equal(bytes.TrimSpace(truncation), []byte(`"disabled"`)) {
+			envelope["max_output_tokens"] = json.RawMessage("1")
+		}
+	}
 	if _, ok := envelope["min_tokens"]; ok {
 		envelope["min_tokens"] = json.RawMessage("0")
 	}
