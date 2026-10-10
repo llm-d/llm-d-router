@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -69,8 +70,8 @@ func spanAttrs(span sdktrace.ReadOnlySpan) map[attribute.Key]attribute.Value {
 
 func chatRequest() *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		RequestID:   "req-1",
 		TargetModel: "model-a",
+		Headers:     map[string]string{reqcommon.RequestIDHeaderKey: "req-1"},
 		Body: &fwkrh.InferenceRequestBody{
 			ChatCompletions: &fwkrh.ChatCompletionsRequest{
 				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},

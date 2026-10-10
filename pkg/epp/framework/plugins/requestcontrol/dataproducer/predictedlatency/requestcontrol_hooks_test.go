@@ -393,7 +393,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FirstToken(t *testing.T) {
 
 	// Initialize the queue and add the request
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	beforeTime := time.Now()
@@ -480,7 +480,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SubsequentTokens(t *testing
 
 	// Initialize the queue and add the request
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	router.ResponseBody(ctx, request, response, endpoint.GetMetadata())
@@ -546,7 +546,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_Success(t *testi
 	// Create queue and add request
 	queue := newRequestPriorityQueue()
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 
 	predictedLatencyCtx := newPredictedLatencyContext(request)
 	predictedLatencyCtx.ttft = 80
@@ -636,7 +636,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_WithMetrics(t *t
 	// Create queue
 	queue := newRequestPriorityQueue()
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 
 	predictedLatencyCtx := newPredictedLatencyContext(request)
 	predictedLatencyCtx.ttft = 80
@@ -669,7 +669,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken_NoSLOs(t *testin
 	// Create queue
 	queue := newRequestPriorityQueue()
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 0)
+	queue.Add(request.RequestID, 0)
 
 	predictedLatencyCtx := newPredictedLatencyContext(request)
 	predictedLatencyCtx.ttft = 80
@@ -708,7 +708,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken(t *testing.T) {
 
 	// Initialize the queue and add the request
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	router.ResponseBody(ctx, request, response, endpoint.GetMetadata())
@@ -741,7 +741,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SingleChunk(t *testing.T) {
 
 	// Initialize the queue and add the request
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	router.ResponseBody(ctx, request, response, endpoint.GetMetadata())
@@ -774,7 +774,7 @@ func TestPredictedLatency_NonStreamingMode_ResponseBody_FinalToken(t *testing.T)
 
 	// Initialize the queue and add the request
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	router.ResponseBody(ctx, request, response, endpoint.GetMetadata())
@@ -813,7 +813,7 @@ func TestPredictedLatency_ResponseBody_CleansUpContext_WhenPreRequestSkipped(t *
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	queue := newRequestPriorityQueue()
-	queue.Add(request.Headers[reqcommon.RequestIDHeaderKey], 50.0)
+	queue.Add(request.RequestID, 50.0)
 	router.runningRequestLists.Store(endpoint.GetMetadata().ID, queue)
 
 	router.ResponseBody(ctx, request, response, endpoint.GetMetadata())

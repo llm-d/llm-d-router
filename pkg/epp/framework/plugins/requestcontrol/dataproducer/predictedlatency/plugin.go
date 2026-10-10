@@ -37,7 +37,6 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -437,7 +436,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 }
 
 func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	if item := pl.sloContextStore.Get(id); item != nil {
 		return item.Value(), nil
 	}
@@ -445,12 +444,12 @@ func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksch
 }
 
 func (pl *PredictedLatency) setPredictedLatencyContextForRequest(request *fwksched.InferenceRequest, ctx *predictedLatencyCtx) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	pl.sloContextStore.Set(id, ctx, ttlcache.DefaultTTL)
 }
 
 func (pl *PredictedLatency) deletePredictedLatencyContextForRequest(request *fwksched.InferenceRequest) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	pl.sloContextStore.Delete(id)
 }
 

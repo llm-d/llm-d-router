@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -319,8 +320,8 @@ func (p *Producer) Produce(ctx context.Context,
 		if request.TargetModel != "" {
 			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 		}
-		if request.RequestID != "" {
-			span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+		if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+			span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
 		}
 	}
 

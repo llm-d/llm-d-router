@@ -230,7 +230,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
-		RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:        reqCtx.Request.ID,
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
@@ -572,7 +572,7 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 		return reqCtx
 	}
 	response := &fwkrc.Response{
-		RequestID:   reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:   reqCtx.Request.ID,
 		Headers:     reqCtx.Response.Headers,
 		ReqMetadata: reqCtx.Request.Metadata,
 	}
@@ -604,7 +604,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	// registered, so this runs before the early return below.
 	if endOfStream && d.requestEvictor != nil {
 		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrc.Response{
-			RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+			RequestID:        reqCtx.Request.ID,
 			EndOfStream:      true,
 			TerminationCause: cause,
 		}, reqCtx.TargetPod)
@@ -617,7 +617,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
 	response := &fwkrc.Response{
-		RequestID:      reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:      reqCtx.Request.ID,
 		Headers:        reqCtx.Response.Headers,
 		StartOfStream:  startOfStream,
 		EndOfStream:    endOfStream,

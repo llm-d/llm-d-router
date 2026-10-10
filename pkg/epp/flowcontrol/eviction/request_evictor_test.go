@@ -92,6 +92,25 @@ func TestRequestEvictor_ResponseBody_DeregistersEvictChannel(t *testing.T) {
 	assert.Equal(t, 0, re.queue.InFlightLen())
 }
 
+func TestRequestEvictor_SharedRequestIDHeaderTrackedIndependently(t *testing.T) {
+	t.Parallel()
+	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, &NoOpEvictor{})
+
+	ctx := context.Background()
+	first := makeInferenceRequest("req-1", -1)
+	second := makeInferenceRequest("req-2", -1)
+	second.Headers[reqcommon.RequestIDHeaderKey] = first.Headers[reqcommon.RequestIDHeaderKey]
+	require.NoError(t, re.PreRequest(ctx, first, makeSchedulingResult()))
+	require.NoError(t, re.PreRequest(ctx, second, makeSchedulingResult()))
+	require.Equal(t, 2, re.queue.InFlightLen())
+
+	re.ResponseBody(ctx, first, &requestcontrol.Response{EndOfStream: true}, nil)
+
+	assert.Nil(t, re.EvictionRegistry().Get("req-1"))
+	assert.NotNil(t, re.EvictionRegistry().Get("req-2"), "completing one request must not untrack another")
+	assert.Equal(t, 1, re.queue.InFlightLen())
+}
+
 func TestRequestEvictor_EvictN_ClosesEvictChannel(t *testing.T) {
 	t.Parallel()
 	evictor := NewImmediateResponseEvictor()

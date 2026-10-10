@@ -50,7 +50,7 @@ const (
 
 // Response contains information from the response received to be passed to the Response requestcontrol plugins
 type Response struct {
-	// RequestID is the Envoy generated Id for the request being processed
+	// RequestID is the unique identifier for the request; see scheduling.InferenceRequest.RequestID.
 	RequestID string
 	// Headers is a map of the response headers. Nil during body processing
 	Headers map[string]string

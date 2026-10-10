@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -216,6 +217,29 @@ func TestProcessRefreshesRequestSpanAfterDirectorResolvesFairness(t *testing.T) 
 			require.Equal(t, tracing.AttributionSourceAgentIdentity, source.AsString())
 		})
 	}
+}
+
+// Streams that share a client-supplied x-request-id must get distinct EPP request IDs.
+func TestProcessAssignsUniqueEPPRequestID(t *testing.T) {
+	useTracerProvider(t, noop.NewTracerProvider())
+
+	headers := map[string]string{"x-request-id": "req-duplicate"}
+	first := entryLine(t, runProcess(t, headers))
+	second := entryLine(t, runProcess(t, headers))
+
+	require.Contains(t, first, "req-duplicate")
+	require.Contains(t, second, "req-duplicate")
+	firstID, secondID := loggedValue(t, first, logKeyEPPRequestID), loggedValue(t, second, logKeyEPPRequestID)
+	require.NotEmpty(t, firstID)
+	require.NotEqual(t, firstID, secondID)
+}
+
+func loggedValue(t *testing.T, rec, key string) string {
+	t.Helper()
+
+	m := regexp.MustCompile(`"` + regexp.QuoteMeta(key) + `"="([^"]*)"`).FindStringSubmatch(rec)
+	require.NotNil(t, m, "%q not found in %q", key, rec)
+	return m[1]
 }
 
 // useTracerProvider installs tp and the W3C propagator for the duration of the

@@ -29,6 +29,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -110,7 +111,7 @@ func TestRunPickerPluginSingleSpan(t *testing.T) {
 	scores := newWeightedScores("pod1", "pod2", "pod3")
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	result := profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, scores)
+	result := profile.runPickerPlugin(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, scores)
 	root.End()
 
 	if result == nil || len(result.TargetEndpoints) != 1 {
@@ -246,6 +247,6 @@ func TestRunPickerPluginOmitsEmptyGenAI(t *testing.T) {
 		t.Errorf("%s set for empty TargetModel", semconv.GenAIRequestModelKey)
 	}
 	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
-		t.Errorf("%s set for empty RequestID", semconv.GenAIRequestIDKey)
+		t.Errorf("%s set without x-request-id", semconv.GenAIRequestIDKey)
 	}
 }
