@@ -191,6 +191,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(middleware.RealIP) //nolint:staticcheck // coordinator runs behind a trusted gateway that sets the forwarded-IP headers
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
+	// After logRequestResponse, so the log keeps the path the client sent.
+	r.Use(reqcommon.CanonicalizeAPIPath)
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
