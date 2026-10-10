@@ -136,8 +136,9 @@ pipeline:
   ec_connector: ec-shared-storage
 
   # use_openai_format selects the wire format for the encode and prefill steps.
-  #   true (default) - forward on the client's original OpenAI path
-  #                    (/v1/chat/completions, /v1/completions, /v1/responses).
+  #   true (default) - forward on the client's original path
+  #                    (/v1/chat/completions, /v1/completions, /v1/responses,
+  #                    /v1/messages).
   #   false          - rewrite to the internal /inference/v1/generate
   #                    token-array (tokens-in) format.
   # false requires a render step in the pipeline (render produces the token
@@ -268,13 +269,13 @@ pipeline:
 
         # max_total_tokens rejects requests whose tokenized prompt exceeds
         # the limit. Counts both text and image-placeholder tokens. Enforced
-        # in the chat-completions, responses, completions string, and
-        # completions token-array paths. 0 (or omitted) = unlimited.
+        # in the chat-completions, responses, messages, completions string,
+        # and completions token-array paths. 0 (or omitted) = unlimited.
         # max_total_tokens: 32768
 
         # max_total_placeholder_tokens rejects requests whose summed image
         # placeholder length exceeds the limit. Only meaningful for
-        # multimodal chat-completions and responses requests.
+        # multimodal chat-completions, responses, and messages requests.
         # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 

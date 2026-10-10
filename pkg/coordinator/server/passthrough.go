@@ -39,7 +39,7 @@ import (
 )
 
 // passthroughHandler is the chi NotFound catch-all: any path the coordinator
-// does not register (e.g. /v1/models, /v1/messages, /v1/embeddings)
+// does not register (e.g. /v1/models, /v1/messages/count_tokens, /v1/embeddings)
 // is reverse-proxied to the gateway with x-llm-d-epp-profile: decode, so EPP dispatches
 // it to a decode pod. Method, body, query, and forwarded headers are preserved;
 // X-Request-Id is validated and replaced with a UUID if malformed, matching
@@ -92,7 +92,7 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The passthrough proxies request bodies verbatim and never parses them,
 	// so it cannot detect stream:true without defeating that design. Clear
 	// the write deadline unconditionally: a streaming response (the stated
-	// motivator, e.g. /v1/messages with stream:true) would otherwise be cut
+	// motivator, a request with stream:true) would otherwise be cut
 	// by WriteTimeout mid-stream. The trade-off is that non-streaming
 	// passthrough responses lose the slow-client guard; the gateway and
 	// server IdleTimeout still bound stalled connections.

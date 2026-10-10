@@ -75,6 +75,8 @@ func TestResolveFormat(t *testing.T) {
 		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
 		{name: "responses with openai format", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeResponses},
 		{name: "responses without openai format collapses to generate", path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
+		{name: "messages with openai format", useOpenAIFormat: true, path: reqcommon.PathMessages, want: reqcommon.APITypeMessages},
+		{name: "messages without openai format collapses to generate", path: reqcommon.PathMessages, want: reqcommon.APITypeVLLMGenerate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

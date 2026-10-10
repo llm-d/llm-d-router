@@ -135,16 +135,16 @@ func unreachableFormatError(format reqcommon.APIType) error {
 }
 
 // resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, Responses, and generate bodies, so
-// any other API collapses to APITypeVLLMGenerate; Chat Completions and
-// Responses additionally require useOpenAIFormat. Generate is the fallback
-// because its body carries the prompt as reqCtx.TokenIDs and does not depend
-// on the client's request shape.
+// build only Completions, Chat Completions, Responses, Messages, and generate
+// bodies, so any other API collapses to APITypeVLLMGenerate; Chat Completions,
+// Responses, and Messages additionally require useOpenAIFormat. Generate is the
+// fallback because its body carries the prompt as reqCtx.TokenIDs and does not
+// depend on the client's request shape.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
 	case reqcommon.APITypeCompletions:
 		return detected
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		if useOpenAIFormat {
 			return detected
 		}
@@ -152,14 +152,14 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	return reqcommon.APITypeVLLMGenerate
 }
 
-// promptItems returns the array an API carries its prompt items in: a
-// chat-completions messages array, or a Responses input array. ok is false for
-// an API that carries no item array, and for a body whose field is absent or
-// holds something other than an array.
+// promptItems returns the array an API carries its prompt items in: the
+// messages array of chat completions or Messages, or a Responses input array.
+// ok is false for an API that carries no item array, and for a body whose field
+// is absent or holds something other than an array.
 func promptItems(body map[string]any, apiType reqcommon.APIType) ([]any, bool) {
 	var field string
 	switch apiType {
-	case reqcommon.APITypeChatCompletions:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages:
 		field = reqcommon.FieldMessages
 	case reqcommon.APITypeResponses:
 		field = reqcommon.FieldInput
@@ -180,7 +180,13 @@ func promptItems(body map[string]any, apiType reqcommon.APIType) ([]any, bool) {
 // does not define image_url and a request carrying one fails the model server's
 // input validation before any worker sees it. The sidecar's encoder fan-out
 // applies the same rule.
+//
+// A Messages request names one with an Anthropic image block only, the one
+// image type vLLM's Anthropic conversion loads.
 func isImagePart(partType string, apiType reqcommon.APIType) bool {
+	if apiType == reqcommon.APITypeMessages {
+		return partType == reqcommon.PartTypeImage
+	}
 	switch partType {
 	case reqcommon.PartTypeInputImage:
 		return true
@@ -198,8 +204,8 @@ type imagePart struct {
 	location string
 }
 
-// collectImageParts walks a chat-completions messages array or a Responses
-// input array and returns the image content parts in order.
+// collectImageParts walks the messages array of chat completions or Messages,
+// or a Responses input array, and returns the image content parts in order.
 //
 // Every step that indexes reqCtx.MultimodalEntries by position walks from here:
 // replace-media-urls builds the entries, encode picks the part to prime, and

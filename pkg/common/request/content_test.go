@@ -87,12 +87,72 @@ func TestMediaPartURL(t *testing.T) {
 			part:    map[string]any{"image_url": "https://example.com/image.jpg"},
 			wantURL: "",
 		},
+		{
+			name:    "messages image with a url source",
+			part:    map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/image.jpg"}},
+			wantURL: "https://example.com/image.jpg",
+		},
+		{
+			name:    "messages image with a base64 source reads as a data URL",
+			part:    map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aGk="}},
+			wantURL: "data:image/png;base64,aGk=",
+		},
+		{
+			name:    "messages base64 source without a media_type",
+			part:    map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "aGk="}},
+			wantURL: "data:image/jpeg;base64,aGk=",
+		},
+		{
+			// vLLM reads any source but a url one as base64.
+			name:    "messages source without a type reads as base64",
+			part:    map[string]any{"type": "image", "source": map[string]any{"media_type": "image/png", "data": "aGk="}},
+			wantURL: "data:image/png;base64,aGk=",
+		},
+		{
+			// A Files API reference names an upload the router never stored.
+			name:    "messages file source carries no url",
+			part:    map[string]any{"type": "image", "source": map[string]any{"type": "file", "file_id": "file-123"}},
+			wantURL: "",
+		},
+		{
+			name:    "messages base64 source with empty data",
+			part:    map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": ""}},
+			wantURL: "",
+		},
+		{
+			name:    "messages image whose source is not an object",
+			part:    map[string]any{"type": "image", "source": "https://example.com/image.jpg"},
+			wantURL: "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if url := MediaPartURL(tt.part); url != tt.wantURL {
 				t.Errorf("MediaPartURL() = %q, want %q", url, tt.wantURL)
+			}
+		})
+	}
+}
+
+// TestMediaPartURLRefRewritesMessagesSource covers the setter on both source
+// kinds: either one becomes a url source carrying the replacement.
+func TestMediaPartURLRefRewritesMessagesSource(t *testing.T) {
+	sources := map[string]map[string]any{
+		"url source":    {"type": "url", "url": "https://example.com/image.jpg"},
+		"base64 source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			part := map[string]any{"type": "image", "source": source}
+			_, set := MediaPartURLRef(part)
+			if set == nil {
+				t.Fatal("expected a setter")
+			}
+			set("data:image/png;base64,aW1n")
+			want := map[string]any{"type": "url", "url": "data:image/png;base64,aW1n"}
+			if !reflect.DeepEqual(part["source"], want) {
+				t.Errorf("source = %#v, want %#v", part["source"], want)
 			}
 		})
 	}
@@ -177,7 +237,38 @@ func TestNewEncoderPrimingBody(t *testing.T) {
 		}
 	})
 
-	t.Run("every api type but responses is treated as chat completions", func(t *testing.T) {
+	t.Run("a messages body carries only the primed part", func(t *testing.T) {
+		part := map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/img.jpg"}}
+		clientBody := map[string]any{
+			"model": "m",
+			// vLLM's /v1/messages accepts neither kwargs field, so the prefiller
+			// hashes the image at the deployment defaults and the encoder has to
+			// as well.
+			"mm_processor_kwargs": map[string]any{"num_crops": 4},
+			"media_io_kwargs":     map[string]any{"video": map[string]any{"num_frames": 8}},
+			// A thinking budget is validated against max_tokens, so it cannot
+			// ride on a request capped to one token.
+			"thinking":   map[string]any{"type": "enabled", "budget_tokens": 512},
+			"max_tokens": 1024,
+			"system":     "be brief",
+			"tools":      []any{map[string]any{"name": "f", "input_schema": map[string]any{}}},
+			"messages":   []any{map[string]any{"role": "user", "content": []any{part}}},
+		}
+
+		body := NewEncoderPrimingBody(clientBody, part, APITypeMessages)
+
+		want := map[string]any{
+			"model":      "m",
+			"stream":     false,
+			"max_tokens": 1,
+			"messages":   []map[string]any{{"role": "user", "content": []map[string]any{part}}},
+		}
+		if !reflect.DeepEqual(body, want) {
+			t.Errorf("body = %#v, want %#v", body, want)
+		}
+	})
+
+	t.Run("every api type but responses and messages is treated as chat completions", func(t *testing.T) {
 		part := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/img.jpg"}}
 		clientBody := map[string]any{"model": "m"}
 
@@ -190,7 +281,6 @@ func TestNewEncoderPrimingBody(t *testing.T) {
 			APITypeCompletions,
 			APITypeVLLMGenerate,
 			APITypeSGLangGenerate,
-			APITypeMessages,
 			APIType(7),
 		} {
 			body := NewEncoderPrimingBody(clientBody, part, apiType)
@@ -241,6 +331,13 @@ func TestNewEncoderPrimingBody(t *testing.T) {
 }
 
 func TestItemPartArrays(t *testing.T) {
+	toolResult := func(content any) map[string]any {
+		return map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": content}
+	}
+	userTurn := []any{"a", toolResult([]any{"b"}), toolResult([]any{"c"})}
+	assistantTurn := []any{"a", toolResult([]any{"b"})}
+	stringToolResultTurn := []any{"a", toolResult("42")}
+
 	tests := []struct {
 		name    string
 		item    map[string]any
@@ -302,6 +399,50 @@ func TestItemPartArrays(t *testing.T) {
 			item:    map[string]any{"role": "user"},
 			apiType: APITypeResponses,
 			want:    nil,
+		},
+		{
+			name:    "messages turn content",
+			item:    map[string]any{"role": "user", "content": []any{"a"}},
+			apiType: APITypeMessages,
+			want:    []PartArray{{Field: FieldContent, Parts: []any{"a"}}},
+		},
+		{
+			// vLLM renders each user tool_result as messages placed ahead of the
+			// turn's own content, so tool_result arrays come first, in order.
+			name:    "messages user tool_result content precedes the turn's content",
+			item:    map[string]any{"role": "user", "content": userTurn},
+			apiType: APITypeMessages,
+			want: []PartArray{
+				{Field: "content[1].content", Parts: []any{"b"}},
+				{Field: "content[2].content", Parts: []any{"c"}},
+				{Field: FieldContent, Parts: userTurn},
+			},
+		},
+		{
+			// vLLM renders an assistant tool_result as text.
+			name:    "messages assistant tool_result is not walked",
+			item:    map[string]any{"role": "assistant", "content": assistantTurn},
+			apiType: APITypeMessages,
+			want:    []PartArray{{Field: FieldContent, Parts: assistantTurn}},
+		},
+		{
+			name:    "messages tool_result with string content is skipped",
+			item:    map[string]any{"role": "user", "content": stringToolResultTurn},
+			apiType: APITypeMessages,
+			want:    []PartArray{{Field: FieldContent, Parts: stringToolResultTurn}},
+		},
+		{
+			// vLLM keeps only the text of a system turn.
+			name:    "messages system turn has no arrays",
+			item:    map[string]any{"role": "system", "content": []any{"a"}},
+			apiType: APITypeMessages,
+			want:    nil,
+		},
+		{
+			name:    "chat tool_result content is not walked",
+			item:    map[string]any{"role": "user", "content": userTurn},
+			apiType: APITypeChatCompletions,
+			want:    []PartArray{{Field: FieldContent, Parts: userTurn}},
 		},
 	}
 

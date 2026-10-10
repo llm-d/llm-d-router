@@ -20,6 +20,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Responses Requests (/v1/responses)](#responses-requests-v1responses)
+- [Messages Requests (/v1/messages)](#messages-requests-v1messages)
 - [Text-Only Requests (no images)](#text-only-requests-no-images-v1chatcompletions)
 - [Generate Requests (/inference/v1/generate)](#generate-requests-inferencev1generate)
 - [Questions](#questions)
@@ -27,7 +28,7 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 ## Pipeline Overview
 
 ```
-Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /inference/v1/generate)
+Client Request (/v1/chat/completions, /v1/responses, /v1/messages, /v1/completions, or /inference/v1/generate)
     |
     |--- /inference/v1/generate (tokens-in)?
     |        YES --> skip replace-media-urls; render parses token_ids and features
@@ -41,8 +42,8 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /infere
     |
     v
 [replace-media-urls] - Fan-out downloads images, converts to base64 data URIs
-    |                    (skipped for /v1/completions and for /v1/chat/completions or
-    |                    /v1/responses without media URLs)
+    |                    (skipped for /v1/completions and for /v1/chat/completions,
+    |                    /v1/responses, or /v1/messages without images)
     v
 [render] - Tokenizes prompt, produces token_ids and per-image metadata
     |         (skipped for /v1/completions with token array prompt)
@@ -50,7 +51,7 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /infere
 [conditional-decode] - Attempts decode with token_ids;
     |                     if 412, continues pipeline; otherwise returns response
     |
-    |--- /v1/completions, or /v1/chat/completions or /v1/responses without multi media content --> skip encode, go to [prefill]
+    |--- /v1/completions, or /v1/chat/completions, /v1/responses, or /v1/messages without multi media content --> skip encode, go to [prefill]
     |
     |--- /inference/v1/generate --> skip encode (prefill encodes inline from kwargs_data), go to [prefill]
     |
@@ -426,6 +427,28 @@ Identical to [2.A](#2a-v1chatcompletionsrender).
 
 ---
 
+### 2.E `/v1/messages/render`
+
+#### Request
+
+```
+POST <rendering_service_address>/v1/messages/render
+Content-Type: application/json
+```
+
+The body is the client's Messages request, with image URLs already inlined by
+[Stage 1](#stage-1-replace-media-urls).
+
+#### Response (single object)
+
+Identical to [2.A](#2a-v1chatcompletionsrender).
+
+#### Output (mutates RequestContext)
+
+Identical to [2.A](#2a-v1chatcompletionsrender).
+
+---
+
 ## Stage 3: conditional-decode
 
 The coordinator attempts an early decode immediately after rendering. This allows the decode worker to serve the request directly if it already has the KV cache available (e.g., from a previous prefill), skipping the encode and prefill stages entirely.
@@ -691,6 +714,48 @@ For image 0:
 `max_output_tokens` is the Responses output cap, in place of chat completions'
 `max_tokens` and `max_completion_tokens`. `stream` is forced to `false` and
 `store` to `false`, since the sub-request exists only to prime the encoder cache.
+
+#### Response
+
+Identical to Option B.
+
+---
+
+### Option D: /v1/messages
+
+#### Request (per image)
+
+```
+POST <gateway>/v1/messages
+Content-Type: application/json
+X-Request-ID: <request_id>
+x-llm-d-epp-profile: encode
+```
+
+Same single-image fan-out as Option B, in the Messages shape. The client's
+`image` block is forwarded unchanged, so the encoder parses it through the same
+Anthropic conversion as the prefill worker:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "source": {"type": "url", "url": "data:image/jpeg;base64,/9j/4AAQ..."}}
+      ]
+    }
+  ],
+  "max_tokens": 1,
+  "stream": false
+}
+```
+
+`max_tokens` is the Messages output cap. The client's `mm_processor_kwargs` and
+`media_io_kwargs` are not forwarded: vLLM's `/v1/messages` accepts neither, so
+the prefill worker hashes the image at the deployment defaults and the encoder
+has to as well.
 
 #### Response
 
@@ -1262,6 +1327,46 @@ value. A worker retains a response only where response storage is enabled on it,
 and otherwise clears the field, so a default deployment retains nothing. Where
 it is enabled, the retained object is unreachable, since `previous_response_id`
 and `conversation` are rejected.
+
+When `use_openai_format` is `false`, the encode and prefill steps collapse to the
+internal `/inference/v1/generate` tokens-in format the same way chat completions
+do (see [Request Format Configuration](#request-format-configuration)).
+
+---
+
+## Messages Requests (/v1/messages)
+
+A `/v1/messages` (Anthropic Messages API) request runs the same pipeline and the
+same step sequence as `/v1/chat/completions`. vLLM's Anthropic endpoint
+converts each request to a chat completion and accepts `kv_transfer_params` and
+`ec_transfer_params`, so every stage sends a Messages body. The differences:
+
+| Concern | `/v1/chat/completions` | `/v1/messages` |
+| :---- | :---- | :---- |
+| Prompt field | `messages` | `messages`, with the system prompt in a top-level `system` field |
+| Image part | `{"type": "image_url", "image_url": {"url": ...}}` | `{"type": "image", "source": {...}}`, a `url` or `base64` source |
+| Part arrays walked | `content` | `content`, and the `content` of each `tool_result` in a user turn |
+| Output cap | `max_tokens`, `max_completion_tokens` | `max_tokens` |
+| Render endpoint | `/v1/chat/completions/render` | `/v1/messages/render` |
+| Image `uuid` on decode | stamped | none |
+
+The images follow vLLM's Anthropic conversion, since render pairs its hashes
+with images by position: within a user turn, the images in its `tool_result`
+blocks come first, in order, then the turn's own image blocks. A system turn
+keeps only its text, and an assistant turn's `tool_result` becomes text, so
+neither carries an image.
+
+Per stage:
+
+1. **replace-media-urls**: walks `messages` for `image` blocks. A `url` source is downloaded and rewritten to a `url` source carrying a data URI; a `base64` source is read in place. A source with no data, such as a Files API reference, is rejected with 400.
+2. **render**: posts to `/v1/messages/render`; same response shape as chat completions (see [2.E](#2e-v1messagesrender))
+3. **conditional-decode**: forwards the body unchanged to `/v1/messages`
+4. **encode**: one `/v1/messages` sub-request per image, each carrying a single `image` block (see [Option D](#option-d-v1messages))
+5. **prefill**: the client body plus `ec_transfer_params` and `kv_transfer_params`, capped to one output token. The client's `thinking` setting stays: vLLM skips its `budget_tokens < max_tokens` check when `kv_transfer_params` sets `do_remote_decode`, which every KV connector does.
+6. **decode**: the client body plus `kv_transfer_params`, uncapped. An Anthropic image block has no `uuid` field, so the decode worker hashes each image itself.
+
+`/v1/messages/count_tokens` is not a pipeline route; it passes through to the
+gateway.
 
 When `use_openai_format` is `false`, the encode and prefill steps collapse to the
 internal `/inference/v1/generate` tokens-in format the same way chat completions

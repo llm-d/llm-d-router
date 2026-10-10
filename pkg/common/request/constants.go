@@ -133,3 +133,29 @@ const (
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
 )
+
+// Anthropic Messages content block types. An image block holds its image in a
+// FieldSource object; a tool_result block holds the tool's output under
+// FieldContent, as a string or as an array of blocks.
+const (
+	PartTypeImage      = "image"
+	PartTypeToolResult = "tool_result"
+)
+
+// Fields of an Anthropic Messages image source. A source of type
+// ImageSourceTypeURL names its image by FieldURL; vLLM reads any other source as
+// base64 FieldData, assuming DefaultImageMediaType when it names no
+// FieldMediaType.
+const (
+	FieldSource           = "source"
+	FieldData             = "data"
+	FieldMediaType        = "media_type"
+	ImageSourceTypeURL    = "url"
+	DefaultImageMediaType = "image/jpeg"
+)
+
+// Message roles a content walk tells apart.
+const (
+	RoleUser   = "user"
+	RoleSystem = "system"
+)

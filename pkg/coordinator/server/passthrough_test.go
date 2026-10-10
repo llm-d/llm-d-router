@@ -119,7 +119,7 @@ func TestPassthrough_PreservesMethodBodyAndQuery(t *testing.T) {
 	srv := newTestServerWithGateway(nil, upstream.URL)
 
 	body := `{"prompt":"hi"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages?stream=true", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens?beta=true", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := doPassthrough(t, srv, req)
 
@@ -130,11 +130,11 @@ func TestPassthrough_PreservesMethodBodyAndQuery(t *testing.T) {
 	if method != http.MethodPost {
 		t.Fatalf("method: got %q want POST", method)
 	}
-	if path != "/v1/messages" {
-		t.Fatalf("path: got %q want /v1/messages", path)
+	if path != "/v1/messages/count_tokens" {
+		t.Fatalf("path: got %q want /v1/messages/count_tokens", path)
 	}
-	if query != "stream=true" {
-		t.Fatalf("query: got %q want %q", query, "stream=true")
+	if query != "beta=true" {
+		t.Fatalf("query: got %q want %q", query, "beta=true")
 	}
 	if string(gotBody) != body {
 		t.Fatalf("body: got %q want %q", string(gotBody), body)
@@ -187,7 +187,7 @@ func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
 	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
 	srv := newTestServerWithGateway(nil, upstream.URL)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{}`))
 	req.Header.Set(routing.EndpointPinHeader, "10.0.3.7:8000")
 	req.Header.Set("X-Keep", "kept")
 	doPassthrough(t, srv, req)

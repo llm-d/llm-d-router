@@ -96,11 +96,11 @@ func truncateLongStrings(v any, maxLen int) any {
 	}
 }
 
-// extractMMItems extracts all multimodal content parts from the request:
-// chat-completions' messages array, or a Responses input array. Which field to
-// walk is gated on apiType rather than presence, since a client could send a
-// stray field the other format does not use. The part arrays within a turn come
-// from reqcommon.ItemPartArrays.
+// extractMMItems extracts all multimodal content parts from the request: the
+// messages array of chat completions or Messages, or a Responses input array.
+// Which field to walk is gated on apiType rather than presence, since a client
+// could send a stray field the other format does not use. The part arrays
+// within a turn come from reqcommon.ItemPartArrays.
 //
 // One item is returned per content part, repeats included. A part's modality and
 // its client-supplied uuid both move the serving engine's multimodal hash, so
@@ -140,6 +140,18 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			}
 			partType, ok := partMap[reqcommon.FieldType].(string)
 			if !ok {
+				continue
+			}
+
+			// vLLM's Messages conversion loads only Anthropic image blocks. It
+			// refuses a chat or Responses part type at a turn's top level and
+			// ignores one inside a tool_result, so priming it would only fail
+			// the fanout first or encode an image no worker reads. Image blocks
+			// are not primed by the sidecar
+			// (https://github.com/llm-d/llm-d-router/issues/3222).
+			if apiType == reqcommon.APITypeMessages && mmTypes[partType] {
+				logger.V(logging.DEBUG).Info("skipping content part the Messages API does not define", "type", partType, "apiType", apiType)
+				droppedParts++
 				continue
 			}
 

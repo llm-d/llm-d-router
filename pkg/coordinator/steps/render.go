@@ -133,6 +133,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return s.executeRender(ctx, reqCtx, reqcommon.PathChatCompletions)
 	case reqcommon.APITypeResponses:
 		return s.executeRender(ctx, reqCtx, reqcommon.PathResponses)
+	case reqcommon.APITypeMessages:
+		return s.executeRender(ctx, reqCtx, reqcommon.PathMessages)
 	default:
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)

@@ -254,6 +254,72 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestDecodeStep_Messages_NonStreaming(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathMessages {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "message", "content": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-messages",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		Body: map[string]any{
+			"model":      "llama-3",
+			"max_tokens": 50,
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/cat.jpg"}},
+				}},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+
+	kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+	if !ok || kvParams["block_id"] != "xyz" {
+		t.Fatalf("expected the prefill's kv_transfer_params at the top level, got %v", parsed["kv_transfer_params"])
+	}
+	if parsed["max_tokens"] != float64(50) {
+		t.Fatalf("expected the client's max_tokens preserved, got %v", parsed["max_tokens"])
+	}
+	// vLLM's Anthropic content block defines no uuid, so decode stamps none and
+	// the worker hashes the image itself.
+	content := parsed["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	image := content[1].(map[string]any)
+	if uuid, ok := image["uuid"]; ok {
+		t.Fatalf("expected no uuid on a Messages image block, got %v", uuid)
+	}
+	if source := image["source"].(map[string]any); source["url"] != "https://example.com/cat.jpg" {
+		t.Fatalf("expected the image source preserved, got %v", source)
+	}
+}
+
 // A chat-completions request carrying a stray top-level "input" array must not
 // have that array's image part stamped with a uuid.
 func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
@@ -469,11 +535,10 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 
 // TestDecodeStep_UnreachableFormat_ReturnsError verifies that request paths
 // for formats prepareDecodeBody's switch does not handle explicitly
-// (APITypeMessages, APITypeSGLangGenerate) fail through
-// its default case, reporting an error instead of sending an unprepared
-// body upstream.
+// (APITypeSGLangGenerate) fail through its default case, reporting an error
+// instead of sending an unprepared body upstream.
 func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathSGLangGenerate} {
+	for _, path := range []string{reqcommon.PathSGLangGenerate} {
 		t.Run(path, func(t *testing.T) {
 			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
 			if err != nil {

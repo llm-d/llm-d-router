@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -175,6 +176,196 @@ func TestReplaceMediaURLsStep_Responses_RejectsFileIDImage(t *testing.T) {
 	}
 	if len(reqCtx.MultimodalEntries) != 0 {
 		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func messagesImage(source map[string]any) map[string]any {
+	return map[string]any{"type": "image", "source": source}
+}
+
+func messagesBase64Image(data string) map[string]any {
+	return messagesImage(map[string]any{"type": "base64", "media_type": "image/png", "data": data})
+}
+
+func messagesToolResult(blocks ...any) map[string]any {
+	return map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": blocks}
+}
+
+func TestReplaceMediaURLsStep_Messages_DownloadsAndInlines(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testImageJPEGContentType)
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	block := messagesImage(map[string]any{"type": "url", "url": imageServer.URL + "/photo.jpg"})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					block,
+				}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if reqCtx.MultimodalEntries[0].ContentType != testImageJPEGContentType {
+		t.Fatalf("expected content type image/jpeg, got %s", reqCtx.MultimodalEntries[0].ContentType)
+	}
+	// vLLM loads a data URL from a url source the same way it loads one from a
+	// chat image_url, so the source keeps its url shape.
+	source := block["source"].(map[string]any)
+	if source["type"] != "url" {
+		t.Fatalf("expected a url source, got %v", source)
+	}
+	if url, _ := source["url"].(string); !strings.HasPrefix(url, "data:image/jpeg;base64,") {
+		t.Fatalf("expected data URI, got %v", source["url"])
+	}
+}
+
+func TestReplaceMediaURLsStep_Messages_Base64Source(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+
+	source := map[string]any{"type": "base64", "media_type": "image/png", "data": "aGk="}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{messagesImage(source)}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 1 {
+		t.Fatalf("expected 1 multimodal entry, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if got := reqCtx.MultimodalEntries[0]; got.ContentType != "image/png" || got.Base64Data != "aGk=" {
+		t.Fatalf("unexpected entry: %+v", got)
+	}
+	if want := map[string]any{"type": "base64", "media_type": "image/png", "data": "aGk="}; !reflect.DeepEqual(source, want) {
+		t.Fatalf("expected the base64 source left unchanged, got %v", source)
+	}
+}
+
+// Render pairs its hashes with entries by position, so the entries follow the
+// order vLLM renders the images in: a user turn's tool_result images ahead of
+// its own image blocks. vLLM keeps only the text of a system turn and renders an
+// assistant tool_result as text, so neither yields an entry.
+func TestReplaceMediaURLsStep_Messages_RenderOrder(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "system", "content": []any{
+					map[string]any{"type": "text", "text": "be brief"},
+					messagesBase64Image("system"),
+				}},
+				map[string]any{"role": "user", "content": []any{
+					messagesBase64Image("user"),
+					messagesToolResult(map[string]any{"type": "text", "text": "two screenshots"}, messagesBase64Image("tool-1")),
+					messagesToolResult(messagesBase64Image("tool-2")),
+				}},
+				map[string]any{"role": "assistant", "content": []any{
+					messagesBase64Image("assistant"),
+					messagesToolResult(messagesBase64Image("assistant-tool")),
+				}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make([]string, 0, len(reqCtx.MultimodalEntries))
+	for i, entry := range reqCtx.MultimodalEntries {
+		if entry.Index != i {
+			t.Fatalf("entry %d has Index %d", i, entry.Index)
+		}
+		got = append(got, entry.Base64Data)
+	}
+	if want := []string{"tool-1", "tool-2", "user", "assistant"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+}
+
+// See collectImageRefs' doc comment for why an image the router cannot fetch
+// is rejected rather than skipped.
+func TestReplaceMediaURLsStep_Messages_RejectsFileSource(t *testing.T) {
+	step, _ := NewReplaceMediaURLsStep(nil, map[string]any{})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					messagesImage(map[string]any{"type": "file", "file_id": "file-abc123"}),
+				}},
+			},
+		},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest, got %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Fatalf("expected no entries populated on rejection, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestReplaceMediaURLsStep_MessagesIgnoresChatImagePart(t *testing.T) {
+	var hits atomic.Int32
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", testImageJPEGContentType)
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	step := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					map[string]any{
+						"type":      reqcommon.PartTypeImageURL,
+						"image_url": map[string]any{"url": imageServer.URL + "/photo.jpg"},
+					},
+				}},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(reqCtx.MultimodalEntries) != 0 {
+		t.Errorf("expected no multimodal entry for a chat image part on a Messages request, got %d", len(reqCtx.MultimodalEntries))
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("expected no download, got %d", n)
 	}
 }
 

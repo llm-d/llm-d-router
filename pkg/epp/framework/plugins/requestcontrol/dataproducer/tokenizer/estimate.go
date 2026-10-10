@@ -29,26 +29,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // Content-block types read by the estimate backend.
 const (
-	blockTypeText       = "text"
-	blockTypeImage      = "image"
-	blockTypeImageURL   = "image_url"
-	blockTypeThinking   = "thinking"
-	blockTypeToolUse    = "tool_use"
-	blockTypeToolResult = "tool_result"
+	blockTypeText     = "text"
+	blockTypeImageURL = "image_url"
+	blockTypeThinking = "thinking"
+	blockTypeToolUse  = "tool_use"
 )
 
-const (
-	// Per-request billing hashes must not defeat prefix caching.
-	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
-	// The base64 image fallback matches vLLM's Anthropic conversion.
-	defaultImageMediaType = "image/jpeg"
-)
+// Per-request billing hashes must not defeat prefix caching.
+const anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
 
 func anthropicSystemText(ac fwkrh.AnthropicContent) string {
 	if ac.Raw != "" {
@@ -83,7 +78,7 @@ func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokeni
 		switch item.Type {
 		case blockTypeText:
 			parts = append(parts, item.Text)
-		case blockTypeImage:
+		case reqcommon.PartTypeImage:
 			imageBlocks = appendImageBlock(imageBlocks, item.Source)
 		}
 	}
@@ -102,7 +97,7 @@ func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
 	}
 	mediaType := src.MediaType
 	if mediaType == "" {
-		mediaType = defaultImageMediaType
+		mediaType = reqcommon.DefaultImageMediaType
 	}
 	return "data:" + mediaType + ";base64," + src.Data
 }
@@ -359,7 +354,7 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case blockTypeImage:
+			case reqcommon.PartTypeImage:
 				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
 					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
 				}
@@ -369,7 +364,7 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 				out = append(out, []byte(block.ID)...)
 				out = append(out, []byte(block.Name)...)
 				out = append(out, block.Input...)
-			case blockTypeToolResult:
+			case reqcommon.PartTypeToolResult:
 				text, imageBlocks := anthropicToolResultContent(block)
 				out = append(out, []byte(text)...)
 				for _, img := range imageBlocks {

@@ -29,6 +29,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 )
@@ -179,14 +180,14 @@ func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.
 			if b.Text != "" {
 				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: b.Text})
 			}
-		case blockTypeImage:
+		case reqcommon.PartTypeImage:
 			contentBlocks = appendImageBlock(contentBlocks, b.Source)
 		case blockTypeThinking:
 			reasoning.WriteString(b.Thinking)
 		case "redacted_thinking":
 		case blockTypeToolUse:
 			toolCalls = append(toolCalls, anthropicToolCall(b))
-		case blockTypeToolResult:
+		case reqcommon.PartTypeToolResult:
 			if m.Role == "user" {
 				conversation = appendAnthropicToolResult(conversation, b)
 			} else {
