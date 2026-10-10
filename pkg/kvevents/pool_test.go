@@ -1648,3 +1648,54 @@ func TestBlockStoredEvent_LoRAExtraKeysMatchRequestKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockStoredEvent_CacheSaltSeparatesEntries stores the same tokens under
+// two salts, in the first-block extra-keys layout the SGLang and vLLM adapters
+// emit, and checks that each salt's request keys resolve only to its own pod.
+func TestBlockStoredEvent_CacheSaltSeparatesEntries(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 64)
+	tokens := makeTokens(128)
+
+	saltedExtras := func(salt string) []*kvblock.BlockExtraFeatures {
+		return []*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: salt}}}, nil}
+	}
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(2, 500),
+		Tokens:      tokens,
+		ExtraKeys:   [][]any{{"salt-a"}, nil},
+	}}}, "pod-a", "test-model")
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(2, 600),
+		Tokens:      tokens,
+		ExtraKeys:   [][]any{{"salt-b"}, nil},
+	}}}, "pod-b", "test-model")
+
+	keysA, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", saltedExtras("salt-a"))
+	require.NoError(t, err)
+	keysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", saltedExtras("salt-b"))
+	require.NoError(t, err)
+	unsalted, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keysA, 2)
+	require.Len(t, keysB, 2)
+	for i := range keysA {
+		assert.NotEqual(t, keysA[i], keysB[i], "block %d shares a key across salts", i)
+	}
+
+	for pod, keys := range map[string][]kvblock.BlockHash{"pod-a": keysA, "pod-b": keysB} {
+		result, err := idx.Lookup(ctx, keys, nil)
+		require.NoError(t, err)
+		for _, key := range keys {
+			require.Len(t, result[key], 1, "request key %d for %s", key, pod)
+			assert.Equal(t, pod, result[key][0].PodIdentifier)
+		}
+	}
+
+	result, err := idx.Lookup(ctx, unsalted, nil)
+	require.NoError(t, err)
+	for _, key := range unsalted {
+		assert.Empty(t, result[key], "unsalted request key %d matched a salted block", key)
+	}
+}

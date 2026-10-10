@@ -58,7 +58,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	}{
 		{
 			name: "sglang", path: "/generate", salt: "tenant-a", parser: sglanghttp.NewSGLangHTTPParser(),
-			body: []byte(`{"input_ids":[1,2,3],"extra_key":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
+			body: []byte(`{"input_ids":[1,2,3],"cache_salt":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
 		},
 		{
 			name: "vllm HTTP", path: "/inference/v1/generate", salt: "tenant-a", parser: vllmhttp.NewVllmHTTPParser(),

@@ -307,9 +307,10 @@ func TestSGLangAllBlocksCleared(t *testing.T) {
 
 // TestSGLangParseMessage_MapEncodedBlockStored verifies the map encoding emitted
 // by SGLang since sgl-project/sglang#37482 dropped msgspec array_like=True:
-// events arrive as field-name maps with the tag under "type". cache_salt and
-// session_id are attribution fields with no positional slot; they must not
-// cause an error and are simply not reflected in the domain event.
+// events arrive as field-name maps with the tag under "type". session_id is
+// attribution only and is not reflected in the domain event. The event has a
+// parent, so its salt is already carried by the parent's request key and no
+// extra keys are emitted.
 func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
 	adapter := NewSGLangAdapter()
 
@@ -344,6 +345,64 @@ func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, 16, blockStored.BlockSize)
 	assert.Equal(t, "GPU", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
+	assert.Nil(t, blockStored.ExtraKeys)
+}
+
+// TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot verifies that a
+// salted event starting at the sequence root carries the salt in the first
+// block's extra keys, matching vLLM's extra_keys layout and the request-side
+// fold in preciseprefixcache.
+func TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	blockStoredEvent := map[string]any{
+		"type":         "BlockStored",
+		"block_hashes": []any{uint64(100), uint64(101)},
+		"token_ids":    []uint32{1, 2, 3, 4},
+		"block_size":   2,
+		"medium":       "GPU",
+		"cache_salt":   "tenant-a",
+	}
+	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, nil})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@m",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(0), blockStored.ParentHash)
+	assert.Equal(t, [][]any{{"tenant-a"}, nil}, blockStored.ExtraKeys)
+}
+
+// TestSGLangBlockStored_PositionalSaltMetadataIgnored verifies that a positional
+// event carrying the {"cache_salt": ...} metadata slot (sgl-project/sglang#30827,
+// before #37482) still decodes, without reading its salt.
+func TestSGLangBlockStored_PositionalSaltMetadataIgnored(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	event := []any{
+		"BlockStored", []any{uint64(1)}, nil, []uint32{1, 2}, 2, nil, "GPU",
+		map[string]any{"cache_salt": "tenant-a"},
+	}
+	payload, err := msgpack.Marshal([]any{0.0, []any{event}, nil})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@m",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint64{1}, blockStored.BlockHashes)
+	assert.Nil(t, blockStored.ExtraKeys)
 }
 
 // TestSGLangParseMessage_MapEncodedBlockStored_RealCaptureTwoBlocks replays a
@@ -385,6 +444,7 @@ func TestSGLangParseMessage_MapEncodedBlockStored_RealCaptureTwoBlocks(t *testin
 	assert.Equal(t, 64, blockStored.BlockSize)
 	assert.Equal(t, "GPU", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
+	assert.Nil(t, blockStored.ExtraKeys)
 }
 
 // TestSGLangParseMessage_MapEncodedBlockRemovedAndCleared covers the remaining
@@ -443,6 +503,16 @@ func TestSGLangMapEncodedErrors(t *testing.T) {
 		"non-string tag": {
 			event:   map[string]any{"type": 7},
 			wantErr: "is not a string",
+		},
+		"non-string cache_salt": {
+			event: map[string]any{
+				"type":         "BlockStored",
+				"block_hashes": []any{uint64(1)},
+				"token_ids":    []uint32{1},
+				"block_size":   1,
+				"cache_salt":   7,
+			},
+			wantErr: "cache_salt is not a string",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

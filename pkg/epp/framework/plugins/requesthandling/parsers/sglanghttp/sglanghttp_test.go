@@ -140,19 +140,44 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name:    "text prompt with extra_key mapped to CacheSalt",
+			name:    "text prompt with cache_salt mapped to CacheSalt",
 			headers: map[string]string{":path": "/generate"},
-			body:    map[string]any{"text": "hello world", "extra_key": "salt-abc"},
+			body:    map[string]any{"text": "hello world", "cache_salt": "salt-abc"},
 			want: &fwkrh.InferenceRequestBody{
 				Generate: &fwkrh.GenerateRequest{Text: "hello world", CacheSalt: "salt-abc"},
 			},
 		},
 		{
-			name:    "extra_key mapped to CacheSalt",
+			name:    "cache_salt mapped to CacheSalt",
+			headers: map[string]string{":path": "/generate"},
+			body:    map[string]any{"input_ids": []any{10, 20}, "cache_salt": "salt-abc"},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{10, 20}, CacheSalt: "salt-abc"},
+			},
+		},
+		{
+			// SGLang does not publish extra_key in KV events, so it must never equal a published salt.
+			name:    "extra_key is kept as a separate namespace",
 			headers: map[string]string{":path": "/generate"},
 			body:    map[string]any{"input_ids": []any{10, 20}, "extra_key": "salt-abc"},
 			want: &fwkrh.InferenceRequestBody{
-				Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{10, 20}, CacheSalt: "salt-abc"},
+				Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{10, 20}, CacheSalt: `["salt-abc",""]`},
+			},
+		},
+		{
+			name:    "extra_key and cache_salt are combined",
+			headers: map[string]string{":path": "/generate"},
+			body:    map[string]any{"input_ids": []any{10, 20}, "extra_key": "tenant-a", "cache_salt": "salt-abc"},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{10, 20}, CacheSalt: `["tenant-a","salt-abc"]`},
+			},
+		},
+		{
+			name:    "empty extra_key is not a salt",
+			headers: map[string]string{":path": "/generate"},
+			body:    map[string]any{"input_ids": []any{1, 2, 11}, "extra_key": ""},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 11}},
 			},
 		},
 		{
@@ -193,6 +218,15 @@ func TestSGLangHTTPParser_ParseRequest(t *testing.T) {
 			body: map[string]any{
 				"input_ids": []int{1, 2},
 				"extra_key": []string{"tenant-a", "tenant-b"},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "per-prompt cache_salt list is rejected",
+			headers: map[string]string{":path": "/generate"},
+			body: map[string]any{
+				"input_ids":  []int{1, 2},
+				"cache_salt": []string{"salt-a", "salt-b"},
 			},
 			wantErr: true,
 		},
@@ -302,9 +336,14 @@ func TestSGLangHTTPParser_ParseRequest_ErrorPaths(t *testing.T) {
 			errContains: "input_ids must be an array of uint32 integers",
 		},
 		{
-			name:        "per-prompt cache salt unsupported",
+			name:        "per-prompt extra_key unsupported",
 			body:        `{"input_ids":[1,2],"extra_key":["a","b"]}`,
 			errContains: "extra_key must be a string",
+		},
+		{
+			name:        "per-prompt cache_salt unsupported",
+			body:        `{"input_ids":[1,2],"cache_salt":["a","b"]}`,
+			errContains: "cache_salt must be a string",
 		},
 		{
 			name:        "unsupported path",

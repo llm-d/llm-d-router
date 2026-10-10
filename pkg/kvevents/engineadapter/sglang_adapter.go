@@ -18,6 +18,7 @@ package engineadapter
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/vmihailenco/msgpack/v5"
 
@@ -31,6 +32,9 @@ import (
 var (
 	sglangBlockStoredFieldOrder  = []string{"block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"}
 	sglangBlockRemovedFieldOrder = []string{"block_hashes", "medium"}
+	// sglangBlockStoredOptionalFields are appended after the required positions
+	// for map-encoded events only and do not count toward the minimum length.
+	sglangBlockStoredOptionalFields = []string{"cache_salt"}
 )
 
 // SGLangAdapter implements the kvevents.EngineAdapter interface for SGLang engines.
@@ -111,7 +115,7 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 	var order []string
 	switch tag {
 	case eventTagBlockStored:
-		order = sglangBlockStoredFieldOrder
+		order = slices.Concat(sglangBlockStoredFieldOrder, sglangBlockStoredOptionalFields)
 	case eventTagBlockRemoved:
 		order = sglangBlockRemovedFieldOrder
 	case eventTagAllBlocksCleared:
@@ -139,9 +143,9 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 //	[4] block_size         int
 //	[5] lora_id            int|nil
 //	[6] medium             string|nil
+//	[7] cache_salt         string|nil        (optional, map form only)
 //
-// cache_salt and session_id are map-only fields and have no positional representation.
-// They are not carried into kvevents.BlockStoredEvent.
+// session_id is attribution only and is not carried into kvevents.BlockStoredEvent.
 func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEvent, error) {
 	minFields := len(sglangBlockStoredFieldOrder) + 1 // tag included
 	if len(fields) < minFields {
@@ -194,6 +198,24 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		deviceTier = mediumStr
 	}
 
+	var cacheSalt string
+	switch raw := fieldAt(fields, 7).(type) {
+	case nil, map[string]any:
+	case string:
+		cacheSalt = raw
+	default:
+		return nil, fmt.Errorf("BlockStored: cache_salt is not a string: %T", raw)
+	}
+
+	// SGLang stamps the salt on every event of a salted node, but the request side
+	// folds it into the first block only (vLLM's extra_keys layout). Events with a
+	// parent inherit the salt through the parent's request key.
+	var extraKeys [][]any
+	if cacheSalt != "" && parentHash == 0 && len(blockHashes) > 0 {
+		extraKeys = make([][]any, len(blockHashes))
+		extraKeys[0] = []any{cacheSalt}
+	}
+
 	return &kvevents.BlockStoredEvent{
 		BlockHashes: blockHashes,
 		Tokens:      tokens,
@@ -201,6 +223,7 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		BlockSize:   blockSize,
 		DeviceTier:  deviceTier,
 		LoraID:      loraID,
+		ExtraKeys:   extraKeys,
 	}, nil
 }
 
