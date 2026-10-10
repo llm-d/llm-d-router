@@ -18,6 +18,7 @@ package requestcontrol
 
 import (
 	"context"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -139,11 +140,15 @@ func (d *DatastoreEndpointCandidates) Locate(ctx context.Context, requestMetadat
 			continue
 		}
 		// Extract address from endpoint string.
-		if idx := strings.LastIndexByte(epStr, ':'); idx >= 0 {
-			endpoints.Insert(epStr[:idx])
-		} else {
-			endpoints.Insert(epStr)
+		address := epStr
+		if host, _, err := net.SplitHostPort(epStr); err == nil && net.ParseIP(host) != nil {
+			address = host
+		} else if net.ParseIP(epStr) == nil {
+			if idx := strings.LastIndexByte(epStr, ':'); idx >= 0 {
+				address = epStr[:idx]
+			}
 		}
+		endpoints.Insert(address)
 	}
 
 	// Query the Datastore with a predicate.

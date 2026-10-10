@@ -336,3 +336,44 @@ func makeMetadataWithSubset(endpoints []any) map[string]any {
 		},
 	}
 }
+
+func TestDatastoreEndpointCandidates_IPv6Subset(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		ip        string
+		subset    string
+		wantMatch bool
+	}{
+		{"IPv4 with port", "10.0.0.1", "10.0.0.1:8080", true},
+		{"IPv4 without port", "10.0.0.1", "10.0.0.1", true},
+		{"bracketed IPv6 with port", "2001:db8::1", "[2001:db8::1]:8080", true},
+		{"IPv6 without port", "2001:db8::1", "2001:db8::1", true},
+		{"IPv6 final hextet stays address", "2001:db8::1:8080", "2001:db8::1:8080", true},
+		{"hostname with port", "worker.example", "worker.example:8080", true},
+		{"hostname without port", "worker.example", "worker.example", true},
+		{"nonnumeric port keeps existing behavior", "10.0.0.1", "10.0.0.1:invalid", true},
+		{"empty port keeps existing behavior", "10.0.0.1", "10.0.0.1:", true},
+		{"extra colon stays unmatched", "10.0.0.1", "10.0.0.1:8080:invalid", false},
+		{"bracketed hostname stays unmatched", "worker.example", "[worker.example]:8080", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ep := makeMockEndpoint("target", tc.ip)
+			other := makeMockEndpoint("other", "10.0.0.99")
+			candidates := NewDatastoreEndpointCandidates(&mockDatastore{pods: []fwkdl.Endpoint{ep, other}})
+			got := candidates.Locate(context.Background(), makeMetadataWithSubset([]any{tc.subset}))
+			if !tc.wantMatch {
+				if len(got) != 0 {
+					t.Fatalf("subset %q should remain unmatched, got %v", tc.subset, got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].GetMetadata().GetIPAddress() != tc.ip {
+				t.Fatalf("subset %q should retain exactly endpoint %q, got %v", tc.subset, tc.ip, got)
+			}
+		})
+	}
+}
