@@ -20,8 +20,8 @@
 
 GATEWAY_NAMESPACE=llm-d-istio-system
 
-CRD_DIR=deploy/components/crds-istio/
-CP_DIR=deploy/components/istio-control-plane/
+CRD_DIR=test/e2e/artifacts/components/crds-istio/
+CP_DIR=test/e2e/artifacts/components/istio-control-plane/
 ISTIO_CP="$(dirname "$0")/istio-cp.yaml"
 
 istioctl manifest generate --dry-run --set values.global.istioNamespace=$GATEWAY_NAMESPACE -f $ISTIO_CP | scripts/istio/manifest-splitter.py -o $CP_DIR
