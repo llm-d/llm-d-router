@@ -22,6 +22,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fcmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
+	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
 // fakeServer stands in for a gRPC server runnable. Like GracefulStop, it returns
@@ -203,5 +213,87 @@ func TestServeWithDrainOnSIGTERM(t *testing.T) {
 	close(extProc.release)
 	if err := waitErr(t, done); err != nil {
 		t.Fatalf("serveWithDrain returned %v, want nil", err)
+	}
+}
+
+func TestFlowControlAdmissionDuringDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		signal     bool
+		managerErr error
+	}{
+		{name: "SIGTERM", signal: true},
+		{name: "lease loss", managerErr: errors.New("leader election lost")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, sigterm := context.WithCancel(context.Background())
+			defer sigterm()
+			r := NewRunner()
+			admissionCtx, stopAdmission := context.WithCancel(context.WithoutCancel(ctx))
+			defer stopAdmission()
+			r.admissionCtx = admissionCtx
+			opts := runserver.NewOptions()
+			opts.PoolName = testPoolName
+			opts.ConfigText = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+`
+			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+			require.NoError(t, err)
+			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
+			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+			require.NoError(t, err)
+			eppConfig.SaturationDetector = &fwkfcmocks.MockSaturationDetector{}
+			candidates := &fcmocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)}}
+			_, admission, _, _ := r.initAdmissionControl(ctx, opts, eppConfig, candidates)
+			admit := func(id string) error {
+				requestCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				return admission.Admit(requestCtx, &handlers.RequestContext{
+					SchedulingRequest:        &fwksched.InferenceRequest{RequestID: id, FairnessID: "draining"},
+					Request:                  &handlers.Request{Metadata: map[string]any{}},
+					RequestSize:              100,
+					RequestReceivedTimestamp: time.Now(),
+					IncomingModelName:        "test-model",
+				}, 0)
+			}
+			require.NoError(t, admit("before shutdown"))
+
+			extProc, health := newFakeServer(), newFakeServer()
+			close(health.release)
+			t.Cleanup(func() {
+				if !isClosed(extProc.release) {
+					close(extProc.release)
+				}
+			})
+			managerStopped := make(chan struct{})
+			stopManager := make(chan struct{})
+			startManager := func(context.Context) error {
+				<-stopManager
+				close(managerStopped)
+				return tc.managerErr
+			}
+			elected := &atomic.Bool{}
+			elected.Store(true)
+			done := make(chan error, 1)
+			go func() {
+				err := serveWithDrain(ctx, startManager, extProc.run, health.run, &atomic.Bool{}, elected, 300*time.Millisecond)
+				stopAdmission()
+				done <- err
+			}()
+			if tc.signal {
+				sigterm()
+			}
+			close(stopManager)
+			require.True(t, closedWithin(managerStopped, time.Second))
+			require.False(t, isClosed(extProc.stopped))
+			require.NoError(t, admit("during drain"))
+			require.True(t, closedWithin(extProc.stopped, time.Second))
+			require.NoError(t, admit("while finishing streams"))
+			close(extProc.release)
+			require.ErrorIs(t, waitErr(t, done), tc.managerErr)
+			require.ErrorContains(t, admit("after drain"), "flow controller is not running")
+		})
 	}
 }
