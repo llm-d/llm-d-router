@@ -110,6 +110,18 @@ func TestFactory(t *testing.T) {
 			expectErr:  false,
 		},
 		{
+			name:       "include max output tokens",
+			pluginName: "ctx-aware",
+			jsonParams: `{"enableFiltering": true, "includeMaxOutputTokens": true}`,
+			expectErr:  false,
+		},
+		{
+			name:       "include max output tokens with reusable tokens producer should error",
+			pluginName: "ctx-aware",
+			jsonParams: `{"label": "llm-d.ai/prefill-work-range", "reusableTokensProducerName": "p2p-source", "includeMaxOutputTokens": true}`,
+			expectErr:  true,
+		},
+		{
 			name:       "malformed JSON should error",
 			pluginName: "malformed",
 			jsonParams: `{"label": "test"`,
@@ -356,6 +368,105 @@ func TestReusableTokensScore(t *testing.T) {
 
 	scores := plugin.Score(ctx, request, endpoints)
 	assert.Greater(t, scores[endpoints[0]], scores[endpoints[1]])
+}
+
+func withMaxOutputTokens(request *scheduling.InferenceRequest, n int64) *scheduling.InferenceRequest {
+	request.Body.MaxOutputTokens = &n
+	return request
+}
+
+func TestIncludeMaxOutputTokensFilter(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-150"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "151-1000"}),
+	}
+	newPlugin := func(include bool) *ContextLengthAware {
+		return NewContextLengthAware("ctx-aware", &contextLengthAwareParameters{
+			Label:                  DefaultContextLengthLabel,
+			EnableFiltering:        true,
+			IncludeMaxOutputTokens: include,
+		})
+	}
+	filteredNames := func(filtered []scheduling.Endpoint) []string {
+		names := make([]string, len(filtered))
+		for i, endpoint := range filtered {
+			names[i] = endpoint.GetMetadata().ID.Name
+		}
+		return names
+	}
+
+	tests := []struct {
+		name     string
+		include  bool
+		request  *scheduling.InferenceRequest
+		expected []string
+	}{
+		{
+			name:     "disabled configuration ignores the output cap",
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 100),
+			expected: []string{"short"},
+		},
+		{
+			name:     "output cap is added to the prompt length",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 100),
+			expected: []string{"long"},
+		},
+		{
+			name:     "prompt plus output cap equal to the range max fits",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 50),
+			expected: []string{"short"},
+		},
+		{
+			name:     "missing output cap reserves nothing",
+			include:  true,
+			request:  createHundredTokenRequest(),
+			expected: []string{"short"},
+		},
+		{
+			name:     "request no range can hold is filtered from every endpoint",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 901),
+			expected: []string{},
+		},
+		{
+			name:    "unknown prompt length counts the output cap alone",
+			include: true,
+			request: withMaxOutputTokens(&scheduling.InferenceRequest{
+				RequestID: "unknown-token-count",
+				Body:      &fwkrh.InferenceRequestBody{},
+			}, 200),
+			expected: []string{"long"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := newPlugin(tt.include).Filter(ctx, tt.request, endpoints)
+			assert.ElementsMatch(t, tt.expected, filteredNames(filtered))
+		})
+	}
+}
+
+func TestIncludeMaxOutputTokensScore(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-150"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "151-1000"}),
+	}
+	plugin := NewContextLengthAware("ctx-aware", &contextLengthAwareParameters{
+		Label:                  DefaultContextLengthLabel,
+		IncludeMaxOutputTokens: true,
+	})
+
+	scores := plugin.Score(ctx, withMaxOutputTokens(createHundredTokenRequest(), 100), endpoints)
+	assert.Greater(t, scores[endpoints[1]], scores[endpoints[0]])
 }
 
 func TestContextLengthAwareFilter(t *testing.T) {
