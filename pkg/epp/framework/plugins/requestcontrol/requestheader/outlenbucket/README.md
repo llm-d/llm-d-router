@@ -95,7 +95,7 @@ estimated output tokens to the in-flight load. They are independent switches:
 | `outlen-bucket` | `addEstimatedOutputTokens` | Behavior |
 |-----------------|----------------------------|----------|
 | off | off | Output tokens not added to in-flight load. |
-| off | on | Output added, but every request reads as UNKNOWN (flat estimate); the producer logs a one-time warning. |
+| off | on | Output added, but every request reads as UNKNOWN (running-average estimate); the producer logs a one-time warning. |
 | on | off | Bucket published for other consumers, not added to in-flight load. |
 | on | on | Bucket published and used for the per-request output estimate. Intended setup. |
 

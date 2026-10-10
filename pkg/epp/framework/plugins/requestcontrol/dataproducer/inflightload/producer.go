@@ -626,6 +626,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
+			p.tokenEstimator.ObserveOutput(request, int64(resp.Usage.CompletionTokens))
 			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
 				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
 					"requestID", request.RequestID,
