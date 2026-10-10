@@ -141,6 +141,10 @@ type Config struct {
 	// sidecar then sets one transfer_id on the prefill and decode requests of a
 	// dispatch so vLLM pairs them by it.
 	NIXLPushMode bool
+	// NIXLPushPrefillTimeout bounds how long a NIXL push dispatch that sends
+	// the prefill and decode requests at once waits for the prefill response
+	// before it cancels both. Zero falls back to defaultNIXLPushPrefillTimeout.
+	NIXLPushPrefillTimeout time.Duration
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool

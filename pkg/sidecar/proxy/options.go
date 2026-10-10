@@ -65,6 +65,7 @@ const (
 	p2pConnectorPortFlag      = "p2p-connector-port"
 	enableP2PPull             = "enable-p2p-pull"
 	nixlPushMode              = "nixl-push-mode"
+	nixlPushPrefillTimeout    = "nixl-push-prefill-timeout"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
 	enableTLS                 = "enable-tls"
@@ -106,6 +107,9 @@ const (
 	// token, so it normally resolves well within this window.
 	defaultMoRIIOParallelDecodeWaitTimeout = 30 * time.Second
 
+	// Default of Config.NIXLPushPrefillTimeout.
+	defaultNIXLPushPrefillTimeout = 120 * time.Second
+
 	// TLS stages
 	prefillStage = "prefiller"
 	decodeStage  = "decoder"
@@ -126,6 +130,7 @@ type yamlConfiguration struct {
 	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
 	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
 	NIXLPushMode            *bool    `json:"nixl-push-mode,omitempty"`
+	NIXLPushPrefillTimeout  string   `json:"nixl-push-prefill-timeout,omitempty"`
 	SecureServing           *bool    `json:"secure-serving,omitempty"`
 	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
 	CertPath                string   `json:"cert-path,omitempty"`
@@ -232,6 +237,7 @@ func NewOptions() *Options {
 			MaxIdleConnsPerHost:     defaultMaxIdleConnsPerHost,
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
+			NIXLPushPrefillTimeout:  defaultNIXLPushPrefillTimeout,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
 			P2PConnectorPort:        p2pConnectorPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
@@ -289,6 +295,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.NIXLPushMode, nixlPushMode, opts.NIXLPushMode,
 		"declare that the engines run vLLM's NixlPushConnector; the sidecar sets one transfer_id on the prefill and decode requests so vLLM pairs them by it. Requires --kv-connector=nixlv2; rejected with MoRI-IO WRITE-mode or Wide-EP settings.")
+	fs.DurationVar(&opts.NIXLPushPrefillTimeout, nixlPushPrefillTimeout, opts.NIXLPushPrefillTimeout,
+		"how long a NIXL push dispatch that sends the prefill and decode requests at once waits for the prefill response before it cancels both requests and answers 504. Only used with --nixl-push-mode.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
 	fs.BoolVar(&opts.SecureServing, secureProxy, opts.SecureServing, "Deprecated: use --secure-serving instead.")
 	_ = fs.MarkDeprecated(secureProxy, "use --secure-serving instead")
@@ -747,6 +755,9 @@ func (opts *Options) Validate() error {
 	if opts.NIXLPushMode && opts.hasMoRIIOFlagsSet() {
 		return errors.New("--nixl-push-mode cannot be combined with MoRI-IO WRITE-mode or Wide-EP settings")
 	}
+	if opts.NIXLPushPrefillTimeout < 0 {
+		return fmt.Errorf("--nixl-push-prefill-timeout must be a non-negative duration (0 uses the default), got %v", opts.NIXLPushPrefillTimeout)
+	}
 
 	// Validate SSRF protection requirements
 	if opts.EnableSSRFProtection {
@@ -907,6 +918,15 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 				prefillRetryBackoff, cfg.PrefillRetryBackoff, err, opts.PrefillRetryBackoff)
 		} else {
 			opts.PrefillRetryBackoff = d
+		}
+	}
+	if cfg.NIXLPushPrefillTimeout != "" && !opts.isFlagSet(nixlPushPrefillTimeout) {
+		d, err := time.ParseDuration(cfg.NIXLPushPrefillTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: ignoring invalid %s value %q: %v; using default %v\n",
+				nixlPushPrefillTimeout, cfg.NIXLPushPrefillTimeout, err, opts.NIXLPushPrefillTimeout)
+		} else {
+			opts.NIXLPushPrefillTimeout = d
 		}
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {
