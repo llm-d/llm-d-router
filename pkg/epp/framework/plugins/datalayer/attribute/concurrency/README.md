@@ -10,6 +10,7 @@ Captures the current real-time load of an endpoint as tracked by the EPP.
 - **Fields**:
   - `Tokens`: Number of tokens currently in-flight.
   - `Requests`: Number of requests currently in-flight.
+  - `NonTextTokens`: The part of `Tokens` that is multimodal placeholder tokens (image, audio, video). Never larger than `Tokens`.
 
 ## Producers
 
