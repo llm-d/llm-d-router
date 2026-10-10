@@ -54,6 +54,7 @@ var (
 			metadata.DestinationEndpointKey,
 			metadata.DestinationEndpointServedKey,
 			metadata.FlowQueueDurationHeaderKey,
+			metadata.FlowBandHeadroomRequestsHeaderKey,
 		),
 		errcommon.RequestDroppedReasonHeaderKey,
 	)

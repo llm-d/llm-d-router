@@ -199,6 +199,23 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 
+	if reqCtx.FlowControlAdmitted && s.capacityReader != nil {
+		snapshot, err := s.capacityReader.CapacitySnapshot(reqCtx.FlowControlEffectivePriority)
+		if err == nil && snapshot.Band.CapacityRequests != 0 {
+			headroom := uint64(0)
+			if snapshot.Band.Len < snapshot.Band.CapacityRequests {
+				headroom = snapshot.Band.CapacityRequests - snapshot.Band.Len
+			}
+			headers = append(headers, &configPb.HeaderValueOption{
+				Header: &configPb.HeaderValue{
+					Key:      metadata.FlowBandHeadroomRequestsHeaderKey,
+					RawValue: []byte(strconv.FormatUint(headroom, 10)),
+				},
+				AppendAction: configPb.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+			})
+		}
+	}
+
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Response.Headers {
 		if request.IsSystemOwnedHeader(key) {

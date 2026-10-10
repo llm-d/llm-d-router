@@ -45,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -61,6 +62,11 @@ type EvictChannelLookup interface {
 	Get(requestID string) chan struct{}
 	GetReason(requestID string) errcommon.RequestDroppedReason
 	Deregister(requestID string)
+}
+
+// CapacityReader reads the queue occupancy and configured capacity for a priority band.
+type CapacityReader interface {
+	CapacitySnapshot(priority int) (contracts.CapacitySnapshot, error)
 }
 
 func NewStreamingServer(datastore Datastore, director Director, parserRegistry *ParserRegistry, maxPoolBufferSize int) *StreamingServer {
@@ -80,6 +86,11 @@ func NewStreamingServer(datastore Datastore, director Director, parserRegistry *
 // SetEvictChannelLookup sets the eviction channel lookup for eviction support.
 func (s *StreamingServer) SetEvictChannelLookup(lookup EvictChannelLookup) {
 	s.evictionLookup = lookup
+}
+
+// SetCapacityReader sets the flow control capacity reader used during response processing.
+func (s *StreamingServer) SetCapacityReader(reader CapacityReader) {
+	s.capacityReader = reader
 }
 
 // SetEmitEndpointScores controls whether the per-endpoint scheduler scores are emitted in the
@@ -106,6 +117,7 @@ type StreamingServer struct {
 	director          Director
 	parserRegistry    *ParserRegistry
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
+	capacityReader    CapacityReader     // optional, set when flow control is enabled
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
 	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
@@ -150,6 +162,9 @@ type RequestContext struct {
 	// FlowControlQueueDuration is the wall-clock time the request spent in flow control admission
 	// (enqueue-and-wait). Meaningful only when FlowControlAdmitted is true.
 	FlowControlQueueDuration time.Duration
+	// FlowControlEffectivePriority is the priority band used by flow control. Meaningful only when
+	// FlowControlAdmitted is true.
+	FlowControlEffectivePriority int
 
 	// Lifecycle bookkeeping.
 	firstTokenTimestamp        time.Time

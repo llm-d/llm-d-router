@@ -148,7 +148,7 @@ featureGates:
 
 			endpointCandidates := contracts.EndpointCandidates(
 				requestcontrol.NewDatastoreEndpointCandidates(ds))
-			_, admissionController, controlPlane, _ :=
+			_, admissionController, controlPlane, capacityReader, _ :=
 				r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
 
 			if wantEnabled {
@@ -157,12 +157,14 @@ featureGates:
 					"the loader should build a flow control config when the gate is on")
 				require.NotNil(t, controlPlane,
 					"the flow registry should be exposed as the priority band control plane")
+				require.Same(t, controlPlane, capacityReader)
 			} else {
 				require.IsType(t, &requestcontrol.LegacyAdmissionController{}, admissionController)
 				require.Nil(t, eppConfig.FlowControlConfig,
 					"the loader should not build a flow control config when the gate is off")
 				require.Nil(t, controlPlane,
 					"no priority band control plane should exist when the gate is off")
+				require.Nil(t, capacityReader)
 			}
 		})
 	}
