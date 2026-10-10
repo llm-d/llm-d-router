@@ -78,6 +78,32 @@ func TestWalkKeysVisitsEveryPositionInOrder(t *testing.T) {
 	assert.Equal(t, []PodEntry{podA, podB}, podEntries(visits[2].entries))
 }
 
+// A walk longer than one peek batch visits every position once, in order,
+// with each position's own hit or miss.
+func TestWalkKeysVisitsEveryPositionAcrossBatches(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+	pod := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	keys := make([]BlockHash, 1000)
+	var held []BlockHash
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+		if i%3 != 2 {
+			held = append(held, keys[i])
+		}
+	}
+	require.NoError(t, index.Add(ctx, nil, held, []PodEntry{pod}))
+
+	visits := walkAll(t, index, keys)
+
+	require.Len(t, visits, len(keys))
+	for i, v := range visits {
+		require.Equal(t, i, v.pos)
+		require.Equal(t, i%3 != 2, v.found, "position %d", i)
+	}
+}
+
 // A key listed twice is visited at both positions.
 func TestWalkKeysVisitsDuplicatePositions(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(t.Context())
