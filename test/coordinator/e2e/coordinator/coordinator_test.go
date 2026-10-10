@@ -376,7 +376,7 @@ func extractJSONObject(s, key string) string {
 // records the x-llm-d-epp-profile value and the upstream pod for every request, so each
 // request must land on a pod whose role matches its profile. This is echo-mode
 // independent and catches a misrouted or swapped x-llm-d-epp-profile route, which a
-// status-code check (all workers echo a plausible 200) cannot.
+// status-code check (all workers return a plausible 200) cannot.
 //
 // reqID scopes the access-log parse to this request (see parseEnvoyProfileRoutes).
 //
