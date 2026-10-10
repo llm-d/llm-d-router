@@ -1078,3 +1078,40 @@ func testLookupPreservesGroupIdentity(t *testing.T, ctx context.Context, index I
 	require.Len(t, podsPerKey[requestKey], 1)
 	assert.Equal(t, pod, podsPerKey[requestKey][0])
 }
+
+// testRetrievalSpanAddLookupEvict covers a span>1 engine block on one backend:
+// Add stamps the span, a later add of the same identity replaces it, and
+// Evict removes the span-bearing records when given an identity that does
+// not carry RetrievalSpan.
+func testRetrievalSpanAddLookupEvict(t *testing.T, index Index) {
+	t.Helper()
+	ctx := context.Background()
+	engineKey := BlockHash(9001)
+	keys := []BlockHash{10, 20, 30, 40}
+	entry := PodEntry{PodIdentifier: "pod-cpu", DeviceTier: "cpu"}
+
+	require.NoError(t, index.Add(ctx, []BlockHash{engineKey}, keys, []PodEntry{entry}))
+
+	for _, key := range keys {
+		got, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		require.Len(t, got[key], 1, "key %v", key)
+		assert.Equal(t, entry.PodIdentifier, got[key][0].PodIdentifier)
+		assert.Equal(t, entry.DeviceTier, got[key][0].DeviceTier)
+		assert.Equal(t, len(keys), got[key][0].RetrievalSpan, "key %v", key)
+	}
+
+	updated := PodEntry{PodIdentifier: entry.PodIdentifier, DeviceTier: entry.DeviceTier, RetrievalSpan: 8}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{keys[0]}, []PodEntry{updated}))
+	got, err := index.Lookup(ctx, []BlockHash{keys[0]}, nil)
+	require.NoError(t, err)
+	require.Len(t, got[keys[0]], 1, "span update must replace, not duplicate")
+	assert.Equal(t, 8, got[keys[0]][0].RetrievalSpan)
+
+	require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{entry}))
+	for _, key := range keys {
+		got, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, got[key], "key %v should be evicted", key)
+	}
+}
