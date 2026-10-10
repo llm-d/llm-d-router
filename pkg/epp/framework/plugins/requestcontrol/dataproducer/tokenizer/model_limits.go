@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 )
 
 const modelLimitFreshness = 90 * time.Second
@@ -112,7 +113,7 @@ func (p *discoveredEndpointPicker) refreshModelLimits(ctx context.Context, clien
 }
 
 func readModelLimit(ctx context.Context, client *http.Client, url, model string) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+attrmodels.OpenAIModelsPath, nil)
 	if err != nil {
 		return 0, err
 	}

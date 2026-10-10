@@ -63,6 +63,10 @@ See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/do
 
 #### Request Control
 
+A configured `Responder` may answer a `GET` request locally before this flow starts. A local
+response skips flow-control, endpoint selection, screening, data production, admission
+plugins, and scheduling.
+
 Request control runs once per request before any scheduling profiles:
 
 1. Request headers are processed and flow-control admission completes
@@ -287,7 +291,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
   usage, active adapters) or served models and LoRA adapters (via `/v1/models`); others react to
   endpoint or Kubernetes object change notifications
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
-- Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+- Screeners and scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+
+The `models-responder` uses the per-endpoint model attributes for both its pool-wide
+OpenAI-compatible `GET /v1/models` response and its request-control screening. The public
+response does not expose endpoint identity. Inference screening uses the endpoint attributes
+before profile selection.
 
 Polling sources share one Collector goroutine per endpoint. The base tick is
 `--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
