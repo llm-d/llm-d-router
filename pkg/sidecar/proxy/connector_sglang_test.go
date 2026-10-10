@@ -19,9 +19,11 @@ package proxy
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -55,7 +57,7 @@ var _ = Describe("SGLang Connector", func() {
 		}()
 
 		<-testInfo.proxy.readyCh
-		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+		proxyBaseAddr := localProxyBaseAddr(testInfo)
 
 		By("sending a /v1/chat/completions request with prefill header")
 		body := `{
@@ -158,7 +160,7 @@ var _ = Describe("SGLang Connector", func() {
 		}()
 
 		<-testInfo.proxy.readyCh
-		proxyBaseAddr := "http://" + testInfo.proxy.addr.String()
+		proxyBaseAddr := localProxyBaseAddr(testInfo)
 
 		body := `{"model": "Qwen", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
@@ -182,4 +184,93 @@ var _ = Describe("SGLang Connector", func() {
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
+
+	It("should add bootstrap info to paired speculative prefill warmups", func() {
+		testInfo.proxy.config.EnableSpeculativePrefill = true
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"Hello from decode"}}]}`
+
+		testInfo.startProxy()
+		proxyBaseAddr := localProxyBaseAddr(testInfo)
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+		req.Header.Set(routing.SpeculativePrefillHeader, "true")
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		if resp.StatusCode != http.StatusOK {
+			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			Fail(string(bp))
+		}
+
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(2))
+		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
+		warmupReq := prefillReqs[1]
+
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapHost, extractHost(prefillHostPort)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapPort, BeNumerically("==", sglangBootstrapPort)))
+		Expect(warmupReq).To(HaveKey(reqcommon.FieldBootstrapRoom))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldMaxTokens, BeNumerically("==", 1)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 1)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldStream, false))
+
+		messages, ok := warmupReq[reqcommon.FieldMessages].([]any)
+		Expect(ok).To(BeTrue())
+		Expect(messages).To(HaveLen(3))
+		assistantMsg, ok := messages[1].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(assistantMsg).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+		Expect(assistantMsg).To(HaveKeyWithValue(reqcommon.FieldContent, "Hello from decode"))
+		placeholderMsg, ok := messages[2].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(placeholderMsg).To(HaveKeyWithValue(reqcommon.FieldRole, "user"))
+		Expect(placeholderMsg).To(HaveKeyWithValue(reqcommon.FieldContent, " "))
+
+		Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(2))
+		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
+		warmupDecodeReq := decodeReqs[1]
+		Expect(warmupDecodeReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapHost, extractHost(prefillHostPort)))
+		Expect(warmupDecodeReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapRoom, warmupReq[reqcommon.FieldBootstrapRoom]))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should skip speculative prefill warmups when concurrency limit is occupied", func() {
+		testInfo.proxy.config.EnableSpeculativePrefill = true
+		specPrefillAdmission <- struct{}{}
+		defer func() { <-specPrefillAdmission }()
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"Hello from decode"}}]}`
+
+		testInfo.startProxy()
+		proxyBaseAddr := localProxyBaseAddr(testInfo)
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+		req.Header.Set(routing.SpeculativePrefillHeader, "true")
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close() //nolint:errcheck
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+		Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
+		Consistently(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }, 100*time.Millisecond, 20*time.Millisecond).Should(Equal(1))
+		Consistently(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }, 100*time.Millisecond, 20*time.Millisecond).Should(Equal(1))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
 })
+
+func localProxyBaseAddr(testInfo *sidecarTestInfo) string {
+	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(testInfo.proxy.addr.(*net.TCPAddr).Port))
+}
