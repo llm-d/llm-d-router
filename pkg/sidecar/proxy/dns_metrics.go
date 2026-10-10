@@ -34,15 +34,17 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // envMoRIIOMetricsAddr is a backward-compatible fallback for enabling the
 // Prometheus scrape endpoint. When set to a listen address (e.g. ":9090") and
 // the --metrics-port flag is unset, the sidecar serves the shared
-// controller-runtime metrics registry (which carries the moriio_dns_* counters)
-// at /metrics on that address. The --metrics-port flag takes precedence. Empty
-// (with no flag) disables it. Kept on a separate address so it never clashes
-// with the data-plane proxy port.
+// controller-runtime metrics registry (which carries the moriio_dns_* and
+// llm_d_disagg_sidecar_* counters) at /metrics on that address. The
+// --metrics-port flag takes precedence. Empty (with no flag) disables it.
+// Kept on a separate address so it never clashes with the data-plane proxy
+// port.
 const envMoRIIOMetricsAddr = "MORIIO_METRICS_ADDR"
 
 // moriioDNSSubsystem is the Prometheus subsystem prefix for the MoRI-IO
@@ -127,14 +129,16 @@ func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 // /metrics until ctx is cancelled, then shuts the server down gracefully.
 // When MetricsListener is set, that listener is used; otherwise the address
 // from metricsAddr() is bound with net.Listen. Registration of the
-// moriio_dns_* counters is ensured here so they are present even if no
-// resolver has been constructed yet. The metrics server uses HTTP by default.
-// When --metrics-cert-dir is set, or metrics-cert-dir is set in the sidecar
-// YAML, it serves /metrics over HTTPS using tls.crt and tls.key from that
-// directory, with no fallback to HTTP. Startup and serving errors are
-// returned to maybeStartMetrics. The shutdown goroutine logs shutdown errors.
+// moriio_dns_* and llm_d_disagg_sidecar_* counters is ensured here so they
+// are present even if no resolver has been constructed yet. The metrics
+// server uses HTTP by default. When --metrics-cert-dir is set, or
+// metrics-cert-dir is set in the sidecar YAML, it serves /metrics over HTTPS
+// using tls.crt and tls.key from that directory, with no fallback to HTTP.
+// Startup and serving errors are returned to maybeStartMetrics. The shutdown
+// goroutine logs shutdown errors.
 func (s *Server) serveMetrics(ctx context.Context) error {
 	registerDNSMetrics()
+	metrics.Register()
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{}))
@@ -163,14 +167,14 @@ func (s *Server) serveMetrics(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			s.logger.Error(err, "failed to gracefully shut down metrics server")
 		}
 	}()
 
-	s.logger.Info("starting MoRI-IO metrics server", "addr", ln.Addr().String(), "tls", serveTLS)
+	s.logger.Info("starting metrics server", "addr", ln.Addr().String(), "tls", serveTLS)
 	var err error
 	if serveTLS {
 		err = server.ServeTLS(ln, "", "")

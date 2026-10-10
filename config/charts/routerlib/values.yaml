@@ -94,6 +94,20 @@ epp:
     limits:
       memory: 16Gi
 
+  # Autoscaling configuration for the EPP Deployment.
+  # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the EPP Deployment.
+  # Note: EPP autoscaling requires Active-Active mode (ha-enable-leader-election must not be true)
+  # and is incompatible with StatefulSet deployments (such as priority routing or GKE preferred backends).
+  # router.epp.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+    # behavior: {}
+    # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
+
   affinity: {}
   tolerations: []
 
@@ -104,7 +118,7 @@ epp:
 
 # By default no proxy is configured
 proxy:
-  enabled: false    
+  enabled: false
 
 # Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
 # `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
@@ -169,6 +183,7 @@ monitoring:
     auth:
       # Set to false to allow unauthenticated /metrics access. Required for annotation-based
       # Prometheus scraping and Istio metrics-merging, which do not send Bearer tokens.
+      # When true, the chart creates cluster-scoped RBAC for the EPP. See docs/metrics.md.
       enabled: true
       # Service account token secret for authentication
       secretName: inference-gateway-sa-metrics-reader-secret

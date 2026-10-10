@@ -19,6 +19,12 @@ package request
 
 import "strings"
 
+const (
+	// MediaTypeEventStream is the base media type for Server-Sent Events, without
+	// the optional parameters a server may append (for example "; charset=utf-8").
+	MediaTypeEventStream = "text/event-stream"
+)
+
 // GetRequestPath extracts the request path from headers with fallback priority.
 // Query parameters are stripped because the path is used only for parser routing.
 func GetRequestPath(headers map[string]string) string {

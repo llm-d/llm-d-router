@@ -116,7 +116,7 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 		},
 		{
 			name:    "forward_headers must not include the mode header",
-			mutate:  func(p map[string]any) { p["forward_headers"] = []any{"x-ap-mode"} },
+			mutate:  func(p map[string]any) { p["forward_headers"] = []any{"x-llm-d-async-mode"} },
 			wantErr: "forward_headers",
 		},
 		{
@@ -181,7 +181,7 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 func TestAsyncBrokerNoModeHeaderIsNoOp(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		"X-Team":                        "team-a",
+		defaultTenantHeader:             "team-a",
 		"x-llm-d-inference-fairness-id": "spoofed",
 	})
 
@@ -225,7 +225,7 @@ func TestAsyncBrokerRejections(t *testing.T) {
 		{
 			name:    "tenant with colon",
 			body:    `{"model":"test-model"}`,
-			headers: map[string]string{defaultModeHeader: "enqueue", "X-Team": "a:b"},
+			headers: map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "a:b"},
 			wantMsg: "must not contain",
 		},
 	}
@@ -245,11 +245,11 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{
-			defaultModeHeader:           "enqueue",
-			"X-Team":                    "team-a",
-			"X-Request-Timeout-Seconds": "120",
-			"x-llm-d-slo-ttft-ms":       "800",
-			"traceparent":               "00-abc-def-01",
+			defaultModeHeader:     "enqueue",
+			defaultTenantHeader:   "team-a",
+			defaultTimeoutHeader:  "120",
+			"x-llm-d-slo-ttft-ms": "800",
+			"traceparent":         "00-abc-def-01",
 		})
 
 	err := step.Execute(t.Context(), reqCtx)
@@ -283,7 +283,7 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	assert.Equal(t, "test-model", envelope.Data.Payload["model"])
 	assert.Equal(t, "800", envelope.Data.Headers["x-llm-d-slo-ttft-ms"])
 	for k := range envelope.Data.Headers {
-		assert.NotEqual(t, "x-ap-mode", strings.ToLower(k))
+		assert.NotEqual(t, "x-llm-d-async-mode", strings.ToLower(k))
 	}
 	assert.InDelta(t, time.Now().Add(120*time.Second).Unix(), envelope.Data.Deadline, 5)
 
@@ -296,7 +296,7 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, nil)
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
 
 	// Pre-load the result so the wait loop's first check finds it.
 	res, err := json.Marshal(api.ResultMessage{StatusCode: 200, Payload: `{"object":"chat.completion"}`})
@@ -318,7 +318,7 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 func TestAsyncBrokerWaitCapFallsBackToPending(t *testing.T) {
 	step, _ := newAsyncTestStep(t, map[string]any{"wait_cap_seconds": 1})
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
 
 	start := time.Now()
 	err := step.Execute(t.Context(), reqCtx)
@@ -333,7 +333,7 @@ func TestAsyncBrokerWaitDeadlineAnswersTimeout(t *testing.T) {
 		"timeouts": map[string]any{"wait": map[string]any{"default_seconds": 1}},
 	})
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{defaultModeHeader: "wait", "X-Team": "team-a"})
+		map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
 
 	start := time.Now()
 	err := step.Execute(t.Context(), reqCtx)
@@ -356,9 +356,9 @@ func TestAsyncBrokerDeadlineClamping(t *testing.T) {
 		return envelope.Data.Deadline
 	}
 	headers := map[string]string{
-		defaultModeHeader:           "enqueue",
-		"X-Team":                    "team-a",
-		"X-Request-Timeout-Seconds": "1000000",
+		defaultModeHeader:    "enqueue",
+		defaultTenantHeader:  "team-a",
+		defaultTimeoutHeader: "1000000",
 	}
 
 	t.Run("unclamped when no max configured", func(t *testing.T) {
@@ -386,8 +386,8 @@ func TestAsyncBrokerDeadlineClamping(t *testing.T) {
 			"timeouts": map[string]any{"enqueue": map[string]any{"max_seconds": 7200}},
 		})
 		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			defaultModeHeader: "enqueue",
-			"X-Team":          "team-a",
+			defaultModeHeader:   "enqueue",
+			defaultTenantHeader: "team-a",
 		})
 		require.True(t, errors.Is(step.Execute(t.Context(), reqCtx), pipeline.ErrPipelineDone))
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -414,7 +414,7 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(t.Context())
 	reqCtx1, rec1 := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
 		defaultModeHeader:               "passthrough",
-		"X-Team":                        "limited-team",
+		defaultTenantHeader:             "limited-team",
 		"x-llm-d-inference-objective":   "self-assigned",
 		"x-llm-d-inference-fairness-id": "spoofed",
 	})
@@ -425,8 +425,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 
 	// Second concurrent request exceeds the reserved limit of 1: overflow.
 	reqCtx2, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		defaultModeHeader: "passthrough",
-		"X-Team":          "limited-team",
+		defaultModeHeader:   "passthrough",
+		defaultTenantHeader: "limited-team",
 	})
 	require.NoError(t, step.Execute(t.Context(), reqCtx2))
 	assert.Equal(t, "interactive-overflow", reqCtx2.OriginalHeaders.Get("x-llm-d-inference-objective"))
@@ -435,8 +435,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 	cancel1()
 	require.Eventually(t, func() bool {
 		reqCtx3, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			defaultModeHeader: "passthrough",
-			"X-Team":          "limited-team",
+			defaultModeHeader:   "passthrough",
+			defaultTenantHeader: "limited-team",
 		})
 		ctx3, cancel3 := context.WithCancel(t.Context())
 		defer cancel3()
@@ -448,8 +448,8 @@ func TestAsyncBrokerPassthroughStampsAndClassifies(t *testing.T) {
 
 	// An unlimited tenant is always reserved and never touches counters.
 	reqCtx4, _ := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		defaultModeHeader: "passthrough",
-		"X-Team":          "team-free",
+		defaultModeHeader:   "passthrough",
+		defaultTenantHeader: "team-free",
 	})
 	require.NoError(t, step.Execute(t.Context(), reqCtx4))
 	assert.Equal(t, "interactive-reserved", reqCtx4.OriginalHeaders.Get("x-llm-d-inference-objective"))
@@ -464,7 +464,7 @@ func TestAsyncBrokerRoutes(t *testing.T) {
 	do := func(method, path, tenant string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)
 		if tenant != "" {
-			req.Header.Set("X-Team", tenant)
+			req.Header.Set(defaultTenantHeader, tenant)
 		}
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
@@ -566,7 +566,7 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 		r := chi.NewRouter()
 		step.RegisterRoutes(r)
 		req := httptest.NewRequest(http.MethodGet, "/v1/requests/"+id, nil)
-		req.Header.Set("X-Team", "team-a")
+		req.Header.Set(defaultTenantHeader, "team-a")
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -624,7 +624,7 @@ func TestAsyncBrokerRetryReattaches(t *testing.T) {
 	post := func(t *testing.T, step *Step, mode, id string) *httptest.ResponseRecorder {
 		t.Helper()
 		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-			defaultModeHeader: mode, "X-Team": "team-a", "X-Request-Id": id,
+			defaultModeHeader: mode, defaultTenantHeader: "team-a", "X-Request-Id": id,
 		})
 		reqCtx.RequestID = id
 		err := step.Execute(t.Context(), reqCtx)

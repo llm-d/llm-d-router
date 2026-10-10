@@ -25,7 +25,12 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 var (
@@ -53,6 +58,8 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	roomID := s.generateSGLangRoomID()
+	// SGLang keys its P/D transfer state and log lines by the bootstrap room.
+	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	// Inject bootstrap info for both prefill and decode
 	bootstrapInfo := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)
@@ -66,7 +73,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, KVConnectorSGLang, nil)
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil)
 }
 
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
@@ -76,9 +83,9 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	bootstrapHost := extractHost(prefillHostPort)
 
 	// Add bootstrap information
-	modifiedRequest[requestFieldBootstrapHost] = bootstrapHost
-	modifiedRequest[requestFieldBootstrapPort] = sglangBootstrapPort
-	modifiedRequest[requestFieldBootstrapRoom] = roomID
+	modifiedRequest[reqcommon.FieldBootstrapHost] = bootstrapHost
+	modifiedRequest[reqcommon.FieldBootstrapPort] = sglangBootstrapPort
+	modifiedRequest[reqcommon.FieldBootstrapRoom] = roomID
 
 	s.logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
@@ -89,5 +96,5 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 }
 
 func (s *Server) generateSGLangRoomID() int64 {
-	return time.Now().UnixNano() + int64(rand.IntN(1000)) //nolint:gosec // G404: non-crypto use, a room ID disambiguator
+	return time.Now().UnixNano() + int64(rand.IntN(1000)) //#nosec G404 -- non-crypto use, a room ID disambiguator
 }

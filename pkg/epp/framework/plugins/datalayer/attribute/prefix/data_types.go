@@ -75,6 +75,11 @@ type PrefixCacheMatchInfo struct {
 
 type MMMatchInfo struct {
 	MatchBlocks int
+	// MatchTokens is the MM feature tokens inside the matched prefix: each
+	// feature counts the overlap of its token span with the matched prefix,
+	// so a feature that starts or ends mid-block contributes only the tokens
+	// it holds.
+	MatchTokens int
 }
 
 func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *PrefixCacheMatchInfo {

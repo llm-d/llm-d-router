@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package prefixmetrics holds the metrics the approximate and precise
 // prefix-cache producers share, so either deployment reports prefix-cache
-// prediction under one metric name.
+// prediction under one set of metric names.
 package prefixmetrics
 
 import (
@@ -27,19 +27,52 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
+
+// Values of the endpoint_role label: the stage the endpoint serves for the request.
+const (
+	RolePrefill = "prefill"
+	RoleDecode  = "decode"
+)
+
+const modalityLabelHelp = "The modality label holds the request's carried modalities as a comma-joined sorted list (none for text-only), matching the mm.modality span attribute; each request is observed once."
 
 var predictedCachedTokens = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 		Name:      "prefix_predicted_cached_tokens",
 		Help: metricsutil.HelpMsgWithStability(
-			"Prompt tokens the producer predicted the scheduler's chosen endpoint holds in its prefix cache, per request.",
+			"Prompt tokens the producer predicted the scheduler's chosen endpoint holds in its prefix cache, per request. "+modalityLabelHelp,
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
+)
+
+var bestPredictedCachedTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_best_predicted_cached_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Highest prefix-cache prediction among the endpoints the scheduler selected from, per request. "+modalityLabelHelp,
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
+)
+
+var bestAvailableCachedTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_best_available_cached_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Highest prefix-cache prediction among the request's candidate endpoints before filtering, per request. "+modalityLabelHelp,
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
 )
 
 var promptTokens = prometheus.NewHistogramVec(
@@ -47,11 +80,35 @@ var promptTokens = prometheus.NewHistogramVec(
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 		Name:      "prefix_prompt_tokens",
 		Help: metricsutil.HelpMsgWithStability(
-			"Prompt tokens the producer measured its prediction against, per request.",
+			"Prompt tokens the producer measured its prediction against, per request. "+modalityLabelHelp,
 			compbasemetrics.ALPHA),
 		Buckets: metricsutil.TokenCountBuckets,
 	},
-	[]string{"plugin_name", "plugin_type"},
+	[]string{"plugin_name", "plugin_type", "endpoint_role", "modality"},
+)
+
+var mmPredictedCachedTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_mm_predicted_cached_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Multimodal prompt tokens the producer predicted the scheduler's chosen endpoint holds in its prefix cache, per request.",
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
+)
+
+var mmPromptTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_mm_prompt_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Multimodal prompt tokens the multimodal prediction was measured against, per request.",
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "plugin_type", "endpoint_role"},
 )
 
 var registerOnce sync.Once
@@ -60,17 +117,73 @@ var registerOnce sync.Once
 // instance calls it; the first call registers.
 func Register() {
 	registerOnce.Do(func() {
-		metrics.Registry.MustRegister(predictedCachedTokens, promptTokens)
+		metrics.Registry.MustRegister(predictedCachedTokens, bestPredictedCachedTokens,
+			bestAvailableCachedTokens, promptTokens, mmPredictedCachedTokens, mmPromptTokens)
 	})
 }
 
-// RecordPrediction records a request's prompt tokens alongside the subset the
-// producer expects the scheduler's chosen endpoint to serve from its prefix
-// cache. The two are observed together so the predicted hit rate divides counts
-// taken over the same requests. llm_d_epp_request_input_tokens is not a usable
-// denominator here: it is recorded from the model server's response, so it
-// omits requests that fail or return no usage, which this metric still counts.
-func RecordPrediction(pluginName, pluginType string, predictedCached, prompt int) {
-	predictedCachedTokens.WithLabelValues(pluginName, pluginType).Observe(float64(predictedCached))
-	promptTokens.WithLabelValues(pluginName, pluginType).Observe(float64(prompt))
+// Prediction is one request's prefix-cache prediction in prompt tokens, taken
+// over three endpoint sets that narrow into each other: every candidate the
+// request could have reached, those that survived filtering and reached the
+// picker of the profile PredictionTarget returns, and the one that picker
+// chose. Selected <= BestPredicted <= BestAvailable holds by construction.
+type Prediction struct {
+	// Selected is what the producer expects the chosen endpoint to serve from
+	// its prefix cache.
+	Selected int
+	// BestPredicted is the highest prediction the picker could have chosen.
+	// The distance from Selected is what the routing decision left behind.
+	BestPredicted int
+	// BestAvailable is the highest prediction among the candidate endpoints
+	// before filters ran. Scheduling profiles filter by endpoint role, so under
+	// disaggregated prefill/decode this spans both roles while the other two
+	// fields follow the prefill profile.
+	BestAvailable int
+	// PromptTokens is the prompt the predictions are measured against.
+	PromptTokens int
+}
+
+// RecordPrediction records a request's prefix-cache prediction under role and
+// modality. Every field is observed in one call so each histogram covers the
+// same requests, which is what lets their sums be divided by one another once
+// modality is summed over.
+// llm_d_epp_request_input_tokens is not a usable denominator here: it is
+// recorded from the model server's response, so it omits requests that fail or
+// return no usage, which these metrics still count.
+func RecordPrediction(pluginName, pluginType, role, modality string, p Prediction) {
+	predictedCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.Selected))
+	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestPredicted))
+	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestAvailable))
+	promptTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.PromptTokens))
+}
+
+// RecordMMPrediction records a request's multimodal prompt tokens alongside
+// the subset the producer expects the endpoint chosen by PredictionTarget to
+// serve from its prefix cache for multimodal content. Observed only for
+// requests whose producer attached multimodal match info, so text-only
+// requests never enter these series. The two are observed together so the
+// ratio divides counts taken over the same requests.
+func RecordMMPrediction(pluginName, pluginType, role string, mmPredictedCached, mmPrompt int) {
+	mmPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(mmPredictedCached))
+	mmPromptTokens.WithLabelValues(pluginName, pluginType, role).Observe(float64(mmPrompt))
+}
+
+// PredictionTarget returns the profile result whose first target endpoint the
+// request's prefix-cache prediction is recorded for, and the endpoint_role to
+// record it under. A request with a target in prefillProfile is attributed to
+// that profile, because the sidecar's nixlv2 KV connector reports the
+// prefiller's cached-token count. The other KV connectors report the decoder's
+// count, which this does not match. It returns nil when the primary profile
+// selected no endpoint.
+func PredictionTarget(result *fwksched.SchedulingResult, prefillProfile string) (*fwksched.ProfileRunResult, string) {
+	if result == nil {
+		return nil, ""
+	}
+	if prefill := result.ProfileResults[prefillProfile]; prefill.FirstEndpoint() != nil {
+		return prefill, RolePrefill
+	}
+	if primary := result.ProfileResults[result.PrimaryProfileName]; primary.FirstEndpoint() != nil {
+		return primary, RoleDecode
+	}
+	return nil, ""
 }

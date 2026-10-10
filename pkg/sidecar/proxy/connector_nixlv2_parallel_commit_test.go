@@ -30,6 +30,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // parallelCommitEnv is a minimal proxy harness for the MoRI-IO parallel WRITE
@@ -58,7 +59,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 	cfg := Config{
 		Port:                       "0",
 		DecoderURL:                 decodeURL,
-		KVConnector:                KVConnectorNIXLV2,
+		KVConnector:                constants.KVConnectorNIXLV2,
 		MoRIIOWriteMode:            true,
 		MoRIIOParallelDispatch:     true,
 		MoRIIODecodePodIP:          decodeURL.Hostname(),
@@ -162,11 +163,12 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		start := time.Now()
 		// Client timeout is far larger than the backstop, so a 504 means the
 		// backstop fired; a client-side timeout error would mean it hung.
-		status, _, _, err := env.send(8 * time.Second)
+		status, hdr, _, err := env.send(8 * time.Second)
 		elapsed := time.Since(start)
 
 		Expect(err).ToNot(HaveOccurred(), "request must return via the backstop, not hang")
 		Expect(status).To(Equal(http.StatusGatewayTimeout))
+		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
 		Expect(elapsed).To(BeNumerically("<", 5*time.Second), "should return shortly after the 300ms backstop")
 	})
 

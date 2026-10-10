@@ -63,6 +63,7 @@ func (f *fakeKVCacheIndexer) MatchBlockKeys(ctx context.Context, keys []kvblock.
 
 type fakeKVBlockIndex struct {
 	addFn   func(ctx context.Context, prevKeys, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
+	evictFn func(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error
 	clearFn func(ctx context.Context, podIdentifier string) error
 }
 
@@ -77,7 +78,10 @@ func (f *fakeKVBlockIndex) Add(ctx context.Context, prevKeys, keys []kvblock.Blo
 	return nil
 }
 
-func (f *fakeKVBlockIndex) Evict(_ context.Context, _ kvblock.BlockHash, _ kvblock.KeyType, _ []kvblock.PodEntry) error {
+func (f *fakeKVBlockIndex) Evict(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+	if f.evictFn != nil {
+		return f.evictFn(ctx, keyType, keys, entries)
+	}
 	return nil
 }
 
@@ -569,6 +573,248 @@ func TestProduce_MMMatchUsesCachedBlocksNotWeightedScore(t *testing.T) {
 	assert.Equal(t, 4, info.CachedBlockCount())
 	require.NotNil(t, info.MM())
 	assert.Equal(t, 1, info.MM().MatchBlocks, "must use cachedBlocks, not matchLen")
+	assert.Equal(t, 16, info.MM().MatchTokens, "the feature sits inside the 4-block matched prefix")
+}
+
+// The MM token count is per feature: with two images and only the first
+// matched, the matched MM blocks cover blocks holding text at the first
+// image's edges, and only the image's own tokens count. Block-granular
+// counting would report 2 blocks (32 tokens) against a 40-token MM total.
+func TestProduce_MMMatchTokensCountPerFeature(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	tokens := make([]uint32, 4*testBlockSize)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	keys := []kvblock.BlockHash{0xAA, 0xBB, 0xCC, 0xDD}
+	const addr = "10.0.0.1:8080"
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return keys, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			return map[string]kvcache.PodMatch{
+				addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+			}, nil
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx)
+	endpoints := freshEndpoints()
+
+	// Image A spans tokens [2,22) (blocks 0-1), image B spans [32,52)
+	// (blocks 2-3). The 2-block matched prefix covers image A fully and
+	// reaches image B's start.
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-tokens",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					TokenIDs: tokens,
+					MultiModalFeatures: []fwkrh.MultiModalFeature{
+						{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
+						{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
+					},
+				}},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	require.NotNil(t, info.MM())
+	assert.Equal(t, 2, info.MM().MatchBlocks)
+	assert.Equal(t, 20, info.MM().MatchTokens, "image A's 20 tokens count, image B starts at the match edge and counts none")
+}
+
+// MM matched blocks are attributed per prompt against that prompt's own
+// matched-block count, then summed across prompts. A text-only prompt
+// contributes to the aggregate match but not the MM sum; endpoints without a
+// match still get MM tracking with a zero count.
+func TestProduce_MultiPromptMMAttributionSumsPerPrompt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := make([]uint32, 4*testBlockSize)
+	promptB := make([]uint32, 4*testBlockSize)
+	promptC := make([]uint32, 2*testBlockSize)
+	for i := range promptA {
+		promptA[i] = uint32(i)
+	}
+	for i := range promptB {
+		promptB[i] = uint32(100 + i)
+	}
+	for i := range promptC {
+		promptC[i] = uint32(200 + i)
+	}
+	keysA := []kvblock.BlockHash{0xA1, 0xA2, 0xA3, 0xA4}
+	keysB := []kvblock.BlockHash{0xB1, 0xB2, 0xB3, 0xB4}
+	keysC := []kvblock.BlockHash{0xC1, 0xC2}
+	const addr = "10.0.0.1:8080"
+
+	// Keyed off the per-prompt MM hash in the extra features: prompt order
+	// does not matter, and each prompt's features must reach the block-hash
+	// input.
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			for _, f := range extra {
+				if f == nil {
+					continue
+				}
+				for _, h := range f.MMHashes {
+					switch h.Hash {
+					case "img-a":
+						return keysA, nil
+					case "img-b":
+						return keysB, nil
+					}
+				}
+			}
+			return keysC, nil
+		},
+		matchBlockKeys: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			switch keys[0] {
+			case keysA[0]:
+				// Prompt A: 2 of 4 blocks matched, so its MM block 0 is a hit.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				}, nil
+			case keysB[0]:
+				// Prompt B: 1 of 4 blocks matched, so its MM block 2 is a miss.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 1, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+				}, nil
+			default:
+				// Prompt C: text-only, both of its blocks matched.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				}, nil
+			}
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-multi",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: promptA, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 16}}},
+					{TokenIDs: promptB, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 16}}},
+					{TokenIDs: promptC},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	assert.Equal(t, 5, info.MatchBlocks())
+	assert.Equal(t, 5, info.CachedBlockCount())
+	assert.Equal(t, 10, info.TotalBlocks())
+	require.NotNil(t, info.MM(), "a request with MM content on a subset of prompts must be tracked")
+	assert.Equal(t, 1, info.MM().MatchBlocks, "prompt A's MM block matched, prompt B's MM block missed, the text prompt carries none")
+	assert.Equal(t, 16, info.MM().MatchTokens, "prompt A's feature sits inside its 2-block match, prompt B's starts past its 1-block match")
+
+	raw, ok = endpoints[1].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok = raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+	require.NotNil(t, info.MM(), "MM tracking attaches present-but-zero on a miss")
+	assert.Equal(t, 0, info.MM().MatchBlocks)
+	assert.Equal(t, 0, info.MM().MatchTokens)
+}
+
+// MM match tokens sum across prompts against each prompt's own matched-block
+// count, so every prompt with a matched feature contributes to the per-pod
+// total. An overwrite instead of a sum keeps only the last prompt's count.
+func TestProduce_MultiPromptMMTokensSumPerPrompt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+
+	promptA := make([]uint32, 4*testBlockSize)
+	promptB := make([]uint32, 4*testBlockSize)
+	for i := range promptA {
+		promptA[i] = uint32(i)
+	}
+	for i := range promptB {
+		promptB[i] = uint32(100 + i)
+	}
+	keysA := []kvblock.BlockHash{0xA1, 0xA2, 0xA3, 0xA4}
+	keysB := []kvblock.BlockHash{0xB1, 0xB2, 0xB3, 0xB4}
+	const addr = "10.0.0.1:8080"
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, extra []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			for _, f := range extra {
+				if f == nil {
+					continue
+				}
+				for _, h := range f.MMHashes {
+					switch h.Hash {
+					case "img-a":
+						return keysA, nil
+					case "img-b":
+						return keysB, nil
+					}
+				}
+			}
+			return nil, nil
+		},
+		matchBlockKeys: func(_ context.Context, keys []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			switch keys[0] {
+			case keysA[0]:
+				// Prompt A: 2 of 4 blocks matched, its block-0 image is a hit.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 2, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+				}, nil
+			default:
+				// Prompt B: 1 of 4 blocks matched, its block-0 image is a hit.
+				return map[string]kvcache.PodMatch{
+					addr: {WeightedScore: 1, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+				}, nil
+			}
+		},
+	}
+
+	p := newProducerWithIndexer(ctx, idx)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-mm-tokens-sum",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{
+					{TokenIDs: promptA, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 16}}},
+					{TokenIDs: promptB, MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 0, Length: 16}}},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	raw, ok := endpoints[0].Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+	require.True(t, ok)
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	require.True(t, ok)
+
+	require.NotNil(t, info.MM())
+	assert.Equal(t, 2, info.MM().MatchBlocks, "each prompt's block-0 image matched")
+	assert.Equal(t, 32, info.MM().MatchTokens, "each prompt's 16-token image counts against its own match length")
 }
 
 // Multimodal features flow through to ComputeBlockKeysFromTokens.
@@ -854,7 +1100,7 @@ type fakeSubscriberManager struct {
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _ string,
+	id, sourceEndpoint, endpoint, _, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)

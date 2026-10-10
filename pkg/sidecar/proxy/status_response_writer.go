@@ -18,9 +18,12 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
+
+	"github.com/felixge/httpsnoop"
 )
 
 const sseEventDelimiter = "\n\n"
@@ -55,6 +58,71 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 	return w.buffer.Bytes()
 }
 
+// responseStatus records the final status code written through a writer
+// returned by captureResponseStatus and whether any body write failed, so a
+// streamed response (SSE included) can be observed for error metrics without
+// buffering its body.
+type responseStatus struct {
+	statusCode  int
+	writeFailed bool
+}
+
+// captureResponseStatus wraps w so writes pass straight through while being
+// recorded in the returned responseStatus. httpsnoop gives the wrapper the same
+// optional interfaces as w (http.Flusher, http.Hijacker, io.ReaderFrom), so
+// wrappers stacked on top of it keep their own hooks for those interfaces.
+func captureResponseStatus(w http.ResponseWriter) (http.ResponseWriter, *responseStatus) {
+	s := &responseStatus{}
+	writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
+		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
+			return func(statusCode int) {
+				// 1xx responses are informational; the final status follows them.
+				// An error status after an implicit 200 (e.g. a later failing chunk
+				// in streaming chunked decode) still marks the response failed.
+				if statusCode >= http.StatusOK && (s.statusCode == 0 || isHTTPError(statusCode)) {
+					s.statusCode = statusCode
+				}
+				next(statusCode)
+			}
+		},
+		Write: func(next httpsnoop.WriteFunc) httpsnoop.WriteFunc {
+			return func(b []byte) (int, error) {
+				s.implicitOK()
+				n, err := next(b)
+				if err != nil {
+					s.writeFailed = true
+				}
+				return n, err
+			}
+		},
+		ReadFrom: func(next httpsnoop.ReadFromFunc) httpsnoop.ReadFromFunc {
+			return func(src io.Reader) (int64, error) {
+				s.implicitOK()
+				n, err := next(src)
+				if err != nil {
+					s.writeFailed = true
+				}
+				return n, err
+			}
+		},
+	})
+	return writer, s
+}
+
+func (s *responseStatus) implicitOK() {
+	if s.statusCode == 0 {
+		s.statusCode = http.StatusOK
+	}
+}
+
+// failed reports whether the response carried an error status or could not be
+// delivered to the client. A response that wrote no status at all also counts
+// as failed: the stage produced nothing, and net/http would send the client an
+// empty 200.
+func (s *responseStatus) failed() bool {
+	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
+}
+
 // deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
 // until the caller decides the outcome (the "commit point"). It is used by the
 // MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill
@@ -82,9 +150,11 @@ type deferredCommitWriter struct {
 	// headerFlushed records that decode's status/headers have been relayed to
 	// dst; after this, writes stream straight through.
 	headerFlushed bool
-	statusCode    int
-	header        http.Header
-	buffer        bytes.Buffer
+	// writeFailed records that relaying decode's output to dst failed.
+	writeFailed bool
+	statusCode  int
+	header      http.Header
+	buffer      bytes.Buffer
 }
 
 func newDeferredCommitWriter(dst http.ResponseWriter) *deferredCommitWriter {
@@ -139,7 +209,11 @@ func (w *deferredCommitWriter) Write(b []byte) (int, error) {
 		if !w.headerFlushed {
 			w.flushCommitLocked()
 		}
-		return w.dst.Write(b)
+		n, err := w.dst.Write(b)
+		if err != nil {
+			w.writeFailed = true
+		}
+		return n, err
 	}
 	return w.buffer.Write(b)
 }
@@ -177,7 +251,9 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	w.headerFlushed = true
 	w.dst.WriteHeader(status)
 	if w.buffer.Len() > 0 {
-		WriteAll(w.dst, w.buffer.Bytes())
+		if _, err := w.dst.Write(w.buffer.Bytes()); err != nil {
+			w.writeFailed = true
+		}
 		w.buffer.Reset()
 	}
 	if f, ok := w.dst.(http.Flusher); ok {
@@ -222,6 +298,15 @@ func (w *deferredCommitWriter) abort() {
 	w.buffer.Reset()
 }
 
+// failed reports whether decode's response carried an error status or could
+// not be relayed to the client. A status of 0 means decode wrote nothing, or
+// the writer was aborted before decode emitted a header; both count as failed.
+func (w *deferredCommitWriter) failed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return isHTTPError(w.statusCode) || w.writeFailed
+}
+
 // responseStarted reports whether decode's status/headers have reached the
 // client. Callers that need to fail a request after the commit point use it to
 // choose between writing their own error status, which is only possible while
@@ -254,6 +339,11 @@ type responseWriterWithBuffer struct {
 	statusCode  int
 	wroteHeader bool
 
+	// header holds the headers set while buffering. They reach the underlying
+	// writer only on flushBufferAndGoDirect, so a response that is never
+	// flushed leaves the client's headers untouched.
+	header http.Header
+
 	// ready receives an error (or nil) when the first Write happens,
 	// signaling that there's data available for inspection or an error occurred.
 	ready     chan struct{}
@@ -264,6 +354,7 @@ type responseWriterWithBuffer struct {
 func newResponseWriterWithBuffer(w flushableResponseWriter) *responseWriterWithBuffer {
 	rw := &responseWriterWithBuffer{
 		writerFlusher: w,
+		header:        make(http.Header),
 		ready:         make(chan struct{}, 1), // buffered to avoid blocking sender
 	}
 	rw.buffering.Store(true)
@@ -271,6 +362,9 @@ func newResponseWriterWithBuffer(w flushableResponseWriter) *responseWriterWithB
 }
 
 func (w *responseWriterWithBuffer) Header() http.Header {
+	if w.buffering.Load() {
+		return w.header
+	}
 	return w.writerFlusher.Header()
 }
 
@@ -359,6 +453,10 @@ func (w *responseWriterWithBuffer) writeHeaderOnce() {
 		return
 	}
 	w.wroteHeader = true
+	dstHeader := w.writerFlusher.Header()
+	for key, values := range w.header {
+		dstHeader[key] = values
+	}
 	if w.statusCode != 0 {
 		w.writerFlusher.WriteHeader(w.statusCode)
 	}

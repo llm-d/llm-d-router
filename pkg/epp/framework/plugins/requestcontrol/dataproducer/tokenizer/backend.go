@@ -68,12 +68,16 @@ type warmer interface {
 // an authentication rejection, or on context cancellation.
 func (b renderBackend) warmup(ctx context.Context) {
 	logger := log.FromContext(ctx)
+	ctx = withUnobservedRender(ctx)
 	// The warmup credential, when set, authenticates the probe's render calls.
 	if b.warmupAuth != "" {
 		ctx = withAuthHeader(ctx, b.warmupAuth)
 	}
 	for i := 0; i < warmupAttempts; i++ {
 		_, err := b.legacyMessages.useLegacy(ctx, b.tk, b.modelName)
+		if err == nil {
+			_, err = b.legacyResponses.useLegacy(ctx, b.tk, b.modelName)
+		}
 		if err == nil {
 			_, err = b.produce(ctx, warmupChat(b.modelName))
 		}
@@ -115,10 +119,11 @@ func warmupChat(model string, imageURLs ...string) *fwkrh.InferenceRequestBody {
 // renderBackend produces real token IDs and owns protocol dispatch, including
 // the pre-tokenized (Generate) passthrough.
 type renderBackend struct {
-	tk             tokenizer
-	modelName      string
-	legacyMessages *legacyMessagesMode
-	warmupAuth     string
+	tk              tokenizer
+	modelName       string
+	legacyMessages  *legacyMessagesMode
+	legacyResponses *legacyResponsesMode
+	warmupAuth      string
 }
 
 func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
@@ -150,10 +155,26 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			TokenIDs:           tokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
-	case body.Generate != nil:
+	case body.Generate != nil && len(body.Generate.TokenIDs) > 0:
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
+		}}}, nil
+	case body.Responses != nil:
+		legacy, err := b.legacyResponses.useLegacy(ctx, b.tk, b.modelName)
+		if err != nil {
+			return nil, err
+		}
+		if legacy {
+			return b.renderLegacyResponses(ctx, body.Responses)
+		}
+		tokenIDs, mmFeatures, err := b.tk.RenderResponses(ctx, body.WirePayload())
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           tokenIDs,
+			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping tokenization")

@@ -61,14 +61,6 @@ const (
 	UpstreamDecode            = "decode"
 )
 
-// Path label values for execution_path_total. Encode always implies prefill,
-// so encode-decode is not a reachable path.
-const (
-	PathDecodeOnly          = "decode-only"
-	PathPrefillDecode       = "prefill-decode"
-	PathEncodePrefillDecode = "encode-prefill-decode"
-)
-
 // Result label values for conditional_decode_probes_total. Served covers 2xx/3xx
 // (the worker answered the request inline). Deferred is exactly HTTP 412 (cache
 // miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
@@ -83,10 +75,49 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Route label values for orchestration_overhead_seconds. These name the
+// coordinator's registered inference routes, not the raw URL path.
+const (
+	RouteChatCompletions = "chat_completions"
+	RouteCompletions     = "completions"
+	RouteGenerate        = "generate"
+	RouteUnknown         = "unknown"
+)
+
+// MediaType label values for media_items. The coordinator currently
+// inventories image parts only; any other type is collapsed to other so the
+// label set stays bounded.
+const (
+	MediaTypeImage = "image"
+	MediaTypeOther = "other"
+)
+
+// Download result label values for media_download_duration_seconds.
+const (
+	DownloadResultSuccess   = "success"
+	DownloadResultError     = "error"
+	DownloadResultCancelled = "cancelled"
+)
+
+// Stream label values for response_size_bytes. Fixed boolean-like strings, not
+// the request's raw stream field.
+const (
+	StreamTrue  = "true"
+	StreamFalse = "false"
+)
+
+// CountBuckets is a small-integer histogram ladder for per-request counts
+// (encode fan-out, media item inventory).
+var CountBuckets = []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256}
+
 var (
-	modelLabel    = []string{"model_name"}
-	stepLabel     = []string{"step"}
-	upstreamLabel = []string{"upstream"}
+	modelLabel     = []string{"model_name"}
+	stepLabel      = []string{"step"}
+	upstreamLabel  = []string{"upstream"}
+	routeLabel     = []string{"route"}
+	mediaTypeLabel = []string{"media_type"}
+	resultLabel    = []string{"result"}
+	streamLabel    = []string{"stream"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a
@@ -125,6 +156,11 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		encodeSubrequests,
+		orchestrationOverhead,
+		mediaItems,
+		mediaDownloadDuration,
+		responseSize,
 	}
 }
 

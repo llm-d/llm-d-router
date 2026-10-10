@@ -31,12 +31,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 const (
-	defaultEventSourceDeviceTier = "gpu"
+	defaultEventSourceDeviceTier = kvcache.GPUTier
 	defaultPodSelector           = ""
 )
 
@@ -129,6 +130,10 @@ type PodDiscoveryConfig struct {
 	// ReplaySocketPort is the port where vLLM pods expose their ZMQ ROUTER
 	// socket for replay requests. Disabled when not set (0 or negative).
 	ReplaySocketPort int `json:"replaySocketPort,omitempty"`
+	// SnapshotSocketPort is the port where vLLM pods serve KV cache snapshots,
+	// offset by rank like SocketPort. A subscriber loads the snapshot in place
+	// of a full replay. Disabled when not set (0 or negative).
+	SnapshotSocketPort int `json:"snapshotSocketPort,omitempty"`
 }
 
 // EffectiveReplayPort returns the replay socket port.
@@ -316,14 +321,9 @@ func (p *Pool) AddTask(task *RawMessage) {
 		return
 	}
 
-	queueIndex := h.Sum32() % uint32(p.concurrency)
+	queueIndex := int64(h.Sum32()) % int64(p.concurrency)
 	p.queues[queueIndex].Add(task)
 	p.addQueueDepth(1)
-}
-
-// resetForSource queues a pod reset on the same shard as its event stream.
-func (p *Pool) resetForSource(topic, sourceEndpoint string) {
-	p.AddTask(&RawMessage{Topic: topic, SourceEndpoint: sourceEndpoint, reset: true})
 }
 
 // worker is the main processing loop for a single worker goroutine.
@@ -363,7 +363,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		if podID == "" {
 			podID = p.adapter.ShardingKey(msg)
 		}
-		p.clearPod(ctx, podID)
+		p.clearPod(ctx, podID, msg.retire)
 		return
 	}
 
@@ -434,13 +434,16 @@ func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, Eve
 	return podID, modelName, batch, nil
 }
 
-func (p *Pool) clearPod(ctx context.Context, podIdentifier string) {
+func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	if err := p.index.Clear(ctx, podIdentifier); err != nil {
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
 	}
 	p.dedup.clear(podIdentifier)
+	if retire {
+		p.groupCatalog.Clear(podIdentifier)
+	}
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -751,16 +754,18 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"received", len(ev.BlockHashes), "forwarded", len(hashesToEvict), "suppressed", suppressed)
 			}
 
-			// Iterate over the surviving hashes and evict each key.
-			// The Index handles engine->request key resolution internally for both
-			// 1:1 (legacy) and 1:many (canonical) mappings.
-			for _, hash := range hashesToEvict {
-				engineKey := kvblock.BlockHash(hash)
-				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
-					debugLogger.Error(err, "Failed to evict engine key from index",
-						"podIdentifier", podIdentifier, "engineKey", engineKey)
-					continue
-				}
+			if len(hashesToEvict) == 0 {
+				break
+			}
+			// The Index handles engine->request key resolution internally for
+			// both 1:1 (legacy) and 1:many (canonical) mappings.
+			engineKeys := make([]kvblock.BlockHash, len(hashesToEvict))
+			for i, hash := range hashesToEvict {
+				engineKeys[i] = kvblock.BlockHash(hash)
+			}
+			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
+				debugLogger.Error(err, "Failed to evict engine keys from index",
+					"podIdentifier", podIdentifier, "keyCount", len(engineKeys))
 			}
 
 		case *AllBlocksClearedEvent:
@@ -780,7 +785,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"anyway (tier-scoped clear is not supported)",
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
-			p.clearPod(ctx, podIdentifier)
+			p.clearPod(ctx, podIdentifier, false)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)

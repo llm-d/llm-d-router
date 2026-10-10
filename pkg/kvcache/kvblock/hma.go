@@ -64,3 +64,10 @@ func (c *GroupCatalog) Get(podID string, g GroupID) (GroupMetadata, bool) {
 	meta, ok := groups[g]
 	return meta, ok
 }
+
+// Clear drops all group metadata for a pod.
+func (c *GroupCatalog) Clear(podID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, podID)
+}

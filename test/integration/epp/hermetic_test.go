@@ -168,6 +168,7 @@ plugins:
   - type: kv-cache-utilization-scorer
   - type: passthrough-parser
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 schedulingProfiles:
   - name: default
     plugins:
@@ -177,6 +178,7 @@ requestHandler:
   parsers:
   - pluginRef: passthrough-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `,
@@ -225,7 +227,7 @@ dataLayer:
 					},
 					wantResponses: ExpectReject(
 						envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - error extracting request body: invalid character 'o' in literal null (expecting 'u')",
+						"error extracting request body: invalid character 'o' in literal null (expecting 'u')",
 					),
 				},
 				{
@@ -277,14 +279,14 @@ dataLayer:
 						`{"model":"my-model","prompt":"edit"}`,
 					),
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - images edits request must have a multipart/form-data content-type"),
+						"images edits request must have a multipart/form-data content-type"),
 				},
 				{
 					name:     "no backend pods available",
 					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 					pods:     nil,
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-						"inference error: Internal - no pods available in datastore"),
+						"no pods available in datastore"),
 				},
 				{
 					name: "request missing model field",
@@ -293,7 +295,16 @@ dataLayer:
 						`{"prompt":"hello world"}`,
 					),
 					wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-						"inference error: BadRequest - model not found in request body"),
+						"model not found in request body"),
+				},
+				{
+					name: "messages API rejection uses the Anthropic envelope",
+					requests: integration.ReqRaw(
+						map[string]string{":path": "/v1/messages", "content-type": "application/json"},
+						`{"model":"my-model","max_tokens":8}`,
+					),
+					wantResponses: ExpectRejectAnthropic(envoyTypePb.StatusCode_BadRequest,
+						"no parser registered matching path suffix for: /v1/messages"),
 				},
 
 				// --- Subsetting & Metadata ---
@@ -327,7 +338,7 @@ dataLayer:
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
 					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-						"inference error: ServiceUnavailable - failed to find endpoint candidates for serving the request",
+						"failed to find endpoint candidates for serving the request",
 						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 
@@ -488,6 +499,7 @@ dataLayer:
 						protocmp.SortRepeated(func(a, b *configPb.HeaderValueOption) bool {
 							return a.GetHeader().GetKey() < b.GetHeader().GetKey()
 						}),
+						protocmp.SortRepeated(func(a, b string) bool { return a < b }),
 					); diff != "" {
 						t.Errorf("Response mismatch (-want +got): %v", diff)
 					}

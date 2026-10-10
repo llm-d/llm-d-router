@@ -123,7 +123,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 
 	switch {
 	case len(positive) > 0 && len(negative) > 0:
-		if rand.Float64() < p.config.EpsilonExploreNeg {
+		if rand.Float64() < p.config.EpsilonExploreNeg { //#nosec G404 -- exploration sampling, not security-sensitive
 			logger.V(logutil.DEBUG).Info("SLOHeadroomTierFilter: epsilon explore, selecting negative tier",
 				"positive", len(positive), "negative", len(negative))
 			return negative

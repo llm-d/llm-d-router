@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/common/httplog"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -102,7 +103,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set(ContentTypeHeader, ContentTypeJSON)
+	req.Header.Set(ContentTypeHeader, reqcommon.ContentTypeJSON)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -114,7 +115,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		}
 	}
 
-	resp, err := c.httpClient.Do(req) //nolint:gosec // baseURL is operator-configured (cfg.Address); path is a fixed APIType constant, never request-derived
+	resp, err := c.httpClient.Do(req) //#nosec -- baseURL is operator-configured (cfg.Address); path is a fixed APIType constant, never request-derived
 	if err != nil {
 		return nil, fmt.Errorf("sending request to gateway: %w", err)
 	}
@@ -123,7 +124,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	// unread stream so large prefill/encode responses are not held in memory.
 	if v := logger.V(logutil.TRACE); v.Enabled() {
 		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("reading response from gateway: %w", err)
 		}

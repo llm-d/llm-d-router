@@ -27,6 +27,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 type readerFromResponseWriter struct {
@@ -132,8 +134,8 @@ var _ = Describe("Cached token usage rewriter", func() {
 
 	It("should not extract cached tokens when prefill response has none", func() {
 		prefillResponse := map[string]any{
-			requestFieldKVTransferParams: map[string]any{
-				requestFieldRemoteBlockIDs: []any{float64(1), float64(2), float64(3)},
+			reqcommon.FieldKVTransferParams: map[string]any{
+				reqcommon.FieldRemoteBlockIDs: []any{float64(1), float64(2), float64(3)},
 			},
 		}
 		_, ok := extractCachedTokens(prefillResponse)

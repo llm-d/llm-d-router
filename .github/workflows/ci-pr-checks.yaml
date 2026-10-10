@@ -88,6 +88,7 @@ jobs:
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
           echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v6
@@ -101,12 +102,16 @@ jobs:
 
       # Missing cache is not an error; compare-coverage.sh reports all
       # components as new and exits 0.
+      # Keyed on the builder's Go version: cmd/cover statement counts differ
+      # across Go releases.
       - name: Restore main branch coverage baseline
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/cache/restore@v6
         with:
           path: coverage/baseline
-          key: coverage-main
+          key: coverage-main-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          restore-keys: |
+            coverage-main-go${{ steps.go-cache.outputs.goversion }}-
 
       - name: Run unit tests
         shell: bash
@@ -202,7 +207,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: coverage/baseline
-          key: coverage-main
+          key: coverage-main-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
       - name: Upload coverage artifact (release branches)
         if: >-

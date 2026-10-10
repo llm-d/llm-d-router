@@ -29,6 +29,20 @@ func TestLLMDSemanticConventions(t *testing.T) {
 		wantKey  string
 		wantType attribute.Type
 	}{
+		// EPP Fairness attribution
+		{
+			name:     "LLMDEPPFairnessID",
+			got:      LLMDEPPFairnessID("team-a"),
+			wantKey:  "llm_d.epp.fairness.id",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDEPPFairnessSource",
+			got:      LLMDEPPFairnessSource("header"),
+			wantKey:  "llm_d.epp.fairness.source",
+			wantType: attribute.STRING,
+		},
+
 		// EPP Scheduling
 		{
 			name:     "LLMDEPPProfileName",
@@ -176,6 +190,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			name:     "LLMDEPPProfileHandlerDecodeFailed",
 			got:      LLMDEPPProfileHandlerDecodeFailed(true),
 			wantKey:  "llm_d.epp.profile_handler.decode_failed",
+			wantType: attribute.BOOL,
+		},
+		{
+			name:     "LLMDEPPProfileHandlerPrefillFailed",
+			got:      LLMDEPPProfileHandlerPrefillFailed(true),
+			wantKey:  "llm_d.epp.profile_handler.prefill_failed",
 			wantType: attribute.BOOL,
 		},
 
@@ -349,6 +369,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantType: attribute.STRING,
 		},
 		{
+			name:     "LLMDKVCacheIndexEvictKeyCount",
+			got:      LLMDKVCacheIndexEvictKeyCount(2),
+			wantKey:  "llm_d.kv_cache.index.evict.key_count",
+			wantType: attribute.INT64,
+		},
+		{
 			name:     "LLMDKVCacheIndexEvictPodEntryCount",
 			got:      LLMDKVCacheIndexEvictPodEntryCount(1),
 			wantKey:  "llm_d.kv_cache.index.evict.pod_entry_count",
@@ -414,37 +440,6 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantKey:  "llm_d.kv_cache.prefix_match.longest_chain",
 			wantType: attribute.INT64,
 		},
-		{
-			name:     "LLMDKVCacheScorerAlgorithm",
-			got:      LLMDKVCacheScorerAlgorithm("prefix_match"),
-			wantKey:  "llm_d.kv_cache.scorer.algorithm",
-			wantType: attribute.STRING,
-		},
-		{
-			name:     "LLMDKVCacheScorerKeyCount",
-			got:      LLMDKVCacheScorerKeyCount(10),
-			wantKey:  "llm_d.kv_cache.scorer.key_count",
-			wantType: attribute.INT64,
-		},
-		{
-			name:     "LLMDKVCacheScoreMax",
-			got:      LLMDKVCacheScoreMax(1.0),
-			wantKey:  "llm_d.kv_cache.score.max",
-			wantType: attribute.FLOAT64,
-		},
-		{
-			name:     "LLMDKVCacheScoreAvg",
-			got:      LLMDKVCacheScoreAvg(0.5),
-			wantKey:  "llm_d.kv_cache.score.avg",
-			wantType: attribute.FLOAT64,
-		},
-		{
-			name:     "LLMDKVCacheScorerPodsScored",
-			got:      LLMDKVCacheScorerPodsScored(4),
-			wantKey:  "llm_d.kv_cache.scorer.pods_scored",
-			wantType: attribute.INT64,
-		},
-
 		// KV Cache Events
 		{
 			name:     "LLMDKVCacheEventsTopic",
@@ -519,6 +514,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			got:      LLMDPDProxyPrefillTarget("10.0.0.1:8000"),
 			wantKey:  "llm_d.pd_proxy.prefill_target",
 			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyBootstrapRoom",
+			got:      LLMDPDProxyBootstrapRoom(1790000000000000123),
+			wantKey:  "llm_d.pd_proxy.bootstrap_room",
+			wantType: attribute.INT64,
 		},
 		{
 			name:     "LLMDPDProxyPrefillCandidates",

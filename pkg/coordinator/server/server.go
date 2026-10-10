@@ -41,7 +41,7 @@ import (
 var serverLog = ctrl.Log.WithName("server")
 
 var (
-	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, gateway.EPPProfileHeader, "Prefer"}
+	loggedRequestHeaders  = []string{"Content-Type", reqcommon.RequestIDHeaderKey, reqcommon.EPPProfileHeaderKey, "Prefer"}
 	loggedResponseHeaders = []string{"Content-Type", reqcommon.RequestIDHeaderKey}
 )
 
@@ -194,6 +194,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
+	r.Post(reqcommon.PathResponses, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
 	r.Get(pathHealthz, s.handleHealth)

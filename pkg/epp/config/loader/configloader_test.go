@@ -43,6 +43,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
@@ -989,6 +990,50 @@ func TestInstantiateAndConfigure(t *testing.T) {
 	}
 }
 
+func TestInstantiateAndConfigureRejectsNonSchedulingPlugins(t *testing.T) {
+	registerTestPlugins(t)
+
+	for _, pluginType := range []string{
+		reqdataprodprefix.ApproxPrefixCachePluginType,
+		openai.OpenAIParserType,
+		single.SingleProfileHandlerType,
+		testSourceType,
+	} {
+		t.Run(pluginType, func(t *testing.T) {
+			const text = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: %s
+- type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: max-score-picker
+`
+			logger := logging.NewTestLogger()
+			for _, inProfile := range []bool{false, true} {
+				t.Run(fmt.Sprintf("inProfile=%t", inProfile), func(t *testing.T) {
+					configText := fmt.Sprintf(text, pluginType)
+					if inProfile {
+						configText += fmt.Sprintf("  - pluginRef: %s\n", pluginType)
+					}
+					rawConfig, _, err := LoadRawConfig([]byte(configText), logger)
+					require.NoError(t, err)
+					handle := testutils.NewTestHandle(t.Context())
+					_, err = InstantiateAndConfigure(rawConfig, handle, logger)
+					if inProfile {
+						require.ErrorContains(t, err, fmt.Sprintf("failed to add plugin '%s' to profile 'default'", pluginType))
+						require.ErrorContains(t, err, "must implement Filter, Scorer, or Picker")
+					} else {
+						require.NoError(t, err)
+						require.NotNil(t, handle.Plugin(pluginType))
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestFlowControlConfigIgnoredWarning verifies that a flowControl config section combined with a
 // disabled flowControl feature gate logs a warning that the settings are ignored, and that the
 // warning stays silent otherwise. The silent cases carry the weight here: ensureSaturationDetector
@@ -1361,6 +1406,7 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityStable, vllmhttp.VllmHTTPParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityStable, usagelimits.StaticPolicyFactory)
+	fwkplugin.Register(bandselection.StrictBandSelectionPolicyType, fwkplugin.StabilityStable, bandselection.StrictPolicyFactory)
 	fwkplugin.Register(prefix.PrefixCacheScorerPluginType, fwkplugin.StabilityStable, prefix.PrefixCachePluginFactory)
 	fwkplugin.Register(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityStable, reqdataprodprefix.ApproxPrefixCacheFactory)
 	// Datalayer plugins are now defaults; register their real factories.
@@ -1528,7 +1574,7 @@ func TestAllowExperimentalPluginsFlag(t *testing.T) {
 			{Name: "sat", Type: "utilization-detector"},
 		},
 		SchedulingProfiles: []configapiv1.SchedulingProfile{
-			{Name: "default", Plugins: []configapiv1.SchedulingPlugin{{PluginRef: "ph"}}},
+			{Name: "default"},
 		},
 		FlowControl: &configapiv1.FlowControlConfig{
 			SaturationDetector: &configapiv1.SaturationDetectorConfig{PluginRef: "sat"},

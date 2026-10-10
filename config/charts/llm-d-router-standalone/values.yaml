@@ -19,8 +19,24 @@ router:
     #             Service, reaching EPP over the EPP Service. Envoy only.
     mode: sidecar
 
-    # Replica count for the proxy Deployment when mode=service.
+    # Replica count for the proxy Deployment when mode=service. Ignored when autoscaling is enabled.
     replicas: 2
+
+    # Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s
+    # draining window time to complete and allows in-flight connections to drain.
+    terminationGracePeriodSeconds: 70
+
+    # Autoscaling configuration for the proxy Deployment (when mode=service).
+    # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the proxy Deployment.
+    # router.proxy.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+      # targetMemoryUtilizationPercentage: 80
+      # behavior: {}
+      # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
 
     # Whether the proxy passes traffic through (fail-open) when EPP is
     # unreachable, for active/passive resiliency.

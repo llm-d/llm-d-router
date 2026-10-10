@@ -39,6 +39,7 @@ import (
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // startHTTP starts the HTTP reverse proxy.
@@ -137,7 +138,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		// Stop allowlist validator
 		s.allowlistValidator.Stop()
 
-		ctx, cancelFn := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancelFn := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancelFn()
 		if err := server.Shutdown(ctx); err != nil {
 			s.logger.Error(err, "failed to gracefully shutdown")
@@ -172,6 +173,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.Is(err, syscall.ECONNREFUSED):
 			s.logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
+			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 
@@ -207,18 +209,18 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	requestFieldKVTransferParams:     {},
-	requestFieldECTransferParams:     {},
-	requestFieldMaxTokens:            {},
-	requestFieldMaxCompletionTokens:  {},
-	requestFieldMaxOutputTokens:      {},
-	requestFieldMinTokens:            {},
-	requestFieldSamplingParams:       {},
-	requestFieldStream:               {},
-	requestFieldStreamOptions:        {},
-	requestFieldCacheHitThreshold:    {},
-	requestFieldContinueFinalMessage: {},
-	requestFieldAddGenerationPrompt:  {},
+	reqcommon.FieldKVTransferParams:     {},
+	reqcommon.FieldECTransferParams:     {},
+	reqcommon.FieldMaxTokens:            {},
+	reqcommon.FieldMaxCompletionTokens:  {},
+	reqcommon.FieldMaxOutputTokens:      {},
+	reqcommon.FieldMinTokens:            {},
+	reqcommon.FieldSamplingParams:       {},
+	reqcommon.FieldStream:               {},
+	reqcommon.FieldStreamOptions:        {},
+	reqcommon.FieldCacheHitThreshold:    {},
+	reqcommon.FieldContinueFinalMessage: {},
+	reqcommon.FieldAddGenerationPrompt:  {},
 }
 
 // requestMessages returns the request's messages, decoding the array on first
@@ -226,7 +228,7 @@ var inspectedRequestFields = map[string]struct{}{
 // preserves the key order inside every message. An absent field yields a nil
 // slice and no error.
 func requestMessages(req map[string]any) ([]json.RawMessage, error) {
-	switch v := req[requestFieldMessages].(type) {
+	switch v := req[reqcommon.FieldMessages].(type) {
 	case nil:
 		return nil, nil
 	case []json.RawMessage:
@@ -274,6 +276,23 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
+	}
+	// createRoutes registers one route per path in DetectAPIType's mapping and
+	// derives each route's apiType from the same call, so a path added to that
+	// list is guarded here without a second edit. Those paths are the API
+	// surface the router serves, and coverage stops there: a request on any
+	// other path, including PathResponses with a trailing slash or an extra
+	// segment, reaches the decoder proxy through the catch-all and its body is
+	// never read. Guarding those would put a body read on the catch-all, which
+	// serves every unrouted path for every API.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+				s.logger.Error(writeErr, "failed to send error response to client")
+			}
+			return nil, nil, false
+		}
 	}
 	return raw, parsed, true
 }

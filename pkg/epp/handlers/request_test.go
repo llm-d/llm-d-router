@@ -27,14 +27,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
@@ -128,6 +133,7 @@ func TestHandleRequestHeaders(t *testing.T) {
 		name          string
 		headers       []*configPb.HeaderValue
 		wantHeaders   map[string]string
+		wantAbsent    []string
 		wantObjective string
 		wantTarget    string
 	}{
@@ -156,6 +162,23 @@ func TestHandleRequestHeaders(t *testing.T) {
 			wantObjective: "new-objective",
 			wantTarget:    "new-model",
 		},
+		{
+			name: "Drops client-supplied routing headers",
+			headers: []*configPb.HeaderValue{
+				{Key: "X-Prefiller-Host-Port", Value: "10.0.0.1:9090"},
+				{Key: routing.EncoderEndpointsHeader, Value: "10.0.0.2:9090"},
+				{Key: routing.DataParallelEndpointHeader, Value: "10.0.0.3:9090"},
+				{Key: routing.KVCacheSourceHeader, Value: "10.0.0.4:9090"},
+				{Key: "x-test", Value: "val"},
+			},
+			wantHeaders: map[string]string{"x-test": "val"},
+			wantAbsent: []string{
+				routing.PrefillEndpointHeader,
+				routing.EncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -180,6 +203,9 @@ func TestHandleRequestHeaders(t *testing.T) {
 				for k, v := range tc.wantHeaders {
 					assert.Equal(t, v, reqCtx.Request.Headers[k], "Header %q should match expected value", k)
 				}
+			}
+			for _, k := range tc.wantAbsent {
+				assert.NotContains(t, reqCtx.Request.Headers, k)
 			}
 		})
 	}
@@ -403,6 +429,104 @@ func TestGenerateRequestHeaderResponse_EndpointScores(t *testing.T) {
 	}
 }
 
+func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) {
+	t.Parallel()
+
+	// Every spelling Envoy must strip, deprecated aliases included: a client
+	// supplying either name must not reach the sidecar.
+	canonical := []string{
+		routing.PrefillEndpointHeader,
+		routing.EncoderEndpointsHeader,
+		routing.DataParallelEndpointHeader,
+		routing.KVCacheSourceHeader,
+		routing.EndpointPinHeader,
+	}
+	allRoutingHeaders := make([]string, 0, 2*len(canonical))
+	for _, h := range canonical {
+		allRoutingHeaders = append(allRoutingHeaders, routing.HeaderNames(h)...)
+	}
+
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		wantSet     map[string]string
+		wantRemoved []string
+	}{
+		{
+			name:        "decode-only removes every routing header",
+			headers:     map[string]string{},
+			wantRemoved: allRoutingHeaders,
+		},
+		{
+			// The disagg handler writes both spellings (routing.SetRoutingHeader), so
+			// a sidecar on either side of the rename reads a prefill target.
+			name: "prefill selected sets both spellings and removes the rest",
+			headers: map[string]string{
+				routing.PrefillEndpointHeader:       "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000",
+			},
+			wantSet: map[string]string{
+				routing.PrefillEndpointHeader:       "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000",
+			},
+			wantRemoved: []string{
+				routing.EncoderEndpointsHeader,
+				routing.LegacyEncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+				routing.LegacyKVCacheSourceHeader,
+				routing.EndpointPinHeader,
+			},
+		},
+		{
+			// An older EPP in a mixed fleet, or a hand-set legacy value: the canonical
+			// spelling is unset and must still be stripped.
+			name:    "legacy spelling only still strips the canonical name",
+			headers: map[string]string{routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000"},
+			wantSet: map[string]string{routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000"},
+			wantRemoved: []string{
+				routing.PrefillEndpointHeader,
+				routing.EncoderEndpointsHeader,
+				routing.LegacyEncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+				routing.LegacyKVCacheSourceHeader,
+				routing.EndpointPinHeader,
+			},
+		},
+		{
+			// The screener reads the client pin, so it stays on the request;
+			// the model server must not see it.
+			name:        "a client pin is removed and not set",
+			headers:     map[string]string{routing.EndpointPinHeader: "10.0.0.1:8000"},
+			wantRemoved: allRoutingHeaders,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request:        &Request{Headers: tc.headers},
+				Response:       &Response{},
+			}
+
+			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = string(h.Header.RawValue)
+			}
+			for k, v := range tc.wantSet {
+				assert.Equal(t, v, gotSet[k])
+			}
+			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
+		})
+	}
+}
+
 func TestFallbackToRandomEndpoint(t *testing.T) {
 	t.Parallel()
 
@@ -486,5 +610,50 @@ func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	return &datalayer.EndpointMetadata{
 		Address: "1.2.3.4",
 		Port:    "80",
+	}
+}
+
+// Attribution must be established from the incoming headers before the Director
+// runs, so a request that fails or returns early is still attributed.
+func TestRequestAttributionAtIngress(t *testing.T) {
+	previous := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	// Mirror InitTracing: the processor is what attributes spans in production.
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(tracing.NewRequestAttributionProcessor()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(previous); _ = provider.Shutdown(context.Background()) })
+
+	for _, tc := range []struct {
+		name               string
+		headers            []*configPb.HeaderValue
+		wantID, wantSource string
+	}{
+		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
+		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
+		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, reqcommon.DefaultFairnessID, tracing.AttributionSourceDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers:     &configPb.HeaderMap{Headers: tc.headers},
+					EndOfStream: true,
+				},
+			})
+
+			_, span := tracing.Tracer().Start(ctx, "request")
+			span.End()
+
+			ended := recorder.Ended()
+			attrs := attribute.NewSet(ended[len(ended)-1].Attributes()...)
+			id, hasID := attrs.Value(semconv.LLMDEPPFairnessIDKey)
+			source, hasSource := attrs.Value(semconv.LLMDEPPFairnessSourceKey)
+
+			require.True(t, hasID && hasSource, "identity and source are recorded together")
+			assert.Equal(t, tc.wantID, id.AsString())
+			assert.Equal(t, tc.wantSource, source.AsString())
+		})
 	}
 }

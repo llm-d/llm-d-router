@@ -23,7 +23,6 @@ package prefixhash
 import (
 	"context"
 	"encoding/binary"
-	"iter"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -49,7 +48,7 @@ func (b HashBlock) Hash() uint64 {
 		// because the length check above guarantees a valid backing array, and
 		// the byte length (len(Tokens) * 4) matches uint32's size exactly, so
 		// the resulting slice stays within the array's bounds.
-		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //nolint:gosec // G103: see comment above
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //#nosec G103 -- see comment above
 		return xxhash.Sum64(byteSlice)
 	}
 
@@ -88,8 +87,7 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 	var result [][]BlockHash
 	var promptTokens []int
 	for _, p := range tp.Prompts {
-		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
-		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+		hashes := computeBlockHashes(request, p.TokenIDs, blockSizeTokens, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
 			promptTokens = append(promptTokens, len(p.TokenIDs))
@@ -102,41 +100,34 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 	return result, promptTokens
 }
 
-// computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
-
-	h := xxhash.New()
-	// Different models should have different hashes even with the same body.
-	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
-		_, _ = h.Write([]byte(cacheSalt))
+// computeBlockHashes hashes a prompt in blocks of blockSizeTokens tokens, the
+// last possibly partial, up to maxPrefixBlocks blocks. Block i's hash is xxhash
+// over its content hash and block i-1's hash, both little-endian; block 0
+// chains from a seed hashed over the target model and cache salt.
+func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, blockSizeTokens, maxPrefixBlocks int) []BlockHash {
+	if len(tokens) == 0 || blockSizeTokens <= 0 || maxPrefixBlocks <= 0 {
+		return nil
 	}
+	count := min((len(tokens)-1)/blockSizeTokens+1, maxPrefixBlocks)
+	blockHashes := make([]BlockHash, 0, count)
 
-	prevBlockHash := BlockHash(h.Sum64())
+	// Different models should have different hashes even with the same body.
+	var seed xxhash.Digest
+	seed.Reset()
+	_, _ = seed.WriteString(request.TargetModel)
+	_, _ = seed.WriteString(request.Body.TokenizedRequest.CacheSalt)
+	prevBlockHash := BlockHash(seed.Sum64())
 
-	count := 0
-	for block := range seq {
-		if count >= maxPrefixBlocks {
-			break
-		}
-		h.Reset()
-		blockID := block.Hash()
-		_, _ = h.Write(toBytes(BlockHash(blockID)))
-		_, _ = h.Write(toBytes(prevBlockHash))
-		blockHashes = append(blockHashes, BlockHash(h.Sum64()))
-
-		prevBlockHash = blockHashes[len(blockHashes)-1]
-		count++
+	var buf [16]byte
+	for i := range count {
+		block := HashBlock{Tokens: tokens[i*blockSizeTokens : min((i+1)*blockSizeTokens, len(tokens))]}
+		PutBlockHash(buf[:8], BlockHash(block.Hash()))
+		PutBlockHash(buf[8:], prevBlockHash)
+		prevBlockHash = BlockHash(xxhash.Sum64(buf[:]))
+		blockHashes = append(blockHashes, prevBlockHash)
 	}
 
 	return blockHashes
-}
-
-func toBytes(i BlockHash) []byte {
-	bytes := make([]byte, 8)
-	PutBlockHash(bytes, i)
-	return bytes
 }
 
 // PutBlockHash writes h into the first 8 bytes of buf in little-endian order.
@@ -144,21 +135,4 @@ func toBytes(i BlockHash) []byte {
 // a reused buffer without allocating per hash.
 func PutBlockHash(buf []byte, h BlockHash) {
 	binary.LittleEndian.PutUint64(buf, uint64(h))
-}
-
-func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
-	return func(yield func(HashBlock) bool) {
-		if len(ids) == 0 || blockSizeTokens <= 0 {
-			return
-		}
-		for i := 0; i < len(ids); i += blockSizeTokens {
-			end := i + blockSizeTokens
-			if end > len(ids) {
-				end = len(ids)
-			}
-			if !yield(HashBlock{Tokens: ids[i:end]}) {
-				return
-			}
-		}
-	}
 }

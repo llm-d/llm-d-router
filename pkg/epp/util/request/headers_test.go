@@ -24,6 +24,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -46,7 +47,10 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		metadata.AudioDurationHeaderKey,
+		metadata.AudioBytesPerSecondHeaderKey,
 		reqcommon.RevisionDecisionIDHeaderKey,
+		routing.EndpointPinHeader,
 		metadata.DestinationEndpointKey,
 		metadata.DestinationEndpointServedKey,
 		metadata.FlowQueueDurationHeaderKey,
@@ -61,4 +65,8 @@ func TestIsSystemOwnedHeaderIncludesAliases(t *testing.T) {
 		assert.True(t, IsSystemOwnedHeader(header), "header %q should be system-owned", header)
 	}
 	assert.False(t, IsSystemOwnedHeader("x-user-data"))
+	// x-peer-topology must reach both the backend request (harmless, model
+	// servers ignore it) and the response to the coordinator/client
+	// (topology-stamp-handler's own output) unfiltered.
+	assert.False(t, IsSystemOwnedHeader("x-peer-topology"))
 }

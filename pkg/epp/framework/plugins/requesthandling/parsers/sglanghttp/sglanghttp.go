@@ -28,6 +28,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -40,11 +41,6 @@ const (
 
 	// generatePathSuffix is the SGLang native generate API path.
 	generatePathSuffix = "generate"
-
-	streamingRespPrefix = "data: "
-	streamingDoneMarker = "[DONE]"
-	contentTypeHeader   = "content-type"
-	eventStreamType     = "text/event-stream"
 )
 
 // compile-time type validation
@@ -54,7 +50,7 @@ var (
 )
 
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
-// endpoint. Only pre-tokenized prompts are supported.
+// endpoint. Pre-tokenized prompts and raw text prompts are supported.
 type SGLangHTTPParser struct {
 	typedName fwkplugin.TypedName
 }
@@ -95,6 +91,7 @@ func (p *SGLangHTTPParser) Claims() fwkrh.Claims {
 // sgLangGenerateWire is the subset of /generate fields this parser reads.
 type sgLangGenerateWire struct {
 	InputIDs       json.RawMessage `json:"input_ids"`
+	Text           json.RawMessage `json:"text"`
 	ExtraKey       json.RawMessage `json:"extra_key"`
 	SamplingParams json.RawMessage `json:"sampling_params"`
 	Stream         bool            `json:"stream"`
@@ -115,24 +112,36 @@ func (p *SGLangHTTPParser) ParseRequest(_ context.Context, body []byte, headers 
 }
 
 // parseGenerateRequest decodes a /generate body into an InferenceRequestBody.
-// input_ids are required. Multimodal inputs are not supported.
+// input_ids or text are required. Multimodal inputs are not supported.
 func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResult, error) {
 	var wire sgLangGenerateWire
 	if err := json.Unmarshal(rawBody, &wire); err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	if !hasJSONValue(wire.InputIDs) {
-		return nil, errors.New("invalid generate request: input_ids must be provided")
+	hasInputIDs := hasJSONValue(wire.InputIDs)
+	hasText := hasJSONValue(wire.Text)
+	if !hasInputIDs && !hasText {
+		return nil, errors.New("invalid generate request: input_ids or text must be provided")
 	}
 
 	cacheSalt, err := parseCacheSalt(wire.ExtraKey)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported generate request: %w", err)
 	}
-	tokenIDs, err := parseInputIDs(wire.InputIDs)
-	if err != nil {
-		return nil, fmt.Errorf("invalid generate request: %w", err)
+
+	var tokenIDs []uint32
+	var text string
+	if hasInputIDs {
+		tokenIDs, err = parseInputIDs(wire.InputIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid generate request: %w", err)
+		}
+	} else {
+		text, err = parseText(wire.Text)
+		if err != nil {
+			return nil, fmt.Errorf("invalid generate request: %w", err)
+		}
 	}
 
 	// Keep the full body as a map so priority can be injected; when nothing is
@@ -143,7 +152,11 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 	}
 
 	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
-		Generate:        &fwkrh.GenerateRequest{TokenIDs: tokenIDs, CacheSalt: cacheSalt},
+		Generate: &fwkrh.GenerateRequest{
+			TokenIDs:  tokenIDs,
+			Text:      text,
+			CacheSalt: cacheSalt,
+		},
 		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
@@ -169,6 +182,17 @@ func parseCacheSalt(data json.RawMessage) (string, error) {
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
 		return "", errors.New("extra_key must be a string")
+	}
+	return value, nil
+}
+
+func parseText(data json.RawMessage) (string, error) {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", errors.New("text must be a string")
+	}
+	if len(value) == 0 {
+		return "", errors.New("text cannot be empty")
 	}
 	return value, nil
 }
@@ -231,8 +255,8 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 
 func isEventStream(headers map[string]string) bool {
 	for key, value := range headers {
-		if strings.EqualFold(key, contentTypeHeader) &&
-			strings.Contains(strings.ToLower(value), eventStreamType) {
+		if strings.EqualFold(key, reqcommon.HeaderContentType) &&
+			strings.Contains(strings.ToLower(value), request.MediaTypeEventStream) {
 			return true
 		}
 	}
@@ -244,12 +268,12 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, streamingRespPrefix)
+		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
 		if !ok {
 			continue
 		}
 		data = strings.TrimSpace(data)
-		if data == streamingDoneMarker {
+		if data == reqcommon.SSEDoneMarker {
 			continue
 		}
 		var resp sgLangResponse

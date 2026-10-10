@@ -93,19 +93,18 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 			ir := srv.sentResponses[0].GetImmediateResponse()
 			require.NotNil(t, ir, "Response should be an ImmediateResponse")
 			assert.Equal(t, envoyTypePb.StatusCode_TooManyRequests, ir.Status.Code)
-			assert.Equal(t, []byte("request evicted by flow control"), ir.Body)
+			assert.Equal(t, `{"error":{"message":"request evicted by flow control","type":"rate_limit_error","code":429}}`, string(ir.Body))
 
-			if tt.wantHeader {
-				require.NotNil(t, ir.Headers, "Should have HeaderMutation when eviction reason is set")
-				require.Len(t, ir.Headers.SetHeaders, 1)
-				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
-				for _, header := range ir.Headers.SetHeaders {
-					gotHeaders[header.Header.Key] = string(header.Header.RawValue)
-				}
-				assert.Equal(t, map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(tt.requestDroppedReason)}, gotHeaders)
-			} else {
-				assert.Nil(t, ir.Headers, "Should not have HeaderMutation when eviction reason is empty")
+			require.NotNil(t, ir.Headers, "Should label the body as JSON")
+			gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
+			for _, header := range ir.Headers.SetHeaders {
+				gotHeaders[header.Header.Key] = string(header.Header.RawValue)
 			}
+			wantHeaders := map[string]string{"content-type": "application/json"}
+			if tt.wantHeader {
+				wantHeaders[errcommon.RequestDroppedReasonHeaderKey] = string(tt.requestDroppedReason)
+			}
+			assert.Equal(t, wantHeaders, gotHeaders)
 		})
 	}
 }

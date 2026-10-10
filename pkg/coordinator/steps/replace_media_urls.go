@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -43,8 +44,6 @@ import (
 )
 
 const ReplaceMediaURLsStepName = "replace-media-urls"
-
-const imageURLPartType = "image_url"
 
 const defaultContentType = "application/octet-stream"
 
@@ -135,45 +134,17 @@ func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
-	messages, ok := reqCtx.Body["messages"].([]any)
-	if !ok {
-		return nil
+	var imageURLs []imageRef
+	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+	if items, ok := promptItems(reqCtx.Body, apiType); ok {
+		var err error
+		imageURLs, err = collectImageRefs(items, apiType)
+		if err != nil {
+			return err
+		}
 	}
 
-	var imageURLs []imageRef
-	for msgIdx, msg := range messages {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"].([]any)
-		if !ok {
-			continue
-		}
-		for partIdx, part := range content {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			if partMap["type"] != imageURLPartType {
-				continue
-			}
-			imageURL, ok := partMap[imageURLPartType].(map[string]any)
-			if !ok {
-				continue
-			}
-			url, ok := imageURL["url"].(string)
-			if !ok {
-				continue
-			}
-			imageURLs = append(imageURLs, imageRef{
-				msgIdx:   msgIdx,
-				partIdx:  partIdx,
-				url:      url,
-				imageURL: imageURL,
-			})
-		}
-	}
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(imageURLs))
 
 	if len(imageURLs) == 0 {
 		return nil
@@ -199,10 +170,10 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		if strings.HasPrefix(ref.url, "data:") {
 			contentType, b64, err := parseDataURI(ref.url)
 			if err != nil {
-				return fmt.Errorf("parsing data URI at message %d part %d: %w: %w", ref.msgIdx, ref.partIdx, err, pipeline.ErrBadRequest)
+				return fmt.Errorf("parsing data URI at %s: %w: %w", ref.location, err, pipeline.ErrBadRequest)
 			}
 			if !allowedImageContentType(contentType) {
-				return fmt.Errorf("data URI content type %q not allowed at message %d part %d: %w", contentType, ref.msgIdx, ref.partIdx, pipeline.ErrBadRequest)
+				return fmt.Errorf("data URI content type %q not allowed at %s: %w", contentType, ref.location, pipeline.ErrBadRequest)
 			}
 			results[i] = downloadResult{ref: ref, base64Data: b64, contentType: contentType}
 			continue
@@ -234,13 +205,34 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 
 	for _, r := range results {
 		if !strings.HasPrefix(r.ref.url, "data:") {
-			r.ref.imageURL["url"] = fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data)
+			r.ref.setURL(fmt.Sprintf("data:%s;base64,%s", r.contentType, r.base64Data))
 		}
 
 		appendMultimodalEntry(reqCtx, r.contentType, r.base64Data)
 	}
 
 	return nil
+}
+
+// collectImageRefs returns a ref per image content part, in walk order.
+//
+// A part whose URL is absent, the wrong type, or empty is rejected rather than
+// skipped. encode indexes the same walk by position to pick the part it primes,
+// so a part skipped here would shift every later image onto another image's
+// hash. Rejecting also keeps the failure at the edge: the alternative is an
+// encoder primed from a part it cannot fetch, under a hash the prefiller then
+// looks up and misses.
+func collectImageRefs(items []any, apiType reqcommon.APIType) ([]imageRef, error) {
+	parts := collectImageParts(items, apiType)
+	refs := make([]imageRef, 0, len(parts))
+	for _, image := range parts {
+		url, setURL := reqcommon.MediaPartURLRef(image.part)
+		if setURL == nil || url == "" {
+			return nil, fmt.Errorf("%s: image part carries no fetchable URL: %w", image.location, pipeline.ErrBadRequest)
+		}
+		refs = append(refs, imageRef{location: image.location, url: url, setURL: setURL})
+	}
+	return refs, nil
 }
 
 func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 string) {
@@ -251,7 +243,7 @@ func appendMultimodalEntry(reqCtx *pipeline.RequestContext, contentType, b64 str
 	})
 }
 
-func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]byte, string, error) {
+func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) (data []byte, contentType string, err error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid URL: %w: %w", err, pipeline.ErrBadRequest)
@@ -265,6 +257,14 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 		return nil, "", fmt.Errorf("host %q not allowed: %w", parsed.Hostname(), pipeline.ErrBadRequest)
 	}
 
+	// Timing starts after pre-dial validation: URL parse, scheme, and
+	// allowed_domains rejections are not download attempts, so they must not
+	// drag the error bucket's duration distribution toward zero.
+	start := time.Now()
+	defer func() {
+		coordmetrics.RecordMediaDownloadDuration(coordmetrics.ClassifyDownloadResult(ctx, err), time.Since(start))
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
@@ -274,30 +274,30 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 	// dialer (addressGuard.dialControl) blocks the resolved IP if it is
 	// loopback, link-local, CGNAT, or private, closing the DNS-rebinding gap
 	// a hostname check alone would miss.
-	resp, err := s.client.Do(req) // codeql[go/request-forgery]
+	// codeql[go/request-forgery]
+	resp, err := s.client.Do(req)
 	call.Done()
 	if err != nil {
 		return nil, "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return nil, "", upstreamError(ReplaceMediaURLsStepName, resp.StatusCode, respBody)
+	if err := checkStatus(ReplaceMediaURLsStepName, resp); err != nil {
+		return nil, "", err
 	}
 
 	if resp.ContentLength > s.maxDownloadSize {
 		return nil, "", fmt.Errorf("response too large: Content-Length %d exceeds max %d: %w", resp.ContentLength, s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, s.maxDownloadSize+1))
 	if err != nil {
 		return nil, "", err
 	}
 	if int64(len(data)) > s.maxDownloadSize {
 		return nil, "", fmt.Errorf("response too large: body exceeds max %d: %w", s.maxDownloadSize, pipeline.ErrBadRequest)
 	}
-	contentType := resp.Header.Get("Content-Type")
+	contentType = resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = defaultContentType
 	}
@@ -305,10 +305,15 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string) ([]b
 }
 
 type imageRef struct {
-	msgIdx   int
-	partIdx  int
+	// location names where this ref's part sits in the client body, for error
+	// messages: "message 0 content part 2", "input item 1 output part 0".
+	location string
 	url      string
-	imageURL map[string]any
+	// setURL writes the rewritten data URI back to wherever this ref's URL
+	// lives in reqCtx.Body, since that location's shape differs by API
+	// format (chat-completions nests it at image_url.url; Responses stores
+	// it as a bare string field on the part itself).
+	setURL func(string)
 }
 
 type downloadResult struct {

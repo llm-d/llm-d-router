@@ -20,6 +20,8 @@ import (
 	"context"
 	"sort"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -29,6 +31,14 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
+// Span attributes for multimodal block matching, emitted by Produce (maximum
+// across endpoints) and PreRequest (chosen endpoint) when the request carries
+// MM block attribution.
+const (
+	mmMatchedBlocksKey = attribute.Key("mm.matched_blocks")
+	mmTotalBlocksKey   = attribute.Key("mm.total_blocks")
+)
+
 // kvCacheIndexer is the subset of kvcache.Indexer that the producer relies on.
 type kvCacheIndexer interface {
 	ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error)
@@ -36,13 +46,20 @@ type kvCacheIndexer interface {
 	MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error)
 }
 
+// mmPromptContent carries one prompt's multimodal content for match
+// attribution: the blocks its features span and the features' token spans.
+type mmPromptContent struct {
+	blockIndices []int
+	features     []fwkrh.MultiModalFeature
+}
+
 // computeBlockKeys hashes the request's TokenizedRequest into per-prompt
-// KV-block keys, folding CacheSalt into each prompt's first block. MM features
-// are carried per-prompt; mmBlockIndices (block indices spanned by MM content)
-// is populated only for single-prompt requests for hit attribution.
+// KV-block keys, folding CacheSalt into each prompt's first block. The second
+// return value holds one MM content value per returned prompt (nil for
+// text-only prompts), aligned positionally with the keys.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 	request *scheduling.InferenceRequest, blockSizeTokens int,
-) ([][]kvblock.BlockHash, []int, error) {
+) ([][]kvblock.BlockHash, []*mmPromptContent, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil, nil
 	}
@@ -51,13 +68,13 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 		return nil, nil, nil
 	}
 
-	var result [][]kvblock.BlockHash
-	var mmBlockIndices []int
+	result := make([][]kvblock.BlockHash, 0, len(tp.Prompts))
+	mmContent := make([]*mmPromptContent, 0, len(tp.Prompts))
 	for _, p := range tp.Prompts {
 		if len(p.TokenIDs) == 0 {
 			continue
 		}
-		keys, mmIdx, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+		keys, mm, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -65,27 +82,27 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 			continue
 		}
 		result = append(result, keys)
-		if len(tp.Prompts) == 1 {
-			mmBlockIndices = mmIdx
-		}
+		mmContent = append(mmContent, mm)
 	}
-	return result, mmBlockIndices, nil
+	return result, mmContent, nil
 }
 
 func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
 	tokens []uint32, mmFeatures []fwkrh.MultiModalFeature, cacheSalt, model string, blockSizeTokens int,
-) ([]kvblock.BlockHash, []int, error) {
+) ([]kvblock.BlockHash, *mmPromptContent, error) {
 	var extraFeatures []*kvblock.BlockExtraFeatures
-	var mmBlockIndices []int
+	var mm *mmPromptContent
 	if len(mmFeatures) > 0 {
 		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(mmFeatures)
 		extraFeatures = kvblock.ComputeBlockExtraFeatures(
 			mmHashes, mmPlaceholders, blockSizeTokens, len(tokens))
-		mmBlockIndices = multimodalBlockIndices(mmFeatures, blockSizeTokens)
+		if blockIndices := multimodalBlockIndices(mmFeatures, blockSizeTokens); len(blockIndices) > 0 {
+			mm = &mmPromptContent{blockIndices: blockIndices, features: mmFeatures}
+		}
 	}
 	extraFeatures = foldCacheSalt(extraFeatures, cacheSalt, len(tokens)/blockSizeTokens)
 	keys, err := idx.ComputeBlockKeysFromTokens(ctx, tokens, model, extraFeatures)
-	return keys, mmBlockIndices, err
+	return keys, mm, err
 }
 
 // countMMMatchedBlocks counts entries in (sorted) mmBlockIndices that are
@@ -100,6 +117,25 @@ func countMMMatchedBlocks(mmBlockIndices []int, matchLen int) int {
 		}
 	}
 	return len(mmBlockIndices)
+}
+
+// countMMMatchedTokens sums each feature's tokens inside the matched prefix
+// [0, matchLen*blockSizeTokens): a feature's overlap with that prefix, clamped
+// to its span, so a feature that starts or ends mid-block contributes only the
+// tokens it holds.
+func countMMMatchedTokens(mmFeatures []fwkrh.MultiModalFeature, matchLen, blockSizeTokens int) int {
+	if matchLen <= 0 || len(mmFeatures) == 0 {
+		return 0
+	}
+	matchedPrefixTokens := matchLen * blockSizeTokens
+	total := 0
+	for _, f := range mmFeatures {
+		if f.Length <= 0 {
+			continue
+		}
+		total += min(f.Length, max(0, matchedPrefixTokens-f.Offset))
+	}
+	return total
 }
 
 // multimodalBlockIndices returns the sorted unique block indices spanned by
@@ -128,6 +164,19 @@ func multimodalBlockIndices(features []fwkrh.MultiModalFeature, blockSizeTokens 
 	}
 	sort.Ints(out)
 	return out
+}
+
+// totalMMBlocks counts the request's blocks spanned by any multimodal
+// feature, summed across prompts.
+func totalMMBlocks(request *scheduling.InferenceRequest, blockSizeTokens int) int {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return 0
+	}
+	total := 0
+	for _, prompt := range request.Body.TokenizedRequest.Prompts {
+		total += len(multimodalBlockIndices(prompt.MultiModalFeatures, blockSizeTokens))
+	}
+	return total
 }
 
 // foldCacheSalt appends the cache salt to the first block's extra keys, after

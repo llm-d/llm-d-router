@@ -15,7 +15,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxy
-
-// tracerScope is the OTel instrumentation scope for the sidecar proxy.
-const tracerScope = "llm-d-router/pkg/sidecar/proxy"
+// Package v1 contains API Schema definitions for the
+// llm-d.ai API group.
+//
+// +k8s:openapi-gen=true
+// +kubebuilder:object:generate=true
+// +groupName=llm-d.ai
+// +groupGoName=XInference
+package v1

@@ -20,6 +20,15 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **Cache Configuration**: Block size and total number of GPU blocks.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
+### Families with several series
+
+A model server that runs several engines in one Pod exposes one series per engine, distinguished by a label such as `engine`. vLLM data parallelism with internal load balancing is one example. The pod-level attributes cover every series that matches the metric spec:
+
+-   `WaitingQueueSize` and `RunningRequestsSize` are the sum over the matching series, so both count requests for the whole Pod. The utilization detector's scrape-lag credit compares their sum with the Pod's in-flight request count, and queue-depth thresholds apply to the Pod total.
+-   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
+
+A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration and custom metrics read one series.
+
 ## Attributes produced
 
 The plugin populates several standard keys on the endpoint:
@@ -32,17 +41,29 @@ The plugin populates several standard keys on the endpoint:
 -   `WaitingModels` (int)
 -   `UpdateTime` (time.Time)
 
+The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
+
+| Attribute | vLLM metric | Counted on |
+|---|---|---|
+| `NixlFailedTransfers` | `vllm:nixl_num_failed_transfers_total` | The endpoint reading the KV cache (decode). |
+| `NixlFailedNotifications` | `vllm:nixl_num_failed_notifications_total` | The endpoint reading the KV cache (decode). |
+| `NixlKVExpiredRequests` | `vllm:nixl_num_kv_expired_reqs_total` | The endpoint that produced the KV cache (prefill). |
+
+The EPP exposes the same values per endpoint, see [Inference pool metrics](../../../../../../../docs/metrics.md#inference-pool).
+
 ## Configuration
 
 The plugin config supports:
 
--   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`. 
-    The deprecated GAIE key `inference.networking.k8s.io/engine-type` is also supported as a fallback, 
-    but will be removed in a future release.
+-   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engine config can also include `customMetrics` entries. Each entry
-    maps a scalar metric selector to an endpoint attribute key.
+    maps a scalar metric selector to an endpoint attribute key. A missing
+    metric is an extraction error unless the entry sets `optional: true`,
+    which skips the entry on a scrape where the endpoint does not report it.
+    An engine config named after a built-in engine replaces that built-in
+    config, including its `customMetrics`.
 
 ### Built-in Engine Configurations
 

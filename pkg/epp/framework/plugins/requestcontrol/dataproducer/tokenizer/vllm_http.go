@@ -36,6 +36,7 @@ import (
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/time/rate"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
@@ -48,6 +49,7 @@ const (
 	completionsRenderPath = "/v1/completions/render"
 	chatRenderPath        = "/v1/chat/completions/render"
 	messagesRenderPath    = "/v1/messages/render"
+	responsesRenderPath   = "/v1/responses/render"
 
 	// maxErrorBodySnippetBytes truncates non-2xx response bodies before
 	// embedding them in the returned error, so a misconfigured upstream that
@@ -57,7 +59,7 @@ const (
 	// vllmAPIKeyEnvVar names the environment variable holding the render
 	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
 	// paths forward the inbound client's Authorization header instead.
-	vllmAPIKeyEnvVar = "VLLM_API_KEY" //nolint:gosec // G101: environment variable name, not a credential value
+	vllmAPIKeyEnvVar = "VLLM_API_KEY" //#nosec G101 -- environment variable name, not a credential value
 )
 
 // authHeaderCtxKey carries the inbound request's Authorization header from
@@ -94,6 +96,9 @@ func (e *renderStatusError) Error() string {
 	return fmt.Sprintf("vLLM render returned status %d: %s", e.StatusCode, e.Body)
 }
 
+// errRenderDecode marks a 2xx render response whose body could not be decoded.
+var errRenderDecode = errors.New("unmarshal response")
+
 // isRenderAuthError reports whether err carries a 401 or 403 render response.
 func isRenderAuthError(err error) bool {
 	var se *renderStatusError
@@ -106,12 +111,17 @@ type vllmConfig struct {
 	// MessagesRenderMode selects "auto" (default), "native" or "legacy" Messages rendering.
 	// The "legacy" value is deprecated.
 	MessagesRenderMode string `json:"messagesRenderMode,omitempty"`
+	// ResponsesRenderMode selects "auto" (default), "native" or "legacy" Responses rendering.
+	// The "legacy" value is deprecated.
+	ResponsesRenderMode string `json:"responsesRenderMode,omitempty"`
 	// URL is the base URL of the vLLM render endpoint (no trailing slash).
 	// Can be a loopback sidecar or a dedicated Service.
 	// Defaults to http://localhost:8000.
 	URL string `json:"url,omitempty"`
 	// PrefillOnly reserves one output token on the render copy, without changing inference.
 	PrefillOnly bool `json:"prefillOnly,omitempty"`
+	// OmitMMKwargs asks vLLM to leave processed multimodal tensors out of render responses.
+	OmitMMKwargs bool `json:"omitMMKwargs,omitempty"`
 	// EndpointDiscovery sends render requests directly to endpoints published
 	// by the configured data-layer discovery provider. Mutually exclusive with URL.
 	EndpointDiscovery *endpointDiscoveryConfig `json:"endpointDiscovery,omitempty"`
@@ -145,6 +155,10 @@ type vllmHTTPRenderer struct {
 	mmTimeout      time.Duration
 	attemptTimeout time.Duration
 	prefillOnly    bool
+	omitMMKwargs   bool
+	// pluginName is the plugin_name label on the render metrics.
+	pluginName string
+	failureLog rate.Sometimes
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
@@ -199,6 +213,8 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		mmTimeout:      mmTimeout,
 		attemptTimeout: attemptTimeout,
 		prefillOnly:    cfg.PrefillOnly,
+		omitMMKwargs:   cfg.OmitMMKwargs,
+		failureLog:     rate.Sometimes{Interval: renderFailureLogInterval},
 	}, nil
 }
 
@@ -233,7 +249,7 @@ func (c *vllmConfig) hasTLS() bool {
 }
 
 func renderTLSConfig(cfg *vllmConfig) (*tls.Config, error) {
-	tc := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec
+	tc := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //#nosec
 
 	if !cfg.InsecureSkipVerify && cfg.CACertPath != "" {
 		pem, err := os.ReadFile(cfg.CACertPath)
@@ -289,6 +305,11 @@ func (r *vllmHTTPRenderer) RenderMessages(ctx context.Context, payload fwkrh.Req
 	return r.renderConversation(ctx, messagesRenderPath, payload)
 }
 
+// RenderResponses leaves Responses rendering to vLLM.
+func (r *vllmHTTPRenderer) RenderResponses(ctx context.Context, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+	return r.renderConversation(ctx, responsesRenderPath, payload)
+}
+
 func (r *vllmHTTPRenderer) renderConversation(ctx context.Context, path string, payload fwkrh.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
 	var resp renderResponse
 	if err := r.postJSON(ctx, path, payload, r.produceTimeout(), &resp); err != nil {
@@ -339,13 +360,12 @@ func toKVCacheMM(f *renderMMFeatures) *tokenization.MultiModalFeatures {
 }
 
 // postJSON permits one retry on a different endpoint within the request budget.
-func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) error {
+func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh.RequestPayload, timeout time.Duration, out any) (err error) {
 	var payload []byte
 	switch body := body.(type) {
 	case fwkrh.RawPayload:
 		payload = body
 	case fwkrh.Marshaler:
-		var err error
 		payload, err = body.Marshal()
 		if err != nil {
 			return fmt.Errorf("marshal request: %w", err)
@@ -354,14 +374,20 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
 	if r.prefillOnly {
-		var err error
 		if payload, err = renderOnlyBudget(payload); err != nil {
 			return fmt.Errorf("apply render-only output budget: %w", err)
 		}
 	}
+	if r.omitMMKwargs {
+		if payload, err = omitMMKwargs(payload); err != nil {
+			return fmt.Errorf("omit multimodal kwargs: %w", err)
+		}
+	}
 
+	start := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	defer func() { r.observeRender(ctx, path, timeout, time.Since(start), err) }()
 
 	baseURL, err := r.endpointPicker.Pick()
 	if err != nil {
@@ -405,6 +431,26 @@ func renderOnlyBudget(payload []byte) ([]byte, error) {
 	return json.Marshal(envelope)
 }
 
+var omitMMKwargsField = []byte(`"return_mm_kwargs":false`)
+
+// omitMMKwargs adds "return_mm_kwargs":false before the closing brace of the render copy of a JSON
+// object. It splices instead of decoding, because the body can carry megabytes of base64 images.
+// A later duplicate key wins in vLLM's parser, so a client-sent value cannot override it.
+func omitMMKwargs(payload []byte) ([]byte, error) {
+	end := bytes.LastIndexByte(payload, '}')
+	head := bytes.TrimSpace(payload[:max(end, 0)])
+	if end < 0 || len(head) == 0 || head[0] != '{' || len(bytes.TrimSpace(payload[end+1:])) != 0 {
+		return nil, errors.New("render payload is not a JSON object")
+	}
+	out := make([]byte, 0, len(payload)+len(omitMMKwargsField)+1)
+	out = append(out, payload[:end]...)
+	if head[len(head)-1] != '{' {
+		out = append(out, ',')
+	}
+	out = append(out, omitMMKwargsField...)
+	return append(out, payload[end:]...), nil
+}
+
 // postJSONAttempt sends one render request and reports whether another endpoint may succeed.
 func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path string, payload []byte, out any) (bool, error) {
 	if r.attemptTimeout > 0 {
@@ -437,7 +483,7 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		// Connection failures can surface after successful response headers.
 		var networkErr net.Error
 		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		return retryable, fmt.Errorf("unmarshal response: %w", err)
+		return retryable, fmt.Errorf("%w: %w", errRenderDecode, err)
 	}
 	return false, nil
 }

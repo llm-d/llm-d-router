@@ -25,6 +25,12 @@ The following plugins produce this attribute:
 - **`topology-extractor`** (Data Layer): Sets the `Topology` attribute using
   `spec.hostname` from the Pod object, or the value of a configured endpoint label.
 
+In coordinator deployments, where prefill and decode are picked by separate EPPs, the
+prefill EPP's **`topology-stamp-handler`** (Request Control) reads this attribute off its
+selected endpoint and encodes it onto the `x-peer-topology` response header, so the
+decode EPP's `topology-affinity-filter`/`-scorer` can read the same locality data without
+the `Topology` attribute itself crossing the wire.
+
 ## Consumers
 
 The following plugins consume this attribute:

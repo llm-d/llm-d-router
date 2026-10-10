@@ -1,0 +1,211 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package thunderagent
+
+import (
+	"sync"
+	"time"
+
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+)
+
+// endpointStaleAfter drops a pod entry that holds no sessions and has not been
+// seen for this long.
+const endpointStaleAfter = 5 * time.Second
+
+// session is one agent trajectory, identified by its agent-identity session id.
+// All fields are guarded by sessionManager.mu.
+type session struct {
+	endpoint *endpointState
+	// committedTokens is usage.total_tokens of the last completed turn.
+	committedTokens int64
+	// inflightTokens is the sum of the estimates of the session's turns in
+	// flight.
+	inflightTokens int64
+	lastActivity   time.Time
+}
+
+// size is the session's KV footprint in tokens. Each turn resends the whole
+// history, so the committed total and the in-flight estimates cover the same
+// KV and the larger one is taken.
+func (s *session) size() float64 {
+	if f := float64(s.inflightTokens); f > float64(s.committedTokens) {
+		return f
+	}
+	return float64(s.committedTokens)
+}
+
+// endpointState is the plugin's own record of one endpoint.
+type endpointState struct {
+	id       string
+	capacity float64
+	// sessions are the sessions bound to this pod.
+	sessions map[string]*session
+	// updatedAt is the last time this pod was seen.
+	updatedAt time.Time
+}
+
+func (p *endpointState) workingSetTokens() float64 {
+	var total float64
+	for _, s := range p.sessions {
+		total += s.size()
+	}
+	return total
+}
+
+// sessionManager is the ledger shared by all of the thunder agent plugin's hooks.
+type sessionManager struct {
+	// mu guards everything below, including all session and endpointState
+	// fields. The Locked suffix and the session / endpointState helpers all
+	// assume the caller holds it.
+	mu        sync.Mutex
+	sessions  map[string]*session
+	endpoints map[string]*endpointState
+
+	ttl time.Duration
+}
+
+func newSessionManager(cfg Config) *sessionManager {
+	return &sessionManager{
+		sessions:  make(map[string]*session),
+		endpoints: make(map[string]*endpointState),
+		ttl:       time.Duration(cfg.EvictionTTLSeconds * float64(time.Second)),
+	}
+}
+
+// ensureEndpointLocked returns the ledger entry for an endpoint, creating
+// it on first sight and refreshing its capacity.
+func (m *sessionManager) ensureEndpointLocked(id string, capacity float64, now time.Time) *endpointState {
+	p, ok := m.endpoints[id]
+	if !ok {
+		p = &endpointState{id: id, sessions: make(map[string]*session)}
+		m.endpoints[id] = p
+	}
+	p.capacity = capacity
+	p.updatedAt = now
+	return p
+}
+
+// bindLocked returns the session for id bound to the given endpoint,
+// creating the session on first sight and moving it if it was bound
+// elsewhere.
+func (m *sessionManager) bindLocked(id string, ep *endpointState) *session {
+	s, ok := m.sessions[id]
+	if !ok {
+		s = &session{}
+		m.sessions[id] = s
+	}
+	if s.endpoint != ep {
+		if s.endpoint != nil {
+			delete(s.endpoint.sessions, id)
+		}
+		s.endpoint = ep
+		ep.sessions[id] = s
+	}
+	return s
+}
+
+// removeLocked drops a session from the ledger and from its endpoint.
+func (m *sessionManager) removeLocked(id string) {
+	s, ok := m.sessions[id]
+	if !ok {
+		return
+	}
+	if s.endpoint != nil {
+		delete(s.endpoint.sessions, id)
+	}
+	delete(m.sessions, id)
+}
+
+// estimateTokens converts a request body size to a token estimate. The body
+// also holds the JSON envelope, tool schemas and images, so the estimate is
+// above the prompt token count.
+// TODO(#3221): use the request's token count once it is available before flow
+// control.
+func estimateTokens(sizeBytes int) int64 {
+	if sizeBytes <= 0 {
+		return 0
+	}
+	return int64(sizeBytes / fwkrh.BytesPerToken)
+}
+
+// gaugeSnapshot is the ledger state the metrics collector reports.
+type gaugeSnapshot struct {
+	endpoints     map[string]endpointGauge
+	running, idle int
+}
+
+type endpointGauge struct {
+	workingSet float64
+	capacity   float64
+}
+
+// sweep drops sessions with no turn in flight that have been idle past the
+// TTL, and empty endpoints not seen for endpointStaleAfter.
+func (m *sessionManager) sweep(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, s := range m.sessions {
+		if s.inflightTokens > 0 {
+			continue
+		}
+		if now.Sub(s.lastActivity) <= m.ttl {
+			continue
+		}
+		m.removeLocked(id)
+	}
+	for id, p := range m.endpoints {
+		if len(p.sessions) == 0 && now.Sub(p.updatedAt) > endpointStaleAfter {
+			delete(m.endpoints, id)
+		}
+	}
+}
+
+// removeEndpoint drops an endpoint that left the pool. Its sessions are
+// unbound and keep their footprint, so their next turn binds them to the pod
+// that serves it.
+func (m *sessionManager) removeEndpoint(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.endpoints[id]
+	if !ok {
+		return
+	}
+	for _, s := range p.sessions {
+		s.endpoint = nil
+	}
+	delete(m.endpoints, id)
+}
+
+// snapshot returns the values to report.
+func (m *sessionManager) snapshot() gaugeSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snap := gaugeSnapshot{endpoints: make(map[string]endpointGauge, len(m.endpoints))}
+	for _, s := range m.sessions {
+		if s.inflightTokens > 0 {
+			snap.running++
+		} else {
+			snap.idle++
+		}
+	}
+	for id, p := range m.endpoints {
+		snap.endpoints[id] = endpointGauge{workingSet: p.workingSetTokens(), capacity: p.capacity}
+	}
+	return snap
+}

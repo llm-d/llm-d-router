@@ -66,17 +66,67 @@ func buildBlockStoredPayload(b *testing.B, numBlocks int, includeOptional, inclu
 	return data
 }
 
+func buildMapBlockStoredPayload(b *testing.B, numBlocks int, includeExtraKeys bool) []byte {
+	b.Helper()
+
+	hashes := make([]any, numBlocks)
+	for i := range hashes {
+		hashes[i] = uint64(1000 + i) //#nosec G115 -- bench test data, no overflow risk
+	}
+	tokens := make([]uint32, 64)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) //#nosec G115 -- bench test data, no overflow risk
+	}
+
+	var extraKeys []any
+	if includeExtraKeys {
+		extraKeys = make([]any, numBlocks)
+		for i := range extraKeys {
+			extraKeys[i] = []any{"uuid-" + fmt.Sprint(i), "salt"}
+		}
+	}
+	event := struct {
+		Type              string   `msgpack:"type"`
+		BlockHashes       []any    `msgpack:"block_hashes"`
+		ParentBlockHash   uint64   `msgpack:"parent_block_hash"`
+		TokenIDs          []uint32 `msgpack:"token_ids"`
+		BlockSize         int      `msgpack:"block_size"`
+		LoraID            int      `msgpack:"lora_id"`
+		Medium            string   `msgpack:"medium"`
+		LoraName          string   `msgpack:"lora_name"`
+		ExtraKeys         []any    `msgpack:"extra_keys"`
+		GroupIdx          int      `msgpack:"group_idx"`
+		KVCacheSpecKind   string   `msgpack:"kv_cache_spec_kind"`
+		KVCacheSpecWindow int      `msgpack:"kv_cache_spec_sliding_window"`
+	}{
+		Type:              "BlockStored",
+		BlockHashes:       hashes,
+		ParentBlockHash:   999,
+		TokenIDs:          tokens,
+		BlockSize:         64,
+		LoraID:            42,
+		Medium:            "gpu",
+		LoraName:          "lora-a",
+		ExtraKeys:         extraKeys,
+		GroupIdx:          0,
+		KVCacheSpecKind:   "sliding_window",
+		KVCacheSpecWindow: 4096,
+	}
+
+	data, err := msgpack.Marshal(event)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return data
+}
+
 // buildBatchPayload wraps individual events into a vLLM event batch.
 func buildBatchPayload(b *testing.B, events [][]byte) []byte {
 	b.Helper()
 
 	rawEvents := make([]any, len(events))
 	for i, ev := range events {
-		var decoded []any
-		if err := msgpack.Unmarshal(ev, &decoded); err != nil {
-			b.Fatal(err)
-		}
-		rawEvents[i] = decoded
+		rawEvents[i] = msgpack.RawMessage(ev)
 	}
 
 	batch := []any{
@@ -89,6 +139,39 @@ func buildBatchPayload(b *testing.B, events [][]byte) []byte {
 		b.Fatal(err)
 	}
 	return data
+}
+
+func BenchmarkDecodeVLLMEvent_MapEncoding(b *testing.B) {
+	adapter := NewVLLMAdapter()
+	payload := buildMapBlockStoredPayload(b, 64, true)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := adapter.decodeVLLMEvent(payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParseMessage_MapEncoding(b *testing.B) {
+	adapter := NewVLLMAdapter()
+	events := make([][]byte, 100)
+	for i := range events {
+		events[i] = buildMapBlockStoredPayload(b, 4, true)
+	}
+	payload := buildBatchPayload(b, events)
+	msg := &kvevents.RawMessage{Topic: "kv@pod-1@Qwen/Qwen3-32B", Payload: payload}
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, _, err := adapter.ParseMessage(msg); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 // BenchmarkDecodeVLLMEvent_SinglePass benchmarks single event decoding

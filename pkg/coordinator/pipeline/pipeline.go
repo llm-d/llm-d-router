@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -183,6 +184,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		if executed["render"] {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
+		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)
 	}()
 
 	for idx, step := range p.steps {
@@ -238,6 +240,7 @@ func (p *Pipeline) runStep(
 		d := time.Since(start)
 		coordmetrics.RecordStepDuration(name, d)
 		coordmetrics.DecStepRunning(name)
+		reqCtx.StepDuration += d
 		timings[idx] = stepTiming{name: name, duration: d}
 		if r := recover(); r != nil {
 			coordmetrics.IncStepErrorTotal(name, coordmetrics.ErrorCodeInternal)
@@ -272,11 +275,11 @@ func classifyExecutionPath(executed map[string]bool) (string, bool) {
 	}
 	switch {
 	case executed["encode"] && executed["prefill"]:
-		return coordmetrics.PathEncodePrefillDecode, true
+		return metricsutil.DisaggPathEncodePrefillDecode, true
 	case executed["prefill"]:
-		return coordmetrics.PathPrefillDecode, true
+		return metricsutil.DisaggPathPrefillDecode, true
 	default:
-		return coordmetrics.PathDecodeOnly, true
+		return metricsutil.DisaggPathDecodeOnly, true
 	}
 }
 

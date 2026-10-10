@@ -13,7 +13,10 @@ metadata:
     {{- include "llm-d-router.labels" . | nindent 4 }}
     {{- include "llm-d-router.proxySelectorLabels" . | nindent 4 }}
 spec:
+  {{- $autoscaling := dig "autoscaling" dict .Values.router.proxy }}
+  {{- if not $autoscaling.enabled }}
   replicas: {{ .Values.router.proxy.replicas | default 2 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}
@@ -29,6 +32,7 @@ spec:
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
       {{- end }}
+      terminationGracePeriodSeconds: {{ dig "terminationGracePeriodSeconds" 70 .Values.router.proxy }}
       containers:
         - name: {{ $proxy.name }}
           image: {{ $proxy.image }}
@@ -62,6 +66,14 @@ spec:
         {{- with $proxy.startupProbe }}
           startupProbe:
           {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+        # Give endpoint removal time to propagate before SIGTERM.
+        # Kubelet performs the delay without a shell in the distroless Envoy image.
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
         {{- end }}
         {{- with $proxy.securityContext }}
           securityContext:

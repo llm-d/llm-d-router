@@ -280,10 +280,11 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "plugin_data_scope_violations_total",
-			Help: metricsutil.HelpMsgWithStability("Total number of endpoint attribute accesses rejected because the "+
-				"plugin did not declare the DataKey in Produces() or Consumes(), by extension point, plugin type, "+
-				"plugin name and access kind (read or write). A non-zero value means a plugin's implementation has "+
-				"drifted from its declaration; rejected reads resolve as absent and rejected writes are dropped.", compbasemetrics.ALPHA),
+			Help: metricsutil.HelpMsgWithStability("Total number of endpoint and per-request attribute accesses "+
+				"rejected because the plugin did not declare the DataKey in Produces() or Consumes(), by extension "+
+				"point, plugin type, plugin name and access kind (read or write). A non-zero value means a plugin's "+
+				"implementation has drifted from its declaration; rejected reads resolve as absent and rejected "+
+				"writes are dropped.", compbasemetrics.ALPHA),
 		},
 		[]string{"extension_point", "plugin_type", "plugin_name", "access"},
 	)
@@ -404,12 +405,11 @@ var (
 					"the most recent saturation evaluation. Recorded by the utilization saturation detector, which scores "+
 					"these endpoints according to stalenessPolicy: saturated by default or excluded under ignore. A nonzero "+
 					"value during a dispatch stall indicates a metrics collection problem rather than genuine overload. "+
-					"This gauge carries no stage label and is written on every detector call, so it reflects the most "+
-					"recently evaluated stage; a reading of 0 does not rule out stale metrics in another stage. "+
-					"Per-stage stale accounting is tracked in #2475.",
+					"Labeled by the pipeline stage ('prefill' or 'decode') whose endpoints were evaluated; the stage "+
+					"label is empty when the detector is evaluated without stage partitioning.",
 				compbasemetrics.ALPHA),
 		},
-		[]string{"detector"},
+		[]string{"detector", "stage"},
 	)
 
 	llmdFlowControlDetectorSaturation = prometheus.NewGaugeVec(
@@ -577,6 +577,32 @@ var (
 	DescInferencePoolPerEndpointQueueSize = prometheus.NewDesc(
 		"llm_d_epp_per_endpoint_queue_size",
 		metricsutil.HelpMsgWithStability("The total number of requests pending in the model server queue for each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
+
+	// The NIXL descriptors expose counters the model server reports.
+	DescInferencePoolPerEndpointNixlFailedTransfers = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_failed_transfers_total",
+		metricsutil.HelpMsgWithStability("The number of failed NIXL KV cache transfers reported by each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
+	DescInferencePoolPerEndpointNixlFailedNotifications = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_failed_notifications_total",
+		metricsutil.HelpMsgWithStability("The number of failed NIXL KV cache notifications reported by each underlying endpoint.", compbasemetrics.ALPHA),
+		[]string{
+			"name",
+			"model_server_endpoint",
+		}, nil,
+	)
+	DescInferencePoolPerEndpointNixlKVExpiredRequests = prometheus.NewDesc(
+		"llm_d_epp_per_endpoint_nixl_kv_expired_requests_total",
+		metricsutil.HelpMsgWithStability("The number of requests whose KV cache expired before it was read, reported by each underlying endpoint.", compbasemetrics.ALPHA),
 		[]string{
 			"name",
 			"model_server_endpoint",

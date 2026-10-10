@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -98,7 +99,7 @@ const (
 	}
 	`
 
-	//nolint:gosec // G101: JSON response body fixture, not a credential
+	//#nosec G101 -- JSON response body fixture, not a credential
 	bodyWithCachedTokens = `
 	{
 		"id": "cmpl-573498d260f2423f9e42817bbba3743a",
@@ -132,7 +133,7 @@ const (
 	streamingBodyWithUsage = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}
 data: [DONE]
 	`
-	//nolint:gosec // G101: JSON response body fixture, not a credential
+	//#nosec G101 -- JSON response body fixture, not a credential
 	streamingBodyWithUsageAndCachedTokens = `data: {"id":"cmpl-41764c93-f9d2-4f31-be08-3ba04fa25394","object":"text_completion","created":1740002445,"model":"food-review-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":5}}}
 data: [DONE]
 	`
@@ -205,7 +206,7 @@ func TestHandleResponseBody(t *testing.T) {
 			if reqCtx == nil {
 				reqCtx = &RequestContext{
 					Response:          &Response{},
-					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 				}
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true)
@@ -267,7 +268,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 						"content-type": "text/event-stream; charset=utf-8",
 					},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			server.HandleResponseBody(ctx, reqCtx, test.body, true) // Hard coded to true since openAIParser does not endOfStream to switch logic.
 
@@ -307,7 +308,7 @@ func TestHandleResponseBodyWithoutSchedulingRequest(t *testing.T) {
 	histogram := findHistogramMetric(t, "llm_d_epp_request_ntpot_seconds", map[string]string{
 		"model_name":        "incoming-model",
 		"target_model_name": "target-model",
-		"fairness_id":       metadata.DefaultFairnessID,
+		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "3",
 	})
 	require.Equal(t, uint64(1), histogram.GetSampleCount())
@@ -330,6 +331,26 @@ func findHistogramMetric(t *testing.T, name string, labels map[string]string) *d
 	}
 	t.Fatalf("metric %q with labels %v not found", name, labels)
 	return nil
+}
+
+// histogramSampleCount reports how many observations a histogram holds for the
+// given labels, and zero when the series was never created.
+func histogramSampleCount(t *testing.T, name string, labels map[string]string) uint64 {
+	t.Helper()
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricHasLabels(metric, labels) {
+				return metric.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
 }
 
 func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
@@ -406,7 +427,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 						"content-type": "text/event-stream",
 					},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 
 			for _, chunk := range tc.chunks {
@@ -449,7 +470,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 				"content-type": "text/event-stream",
 			},
 		},
-		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 	}
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
@@ -457,10 +478,11 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
 	}
 
+	// 1000 uncached plus 800 read from the cache.
 	wantUsage := fwkrh.Usage{
-		PromptTokens:       1000,
+		PromptTokens:       1800,
 		CompletionTokens:   200,
-		TotalTokens:        1200,
+		TotalTokens:        2000,
 		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
 	}
 	assert.Equal(t, wantUsage, reqCtx.Usage, "message_delta must not discard the usage reported by message_start")
@@ -468,14 +490,14 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	labels := map[string]string{
 		"model_name":        "incoming-model",
 		"target_model_name": "target-model",
-		"fairness_id":       metadata.DefaultFairnessID,
+		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
 	}
 	// Each token count belongs to one request, so accumulating usage across chunks must not
 	// turn into a second observation on the chunk that completes it.
 	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
 	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
-	require.Equal(t, float64(1000), inputTokens.GetSampleSum())
+	require.Equal(t, float64(1800), inputTokens.GetSampleSum())
 
 	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
 	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
@@ -486,16 +508,133 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	require.Equal(t, float64(200), outputTokens.GetSampleSum())
 }
 
+// Both message_start and message_delta can carry the cumulative input and cache
+// counts. The counts belong to one request and must reach the histograms once.
+func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+		[]byte(`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1000,"cache_read_input_tokens":800,"output_tokens":200}}` + "\n\n"),
+		[]byte(`event: message_stop` + "\n" + `data: {"type":"message_stop"}`),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for i, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
+	}
+
+	wantUsage := fwkrh.Usage{
+		PromptTokens:       1800,
+		CompletionTokens:   200,
+		TotalTokens:        2000,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+	}
+	assert.Equal(t, wantUsage, reqCtx.Usage)
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       reqcommon.DefaultFairnessID,
+		"priority":          "0",
+	}
+	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
+	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
+	require.Equal(t, float64(1800), inputTokens.GetSampleSum())
+
+	cachedTokens := findHistogramMetric(t, "llm_d_epp_request_cached_tokens", labels)
+	require.Equal(t, uint64(1), cachedTokens.GetSampleCount())
+	require.Equal(t, float64(800), cachedTokens.GetSampleSum())
+
+	outputTokens := findHistogramMetric(t, "llm_d_epp_request_output_tokens", labels)
+	require.Equal(t, uint64(1), outputTokens.GetSampleCount())
+	require.Equal(t, float64(200), outputTokens.GetSampleSum())
+}
+
+// A stream that never reaches end of stream records no token counts. The usage
+// parsed so far still accumulates on the request context for the response record.
+func TestHandleResponseBodyModelStreaming_IncompleteStreamRecordsNoTokens(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	chunks := [][]byte{
+		[]byte(`event: message_start` + "\n" + `data: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":800}}}` + "\n\n"),
+		[]byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}` + "\n\n"),
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		IncomingModelName: "incoming-model",
+		TargetModelName:   "target-model",
+		Request: &Request{
+			Headers: map[string]string{
+				":path": "/v1/messages",
+			},
+		},
+		Response: &Response{
+			Headers: map[string]string{
+				"content-type": "text/event-stream",
+			},
+		},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	for _, chunk := range chunks {
+		server.HandleResponseBody(ctx, reqCtx, chunk, false)
+	}
+
+	assert.Equal(t, 1800, reqCtx.Usage.PromptTokens)
+
+	labels := map[string]string{
+		"model_name":        "incoming-model",
+		"target_model_name": "target-model",
+		"fairness_id":       reqcommon.DefaultFairnessID,
+		"priority":          "0",
+	}
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_input_tokens", labels))
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_cached_tokens", labels))
+	assert.Zero(t, histogramSampleCount(t, "llm_d_epp_request_output_tokens", labels))
+}
+
 func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	server := &StreamingServer{}
 	reqCtx := &RequestContext{
 		Response: &Response{
 			Headers: map[string]string{
-				"x-backend-server":              "vllm-v0.6.3",                // should passthrough
-				metadata.ObjectiveKey:           "sensitive-objective-id",     // should be stripped
-				metadata.OldObjectiveKey:        "old-sensitive-objective-id", // should be stripped
-				metadata.DestinationEndpointKey: "10.2.0.5:8080",              // should be stripped
-				"content-length":                "500",                        // should be stripped
+				"x-backend-server":              "vllm-v0.6.3",                 // should passthrough
+				metadata.ObjectiveKey:           "sensitive-objective-id",      // should be stripped
+				metadata.OldObjectiveKey:        "old-sensitive-objective-id",  // should be stripped
+				metadata.DestinationEndpointKey: "10.2.0.5:8080",               // should be stripped
+				"content-length":                "500",                         // should be stripped
+				"x-peer-topology":               "host=node12,zone=us-east1-a", // stamped by topology-stamp-handler, must reach the coordinator
 			},
 		},
 	}
@@ -513,6 +652,7 @@ func TestGenerateResponseHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, metadata.OldObjectiveKey)
 	assert.NotContains(t, gotHeaders, metadata.DestinationEndpointKey)
 	assert.NotContains(t, gotHeaders, "content-length")
+	assert.Equal(t, "host=node12,zone=us-east1-a", gotHeaders["x-peer-topology"])
 }
 
 func TestGenerateResponseHeaders_FlowQueueDuration(t *testing.T) {
@@ -692,7 +832,7 @@ func TestResponseSizeAccumulation(t *testing.T) {
 				Response: &Response{
 					Headers: map[string]string{},
 				},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			for i, chunk := range tt.chunks {
 				endOfStream := i == len(tt.chunks)-1
@@ -752,7 +892,7 @@ func TestStreamedEventAccumulation(t *testing.T) {
 			}
 			reqCtx := &RequestContext{
 				Response:          &Response{Headers: tt.headers},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
 			}
 			for i, chunk := range tt.chunks {
 				server.HandleResponseBody(ctx, reqCtx, chunk, i == len(tt.chunks)-1)

@@ -125,9 +125,15 @@ func New(name string, cfg Config) *Producer {
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
 
-// Produces declares the request-wide reusable prefix token floor.
+// Produces declares the request-wide reusable prefix token floor, and the
+// best-match peer this plugin stashes on the request for its own PreRequest to
+// read back. Both keys are name-bound to this instance, so two configured
+// p2p-source producers do not share them.
 func (p *Producer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0)}
+	return map[plugin.DataKey]any{
+		p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0),
+		p.attrKeyValue:                (*bestMatchPeer)(nil),
+	}
 }
 
 // Consumes declares the PrefixCacheMatchInfo dependency so the data-layer
@@ -181,7 +187,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		hasTierData bool
 	}
 	maxCached := 0
-	var matches []sourceMatch
+	matches := make([]sourceMatch, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if ep.GetMetadata() == nil {
 			continue
@@ -273,7 +279,7 @@ func requestSpreadFraction(requestID string) float64 {
 // minCachedTokenDelta tokens. Any inbound value of the header is removed.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE)
-	delete(request.Headers, routing.KVCacheSourceHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.KVCacheSourceHeader)
 
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
 	if !ok {
@@ -311,7 +317,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
-	request.Headers[routing.KVCacheSourceHeader] = best.hostPort
+	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, best.hostPort)
 	logger.Info("set KV cache source header", "requestID", request.RequestID, "value", best.hostPort)
 	return nil
 }

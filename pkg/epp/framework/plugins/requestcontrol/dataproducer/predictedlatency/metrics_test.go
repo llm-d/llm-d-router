@@ -140,4 +140,5 @@ func resetMetrics() {
 	llmdRequestPredictedTPOT.Reset()
 	llmdRequestTPOTPredictionDuration.Reset()
 	llmdSloViolationCounter.Reset()
+	llmdRequestPredictionFailures.Reset()
 }

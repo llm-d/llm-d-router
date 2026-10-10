@@ -144,7 +144,7 @@ func (in *interner) internLocked(s string) uint32 {
 	if id, ok := in.ids[s]; ok {
 		return id
 	}
-	id := uint32(len(in.ids))
+	id := uint32(len(in.ids)) //#nosec G115 -- fitsLocked caps len(in.ids) at the interner limit, at most 1<<20
 	in.ids[s] = id
 	return id
 }

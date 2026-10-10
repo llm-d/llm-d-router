@@ -29,6 +29,10 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
+// ErrResponseLengthMismatch indicates that the prediction server returned a
+// different number of predictions than requested.
+var ErrResponseLengthMismatch = errors.New("bulk prediction count does not match request count")
+
 // batchSubmission represents a single caller's request to PredictBulkStrict
 // waiting to be coalesced with other concurrent callers.
 type batchSubmission struct {
@@ -204,7 +208,7 @@ func (p *Predictor) doPredictBulkStrictHTTP(ctx context.Context, requests []Pred
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req) //nolint:gosec // URL is operator-configured in config.PredictionURLs
+	resp, err := p.httpClient.Do(req) //#nosec -- URL is operator-configured in config.PredictionURLs
 	if err != nil {
 		return nil, fmt.Errorf("failed to call bulk prediction endpoint %s: %w", url, err)
 	}
@@ -219,6 +223,10 @@ func (p *Predictor) doPredictBulkStrictHTTP(ctx context.Context, requests []Pred
 	var bulkResp BulkPredictionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&bulkResp); err != nil {
 		return nil, fmt.Errorf("failed to decode bulk prediction response: %w", err)
+	}
+	if len(bulkResp.Predictions) != len(requests) {
+		return nil, fmt.Errorf("%w: got %d predictions for %d requests",
+			ErrResponseLengthMismatch, len(bulkResp.Predictions), len(requests))
 	}
 
 	return &bulkResp, nil

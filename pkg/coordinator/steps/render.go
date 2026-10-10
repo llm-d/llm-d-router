@@ -130,9 +130,10 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	case reqcommon.APITypeCompletions:
 		return s.executeCompletions(ctx, reqCtx)
 	case reqcommon.APITypeChatCompletions:
-		return s.executeChatCompletions(ctx, reqCtx)
+		return s.executeRender(ctx, reqCtx, reqcommon.PathChatCompletions)
+	case reqcommon.APITypeResponses:
+		return s.executeRender(ctx, reqCtx, reqcommon.PathResponses)
 	default:
-		// Other APIs, such as Responses, carry no token_ids to normalize.
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
 		return nil
@@ -188,6 +189,8 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 		return err
 	}
 	reqCtx.MultimodalEntries = entries
+
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(entries))
 
 	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
 	return nil
@@ -261,13 +264,27 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 	}
 }
 
-func (s *RenderStep) executeChatCompletions(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName(RenderStepName)
-
+// executeRender posts the client body to the render service under path and
+// applies the token_ids and per-image features it returns. The render service
+// tokenizes whatever shape the prompt field holds, so this step does not
+// inspect it.
+//
+// Chat completions and responses share this path because vLLM's renderer
+// declares the same response model for both. /v1/completions/render returns
+// one object per prompt instead, so executeCompletions decodes and applies its
+// own shape.
+func (s *RenderStep) executeRender(ctx context.Context, reqCtx *pipeline.RequestContext, path string) error {
 	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, reqcommon.PathChatCompletions, &renderResp); err != nil {
+	if err := s.postRender(ctx, reqCtx, path, &renderResp); err != nil {
 		return err
 	}
+	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+}
+
+// applyRenderResponse stores a renderResponse's token_ids and reconciles its
+// per-image features onto reqCtx.MultimodalEntries.
+func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
+	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
 	if err := s.checkTokenLimit(len(reqCtx.TokenIDs)); err != nil {
@@ -326,7 +343,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		return fmt.Errorf("creating render request: %w", err)
 	}
 	req.ContentLength = int64(len(body))
-	req.Header.Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+	req.Header.Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	for k, v := range reqCtx.ForwardedHeaders() {
 		req.Header.Set(k, v)
 	}
@@ -339,9 +356,8 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return upstreamError(RenderStepName, resp.StatusCode, respBody)
+	if err := checkStatus(RenderStepName, resp); err != nil {
+		return err
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

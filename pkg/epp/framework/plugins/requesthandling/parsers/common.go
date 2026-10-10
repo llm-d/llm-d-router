@@ -46,8 +46,6 @@ func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.Marshalable
 	if isVLLMTarget(ctx) {
 		priority = -priority
 	}
-	// OpenAI-compatible and Anthropic messages payloads both use the same
-	// backend priority field name.
 	m["priority"] = priority
 	return m, true, nil
 }
@@ -58,10 +56,5 @@ func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
 	if meta == nil || meta.Labels == nil {
 		return false
 	}
-	engineType := meta.Labels[fwkplugins.EngineTypeLabelKey]
-	if engineType == "" {
-		// Fall back to the pre-migration GAIE label for backward compatibility.
-		engineType = meta.Labels["inference.networking.k8s.io/engine-type"]
-	}
-	return strings.EqualFold(engineType, "vllm")
+	return strings.EqualFold(meta.Labels[fwkplugins.EngineTypeLabelKey], "vllm")
 }

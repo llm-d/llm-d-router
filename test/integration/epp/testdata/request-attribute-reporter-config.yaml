@@ -15,12 +15,10 @@ plugins:
           condition: "has(usage.completion_tokens)"
 schedulingProfiles:
   - name: default
-    plugins:
-      - pluginRef: openai-parser
-      - pluginRef: total-tokens-cost-reporter
 requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source

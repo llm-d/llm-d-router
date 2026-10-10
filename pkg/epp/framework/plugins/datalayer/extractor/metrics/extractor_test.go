@@ -20,6 +20,8 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -330,6 +332,109 @@ func TestBuiltinAtomEngine(t *testing.T) {
 	}
 	if metrics.CacheNumBlocks != 138302 {
 		t.Errorf("CacheNumBlocks = %v, want 138302", metrics.CacheNumBlocks)
+	}
+}
+
+func TestExtractorReadsEveryEngineOfDataParallelPod(t *testing.T) {
+	ctx := context.Background()
+
+	registry := NewMappingRegistry()
+	mapping, err := NewMapping(defaultTotalQueuedRequestsMetric, defaultTotalRunningRequestsMetric,
+		defaultKvCacheUsagePercentageMetric, "", "")
+	if err != nil {
+		t.Fatalf("failed to create mapping: %v", err)
+	}
+	if err := registry.Register(DefaultEngineType, mapping); err != nil {
+		t.Fatalf("failed to register mapping: %v", err)
+	}
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+
+	perEngine := func(values ...float64) *dto.MetricFamily {
+		series := make([]*dto.Metric, 0, len(values))
+		for i, v := range values {
+			series = append(series, &dto.Metric{
+				Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(strconv.Itoa(i))}},
+				Gauge: &dto.Gauge{Value: ptr.To(v)},
+			})
+		}
+		return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
+	}
+
+	fourEngines := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    perEngine(6, 10, 11, 7),
+		defaultTotalRunningRequestsMetric:   perEngine(40, 38, 41, 37),
+		defaultKvCacheUsagePercentageMetric: perEngine(0.52, 0.91, 0.78, 0.60),
+	}
+
+	tests := []struct {
+		name string
+		// previous, when set, is extracted first so the test can check which fields a failed scrape keeps.
+		previous    sourcemetrics.PrometheusMetricMap
+		data        sourcemetrics.PrometheusMetricMap
+		wantErr     bool
+		wantWaiting int
+		wantRunning int
+		wantKV      float64
+	}{
+		{
+			name:        "four engines",
+			data:        fourEngines,
+			wantWaiting: 34,
+			wantRunning: 156,
+			wantKV:      0.91,
+		},
+		{
+			name: "single engine",
+			data: sourcemetrics.PrometheusMetricMap{
+				defaultTotalQueuedRequestsMetric:    perEngine(6),
+				defaultTotalRunningRequestsMetric:   perEngine(40),
+				defaultKvCacheUsagePercentageMetric: perEngine(0.52),
+			},
+			wantWaiting: 6,
+			wantRunning: 40,
+			wantKV:      0.52,
+		},
+		{
+			name:     "non-finite engine keeps the previous value",
+			previous: fourEngines,
+			data: sourcemetrics.PrometheusMetricMap{
+				defaultTotalQueuedRequestsMetric:    perEngine(1, math.NaN(), 2, 3),
+				defaultTotalRunningRequestsMetric:   perEngine(10, 20, 30, 40),
+				defaultKvCacheUsagePercentageMetric: perEngine(0.1, 0.2, 0.3, 0.4),
+			},
+			wantErr:     true,
+			wantWaiting: 34,
+			wantRunning: 100,
+			wantKV:      0.4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
+			if tt.previous != nil {
+				if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: tt.previous, Endpoint: ep}); err != nil {
+					t.Fatalf("unexpected error on previous scrape: %v", err)
+				}
+			}
+			err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: tt.data, Endpoint: ep})
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("Extract error: want error %v, got %v", tt.wantErr, err)
+			}
+			got := ep.GetMetrics()
+			if got.WaitingQueueSize != tt.wantWaiting {
+				t.Errorf("WaitingQueueSize: want %d, got %d", tt.wantWaiting, got.WaitingQueueSize)
+			}
+			if got.RunningRequestsSize != tt.wantRunning {
+				t.Errorf("RunningRequestsSize: want %d, got %d", tt.wantRunning, got.RunningRequestsSize)
+			}
+			if got.KVCacheUsagePercent != tt.wantKV {
+				t.Errorf("KVCacheUsagePercent: want %v, got %v", tt.wantKV, got.KVCacheUsagePercent)
+			}
+		})
 	}
 }
 
@@ -808,19 +913,10 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 			want:     "vllm",
 		},
 		{
-			name:     "legacy GAIE label key fallback",
-			labels:   map[string]string{legacyGAIEEngineTypeLabelKey: "sglang"},
+			name:     "legacy GAIE label key is ignored",
+			labels:   map[string]string{"inference.networking.k8s.io/engine-type": "sglang"},
 			labelKey: DefaultEngineTypeLabelKey,
-			want:     "sglang",
-		},
-		{
-			name: "new label key takes precedence over legacy GAIE key",
-			labels: map[string]string{
-				DefaultEngineTypeLabelKey:    "vllm",
-				legacyGAIEEngineTypeLabelKey: "sglang",
-			},
-			labelKey: DefaultEngineTypeLabelKey,
-			want:     "vllm",
+			want:     DefaultEngineType,
 		},
 		{
 			name:     "no labels returns default",
@@ -844,5 +940,123 @@ func TestGetEngineTypeFromEndpoint(t *testing.T) {
 				t.Errorf("getEngineTypeFromEndpoint() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
+	ext, err := newCoreMetricsExtractorPlugin(context.Background(), "core", nil)
+	if err != nil {
+		t.Fatalf("new extractor: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, name := range ext.MetricFamilies() {
+		declared[name] = true
+	}
+	for _, engine := range defaultEngineConfigs {
+		for _, raw := range []string{
+			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
+			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+		} {
+			spec, err := parseStringToSpec(raw)
+			if err != nil {
+				t.Fatalf("engine %s spec %q: %v", engine.Name, raw, err)
+			}
+			if spec != nil && !declared[spec.Name] {
+				t.Errorf("engine %s reads %s, which MetricFamilies does not declare", engine.Name, spec.Name)
+			}
+		}
+	}
+}
+
+func TestExtractorRejectsNonFiniteMetrics(t *testing.T) {
+	ctx := context.Background()
+
+	registry := NewMappingRegistry()
+	mapping, err := NewMapping(
+		defaultTotalQueuedRequestsMetric,
+		defaultTotalRunningRequestsMetric,
+		defaultKvCacheUsagePercentageMetric,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("failed to create mapping: %v", err)
+	}
+	if err := registry.Register(DefaultEngineType, mapping); err != nil {
+		t.Fatalf("failed to register mapping: %v", err)
+	}
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+
+	ep := fwkdl.NewEndpoint(nil, nil)
+
+	// Seed valid baseline metrics.
+	validData := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(4.0)}}},
+		},
+		defaultTotalRunningRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(2.0)}}},
+		},
+		defaultKvCacheUsagePercentageMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(0.35)}}},
+		},
+	}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: validData, Endpoint: ep}); err != nil {
+		t.Fatalf("unexpected baseline extract error: %v", err)
+	}
+	baseline := ep.GetMetrics().Clone()
+
+	// Scrape where all gauges are non-finite (NaN / +Inf / -Inf): must error and keep baseline unchanged.
+	nonFiniteData := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(math.NaN())}}},
+		},
+		defaultTotalRunningRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(math.Inf(1))}}},
+		},
+		defaultKvCacheUsagePercentageMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(math.Inf(-1))}}},
+		},
+	}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: nonFiniteData, Endpoint: ep}); err == nil {
+		t.Fatal("expected error for non-finite metrics, got nil")
+	}
+	if diff := cmp.Diff(baseline, ep.GetMetrics()); diff != "" {
+		t.Errorf("expected baseline metrics to be preserved when all samples are non-finite (-want +got):\n%s", diff)
+	}
+
+	// Partial scrape: valid queue depth updates, while NaN KV cache usage preserves previous KV usage and returns error.
+	partialData := sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(7.0)}}},
+		},
+		defaultTotalRunningRequestsMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(2.0)}}},
+		},
+		defaultKvCacheUsagePercentageMetric: &dto.MetricFamily{
+			Type:   dto.MetricType_GAUGE.Enum(),
+			Metric: []*dto.Metric{{Gauge: &dto.Gauge{Value: ptr.To(math.NaN())}}},
+		},
+	}
+	if err := extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: partialData, Endpoint: ep}); err == nil {
+		t.Fatal("expected error when KV cache gauge is NaN, got nil")
+	}
+	afterPartial := ep.GetMetrics()
+	if afterPartial.WaitingQueueSize != 7 {
+		t.Errorf("WaitingQueueSize = %d, want 7", afterPartial.WaitingQueueSize)
+	}
+	if afterPartial.KVCacheUsagePercent != 0.35 {
+		t.Errorf("KVCacheUsagePercent = %v, want 0.35", afterPartial.KVCacheUsagePercent)
 	}
 }

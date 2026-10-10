@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 )
@@ -117,5 +118,65 @@ func TestMetricsCollected(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestNixlFailureCountersCollected verifies that the collector exposes the
+// NIXL failure counters for an endpoint carrying them, and no NIXL series for
+// an endpoint that does not.
+func TestNixlFailureCountersCollected(t *testing.T) {
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod2",
+		},
+	}
+	inferencePool := &v1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-pool",
+		},
+		Spec: v1.InferencePoolSpec{
+			TargetPorts: []v1.Port{{Number: v1.PortNumber(int32(8000))}},
+		},
+	}
+	ds := datastore.NewDatastore(context.Background(), datalayer.NewTestRuntime(t, time.Second))
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(runtime.NewScheme()).
+		Build()
+
+	_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(inferencePool))
+	_ = ds.PodUpdateOrAddIfNotExist(context.Background(), pod1)
+	_ = ds.PodUpdateOrAddIfNotExist(context.Background(), pod2)
+
+	reporting := ds.PodList(func(ep fwkdl.Endpoint) bool {
+		return ep.GetMetadata().ID == pod1NamespacedName
+	})
+	if len(reporting) != 1 {
+		t.Fatalf("expected one endpoint for %v, got %d", pod1NamespacedName, len(reporting))
+	}
+	attrs := reporting[0].GetAttributes()
+	attrs.Put(attrmetrics.NixlFailedTransfersDataKey, attrmetrics.ScalarMetricValue(44))
+	attrs.Put(attrmetrics.NixlFailedNotificationsDataKey, attrmetrics.ScalarMetricValue(22))
+	attrs.Put(attrmetrics.NixlKVExpiredRequestsDataKey, attrmetrics.ScalarMetricValue(3))
+
+	collector := &inferencePoolMetricsCollector{
+		ds: ds,
+	}
+	err := promtestutil.CollectAndCompare(collector, strings.NewReader(`
+		# HELP llm_d_epp_per_endpoint_nixl_failed_notifications_total [ALPHA] The number of failed NIXL KV cache notifications reported by each underlying endpoint.
+		# TYPE llm_d_epp_per_endpoint_nixl_failed_notifications_total counter
+		llm_d_epp_per_endpoint_nixl_failed_notifications_total{model_server_endpoint="pod1-rank-0",name="test-pool"} 22
+		# HELP llm_d_epp_per_endpoint_nixl_failed_transfers_total [ALPHA] The number of failed NIXL KV cache transfers reported by each underlying endpoint.
+		# TYPE llm_d_epp_per_endpoint_nixl_failed_transfers_total counter
+		llm_d_epp_per_endpoint_nixl_failed_transfers_total{model_server_endpoint="pod1-rank-0",name="test-pool"} 44
+		# HELP llm_d_epp_per_endpoint_nixl_kv_expired_requests_total [ALPHA] The number of requests whose KV cache expired before it was read, reported by each underlying endpoint.
+		# TYPE llm_d_epp_per_endpoint_nixl_kv_expired_requests_total counter
+		llm_d_epp_per_endpoint_nixl_kv_expired_requests_total{model_server_endpoint="pod1-rank-0",name="test-pool"} 3
+`),
+		"llm_d_epp_per_endpoint_nixl_failed_transfers_total",
+		"llm_d_epp_per_endpoint_nixl_failed_notifications_total",
+		"llm_d_epp_per_endpoint_nixl_kv_expired_requests_total",
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

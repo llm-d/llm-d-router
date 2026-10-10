@@ -309,3 +309,39 @@ func TestModelLimitEligibility(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestOmitMMKwargs(t *testing.T) {
+	for _, tc := range []struct{ name, payload, want string }{
+		{"appends", `{"model":"m","messages":[]}`, `{"model":"m","messages":[],"return_mm_kwargs":false}`},
+		{"empty object", `{ }`, `{ "return_mm_kwargs":false}`},
+		{"trailing space", "{\"model\":\"m\"}\n", "{\"model\":\"m\",\"return_mm_kwargs\":false}\n"},
+		{"client value loses", `{"return_mm_kwargs":true}`, `{"return_mm_kwargs":true,"return_mm_kwargs":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := omitMMKwargs([]byte(tc.payload))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(out))
+		})
+	}
+	for _, bad := range []string{`[1,2]`, ``, `"x"`} {
+		_, err := omitMMKwargs([]byte(bad))
+		require.Error(t, err, bad)
+	}
+}
+
+func TestOmitMMKwargsAppliesToRawPayload(t *testing.T) {
+	var seen map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&seen))
+		_, _ = w.Write([]byte(`{"token_ids":[1,2,3]}`))
+	}))
+	defer server.Close()
+	renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true, OmitMMKwargs: true})
+	require.NoError(t, err)
+	raw := fwkrh.RawPayload(`{"model":"adapter","messages":[{"role":"user","content":"hi"}],"max_tokens":32000}`)
+	_, _, err = renderer.RenderChat(context.Background(), raw)
+	require.NoError(t, err)
+	assert.Equal(t, "false", string(seen["return_mm_kwargs"]))
+	assert.Equal(t, "1", string(seen["max_tokens"]))
+	assert.Equal(t, `[{"role":"user","content":"hi"}]`, string(seen["messages"]))
+}

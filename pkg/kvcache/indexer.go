@@ -35,17 +35,15 @@ import (
 // The configuration cover the different components found in the Indexer
 // module.
 type Config struct {
-	KVBlockIndexConfig  *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
-	KVBlockScorerConfig *KVBlockScorerConfig    // not exported
-	BackendConfigs      []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
+	KVBlockIndexConfig *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
+	BackendConfigs     []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
 }
 
 // NewDefaultConfig returns a default configuration for the Indexer module.
 func NewDefaultConfig() (*Config, error) {
 	return &Config{
-		KVBlockIndexConfig:  kvblock.DefaultIndexConfig(),
-		KVBlockScorerConfig: DefaultKVBlockScorerConfig(),
-		BackendConfigs:      DefaultKVCacheBackendConfig(),
+		KVBlockIndexConfig: kvblock.DefaultIndexConfig(),
+		BackendConfigs:     DefaultKVCacheBackendConfig(),
 	}, nil
 }
 
@@ -80,12 +78,6 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 	// Wrap index with tracing instrumentation.
 	// When tracing is not configured, the tracer is a no-op implementation.
 	kvBlockIndex = kvblock.NewTracedIndex(kvBlockIndex)
-
-	// override backend configs with the ones from the config, if the defaults are not used.
-	config.KVBlockScorerConfig.BackendConfigs = config.BackendConfigs
-	if strategy := config.KVBlockScorerConfig.ScoringStrategy; strategy != LongestPrefixMatch {
-		return nil, fmt.Errorf("unsupported scoring strategy: %s", strategy)
-	}
 
 	// A nil index config selects kvblock's defaults, metrics off included.
 	recordHits := config.KVBlockIndexConfig != nil && config.KVBlockIndexConfig.EnableMetrics

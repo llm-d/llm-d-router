@@ -1,0 +1,183 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package thunderagent
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// A turn charges its byte estimate while in flight and settles to the
+// usage-reported total when it completes.
+func TestTurnAccounting(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+
+	req := startTurn(t, a, "s1", ep, 400) // 400 bytes / 4 bytes-per-token = 100 tokens
+	s, ok := sessionOf(a, "s1")
+	require.True(t, ok)
+	require.Equal(t, int64(100), s.inflightTokens)
+	require.Equal(t, float64(100), endpointTokens(a, "default/pod-a"))
+
+	a.ResponseBody(context.Background(), req, endOfStream(250, 100), nil)
+	s, _ = sessionOf(a, "s1")
+	require.Equal(t, int64(0), s.inflightTokens)
+	require.Equal(t, int64(250), s.committedTokens)
+	require.Equal(t, float64(250), endpointTokens(a, "default/pod-a"))
+}
+
+// During a later turn the footprint is the max of the committed total and
+// the in-flight estimates, not their sum: the new prefill covers the same
+// history. Overlapping turns of one session add up while in flight.
+func TestFootprintIsMaxNotSum(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+
+	req := startTurn(t, a, "s1", ep, 400)
+	a.ResponseBody(context.Background(), req, endOfStream(300, 100), nil)
+
+	_ = startTurn(t, a, "s1", ep, 800) // in-flight estimate 200 < committed 300
+	require.Equal(t, float64(300), endpointTokens(a, "default/pod-a"))
+
+	_ = startTurn(t, a, "s1", ep, 2000) // overlapping turn: in-flight 200+500=700 > 300
+	require.Equal(t, float64(700), endpointTokens(a, "default/pod-a"))
+}
+
+// Each overlapping turn removes only its own estimate: when a small turn ends
+// first, the larger turn still in flight keeps counting, although the small
+// turn's usage total becomes the committed size.
+func TestOverlappingTurnsSettleIndependently(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+	runTurn(t, a, "s1", ep, 400, 300)
+
+	big := startTurn(t, a, "s1", ep, 2000)  // 500 in flight
+	small := startTurn(t, a, "s1", ep, 400) // 100 more
+	require.Equal(t, float64(600), endpointTokens(a, "default/pod-a"))
+
+	a.ResponseBody(context.Background(), small, endOfStream(150, 100), nil)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(500), s.inflightTokens)
+	require.Equal(t, float64(500), endpointTokens(a, "default/pod-a"), "the big turn still counts")
+
+	a.ResponseBody(context.Background(), big, endOfStream(520, 500), nil)
+	s, _ = sessionOf(a, "s1")
+	require.Equal(t, int64(0), s.inflightTokens)
+	require.Equal(t, float64(520), endpointTokens(a, "default/pod-a"))
+}
+
+// A response for a request PreRequest never charged leaves the session alone.
+func TestResponseWithoutEstimateIgnored(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+	runTurn(t, a, "s1", ep, 400, 300)
+
+	a.ResponseBody(context.Background(), newRequest("s1", 400), endOfStream(900, 900), nil)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(300), s.committedTokens)
+}
+
+// A turn charges at least one token, so a session with an empty request in
+// flight is not taken for idle.
+func TestEmptyRequestStillInFlight(t *testing.T) {
+	a := newTestAgent(testConfig())
+	_ = startTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 0)
+	s, _ := sessionOf(a, "s1")
+	require.Equal(t, int64(1), s.inflightTokens)
+}
+
+// Idle sessions past the TTL are dropped by the sweep, and a pod that then
+// holds nothing is dropped too. Fresh sessions and pods stay.
+func TestTTLEviction(t *testing.T) {
+	cfg := testConfig()
+	a := newTestAgent(cfg)
+	ep := schedEndpoint("pod-a", 0, 0)
+	runTurn(t, a, "s1", ep, 400, 300)
+
+	a.mgr.mu.Lock()
+	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
+	a.mgr.endpoints["default/pod-a"].updatedAt = time.Now().Add(-2 * endpointStaleAfter)
+	a.mgr.mu.Unlock()
+	runTurn(t, a, "s2", schedEndpoint("pod-b", 0, 0), 4, 1)
+
+	a.mgr.sweep(time.Now())
+	_, ok := sessionOf(a, "s1")
+	require.False(t, ok)
+	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
+	_, ok = sessionOf(a, "s2")
+	require.True(t, ok)
+	require.Equal(t, float64(1), endpointTokens(a, "default/pod-b"))
+}
+
+// A session with a turn in flight is never TTL-evicted, so the completion
+// bookkeeping always finds its state.
+func TestTTLKeepsInflightSessions(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+	_ = startTurn(t, a, "s1", ep, 400)
+
+	a.mgr.mu.Lock()
+	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
+	a.mgr.mu.Unlock()
+
+	a.mgr.sweep(time.Now())
+	_, ok := sessionOf(a, "s1")
+	require.True(t, ok)
+}
+
+// Real scraped capacity wins over the configured fallback.
+func TestCapacity(t *testing.T) {
+	a := newTestAgent(testConfig())
+	require.Equal(t, float64(16000), a.endpointCapacity(schedEndpoint("pod-a", 16, 1000).GetMetrics()))
+	require.Equal(t, float64(1000), a.endpointCapacity(schedEndpoint("pod-a", 0, 0).GetMetrics()))
+}
+
+// Anonymous requests (no session identity) are not tracked.
+func TestAnonymousIgnored(t *testing.T) {
+	a := newTestAgent(testConfig())
+	anon := newRequest("", 400)
+	require.NoError(t, a.PreRequest(context.Background(), anon, schedulingResultFor(schedEndpoint("pod-a", 0, 0))))
+	a.mgr.mu.Lock()
+	n := len(a.mgr.sessions)
+	a.mgr.mu.Unlock()
+	require.Equal(t, 0, n)
+}
+
+// The session is the agent-identity attribute, also when an explicit
+// fairness header sets FairnessID to another value. FairnessID alone does not
+// identify a session.
+func TestSessionFollowsAgentIdentity(t *testing.T) {
+	a := newTestAgent(testConfig())
+	ep := schedEndpoint("pod-a", 0, 0)
+
+	withTenant := newRequest("s1", 400)
+	withTenant.FairnessID = "tenant-a"
+	require.NoError(t, a.PreRequest(context.Background(), withTenant, schedulingResultFor(ep)))
+	a.ResponseBody(context.Background(), withTenant, endOfStream(300, 100), nil)
+	s, ok := sessionOf(a, "s1")
+	require.True(t, ok)
+	require.Equal(t, int64(300), s.committedTokens)
+
+	fairnessOnly := newRequest("", 400)
+	fairnessOnly.FairnessID = "tenant-a"
+	require.NoError(t, a.PreRequest(context.Background(), fairnessOnly, schedulingResultFor(ep)))
+	_, ok = sessionOf(a, "tenant-a")
+	require.False(t, ok)
+}

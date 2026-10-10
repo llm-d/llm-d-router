@@ -240,20 +240,69 @@ func EventuallyExists(testConfig *TestConfig, getResource func() error) {
 	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.Succeed())
 }
 
+// SetupNamespace creates nsName if it does not already exist and reports whether
+// it created it, so the caller knows whether to delete it on cleanup.
+func SetupNamespace(testConfig *TestConfig, nsName string) bool {
+	ginkgo.By("Setup namespace " + nsName)
+	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+	if err == nil {
+		return false
+	}
+	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
+
+	ginkgo.By("Creating namespace " + nsName)
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nsName,
+		},
+	}
+	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	EventuallyExists(testConfig, func() error {
+		return testConfig.K8sClient.Get(testConfig.Context,
+			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
+	})
+
+	return true
+}
+
+// DeleteNamespace deletes nsName and waits until the API server reports it gone,
+// so a caller that recreates it does not race the terminating namespace. The
+// wait uses ReadyTimeout because finalizing a namespace reaps every workload
+// still in it, which under parallel runs sharing one node takes far longer than
+// an object needs to appear in the API server.
+func DeleteNamespace(testConfig *TestConfig, nsName string) {
+	ginkgo.By("Deleting namespace " + nsName)
+	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(func() bool {
+		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, testConfig.ReadyTimeout, testConfig.Interval).Should(gomega.BeTrue(),
+		"namespace %s was not fully deleted", nsName)
+}
+
 func CreateAndVerifyObjs(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string) []string {
 	objNames := CreateObjsWithVerifier(testConfig, objs, nsName,
 		func(kind string, clientObj client.Object) {
-			switch kind {
-			case "CustomResourceDefinition":
-				CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
-			case "Deployment":
-				DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
-			case "Pod":
-				PodReady(testConfig, clientObj.(*corev1.Pod))
-			}
+			VerifyObj(testConfig, kind, clientObj)
 		})
 
 	return objNames
+}
+
+// VerifyObj waits until clientObj is ready: an established CRD, an available
+// Deployment, or a ready Pod. Other kinds return at once.
+func VerifyObj(testConfig *TestConfig, kind string, clientObj client.Object) {
+	switch kind {
+	case "CustomResourceDefinition":
+		CRDEstablished(testConfig, clientObj.(*apiextv1.CustomResourceDefinition))
+	case "Deployment":
+		DeploymentAvailable(testConfig, clientObj.(*appsv1.Deployment))
+	case "Pod":
+		PodReady(testConfig, clientObj.(*corev1.Pod))
+	}
 }
 
 func CreateObjsWithVerifier(testConfig *TestConfig, objs []*unstructured.Unstructured, nsName string, verifier func(kind string, clientObj client.Object)) []string {
@@ -350,7 +399,7 @@ func ApplyYAMLFile(testConfig *TestConfig, filePath string, nsName string) []str
 // ReadYaml is a helper function to read in K8S YAML files and split by the --- separator
 func ReadYaml(filePath string) []string {
 	ginkgo.By("Reading YAML file: " + filePath)
-	yamlBytes, err := os.ReadFile(filePath) //nolint:gosec // G304: test helper reads a caller-provided fixture path
+	yamlBytes, err := os.ReadFile(filePath) //#nosec G304 -- test helper reads a caller-provided fixture path
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Split multiple docs, if needed

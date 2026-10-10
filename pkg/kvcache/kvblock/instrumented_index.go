@@ -46,13 +46,17 @@ func NewInstrumentedIndex(next Index) Index {
 
 func (m *instrumentedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
 	err := m.next.Add(ctx, engineKeys, requestKeys, entries)
-	metrics.Admissions.Add(float64(len(requestKeys)))
+	if err == nil {
+		metrics.Admissions.Add(float64(len(requestKeys)))
+	}
 	return err
 }
 
-func (m *instrumentedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
-	err := m.next.Evict(ctx, key, keyType, entries)
-	metrics.Evictions.Add(float64(len(entries)))
+func (m *instrumentedIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
+	err := m.next.Evict(ctx, keyType, keys, entries)
+	if err == nil {
+		metrics.Evictions.Add(float64(len(keys) * len(entries)))
+	}
 	return err
 }
 

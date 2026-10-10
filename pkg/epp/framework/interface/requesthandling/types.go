@@ -18,6 +18,7 @@ limitations under the License.
 package requesthandling
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -207,6 +208,12 @@ func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	}
 	return nil
 }
+
+// BytesPerToken is the average number of request bytes per prompt token, used
+// to estimate token counts without a tokenizer. The tokenizer's estimate
+// backend packs this many bytes into each pseudo-token, so its counts agree
+// with byte-based estimates.
+const BytesPerToken = 4
 
 // TokenizedRequest contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
@@ -606,7 +613,9 @@ func (i *ImagesGenerationsRequest) String() string {
 // This struct includes fields usable for plugins and scheduling decisions.
 type GenerateRequest struct {
 	// TokenIDs are the pre-tokenized input token IDs.
-	TokenIDs []uint32 `json:"token_ids"`
+	TokenIDs []uint32 `json:"token_ids,omitempty"`
+	// Text is the prompt text when pre-tokenized token IDs are not provided.
+	Text string `json:"text,omitempty"`
 	// Features carries multimodal metadata (per-modality content hashes and
 	// placeholder ranges) parsed out of the wire `features` block. Populated
 	// by UnmarshalJSON; not itself a JSON-tagged field.
@@ -774,23 +783,25 @@ type VideoBlock struct {
 	URL string `json:"url,omitempty"`
 }
 
-// UnmarshalJSON allow use both format
+// UnmarshalJSON accepts either a string or an array of content blocks. The first
+// byte selects the format because each json.Unmarshal rescans the whole value,
+// which is costly for content blocks carrying base64 media.
 func (mc *Content) UnmarshalJSON(data []byte) error {
-	// Raw format
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		mc.Raw = str
-		return nil
-	}
-
-	// Block format
-	var blocks []ContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var blocks []ContentBlock
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			return errors.New("content format not supported")
+		}
 		mc.Structured = blocks
 		return nil
 	}
 
-	return errors.New("content format not supported")
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return errors.New("content format not supported")
+	}
+	mc.Raw = str
+	return nil
 }
 
 func (mc Content) MarshalJSON() ([]byte, error) {
@@ -826,6 +837,8 @@ type Usage struct {
 }
 
 type PromptTokenDetails struct {
+	// CachedTokens is the prompt-cache read count, counted inside PromptTokens
+	// rather than added to it.
 	CachedTokens int `json:"cached_tokens"`
 }
 
