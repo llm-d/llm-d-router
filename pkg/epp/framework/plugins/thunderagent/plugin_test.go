@@ -51,7 +51,7 @@ func TestAgentIdentityIsARequiredDependency(t *testing.T) {
 func TestFactoryStartsSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01}`))
+	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01, "headWaitStarvationMs": 0}`))
 	p, err := Factory("thunder", params, utils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	a := p.(*ThunderAgent)

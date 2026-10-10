@@ -37,6 +37,7 @@ import (
 	"time"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -59,6 +60,9 @@ var (
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
 	_ fwkdl.Registrant            = &ThunderAgent{}
 	_ fwkdl.EndpointExtractor     = &ThunderAgent{}
+	_ fwksched.Scorer             = &ThunderAgent{}
+	_ fwkfc.SaturationDetector    = &ThunderAgent{}
+	_ fwkfc.FairnessPolicy        = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -66,7 +70,9 @@ var (
 type ThunderAgent struct {
 	typedName fwkplugin.TypedName
 
-	capacityTokens float64
+	capacityTokens       float64
+	utilThreshold        float64
+	headWaitStarvationMs float64
 
 	mgr     *sessionManager
 	metrics *thunderMetrics
@@ -115,10 +121,12 @@ func (a *ThunderAgent) runSweep(ctx context.Context, interval time.Duration) {
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
 	return &ThunderAgent{
-		typedName:      fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
-		capacityTokens: float64(cfg.CapacityTokens),
-		mgr:            mgr,
-		metrics:        newThunderMetrics(mgr),
+		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
+		capacityTokens:       float64(cfg.CapacityTokens),
+		utilThreshold:        cfg.UtilThreshold,
+		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
+		mgr:                  mgr,
+		metrics:              newThunderMetrics(mgr),
 	}
 }
 
@@ -186,7 +194,7 @@ type endpointDump struct {
 // DumpState reports session counts and each endpoint's working set and
 // capacity, the same values as the metrics.
 func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
-	snap := a.mgr.snapshot()
+	snap := a.mgr.snapshot(time.Now())
 	dump := stateDump{
 		RunningSessions: snap.running,
 		IdleSessions:    snap.idle,

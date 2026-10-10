@@ -19,11 +19,14 @@ package thunderagent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -31,7 +34,8 @@ import (
 )
 
 // testConfig uses round numbers so tests can assert exact values: 1000-token
-// fallback capacity, byte estimates at 4 bytes per token.
+// fallback capacity, byte estimates at 4 bytes per token, the default 30 s
+// idle lease.
 func testConfig() Config {
 	cfg := defaultConfig()
 	cfg.CapacityTokens = 1000
@@ -112,5 +116,87 @@ func endpointTokens(a *ThunderAgent, id string) float64 {
 	if !ok {
 		return -1
 	}
-	return p.workingSetTokens()
+	return p.occupancy(time.Now())
+}
+
+// idleFor backdates a session's last response, so it looks idle for d.
+func idleFor(a *ThunderAgent, id string, d time.Duration) {
+	a.mgr.mu.Lock()
+	a.mgr.sessions[id].lastResponseAt = time.Now().Add(-d)
+	a.mgr.mu.Unlock()
+}
+
+// pause marks a session paused, as a reclaim would.
+func pause(a *ThunderAgent, id string) {
+	a.mgr.mu.Lock()
+	a.mgr.sessions[id].paused = true
+	a.mgr.mu.Unlock()
+}
+
+// dlEndpoint builds a datalayer endpoint without scraped capacity, selecting
+// the fallback.
+func dlEndpoint(name string) fwkdl.Endpoint {
+	nn := types.NamespacedName{Namespace: "default", Name: name}
+	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{})
+}
+
+// primeFitView refreshes the pod ledger the way the flow controller does
+// each dispatch cycle.
+func primeFitView(a *ThunderAgent, endpoints ...fwkdl.Endpoint) {
+	a.Saturation(context.Background(), endpoints)
+}
+
+func isPaused(a *ThunderAgent, id string) bool {
+	a.mgr.mu.Lock()
+	defer a.mgr.mu.Unlock()
+	s, ok := a.mgr.sessions[id]
+	return ok && s.paused
+}
+
+func makeQueue(id string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
+	return makeFlowQueue(id, id, headEnqueue, headBytes)
+}
+
+// makeFlowQueue builds a one-item queue named flowID whose head request
+// carries the given agent-identity session; an empty session leaves it
+// anonymous.
+func makeFlowQueue(flowID, session string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
+	req := fwkfcmocks.NewMockFlowControlRequest(headBytes, "req-"+flowID, fwkfc.FlowKey{ID: flowID})
+	req.InferenceRequestV = newRequest(session, int(headBytes))
+	return &fwkfcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: fwkfc.FlowKey{ID: flowID},
+		PeekV: &fwkfcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     headEnqueue,
+			OriginalRequestV: req,
+		},
+	}
+}
+
+func bandOf(queues ...fwkfc.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAccessor {
+	return &fwkfcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(callback func(flow fwkfc.FlowQueueAccessor) bool) {
+			for _, q := range queues {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
+}
+
+// seed runs one 400-byte turn for the session on pod and completes it with
+// the given committed total.
+func seed(t *testing.T, a *ThunderAgent, id string, pod string, committed int) {
+	t.Helper()
+	ep := schedEndpoint(pod, 0, 0)
+	req := startTurn(t, a, id, ep, 400)
+	a.ResponseBody(context.Background(), req, endOfStream(committed, 100), nil)
+}
+
+func pick(t *testing.T, a *ThunderAgent, queues ...fwkfc.FlowQueueAccessor) fwkfc.FlowQueueAccessor {
+	t.Helper()
+	got, err := a.Pick(context.Background(), bandOf(queues...))
+	require.NoError(t, err)
+	return got
 }
