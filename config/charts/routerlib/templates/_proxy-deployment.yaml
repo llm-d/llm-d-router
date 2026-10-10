@@ -68,12 +68,12 @@ spec:
           {{- toYaml . | nindent 12 }}
         {{- end }}
         {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
-        # Give endpoint removal time to propagate before SIGTERM.
-        # Kubelet performs the delay without a shell in the distroless Envoy image.
-        lifecycle:
-          preStop:
-            sleep:
-              seconds: 5
+          # Give endpoint removal time to propagate before SIGTERM.
+          # Kubelet performs the delay without a shell in the distroless Envoy image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
         {{- end }}
         {{- with $proxy.securityContext }}
           securityContext:
