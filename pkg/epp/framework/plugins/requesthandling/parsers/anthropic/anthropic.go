@@ -113,6 +113,10 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 
 	var messagesReq fwkrh.MessagesRequest
 	if err := json.Unmarshal(body, &messagesReq); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && typeErr.Field != "" {
+			err = &fwkrh.RequestFieldError{Field: typeErr.Field, Err: err}
+		}
 		return nil, fmt.Errorf("error parsing messages request: %w", err)
 	}
 	if len(messagesReq.Messages) == 0 {

@@ -21,6 +21,7 @@ import (
 	compbasemetrics "k8s.io/component-base/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 )
 
 const (
@@ -570,6 +571,23 @@ var (
 		},
 		[]string{"source_type", "extractor_type"},
 	)
+)
+
+// --- Tool-calling request field integrity metric ---
+const toolCallingFieldStatusMetricName = "tool_calling_field_status_total"
+
+var llmdToolCallingFieldStatusTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Subsystem: LLMDRouterEndpointPickerSubsystem,
+		Name:      toolCallingFieldStatusMetricName,
+		Help:      metricsutil.HelpMsgWithStability("Tool-calling request field outcomes by component, direction, field, and status.", compbasemetrics.ALPHA),
+	},
+	[]string{
+		toolcalling.MetricLabelComponent,
+		toolcalling.MetricLabelDirection,
+		toolcalling.MetricLabelField,
+		toolcalling.MetricLabelStatus,
+	},
 )
 
 var (

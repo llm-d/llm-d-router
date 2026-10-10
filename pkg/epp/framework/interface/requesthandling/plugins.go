@@ -54,6 +54,21 @@ type Parser interface {
 	Claims() Claims
 }
 
+// RequestFieldError identifies the JSON field path responsible for a parser failure.
+// Err preserves the client-facing error message.
+type RequestFieldError struct {
+	Field string
+	Err   error
+}
+
+func (e *RequestFieldError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *RequestFieldError) Unwrap() error {
+	return e.Err
+}
+
 // ModelNameRewriter is implemented by parsers whose forwarded body can carry a model name.
 type ModelNameRewriter interface {
 	// RewriteModelName writes model into the payload and returns it. Taking and

@@ -509,6 +509,10 @@ func requestBodyDecodeError(err, validationErr error) error {
 	if errors.As(err, &syntaxErr) {
 		return err
 	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) && typeErr.Field != "" {
+		return &fwkrh.RequestFieldError{Field: typeErr.Field, Err: validationErr}
+	}
 	return validationErr
 }
 
