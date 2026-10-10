@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -260,6 +261,22 @@ func TestNIXLPushIdentityCache_SerialOnlyExpires(t *testing.T) {
 	require.True(t, cache.serialOnly(testNIXLPushEndpoint))
 	advance(time.Second)
 	require.False(t, cache.serialOnly(testNIXLPushEndpoint))
+}
+
+// A change of identity while the endpoint is serial-only extends the marking,
+// so the endpoint is counted as marked once.
+func TestStoreNIXLPushIdentity_CountsSerialOnlyMarkOnce(t *testing.T) {
+	s := NewProxy(Config{})
+	s.logger = logr.Discard()
+	before := unlabeledCounterValue(t, metricNIXLPushSerialOnlyMarks)
+
+	for _, engineID := range []string{"prefill-engine_dp0", "prefill-engine_dp1", "prefill-engine_dp0", "prefill-engine_dp1"} {
+		_, ok := s.storeNIXLPushIdentity(testNIXLPushEndpoint, map[string]any(testNIXLPushIdentity(engineID)))
+		require.True(t, ok)
+	}
+
+	require.True(t, s.nixlPushIdentities.serialOnly(testNIXLPushEndpoint))
+	require.Equal(t, 1.0, unlabeledCounterValue(t, metricNIXLPushSerialOnlyMarks)-before)
 }
 
 // Request goroutines and the data-parallel rank servers share one cache, so

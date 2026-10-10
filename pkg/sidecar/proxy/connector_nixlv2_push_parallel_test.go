@@ -24,11 +24,13 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
 
@@ -665,5 +667,97 @@ var _ = Describe("NIXL Connector (v2) NIXL push parallel dispatch", func() {
 		Expect(status).To(Equal(http.StatusOK), body)
 		parallelAttempt, retry := <-prefillMessages, <-prefillMessages
 		Expect(retry).To(Equal(parallelAttempt))
+	})
+
+	// serveUnstarted sends one request straight to handleNIXLV2 of a proxy that
+	// is not started, with testNIXLPushIdentity cached for the prefill endpoint.
+	// It returns the response and the messages the proxy logged as errors.
+	serveUnstarted := func(prefill, decode http.Handler) (*httptest.ResponseRecorder, []string) {
+		GinkgoHelper()
+		prefillBackend := httptest.NewServer(prefill)
+		DeferCleanup(prefillBackend.Close)
+		prefillURL, err := url.Parse(prefillBackend.URL)
+		Expect(err).ToNot(HaveOccurred())
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: prefillURL, NIXLPushMode: true})
+		sink := &errorCaptureSink{}
+		proxy.logger = logr.New(sink)
+		proxy.decoderProxy = decode
+		proxy.nixlPushIdentities.put(prefillURL.Host, testNIXLPushIdentity(testNIXLPushEngineID))
+
+		rw := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody))
+		proxy.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+		captured := sink.snapshot()
+		logged := make([]string, 0, len(captured))
+		for _, e := range captured {
+			logged = append(logged, e.msg)
+		}
+		return rw, logged
+	}
+
+	It("logs no error for the decode request it cancels to send again", func() {
+		decodeArrived, stop := make(chan struct{}), make(chan struct{})
+		defer close(stop)
+		answer := nixlPushPrefillAnswer("restarted-engine")
+		prefill := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-decodeArrived:
+				statusHandler(http.StatusOK, answer).ServeHTTP(w, r)
+			case <-stop:
+			}
+		})
+		stale := staleThenResentDecode(decodeArrived, make(chan struct{}), stop, make(chan map[string]any, 2))
+		decode := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			stale.ServeHTTP(w, r)
+			// The reverse proxy panics with http.ErrAbortHandler when the response
+			// it relays breaks off.
+			if r.Context().Err() != nil {
+				panic(http.ErrAbortHandler)
+			}
+		})
+
+		rw, logged := serveUnstarted(prefill, decode)
+
+		Expect(rw.Code).To(Equal(http.StatusOK))
+		Expect(rw.Body.String()).To(Equal(resentDecodeBody))
+		Expect(logged).To(BeEmpty())
+	})
+
+	It("logs no error for the prefill request it cancels after decode failed", func() {
+		prefillArrived, stop := make(chan struct{}), make(chan struct{})
+		defer close(stop)
+		decode := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-prefillArrived:
+			case <-stop:
+				return
+			}
+			statusHandler(http.StatusInternalServerError, `{"error":"decode boom"}`).ServeHTTP(w, r)
+		})
+
+		rw, logged := serveUnstarted(blockUntilCancelled(prefillArrived, make(chan struct{}), stop), decode)
+
+		Expect(rw.Code).To(Equal(http.StatusInternalServerError))
+		Expect(logged).To(BeEmpty())
+	})
+
+	It("logs an error when decode aborts without being cancelled", func() {
+		prefillArrived, stop := make(chan struct{}), make(chan struct{})
+		defer close(stop)
+		decode := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			select {
+			case <-prefillArrived:
+			case <-stop:
+				return
+			}
+			panic(http.ErrAbortHandler)
+		})
+
+		rw, logged := serveUnstarted(blockUntilCancelled(prefillArrived, make(chan struct{}), stop), decode)
+
+		Expect(rw.Code).To(Equal(http.StatusBadGateway))
+		Expect(logged).To(ContainElement("concurrent-dispatch decode handler aborted"))
 	})
 })

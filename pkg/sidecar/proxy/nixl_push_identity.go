@@ -25,6 +25,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // NIXL push kv_transfer_params fields and values.
@@ -134,7 +135,8 @@ func (c *nixlPushIdentityCache) get(hostPort string) (nixlPushIdentity, bool) {
 }
 
 // put caches a copy of identity for hostPort, replacing the older entry. It
-// reports whether the change of identity marked hostPort serial-only.
+// reports whether the change of identity marked hostPort serial-only. A change
+// while hostPort is serial-only extends the marking and reports false.
 func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -148,6 +150,7 @@ func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) 
 		return false
 	}
 	now := c.now()
+	wasSerialOnly := now.Before(entry.serialUntil)
 	marked := !entry.changedAt.IsZero() && now.Sub(entry.changedAt) <= nixlPushIdentityChangeWindow
 	if marked {
 		entry.serialUntil = now.Add(nixlPushSerialOnlyDuration)
@@ -155,7 +158,7 @@ func (c *nixlPushIdentityCache) put(hostPort string, identity nixlPushIdentity) 
 	entry.identity = maps.Clone(identity)
 	entry.changedAt = now
 	c.lru.Add(hostPort, entry)
-	return marked
+	return marked && !wasSerialOnly
 }
 
 // serialOnly reports whether hostPort is marked serial-only.
@@ -197,6 +200,7 @@ func (s *Server) storeNIXLPushIdentity(prefillPodHostPort string, kvTransferPara
 		return nil, false
 	}
 	if s.nixlPushIdentities.put(prefillPodHostPort, identity) {
+		metrics.RecordNIXLPushSerialOnlyMark()
 		s.logger.Info("NIXL push identity of the prefill endpoint keeps changing; dispatching its requests serially",
 			"target", prefillPodHostPort, "duration", nixlPushSerialOnlyDuration.String())
 	}

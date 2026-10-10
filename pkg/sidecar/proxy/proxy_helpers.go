@@ -165,7 +165,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureSkipVerify bool) *httputil.ReverseProxy {
 	decoderProxy := httputil.NewSingleHostReverseProxy(decoderURL)
 	decoderProxy.Transport = s.newProxyTransport(decoderURL.Scheme, decoderInsecureSkipVerify)
-	decoderProxy.ErrorHandler = func(res http.ResponseWriter, _ *http.Request, err error) {
+	decoderProxy.ErrorHandler = func(res http.ResponseWriter, req *http.Request, err error) {
 
 		// Log errors from the decoder proxy
 		var writeError error
@@ -176,6 +176,12 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
+
+		// The caller cancelled the request, so the decoder did not fail.
+		case errors.Is(err, context.Canceled) && req.Context().Err() != nil:
+			s.logger.V(logging.DEBUG).Info("decoder request cancelled",
+				"decoderURL", s.config.DecoderURL.String())
+			writeError = errorBadGateway(err, res)
 
 		default:
 			s.logger.Error(err, "http: proxy error",

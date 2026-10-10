@@ -683,6 +683,18 @@ func TestLLMDSemanticConventions(t *testing.T) {
 			wantKey:  "llm_d.pd_proxy.chunked_decode.duration_ms",
 			wantType: attribute.FLOAT64,
 		},
+		{
+			name:     "LLMDPDProxyNIXLPushDispatchReason",
+			got:      LLMDPDProxyNIXLPushDispatchReason("cache_hit"),
+			wantKey:  "llm_d.pd_proxy.nixl_push.dispatch_reason",
+			wantType: attribute.STRING,
+		},
+		{
+			name:     "LLMDPDProxyNIXLPushIdentityMismatch",
+			got:      LLMDPDProxyNIXLPushIdentityMismatch(true),
+			wantKey:  "llm_d.pd_proxy.nixl_push.identity_mismatch",
+			wantType: attribute.BOOL,
+		},
 
 		// EC Proxy
 		{
