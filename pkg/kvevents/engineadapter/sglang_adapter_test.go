@@ -17,6 +17,7 @@ limitations under the License.
 package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
+	"bytes"
 	"os"
 	"strconv"
 	"strings"
@@ -93,8 +94,6 @@ func TestSGLangParseMessage_InvalidPayload(t *testing.T) {
 
 // TestSGLangBlockStored_FullFields tests decoding with all 9 fields (same as vLLM).
 func TestSGLangBlockStored_FullFields(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{
 		"BlockStored",
 		[]any{uint64(100), uint64(101)},
@@ -110,7 +109,7 @@ func TestSGLangBlockStored_FullFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -129,7 +128,6 @@ func TestSGLangBlockStored_FullFields(t *testing.T) {
 // TestSGLangBlockStoredNegativeHashPreservesBits verifies the signed hash
 // representation emitted by SGLang survives adapter conversion.
 func TestSGLangBlockStoredNegativeHashPreservesBits(t *testing.T) {
-	adapter := NewSGLangAdapter()
 	hash := int64(-987654321987654321)
 	parentHash := int64(-1234567890123456789)
 
@@ -146,7 +144,7 @@ func TestSGLangBlockStoredNegativeHashPreservesBits(t *testing.T) {
 		0xa3, 'G', 'P', 'U',
 	}
 
-	event, err := decodeEvent(rawEvent, sglangMapEventToFields, adapter.eventConverters)
+	event, err := decodeSGLangEvent(rawEvent)
 	require.NoError(t, err)
 
 	blockStored, ok := event.(*kvevents.BlockStoredEvent)
@@ -157,8 +155,6 @@ func TestSGLangBlockStoredNegativeHashPreservesBits(t *testing.T) {
 
 // TestSGLangBlockStored_7Fields tests decoding with 7 fields (no lora_name, no extra_keys).
 func TestSGLangBlockStored_7Fields(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{
 		"BlockStored",
 		[]any{uint64(300), uint64(301)},
@@ -172,7 +168,7 @@ func TestSGLangBlockStored_7Fields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err, "SGLang 7-field format should decode successfully")
 	require.NotNil(t, result)
 
@@ -189,8 +185,6 @@ func TestSGLangBlockStored_7Fields(t *testing.T) {
 
 // TestSGLangBlockStored_MinimalFields tests decoding with only the minimum required fields.
 func TestSGLangBlockStored_MinimalFields(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	// 7 fields (the current minimum): tag + block_hashes + parent + tokens +
 	// block_size + lora_id + medium, with lora_id and medium set to nil.
 	event := []any{
@@ -206,7 +200,7 @@ func TestSGLangBlockStored_MinimalFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err, "minimal 7-field BlockStored should decode successfully")
 	require.NotNil(t, result)
 
@@ -224,8 +218,6 @@ func TestSGLangBlockStored_MinimalFields(t *testing.T) {
 
 // TestSGLangBlockStored_TooFewFields tests that fewer than minimum fields returns an error.
 func TestSGLangBlockStored_TooFewFields(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{
 		"BlockStored",
 		[]any{uint64(500)},
@@ -236,15 +228,13 @@ func TestSGLangBlockStored_TooFewFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	_, err = decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	_, err = decodeSGLangEvent(rawBytes)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "too few fields")
+	assert.Contains(t, err.Error(), "need at least")
 }
 
 // TestSGLangBlockRemoved_FullFields tests decoding with all 3 fields.
 func TestSGLangBlockRemoved_FullFields(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	medium := "cpu"
 	event := []any{
 		"BlockRemoved",
@@ -255,7 +245,7 @@ func TestSGLangBlockRemoved_FullFields(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -267,8 +257,6 @@ func TestSGLangBlockRemoved_FullFields(t *testing.T) {
 
 // TestSGLangBlockRemoved_NilMedium tests decoding with medium set to nil.
 func TestSGLangBlockRemoved_NilMedium(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{
 		"BlockRemoved",
 		[]any{uint64(500), uint64(501)},
@@ -278,7 +266,7 @@ func TestSGLangBlockRemoved_NilMedium(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err, "SGLang BlockRemoved with nil medium should decode successfully")
 	require.NotNil(t, result)
 
@@ -290,14 +278,12 @@ func TestSGLangBlockRemoved_NilMedium(t *testing.T) {
 
 // TestSGLangAllBlocksCleared tests decoding a valid AllBlocksCleared event.
 func TestSGLangAllBlocksCleared(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{"AllBlocksCleared"}
 
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -459,15 +445,116 @@ func TestSGLangMapEncodedErrors(t *testing.T) {
 
 // TestSGLangUnknownTag tests error handling for unknown event tags.
 func TestSGLangUnknownTag(t *testing.T) {
-	adapter := NewSGLangAdapter()
-
 	event := []any{"UnknownEventType", "some", "data"}
 
 	rawBytes, err := msgpack.Marshal(event)
 	require.NoError(t, err)
 
-	result, err := decodeEvent(rawBytes, sglangMapEventToFields, adapter.eventConverters)
+	result, err := decodeSGLangEvent(rawBytes)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "unknown event tag")
+}
+
+func TestSGLangParseMessage_BoundedUnknownField(t *testing.T) {
+	var nested any = nil
+	for range maxDecodeDepth + 1 {
+		nested = []any{nested}
+	}
+	payload, err := msgpack.Marshal([]any{0.0, []any{map[string]any{
+		"type":       eventTagAllBlocksCleared,
+		"cache_salt": nested,
+	}}, nil})
+	require.NoError(t, err)
+	_, _, _, err = NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+	require.ErrorContains(t, err, "depth")
+}
+
+func BenchmarkParseSGLangMessage_RealCapture(b *testing.B) {
+	payload, err := os.ReadFile("testdata/sglang_encoded_kvevent")
+	require.NoError(b, err)
+	adapter := NewSGLangAdapter()
+	message := &kvevents.RawMessage{Topic: "kv@pod@model", Payload: payload}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for range b.N {
+		if _, _, _, err := adapter.ParseMessage(message); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func decodeSGLangEvent(payload []byte) (kvevents.GenericEvent, error) {
+	return decodeTypedEventFromDecoder(msgpack.NewDecoder(bytes.NewReader(payload)), true)
+}
+
+func TestSGLangParseMessage_EngineSchema(t *testing.T) {
+	stored := []any{eventTagBlockStored, []uint64{1}, nil, []uint32{2}, 1, nil, "GPU"}
+	for name, event := range map[string]any{
+		"array trailing fields": append(stored, 42, "unused", -1),
+		"map engine fields": map[string]any{
+			"type": eventTagBlockStored, "block_hashes": []uint64{1},
+			"token_ids": []uint32{2}, "block_size": 1, "medium": "GPU",
+			"lora_name": 42, "extra_keys": "unused", "group_idx": -1,
+			"cache_salt": "salt", "session_id": "session",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := msgpack.Marshal([]any{1.0, []any{event}, nil, "publisher"})
+			require.NoError(t, err)
+			_, _, batch, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+			require.NoError(t, err)
+			require.Equal(t, []kvevents.GenericEvent{&kvevents.BlockStoredEvent{
+				BlockHashes: []uint64{1}, Tokens: []uint32{2}, BlockSize: 1, DeviceTier: "GPU",
+			}}, batch.Events)
+		})
+	}
+}
+
+func TestSGLangParseMessage_InvalidFields(t *testing.T) {
+	for name, event := range map[string]any{
+		"stored omitted medium":  []any{eventTagBlockStored, []uint64{1}, nil, []uint32{2}, 1, nil},
+		"removed omitted medium": []any{eventTagBlockRemoved, []uint64{1}},
+		"invalid hash":           []any{eventTagBlockRemoved, []any{true}, nil},
+		"invalid tokens":         map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": "bad", "block_size": 1},
+		"missing block size":     map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := msgpack.Marshal([]any{0.0, []any{event}, nil})
+			require.NoError(t, err)
+			_, _, _, err = NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+			require.Error(t, err)
+		})
+	}
+	payload, err := msgpack.Marshal([]any{0.0, []any{}})
+	require.NoError(t, err)
+	_, _, _, err = NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+	require.Error(t, err)
+}
+
+func TestSGLangParseMessage_MapTagOrder(t *testing.T) {
+	for _, tagFirst := range []bool{true, false} {
+		var buffer bytes.Buffer
+		encoder := msgpack.NewEncoder(&buffer)
+		require.NoError(t, encoder.EncodeArrayLen(3))
+		require.NoError(t, encoder.EncodeFloat64(1))
+		require.NoError(t, encoder.EncodeArrayLen(1))
+		require.NoError(t, encoder.EncodeMapLen(5))
+		names := []string{"block_hashes", "token_ids", "block_size", "lora_name", "type"}
+		if tagFirst {
+			names = []string{"type", "block_hashes", "token_ids", "block_size", "lora_name"}
+		}
+		values := map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}, "block_size": 1, "lora_name": 42}
+		for _, name := range names {
+			require.NoError(t, encoder.EncodeString(name))
+			require.NoError(t, encoder.Encode(values[name]))
+		}
+		require.NoError(t, encoder.EncodeNil())
+		_, _, batch, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: buffer.Bytes()})
+		require.NoError(t, err)
+		require.Equal(t, []kvevents.GenericEvent{&kvevents.BlockStoredEvent{
+			BlockHashes: []uint64{1}, Tokens: []uint32{2}, BlockSize: 1,
+		}}, batch.Events)
+	}
 }

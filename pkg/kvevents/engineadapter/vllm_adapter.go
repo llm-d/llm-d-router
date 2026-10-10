@@ -44,7 +44,7 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	podID, modelName := parseTopic(msg.Topic)
 
-	var vllmBatch msgpackVLLMEventBatch
+	var vllmBatch msgpackTypedEventBatch
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
