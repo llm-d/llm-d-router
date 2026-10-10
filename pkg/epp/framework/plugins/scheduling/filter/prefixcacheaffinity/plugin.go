@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -90,6 +91,14 @@ type Config struct {
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
 
+	// MaxInFlightRequestsDelta adds non-sticky endpoints to the sticky set
+	// when the least-loaded sticky endpoint holds more than this many in-flight
+	// requests above the least-loaded of them. Only non-sticky endpoints where
+	// the request's estimated TTFT exceeds its best TTFT on a sticky endpoint
+	// by at most MaxTTFTPenaltyMs are considered and kept. Requires
+	// MaxTTFTPenaltyMs > 0. Default: 0 (disabled).
+	MaxInFlightRequestsDelta int64 `json:"maxInFlightRequestsDelta,omitempty"`
+
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
@@ -146,6 +155,12 @@ func (c *Config) validate() error {
 	}
 	if c.MaxTTFTPenaltyMs < 0 {
 		return fmt.Errorf("maxTTFTPenaltyMs must be >= 0, got %f", c.MaxTTFTPenaltyMs)
+	}
+	if c.MaxInFlightRequestsDelta < 0 {
+		return fmt.Errorf("maxInFlightRequestsDelta must be >= 0, got %d", c.MaxInFlightRequestsDelta)
+	}
+	if c.MaxInFlightRequestsDelta > 0 && c.MaxTTFTPenaltyMs == 0 {
+		return errors.New("maxTTFTPenaltyMs must be > 0 when maxInFlightRequestsDelta is set")
 	}
 	if c.PeakPrefillThroughput < 0 {
 		return fmt.Errorf("peakPrefillThroughput must be >= 0, got %f", c.PeakPrefillThroughput)
@@ -252,6 +267,24 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		}
 	}
 
+	// In-flight request gate: add the non-sticky endpoints that can serve the
+	// request within the penalty when the sticky endpoints hold many more
+	// in-flight requests than the least-loaded of them. Endpoints over the
+	// penalty are not added, so the scorers cannot pick them.
+	if p.config.MaxInFlightRequestsDelta > 0 && len(nonSticky) > 0 {
+		within := p.withinPenalty(sticky, nonSticky)
+		stickyRequests, stickyOk := p.leastInFlightRequests(sticky)
+		withinRequests, withinOk := p.leastInFlightRequests(within)
+		if stickyOk && withinOk && stickyRequests-withinRequests > p.config.MaxInFlightRequestsDelta {
+			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: in-flight request gate broken",
+				"stickyRequests", stickyRequests, "nonStickyRequests", withinRequests,
+				"maxDelta", p.config.MaxInFlightRequestsDelta, "added", len(within))
+			recordDecision(p.typedName.Name, outcomeRequestLoadOverride)
+			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeRequestLoadOverride))
+			return slices.Concat(sticky, within)
+		}
+	}
+
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	recordDecision(p.typedName.Name, outcomeSticky)
@@ -269,6 +302,9 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 		} else {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
 		}
+	}
+	if p.config.MaxInFlightRequestsDelta > 0 {
+		required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
 	}
 	return fwkplugin.DataDependencies{Required: required}
 }
@@ -318,12 +354,96 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
+// requestTTFT returns the estimated TTFT (ms) of the current request on an
+// endpoint. The predictor path already accounts for the request. The
+// throughput path adds the prompt tokens the endpoint has not cached, taken
+// from the same PrefixCacheMatchInfo that forms the sticky set. Prompt tokens
+// beyond the prefix index are the same on every endpoint and cancel in
+// withinPenalty, so they are left out. It returns false when a required
+// attribute is absent.
+func (p *Plugin) requestTTFT(ep fwksched.Endpoint) (float64, bool) {
+	base, ok := p.endpointTTFT(ep)
+	if !ok {
+		return 0, false
+	}
+	if p.config.usesLatencyPredictor() {
+		return base, true
+	}
+	raw, ok := ep.Get(p.prefixMatchDataKey)
+	if !ok {
+		return 0, false
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok || info == nil {
+		return 0, false
+	}
+	uncached := (info.TotalBlocks() - info.MatchBlocks()) * info.BlockSizeTokens()
+	return base + float64(uncached)/p.config.PeakPrefillThroughput*1000, true
+}
+
+// bestRequestTTFT returns the lowest requestTTFT across endpoints, and false
+// when no endpoint carries the required attributes.
+func (p *Plugin) bestRequestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
+	best := math.MaxFloat64
+	found := false
+	for _, ep := range endpoints {
+		if ttft, ok := p.requestTTFT(ep); ok && ttft < best {
+			best = ttft
+			found = true
+		}
+	}
+	return best, found
+}
+
+// withinPenalty returns the non-sticky endpoints on which the request's
+// estimated TTFT exceeds its best TTFT on a sticky endpoint by at most
+// MaxTTFTPenaltyMs. Endpoints without the required attributes are left out.
+func (p *Plugin) withinPenalty(sticky, nonSticky []fwksched.Endpoint) []fwksched.Endpoint {
+	best, ok := p.bestRequestTTFT(sticky)
+	if !ok {
+		return nil
+	}
+	var within []fwksched.Endpoint
+	for _, ep := range nonSticky {
+		if ttft, ok := p.requestTTFT(ep); ok && ttft-best <= p.config.MaxTTFTPenaltyMs {
+			within = append(within, ep)
+		}
+	}
+	return within
+}
+
 // inFlightTokens returns an endpoint's in-flight token count. If the attribute is
 // absent, it returns ok=false so the caller can treat the signal as missing.
 func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Tokens, true
+		}
+	}
+	return 0, false
+}
+
+// leastInFlightRequests returns the lowest in-flight request count across
+// endpoints, and false when no endpoint carries InFlightLoad.
+func (p *Plugin) leastInFlightRequests(endpoints []fwksched.Endpoint) (int64, bool) {
+	best := int64(math.MaxInt64)
+	found := false
+	for _, ep := range endpoints {
+		if n, ok := p.inFlightRequests(ep); ok && n < best {
+			best = n
+			found = true
+		}
+	}
+	return best, found
+}
+
+// inFlightRequests returns an endpoint's in-flight request count. If the
+// attribute is absent, it returns ok=false so the caller can treat the signal
+// as missing.
+func (p *Plugin) inFlightRequests(ep fwksched.Endpoint) (int64, bool) {
+	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
+		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
+			return load.Requests, true
 		}
 	}
 	return 0, false
