@@ -192,6 +192,8 @@ type Runner struct {
 	customCollectors     []prometheus.Collector
 	parserRegistry       *handlers.ParserRegistry
 	dlRuntime            *datalayer.Runtime
+	flowControlCtx       context.Context
+	cancelFlowControl    context.CancelFunc
 	PluginHandle         fwkplugin.Handle
 	// rawConfig caches the result of parseConfigurationPhaseOne.
 	rawConfig *configapiv1.EndpointPickerConfig
@@ -233,6 +235,8 @@ func (r *Runner) WithCustomCollectors(collectors ...prometheus.Collector) *Runne
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	defer r.stopFlowControl()
+
 	// Setup a very basic logger in case command line argument parsing fails
 	logutil.InitSetupLogging("llm-d-epp")
 
@@ -321,7 +325,25 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 	if leaderElection {
 		elected = r.isLeader
 	}
-	return serveWithDrain(ctx, mgr.Start, extProc, health, r.draining, elected, drainTimeout)
+	return serveWithDrain(ctx, mgr.Start, extProc, health, r.stopFlowControl, r.draining, elected, drainTimeout)
+}
+
+func (r *Runner) stopFlowControl() {
+	if r.cancelFlowControl != nil {
+		r.cancelFlowControl()
+	}
+}
+
+// Flow control and endpoint metrics polling must outlive SIGTERM until ext_proc
+// finishes its streams.
+func (r *Runner) flowControlContext(ctx context.Context) context.Context {
+	if !r.featureGates[flowcontrol.FeatureGate] {
+		return ctx
+	}
+	if r.flowControlCtx == nil {
+		r.flowControlCtx, r.cancelFlowControl = context.WithCancel(context.WithoutCancel(ctx))
+	}
+	return r.flowControlCtx
 }
 
 // serveWithDrain runs extProc and health on a context that outlives the manager.
@@ -331,12 +353,16 @@ func (r *Runner) runWithGracefulShutdown(ctx context.Context, mgr ctrl.Manager, 
 // Kubernetes drains it from the Service endpoints), and the ext_proc server keeps
 // accepting requests for drainTimeout so in-flight and pre-DNS-refresh requests
 // are served rather than rejected. ext_proc then stops gracefully, finishing its
-// streams, and the health server stops after it so liveness holds meanwhile. A
-// drainTimeout of 0 stops ext_proc as soon as the manager terminates. A manager
+// streams, and the health server stops after it so liveness holds meanwhile.
+// Flow control and its endpoint metrics polling stop after the servers return.
+// A drainTimeout of 0 stops ext_proc as soon as the manager terminates. A manager
 // that fails before election, or with leader election disabled (elected is nil),
 // stops both servers at once.
-func serveWithDrain(ctx context.Context, startManager func(context.Context) error, extProc, health func(context.Context) error,
+func serveWithDrain(ctx context.Context, startManager func(context.Context) error, extProc, health func(context.Context) error, stopFlowControl func(),
 	draining, elected *atomic.Bool, drainTimeout time.Duration) error {
+	if stopFlowControl != nil {
+		defer stopFlowControl()
+	}
 	// serveCtx is intentionally rooted at Background, not ctx, so SIGTERM does not
 	// immediately stop the ext_proc/health servers. stopExtProc ends ext_proc alone.
 	serveCtx, serveCancel := context.WithCancel(context.Background())
@@ -430,7 +456,7 @@ func (r *Runner) setup(ctx context.Context, cfg *rest.Config, opts *runserver.Op
 		return nil, nil, err
 	}
 
-	ds, err := setupDatastore(ctx, epf, startCrdReconcilers,
+	ds, err := setupDatastore(r.flowControlContext(ctx), epf, startCrdReconcilers,
 		gknn.Namespace, gknn.Name, opts.EndpointSelector, opts.EndpointTargetPorts)
 	if err != nil {
 		setupLog.Error(err, "Failed to setup datastore")
@@ -1072,6 +1098,7 @@ func (r *Runner) initAdmissionControl(
 			nil,
 			nil
 	}
+	ctx = r.flowControlContext(ctx)
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
@@ -1154,6 +1181,8 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	defer r.stopFlowControl()
+
 	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
@@ -1162,7 +1191,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		poolName = "epp"
 	}
 	pool := datalayer.NewEndpointPool(namespace, poolName)
-	ds := datastore.NewDatastore(ctx, epf).WithEndpointPool(pool)
+	ds := datastore.NewDatastore(r.flowControlContext(ctx), epf).WithEndpointPool(pool)
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
 	// API), neither --pool-namespace nor the NAMESPACE env var is set, so the

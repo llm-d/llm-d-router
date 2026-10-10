@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -130,6 +131,7 @@ featureGates:
 			opts.PoolName = testPoolName
 
 			r := NewRunner()
+			t.Cleanup(r.stopFlowControl)
 			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 			require.NoError(t, err)
 
@@ -187,4 +189,34 @@ func TestFeatureGatesFlagNotDuplicatedAcrossCalls(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, first, second, "the cached config should be returned")
 	require.Len(t, second.FeatureGates, 1, "the flag gate must not be appended twice")
+}
+
+func TestFlowControlContext(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			r := NewRunner()
+			t.Cleanup(r.stopFlowControl)
+			opts := runserver.NewOptions()
+			opts.FeatureGates = []string{flowcontrol.FeatureGate + "=" + strconv.FormatBool(enabled)}
+			type lifecycleKey struct{}
+			key := lifecycleKey{}
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), key, "request-serving"))
+			defer cancel()
+			_, err := r.parseConfigurationPhaseOne(ctx, opts)
+			require.NoError(t, err)
+			servingCtx := r.flowControlContext(ctx)
+			require.Same(t, servingCtx, r.flowControlContext(ctx), "datastore and flow control must share their lifecycle")
+			require.Equal(t, "request-serving", servingCtx.Value(key))
+
+			cancel()
+			if enabled {
+				require.NoError(t, servingCtx.Err(), "flow control dependencies must remain running during drain")
+			} else {
+				require.Same(t, ctx, servingCtx, "legacy admission must retain the signal context")
+				require.ErrorIs(t, servingCtx.Err(), context.Canceled)
+			}
+			r.stopFlowControl()
+			require.ErrorIs(t, servingCtx.Err(), context.Canceled)
+		})
+	}
 }

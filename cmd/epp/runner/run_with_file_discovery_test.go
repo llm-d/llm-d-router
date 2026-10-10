@@ -394,6 +394,8 @@ func TestRunWithFileDiscovery_AlphaPluginBlockedByDefault(t *testing.T) {
 
 	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
+featureGates:
+- flowControl
 plugins:
   - name: file-discovery
     type: file-discovery
@@ -423,6 +425,8 @@ dataLayer:
 	err = r.runWithFileDiscovery(ctx, opts, rawConfig)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "has Alpha stability level, but command line flag --allow-experimental-plugins is not set")
+	require.NotNil(t, r.flowControlCtx)
+	require.ErrorIs(t, r.flowControlCtx.Err(), context.Canceled, "serving dependencies must stop on startup failure")
 }
 
 func TestRunWithFileDiscovery_AlphaPluginAllowedWithFlag(t *testing.T) {
