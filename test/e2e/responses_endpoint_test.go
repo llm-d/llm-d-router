@@ -24,7 +24,8 @@ import (
 	"github.com/onsi/gomega"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/metrics"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
 
@@ -44,12 +45,12 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 		createModelServersPDSharedStorage(decodeReplicas)
 		standalone.Create(standaloneConfig(), pdConfig, 1, 8000)
 
-		prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+		prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
-		prefillBefore := utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])
-		decodeBefore := utils.GetPodRequestCount(testConfig, nsName, decodePods[0])
+		prefillBefore := metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])
+		decodeBefore := metrics.GetPodRequestCount(testConfig, nsName, decodePods[0])
 		gomega.Expect(prefillBefore).To(gomega.BeNumerically(">=", 0), "prefill pod metrics unreadable, cannot prove a request was not dispatched")
 		gomega.Expect(decodeBefore).To(gomega.BeNumerically(">=", 0), "decode pod metrics unreadable, cannot prove a request was not dispatched")
 
@@ -94,9 +95,9 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 				"error should name the unsupported field: %s", string(raw))
 		}
 
-		gomega.Expect(utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])).To(gomega.Equal(prefillBefore),
+		gomega.Expect(metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])).To(gomega.Equal(prefillBefore),
 			"prefill pod received a request the sidecar should have refused")
-		gomega.Expect(utils.GetPodRequestCount(testConfig, nsName, decodePods[0])).To(gomega.Equal(decodeBefore),
+		gomega.Expect(metrics.GetPodRequestCount(testConfig, nsName, decodePods[0])).To(gomega.Equal(decodeBefore),
 			"decode pod received a request the sidecar should have refused")
 	})
 
@@ -110,11 +111,11 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 		createModelServersPDSharedStorage(decodeReplicas)
 		standalone.Create(standaloneConfig(), pdConfig, 1, 8000)
 
-		prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+		prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
-		prefillBefore := utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])
+		prefillBefore := metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count before: %d", prefillBefore))
 
 		ginkgo.By("POST a supported /v1/responses body")
@@ -126,7 +127,7 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
 
-		prefillAfter := utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])
+		prefillAfter := metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count after: %d", prefillAfter))
 		gomega.Expect(prefillAfter).To(gomega.BeNumerically(">", prefillBefore),
 			"prefill pod should have received the Responses request; the sidecar must route "+
@@ -142,10 +143,10 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 		createModelServersEPDDisagg(encodeReplicas, prefillReplicas, decodeReplicas)
 		standalone.Create(standaloneConfig(), epdConfig, 1, 8000)
 
-		encodePods := utils.GetPodNames(testConfig, encodeSelector, nsName)
+		encodePods := k8s.GetPodNames(testConfig, encodeSelector, nsName)
 		gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 
-		encodeBefore := utils.GetPodRequestCount(testConfig, nsName, encodePods[0])
+		encodeBefore := metrics.GetPodRequestCount(testConfig, nsName, encodePods[0])
 		ginkgo.By(fmt.Sprintf("encode request count before: %d", encodeBefore))
 
 		// A Responses input_image carries its URL as a bare string on the part,
@@ -168,7 +169,7 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
 
-		encodeAfter := utils.GetPodRequestCount(testConfig, nsName, encodePods[0])
+		encodeAfter := metrics.GetPodRequestCount(testConfig, nsName, encodePods[0])
 		ginkgo.By(fmt.Sprintf("encode request count after: %d", encodeAfter))
 		gomega.Expect(encodeAfter).To(gomega.BeNumerically(">", encodeBefore),
 			"encode pod should have been primed from the Responses input_image; the fanout must "+

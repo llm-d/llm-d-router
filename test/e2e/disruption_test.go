@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
 
@@ -69,7 +69,7 @@ func sendRawCompletion() (int, error) {
 // and at least minRemaining pods exist.
 func podGone(podName string, nsName string, minRemaining int) func() bool {
 	return func() bool {
-		_, currentDecode := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+		_, currentDecode := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		for _, pod := range currentDecode {
 			if pod == podName {
 				return false
@@ -82,7 +82,7 @@ func podGone(podName string, nsName string, minRemaining int) func() bool {
 // eppPodReady returns true when a new EPP pod (not oldPodName) is Running and Ready.
 func eppPodReady(oldPodName string, nsName string, selector map[string]string) func() bool {
 	return func() bool {
-		pods := utils.GetPods(testConfig, selector, nsName)
+		pods := k8s.GetPods(testConfig, selector, nsName)
 		for _, p := range pods {
 			if p.Name == oldPodName {
 				continue
@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			createModelServersDecode(2)
 			standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
 
-			prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+			prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -149,7 +149,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			ginkgo.By("Waiting for replacement pod to become ready")
 			gomega.Eventually(func() int {
-				_, currentDecode := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+				_, currentDecode := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
@@ -167,7 +167,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
 
-			prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+			prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(prefillPods).Should(gomega.BeEmpty())
 			gomega.Expect(decodePods).Should(gomega.HaveLen(2))
 
@@ -201,7 +201,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			ginkgo.By("Waiting for replacement pod")
 			gomega.Eventually(func() int {
-				_, currentDecode := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+				_, currentDecode := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, readyTimeout, 2*time.Second).Should(gomega.Equal(2))
 
@@ -219,7 +219,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
 
-			_, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+			_, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 			gomega.Expect(decodePods).Should(gomega.HaveLen(1))
 
 			ginkgo.By("Verifying requests succeed before disruption")
@@ -227,11 +227,11 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
 
 			ginkgo.By("Scaling deployment to zero")
-			utils.ScaleDeployment(testConfig, nsName, modelServers, -1)
+			k8s.ScaleDeployment(testConfig, nsName, modelServers, -1)
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+				_, currentDecode := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
@@ -245,7 +245,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			}, trafficProbeTimeout, 500*time.Millisecond).Should(gomega.Equal(http.StatusServiceUnavailable))
 
 			ginkgo.By("Scaling deployment back up")
-			utils.ScaleDeployment(testConfig, nsName, modelServers, 1)
+			k8s.ScaleDeployment(testConfig, nsName, modelServers, 1)
 
 			ginkgo.By("Verifying requests succeed after recovery")
 			gomega.Eventually(func() string {
@@ -268,7 +268,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			gomega.Expect(nsHdr).Should(gomega.Equal(getNamespace()))
 
 			ginkgo.By("Finding EPP pod")
-			eppPods := utils.GetPods(testConfig, router.Selector, nsName)
+			eppPods := k8s.GetPods(testConfig, router.Selector, nsName)
 			gomega.Expect(eppPods).Should(gomega.HaveLen(1))
 			eppPodName := eppPods[0].Name
 
@@ -324,11 +324,11 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			}()
 
 			ginkgo.By("Scaling to zero")
-			utils.ScaleDeployment(testConfig, nsName, modelServers, -1)
+			k8s.ScaleDeployment(testConfig, nsName, modelServers, -1)
 
 			ginkgo.By("Waiting for all pods to be removed")
 			gomega.Eventually(func() int {
-				_, currentDecode := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+				_, currentDecode := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 				return len(currentDecode)
 			}, podRemovalTimeout, 1*time.Second).Should(gomega.Equal(0))
 
@@ -336,7 +336,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			gomega.Eventually(tc.failures, trafficProbeTimeout, 500*time.Millisecond).Should(gomega.BeNumerically(">", 0))
 
 			ginkgo.By("Scaling back to 1")
-			utils.ScaleDeployment(testConfig, nsName, modelServers, 1)
+			k8s.ScaleDeployment(testConfig, nsName, modelServers, 1)
 
 			ginkgo.By("Waiting for traffic to observe recovery")
 			successBaseline := tc.successes()

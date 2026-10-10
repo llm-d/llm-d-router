@@ -35,7 +35,7 @@ import (
 
 	infextv1a2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/manifest"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -248,7 +248,7 @@ func setupK8sClient() {
 
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
-	crds := utils.RunKustomize(crdKustomizePath)
+	crds := manifest.RunKustomize(crdKustomizePath)
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
