@@ -133,6 +133,163 @@ func doPost(addr, body string) *http.Response {
 }
 
 var _ = Describe("Chunked Decode", func() {
+	DescribeTable("keeps one accumulated assistant message across chunks",
+		func(streaming, continueFinal bool, finalReason string) {
+			// Unsorted keys and the extra name field expose any re-encoding of client messages.
+			userMessage := `{"role":"user","content":[{"type":"text","text":"Hi","z":1,"a":2}]}`
+			history := `{"role":"assistant","content":"Earlier answer"}`
+			prefixMessage := `{"role":"assistant","content":"Prefix: ","name":"writer"}`
+			messages := []json.RawMessage{json.RawMessage(history), json.RawMessage(userMessage), json.RawMessage(prefixMessage)}
+			requestBody := map[string]any{
+				reqcommon.FieldMessages:             messages,
+				reqcommon.FieldMaxTokens:            20,
+				reqcommon.FieldStream:               streaming,
+				reqcommon.FieldContinueFinalMessage: continueFinal,
+				reqcommon.FieldAddGenerationPrompt:  !continueFinal,
+				reqcommon.FieldKVTransferParams:     map[string]any{"test": true},
+			}
+			raw, err := json.Marshal(requestBody)
+			Expect(err).ToNot(HaveOccurred())
+			var requests []map[string]json.RawMessage
+			texts := []string{"one", "two", "", "three"}
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				Expect(json.NewDecoder(r.Body).Decode(&body)).To(Succeed())
+				requests = append(requests, body)
+				Expect(len(requests)).To(BeNumerically("<=", len(texts)))
+				reason := finishReasonLength
+				if len(requests) == len(texts) {
+					reason = finalReason
+				}
+				_, err := io.WriteString(w, chatResponse(texts[len(requests)-1], reason, 8, 5))
+				Expect(err).ToNot(HaveOccurred())
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(string(raw))))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			Expect(requests).To(HaveLen(4))
+			for index, request := range requests {
+				var gotMessages []json.RawMessage
+				Expect(json.Unmarshal(request[reqcommon.FieldMessages], &gotMessages)).To(Succeed())
+				Expect(gotMessages[:2]).To(Equal(messages[:2]))
+				if index == 0 {
+					Expect(gotMessages).To(Equal(messages))
+					continue
+				}
+				Expect(string(request[reqcommon.FieldContinueFinalMessage])).To(Equal("true"))
+				Expect(string(request[reqcommon.FieldAddGenerationPrompt])).To(Equal("false"))
+				Expect(request).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
+				wantText := strings.Join(texts[:index], "")
+				if continueFinal {
+					Expect(gotMessages).To(HaveLen(3))
+					wantText = "Prefix: " + wantText
+				} else {
+					Expect(gotMessages).To(HaveLen(4))
+					Expect(gotMessages[2]).To(Equal(messages[2]))
+				}
+				var last map[string]any
+				Expect(json.Unmarshal(gotMessages[len(gotMessages)-1], &last)).To(Succeed())
+				Expect(last).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+				Expect(last).To(HaveKeyWithValue(reqcommon.FieldContent, wantText))
+				if continueFinal {
+					Expect(last).To(HaveKeyWithValue("name", "writer"))
+				}
+			}
+			if streaming {
+				var emitted []string
+				scanner := bufio.NewScanner(response.Body)
+				for scanner.Scan() {
+					data, ok := strings.CutPrefix(scanner.Text(), reqcommon.SSEDataPrefix)
+					if !ok || scanner.Text() == reqcommon.SSEDone {
+						continue
+					}
+					var event map[string]any
+					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
+					if choice := firstChoice(event); choice != nil {
+						emitted = append(emitted, choice[responseFieldDelta].(map[string]any)[reqcommon.FieldContent].(string))
+					}
+				}
+				Expect(scanner.Err()).ToNot(HaveOccurred())
+				Expect(emitted).To(Equal(texts))
+			} else {
+				var result map[string]any
+				Expect(json.Unmarshal(response.Body.Bytes(), &result)).To(Succeed())
+				Expect(extractChoiceText(firstChoice(result))).To(Equal(strings.Join(texts, "")))
+			}
+		},
+		Entry("non-streaming new answer", false, false, "stop"),
+		Entry("streaming new answer", true, false, "stop"),
+		Entry("non-streaming existing prefix", false, true, "stop"),
+		Entry("streaming existing prefix", true, true, "stop"),
+		Entry("non-streaming exhausted budget", false, false, finishReasonLength),
+	)
+
+	DescribeTable("forwards unsupported continuation inputs unchanged",
+		func(messages string) {
+			raw := `{"messages":` + messages + `,"continue_final_message":true,"max_tokens":20,"stream":true}`
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+				w.WriteHeader(http.StatusBadRequest)
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+			Expect(response.Code).To(Equal(http.StatusBadRequest))
+		},
+		Entry("empty messages", `[]`),
+		Entry("malformed messages", `{}`),
+		Entry("missing role", `[{"content":"prefix"}]`),
+		Entry("user message", `[{"role":"user","content":"prefix"}]`),
+		Entry("structured content", `[{"role":"assistant","content":[{"type":"text","text":"prefix"}]}]`),
+		Entry("null content", `[{"role":"assistant","content":null}]`),
+	)
+
+	DescribeTable("handles an empty first chunk",
+		func(tokens int, wantCalls int) {
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 1 {
+					_, err := io.WriteString(w, chatResponse("", finishReasonLength, 8, tokens))
+					Expect(err).ToNot(HaveOccurred())
+					return
+				}
+				var request map[string]any
+				Expect(json.NewDecoder(r.Body).Decode(&request)).To(Succeed())
+				Expect(request[reqcommon.FieldMessages]).To(Equal([]any{
+					map[string]any{"role": "user", "content": "Hi"},
+					map[string]any{"role": "assistant", "content": ""},
+				}))
+				_, err := io.WriteString(w, chatResponse("done", "stop", 8, 1))
+				Expect(err).ToNot(HaveOccurred())
+			})
+			body, err := decodeRequestBody([]byte(`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20}`))
+			Expect(err).ToNot(HaveOccurred())
+			original, err := json.Marshal(body)
+			Expect(err).ToNot(HaveOccurred())
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(string(original)))
+			server.runChunkedDecodeFromMap(response, request, body)
+			Expect(calls).To(Equal(wantCalls))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			after, err := json.Marshal(body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(after).To(Equal(original))
+		},
+		Entry("continues an empty assistant message when tokens were consumed", 5, 2),
+		Entry("stops when neither tokens nor text were produced", 0, 1),
+	)
 
 	Describe("non-streaming", func() {
 
@@ -195,37 +352,6 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
 			content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
 			Expect(content).To(Equal("done"))
-		})
-
-		It("appends assistant message to messages on second chunk", func() {
-			var secondReqBody map[string]any
-			var reqIdx int
-			responses := []string{
-				chatResponse("hello ", "length", 5, 5),
-				chatResponse("world", "stop", 9, 5),
-			}
-
-			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				if reqIdx == 1 {
-					json.Unmarshal(b, &secondReqBody) //nolint:errcheck
-				}
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, responses[reqIdx]) //nolint:errcheck
-				reqIdx++
-			}))
-			defer ti.stop()
-
-			resp := doPost(ti.addr,
-				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
-			Expect(resp.StatusCode).To(Equal(http.StatusOK))
-
-			Expect(secondReqBody).ToNot(BeNil())
-			msgs := secondReqBody[reqcommon.FieldMessages].([]any)
-			Expect(msgs).To(HaveLen(2))
-			lastMsg := msgs[1].(map[string]any)
-			Expect(lastMsg[reqcommon.FieldRole]).To(Equal("assistant"))
-			Expect(lastMsg[reqcommon.FieldContent]).To(Equal("hello "))
 		})
 
 		It("propagates decode backend error to client", func() {
@@ -302,37 +428,6 @@ var _ = Describe("Chunked Decode", func() {
 
 		It("remainingTokens returns 0 when budget is exhausted", func() {
 			Expect(remainingTokens(10, 10)).To(Equal(0))
-		})
-
-		It("appendChunkToRequest appends assistant message to chat messages", func() {
-			req := map[string]any{
-				reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"Hi"}]`),
-			}
-			appendChunkToRequest(logr.Discard(), req, "hello")
-			msgs := req[reqcommon.FieldMessages].([]json.RawMessage)
-			Expect(msgs).To(HaveLen(2))
-			var last map[string]any
-			Expect(json.Unmarshal(msgs[1], &last)).To(Succeed())
-			Expect(last[reqcommon.FieldRole]).To(Equal("assistant"))
-			Expect(last[reqcommon.FieldContent]).To(Equal("hello"))
-		})
-
-		It("appendChunkToRequest keeps the client's messages byte-for-byte across chunks", func() {
-			userMessage := `{"role":"user","content":[{"type":"text","b":"1","a":"2"}]}`
-			req := map[string]any{reqcommon.FieldMessages: json.RawMessage(`[` + userMessage + `]`)}
-
-			appendChunkToRequest(logr.Discard(), req, "one")
-			appendChunkToRequest(logr.Discard(), req, "two")
-
-			body, err := json.Marshal(req)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(string(body)).To(ContainSubstring(userMessage))
-		})
-
-		It("appendChunkToRequest is a no-op for empty text", func() {
-			req := map[string]any{reqcommon.FieldMessages: json.RawMessage(`[]`)}
-			appendChunkToRequest(logr.Discard(), req, "")
-			Expect(req[reqcommon.FieldMessages]).To(Equal(json.RawMessage(`[]`)))
 		})
 	})
 })
