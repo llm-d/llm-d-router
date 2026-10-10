@@ -102,6 +102,12 @@ dynamic LoRA implementation.
 The model servers MUST support serving a LoRA adapter specified in the `model` argument of the
 request, provided the requested adapter is valid.
 
+A pool where adapters are registered on only some model servers, for example through vLLM's
+run-time management API, does not meet this. Its model servers MUST list the adapters they can
+serve at `GET /v1/models`, and its scheduling profiles need the
+[`served-model-filter`](../pkg/epp/framework/plugins/scheduling/filter/servedmodel/README.md) so
+that a request reaches only model servers that list the requested adapter.
+
 The model server MUST expose the following LoRA adapter metrics via the same Prometheus endpoint:
 
 * Metric name implemented in vLLM: `vllm:lora_requests_info`

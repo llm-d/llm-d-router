@@ -341,3 +341,65 @@ func TestConfigure_CrossVariantSourceTypeCollisionRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigure_PollingSourceResolution(t *testing.T) {
+	const (
+		pollType  = "test-polling-source"
+		otherType = "other-polling-source"
+		extType   = "test-polling-extractor" // the mock uses its name as its type
+	)
+	cases := []struct {
+		name      string
+		bindUnder string // source name listing an extractor of extType in config, "" for none
+		ifMissing fwkdl.MissingPolicy
+		wantErr   error
+	}{
+		{
+			name:    "several matching sources and no config binding is ambiguous",
+			wantErr: ErrAmbiguousSource,
+		},
+		{
+			name:      "config binding on any matching source satisfies the registration",
+			bindUnder: "a",
+		},
+		{
+			name:      "several matching sources are skipped under the warn policy",
+			ifMissing: fwkdl.Warn,
+		},
+		{
+			name:      "config binding on a source of another type does not",
+			bindUnder: "c",
+			wantErr:   ErrAmbiguousSource,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRuntime(0)
+			sources := []DataSourceConfig{
+				{Plugin: sourcemocks.NewDataSource(fwkplugin.TypedName{Type: pollType, Name: "a"})},
+				{Plugin: sourcemocks.NewDataSource(fwkplugin.TypedName{Type: pollType, Name: "b"})},
+				{Plugin: sourcemocks.NewDataSource(fwkplugin.TypedName{Type: otherType, Name: "c"})},
+			}
+			for i := range sources {
+				if sources[i].Plugin.TypedName().Name == tc.bindUnder {
+					sources[i].Extractors = []fwkplugin.Plugin{extractormocks.NewPollingExtractor(extType)}
+				}
+			}
+
+			require.NoError(t, r.Register(fwkdl.PendingRegistration{
+				Owner:      fwkplugin.TypedName{Type: "test-plugin", Name: "test"},
+				SourceType: pollType,
+				Extractor:  extractormocks.NewPollingExtractor(extType),
+				IfMissing:  tc.ifMissing,
+			}))
+
+			err := r.Configure(&Config{Sources: sources}, newTestLogger(t))
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

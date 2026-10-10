@@ -22,11 +22,12 @@ import (
 	"io"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
 
-const ModelsDataSourceType = "models-data-source"
+const ModelsDataSourceType = attrmodels.ModelsDataSourceType
 
 // Default values for the models data source configuration.
 const (

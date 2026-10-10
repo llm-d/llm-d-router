@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ var (
 	ErrSourceTypeCollision    = errors.New("source type registered across variants")
 	ErrDuplicateExtractorType = errors.New("duplicate extractor type configured for the same source")
 	ErrNoDefaultProducer      = errors.New("no default producer found for missing data key")
+	ErrAmbiguousSource        = errors.New("ambiguous polling source")
 )
 
 type sourceVariant string
@@ -194,19 +196,29 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 
 	// Resolve code-registered pending registrations after processing user config.
 	for _, pending := range r.pendingRegistrations {
+		// If the config already attaches an extractor of this type to one of the
+		// polling sources of the requested type, the registration is satisfied.
+		// Several such sources are ambiguous only when the config attaches it to none.
+		if r.boundToPollingSourceType(boundTypes, pending.SourceType, pending.Extractor.TypedName().Type) {
+			continue
+		}
 		var gvkFilter *schema.GroupVersionKind
 		if ns, ok := pending.DefaultSource.(fwkdl.NotificationSource); ok {
 			sourceGVK := ns.GVK()
 			gvkFilter = &sourceGVK
 		}
 		srcName, matchedSrc, err := r.findSourceByType(pending.SourceType, gvkFilter)
+		if errors.Is(err, ErrAmbiguousSource) && pending.IfMissing == fwkdl.Warn {
+			logger.Info("datalayer: skipping unresolved dependency", "reason", err.Error())
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("resolve %s: %w", pending.Extractor.TypedName(), err)
 		}
 
 		if matchedSrc == nil {
 			if pending.DefaultSource == nil {
-				msg := fmt.Sprintf("extractor %s requires source type %s, not configured",
+				msg := fmt.Sprintf("extractor %s requires source type %s, not configured in dataLayer.sources",
 					pending.Extractor.TypedName(), pending.SourceType)
 				if pending.IfMissing == fwkdl.Warn {
 					logger.Info("datalayer: skipping unresolved dependency", "reason", msg)
@@ -353,8 +365,22 @@ func (r *Runtime) validateNoCrossVariantCollisions() error {
 	return firstErr
 }
 
+func (r *Runtime) boundToPollingSourceType(bound map[string]map[string]struct{}, sourceType, extType string) bool {
+	for name, disp := range r.dispatchers.Dispatchers() {
+		if disp.TypedName().Type != sourceType {
+			continue
+		}
+		if _, ok := bound[name][extType]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // findSourceByType walks every variant manager and returns the matching source.
-// Returns ErrSourceTypeCollision if sourceType is registered in more than one variant.
+// Returns ErrSourceTypeCollision if sourceType is registered in more than one variant,
+// and ErrAmbiguousSource if more than one polling source matches, since the choice
+// would depend on map iteration order.
 // Return type is plugin.Plugin because PollingDispatcher is not a DataSource.
 func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVersionKind) (string, fwkplugin.Plugin, error) {
 	matches := func(src fwkplugin.Plugin) bool {
@@ -371,13 +397,18 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 		return true
 	}
 
-	// Polling dispatchers searched first; one-pass scan.
 	var pollingHit sourceHit
+	var pollingNames []string
 	for name, disp := range r.dispatchers.Dispatchers() {
 		if matches(disp) {
 			pollingHit = sourceHit{variant: variantPolling, name: name, src: disp}
-			break
+			pollingNames = append(pollingNames, name)
 		}
+	}
+	if len(pollingNames) > 1 {
+		slices.Sort(pollingNames)
+		return "", nil, fmt.Errorf("%w: type %q has sources %v; list the extractor under one of them in dataLayer.sources",
+			ErrAmbiguousSource, sourceType, pollingNames)
 	}
 
 	matched, err := findUnique(sourceType,
