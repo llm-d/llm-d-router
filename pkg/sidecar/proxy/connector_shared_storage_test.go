@@ -351,3 +351,23 @@ func TestSharedStorage_StreamingDecodeFirstErrorStatus(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, client.Code)
 	require.Equal(t, errEvent, client.Body.String())
 }
+
+func TestCacheThresholdFinishReasonScansEveryChoice(t *testing.T) {
+	s := &Server{}
+	require.False(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "stop"},
+		},
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "stop"},
+			map[string]any{"finish_reason": "cache_threshold"},
+		},
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "cache_threshold"},
+		},
+	}))
+}

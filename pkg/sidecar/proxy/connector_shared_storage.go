@@ -239,13 +239,17 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		return false
 	}
 
-	choice, ok := choices[0].(map[string]any)
-	if !ok {
-		return false
+	for _, raw := range choices {
+		choice, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		finishReason, ok := choice[responseFieldFinishReason].(string)
+		if ok && finishReason == finishReasonCacheThreshold {
+			return true
+		}
 	}
-
-	finishReason, ok := choice[responseFieldFinishReason].(string)
-	return ok && finishReason == finishReasonCacheThreshold
+	return false
 }
 
 // checkBufferedResponseForCacheThreshold checks the buffered SSE response for cache_threshold finish reason.
