@@ -775,6 +775,70 @@ Enabling the flag requires:
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+| `nixlv2` | `--nixl-push-mode` | — | `false` | Declare that the engines run vLLM's `NixlPushConnector`. See [NIXL Push Mode](#nixl-push-mode). Rejected at startup with any other connector. Also rejected with MoRI-IO WRITE-mode or Wide-EP settings. |
+| `nixlv2` | `--nixl-push-prefill-timeout` | — | `120s` | How long a NIXL push dispatch that sends the prefill and decode requests at once waits for the prefill response before it cancels both requests and answers `504`. `0` uses the default. Only used with `--nixl-push-mode`. |
+
+### NIXL Push Mode
+
+With `--nixl-push-mode` the engines run vLLM's `NixlPushConnector`, in which the prefill pod
+writes the KV cache into blocks that the decode pod registered for the request. When the sidecar
+knows the NIXL push identity of the prefill endpoint, it sends the prefill and decode requests at
+the same time. The decode pod then registers its blocks while the prefill runs, so the prefill pod
+can write the KV as soon as the prefill finishes. The identity is the part of the
+`kv_transfer_params` in a prefill response that is the same for every request to the endpoint:
+`remote_engine_id`, `remote_host`, `remote_port`, `tp_size`, `pp_size`, `dcp_size` and
+`transfer_mode`. Without it the sidecar sends the decode request after the prefill response, as in
+pull mode.
+
+The sidecar learns the identity of each prefill endpoint from its responses:
+
+- A request to an endpoint without a cached identity runs serially. The sidecar caches the identity
+  of the prefill response under the endpoint's `host:port`, so later requests to that endpoint run
+  in parallel.
+- Every successful prefill response refreshes the cached identity. A response without one removes
+  it.
+- When a prefill response does not carry the identity the decode request was built from, the
+  sidecar cancels the decode request and sends it again with the `kv_transfer_params` of the
+  prefill response.
+- A failed parallel dispatch drops the cached identity, so the next request to that endpoint runs
+  serially.
+- When the identity of an endpoint changes within 5 minutes of its previous change, the sidecar
+  marks the endpoint serial-only. Its requests run serially until 10 minutes after the last such
+  change.
+
+When the prefill request of a parallel dispatch answers `502`, `503` or `504` and
+`--prefill-max-retries` allows another attempt, the sidecar cancels the decode request, keeps the
+cached identity and retries on the serial path. Chunked decode (`--decode-chunk-size`) runs in both
+dispatch modes and sends the push `kv_transfer_params` with its first chunk only. In both modes the
+usage of the decode response reports the cached tokens of the prefill response. The sidecar reports
+the dispatches and the identity cache events in the `llm_d_disagg_sidecar_nixl_push_*` metrics;
+see [Metrics](metrics.md#nixl-push).
+
+Requirements:
+
+- Both the prefill and the decode pods run `NixlPushConnector`.
+- vLLM v0.28.0 or newer. Older versions do not set `transfer_mode` in the prefill response, so the
+  sidecar caches no identity and every request runs serially. They also lack the fix for KV
+  corruption on partial prefix cache hits ([vLLM PR #48758](https://github.com/vllm-project/vllm/pull/48758)).
+- The sidecar sets the same `transfer_id` in the `kv_transfer_params` of the prefill and decode
+  requests, with a new one for every prefill attempt, so vLLM pairs the two requests by it. Pairing
+  by `transfer_id` needs a vLLM version that includes
+  [vLLM PR #59758](https://github.com/vllm-project/vllm/pull/59758); older versions ignore the
+  field and pair the requests by request ID.
+- With data parallelism, every rank needs its own HTTP port, for example with vLLM's
+  `--data-parallel-multi-port-external-lb`. Behind one HTTP port for all ranks the identity changes
+  with the rank that serves each request, so the endpoint ends up serial-only.
+
+vLLM tracks the reliability of push mode in
+[vLLM issue #48633](https://github.com/vllm-project/vllm/issues/48633). A decode request that is
+cancelled after it registered its blocks frees them while the prefill pod can still write KV into
+them (C1). A parallel dispatch registers the decode request while the prefill runs, so a
+cancellation during the prefill, for example on a client disconnect or on
+`--nixl-push-prefill-timeout`, falls into this window. A decode request whose prefill pod died can
+hang for up to 480 seconds by default without failing cleanly (L1). In vLLM versions without
+[vLLM PR #53244](https://github.com/vllm-project/vllm/pull/53244), push heartbeats do not renew the
+KV lease of the prefill pod (30 seconds by default), so a decode pod that registers its blocks
+later than that after the prefill finished can lose the KV.
 
 ---
 

@@ -32,6 +32,11 @@ const (
 	metricEncodeDuration  = "llm_d_disagg_sidecar_encode_duration_seconds"
 	metricPrefillDuration = "llm_d_disagg_sidecar_prefill_duration_seconds"
 	metricDecodeDuration  = "llm_d_disagg_sidecar_decode_duration_seconds"
+
+	metricNIXLPushDispatches         = "llm_d_disagg_sidecar_nixl_push_dispatches_total"
+	metricNIXLPushIdentityMismatches = "llm_d_disagg_sidecar_nixl_push_identity_mismatches_total"
+	metricNIXLPushIdentityDrops      = "llm_d_disagg_sidecar_nixl_push_identity_drops_total"
+	metricNIXLPushSerialOnlyMarks    = "llm_d_disagg_sidecar_nixl_push_serial_only_marks_total"
 )
 
 // gatherFamily returns the named metric family from the controller-runtime
@@ -75,6 +80,16 @@ func histogramCount(t *testing.T, name string) uint64 {
 		return 0
 	}
 	return mf.GetMetric()[0].GetHistogram().GetSampleCount()
+}
+
+// unlabeledCounterValue returns the value of an unlabeled counter.
+func unlabeledCounterValue(t *testing.T, name string) float64 {
+	t.Helper()
+	mf := gatherFamily(t, name)
+	if mf == nil || len(mf.GetMetric()) == 0 {
+		return 0
+	}
+	return mf.GetMetric()[0].GetCounter().GetValue()
 }
 
 func stageErrors(t *testing.T, stage string) float64 {

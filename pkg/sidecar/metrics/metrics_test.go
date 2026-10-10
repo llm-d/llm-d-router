@@ -88,6 +88,39 @@ func TestRecordError(t *testing.T) {
 	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageEncode)))
 }
 
+func TestRecordNIXLPushDispatch(t *testing.T) {
+	nixlPushDispatchesTotal.Reset()
+
+	RecordNIXLPushDispatch(NIXLPushReasonCacheHit)
+	RecordNIXLPushDispatch(NIXLPushReasonCacheHit)
+	RecordNIXLPushDispatch(NIXLPushReasonCacheMiss)
+	RecordNIXLPushDispatch(NIXLPushReasonSerialOnly)
+	RecordNIXLPushDispatch(NIXLPushReasonPrefillRetry)
+
+	// Each reason has one series, under the mode it implies.
+	require.Equal(t, 4, promtestutil.CollectAndCount(nixlPushDispatchesTotal))
+	require.Equal(t, 2.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeParallel, NIXLPushReasonCacheHit)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeSerial, NIXLPushReasonCacheMiss)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeSerial, NIXLPushReasonSerialOnly)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeSerial, NIXLPushReasonPrefillRetry)))
+}
+
+func TestRecordNIXLPushIdentityEvents(t *testing.T) {
+	// Plain counters have no Reset, so the test compares before/after values.
+	mismatches := promtestutil.ToFloat64(nixlPushIdentityMismatchesTotal)
+	drops := promtestutil.ToFloat64(nixlPushIdentityDropsTotal)
+	marks := promtestutil.ToFloat64(nixlPushSerialOnlyMarksTotal)
+
+	RecordNIXLPushIdentityMismatch()
+	RecordNIXLPushIdentityDrop()
+	RecordNIXLPushIdentityDrop()
+	RecordNIXLPushSerialOnlyMark()
+
+	require.Equal(t, mismatches+1, promtestutil.ToFloat64(nixlPushIdentityMismatchesTotal))
+	require.Equal(t, drops+2, promtestutil.ToFloat64(nixlPushIdentityDropsTotal))
+	require.Equal(t, marks+1, promtestutil.ToFloat64(nixlPushSerialOnlyMarksTotal))
+}
+
 // Register must be idempotent so repeated calls do not panic on duplicate
 // registration with controller-runtime's registry.
 func TestRegisterIdempotent(t *testing.T) {
@@ -102,11 +135,13 @@ func TestRegisterIdempotent(t *testing.T) {
 // breaking every scrape config/dashboard built on the doc comments' promises.
 func TestMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal)
+	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal,
+		nixlPushDispatchesTotal, nixlPushIdentityMismatchesTotal, nixlPushIdentityDropsTotal, nixlPushSerialOnlyMarksTotal)
 	// Gather omits a CounterVec with no children, so create one in each.
 	requestsTotal.WithLabelValues("x")
 	disaggRequestsTotal.WithLabelValues("x")
 	errorsTotal.WithLabelValues("x")
+	nixlPushDispatchesTotal.WithLabelValues("x", "x")
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -123,5 +158,9 @@ func TestMetricNames(t *testing.T) {
 		"llm_d_disagg_sidecar_prefill_duration_seconds",
 		"llm_d_disagg_sidecar_decode_duration_seconds",
 		"llm_d_disagg_sidecar_request_errors_total",
+		"llm_d_disagg_sidecar_nixl_push_dispatches_total",
+		"llm_d_disagg_sidecar_nixl_push_identity_mismatches_total",
+		"llm_d_disagg_sidecar_nixl_push_identity_drops_total",
+		"llm_d_disagg_sidecar_nixl_push_serial_only_marks_total",
 	}, names)
 }

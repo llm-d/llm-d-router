@@ -28,6 +28,10 @@ var errInvalidJSON = errors.New("invalid JSON")
 // its response, leaving the caller to write a status on its behalf.
 var errDecodeAborted = errors.New("decode aborted before sending a response")
 
+// errNIXLPushPrefillTimeout reports a parallel NIXL push dispatch that ran into
+// --nixl-push-prefill-timeout.
+var errNIXLPushPrefillTimeout = errors.New("prefill did not respond within the NIXL push prefill timeout")
+
 // vLLM error response
 type errorResponse struct {
 	Object  string `json:"object"`
@@ -59,6 +63,10 @@ func errorBadGateway(err error, w http.ResponseWriter) error {
 
 func errorInternalServerError(err error, w http.ResponseWriter) error {
 	return sendError(err, "InternalServerError", http.StatusInternalServerError, w)
+}
+
+func errorGatewayTimeout(err error, w http.ResponseWriter) error {
+	return sendError(err, "GatewayTimeout", http.StatusGatewayTimeout, w)
 }
 
 // sendError simulates vLLM errors

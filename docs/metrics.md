@@ -15,7 +15,7 @@ The router deployment has three metric sources:
 |---|---|---|
 | EPP / router pod | EPP metrics, plugin metrics, and KV-cache metrics | EPP `/metrics`, default port `9090` |
 | Model server / engine pods | vLLM or other engine metrics | Each model server's `/metrics` |
-| P/D sidecar | MoRI-IO metrics only | HTTP `/metrics`, disabled by default |
+| P/D sidecar | Disaggregation and MoRI-IO metrics | HTTP `/metrics`, disabled by default |
 
 The EPP sends HTTP or HTTPS requests directly to each model server endpoint, per the
 `metrics-data-source` plugin's `scheme` parameter (default `http`).
@@ -28,6 +28,7 @@ The tables in this document show complete metric names.
 |---|---|---|
 | EPP / router pod | `llm_d_epp_` | EPP request and latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, fairness, predicted latency, model rewrite, and KV-cache metrics. |
 | Model server / engine | Engine-specific | Metrics exposed by the model server implementation. |
+| P/D sidecar | `llm_d_disagg_sidecar_` | Disaggregation request, stage latency, stage error and NIXL push metrics. |
 | P/D sidecar | `moriio_dns_` | MoRI-IO peer DNS re-resolution metrics. |
 
 The model server and sidecar metrics use separate registries and prefixes. See [Deprecated series](#deprecated-series)
@@ -70,9 +71,9 @@ endpoint's `/metrics` path (configurable) and parses the response. The `core-met
 selects configured values and stores them on the endpoint for scorers. These are model server
 metrics, not EPP metrics. The raw engine metrics remain available at the model server endpoint.
 
-### P/D sidecar: MoRI-IO metrics
+### P/D sidecar
 
-The P/D sidecar currently exposes only the `moriio_dns_*` MoRI-IO metrics, and only when
+The P/D sidecar serves the `llm_d_disagg_sidecar_*` and `moriio_dns_*` metrics only when
 `--metrics-port` or the backward-compatible `MORIIO_METRICS_ADDR` environment variable is set. The
 endpoint serves plain HTTP unless `--metrics-cert-dir` is set; see
 [MoRI-IO DNS re-resolution](#mori-io-dns-re-resolution) for the enablement and TLS settings.
@@ -736,6 +737,19 @@ back to HTTP. The metrics TLS setting is independent of `--secure-serving` and
 | `moriio_dns_reresolve_total` | Counter | - | Successful request-path re-resolutions of a peer DNS name (counted per actual lookup; concurrent lookups coalesced by singleflight count once). |
 | `moriio_dns_ip_changed_total` | Counter | - | Re-resolutions where the peer resolved to a different IP than the cached value (peer pod likely restarted at a new IP). |
 | `moriio_dns_lookup_failures_total` | Counter | - | Failed peer DNS lookups on the request path; the resolver then serves the last-known-good IP (or, on cold start, the raw spec). |
+
+### NIXL push
+
+Emitted by the P/D sidecar with `--nixl-push-mode` at the endpoint described in
+[P/D sidecar](#pd-sidecar). [NIXL Push Mode](disaggregation.md#nixl-push-mode) describes the
+dispatch modes and the identity cache these metrics report on.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_disagg_sidecar_nixl_push_dispatches_total` | Counter | `mode`, `reason` | NIXL push dispatches. A parallel dispatch has `mode` `parallel` and `reason` `cache_hit`. A serial dispatch has `mode` `serial` and `reason` `cache_miss` (no cached identity), `serial_only` (endpoint marked serial-only) or `prefill_retry` (retry of a parallel dispatch whose prefill request answered a retryable status). A request retried on the serial path counts once in each mode. |
+| `llm_d_disagg_sidecar_nixl_push_identity_mismatches_total` | Counter | - | Parallel dispatches whose prefill response did not carry the cached identity, so the sidecar sent the decode request again. |
+| `llm_d_disagg_sidecar_nixl_push_identity_drops_total` | Counter | - | Cached identities dropped after a failed parallel dispatch. |
+| `llm_d_disagg_sidecar_nixl_push_serial_only_marks_total` | Counter | - | Prefill endpoints marked serial-only. A change of identity while an endpoint is serial-only extends the marking and is not counted again. |
 
 ## Deprecated series
 
