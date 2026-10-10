@@ -130,3 +130,26 @@ func TestSpeculativePrefillDataParallelWarmupUsesChatCompletionsPath(t *testing.
 		t.Fatalf("expected warmup path %q, got %q", reqcommon.PathChatCompletions, path)
 	}
 }
+
+func TestAccumulateAssistantTextStripsThinkingContent(t *testing.T) {
+	body := []byte(`data: {"choices":[{"delta":{"content":"<think>private"}}]}
+data: {"choices":[{"delta":{"content":" reasoning</think>"}}]}
+data: {"choices":[{"delta":{"content":"visible answer"}}]}
+data: [DONE]
+`)
+
+	if got := accumulateAssistantText("text/event-stream", body); got != "visible answer" {
+		t.Fatalf("expected visible answer, got %q", got)
+	}
+}
+
+func TestAccumulateAssistantTextDropsUnclosedThinkingContent(t *testing.T) {
+	body := []byte(`data: {"choices":[{"delta":{"content":"prefix"}}]}
+data: {"choices":[{"delta":{"content":"<think>private reasoning"}}]}
+data: [DONE]
+`)
+
+	if got := accumulateAssistantText("text/event-stream", body); got != "prefix" {
+		t.Fatalf("expected prefix, got %q", got)
+	}
+}

@@ -379,14 +379,34 @@ func (s *Server) sendToDecoder(ctx context.Context, logger logr.Logger, payload 
 // streaming SSE bodies.
 func accumulateAssistantText(contentType string, body []byte) string {
 	if strings.Contains(contentType, "text/event-stream") {
-		return accumulateSSEText(body)
+		return stripThinkingContent(accumulateSSEText(body))
 	}
 	var response map[string]any
 	if json.Unmarshal(body, &response) != nil {
 		// Fall back to SSE parsing in case the content type was absent.
-		return accumulateSSEText(body)
+		return stripThinkingContent(accumulateSSEText(body))
 	}
-	return extractChoiceText(firstChoice(response))
+	return stripThinkingContent(extractChoiceText(firstChoice(response)))
+}
+
+func stripThinkingContent(content string) string {
+	start := strings.Index(content, "<think>")
+	if start < 0 {
+		end := strings.Index(content, "</think>")
+		if end >= 0 {
+			content = content[end+len("</think>"):]
+			return strings.TrimLeft(strings.ReplaceAll(strings.ReplaceAll(content, "<think>", ""), "</think>", ""), " \t\r\n")
+		}
+		return content
+	}
+
+	end := strings.Index(content[start+len("<think>"):], "</think>")
+	if end < 0 {
+		return strings.TrimRight(content[:start], " \t\r\n")
+	}
+	end += start + len("<think>")
+	content = content[:start] + content[end+len("</think>"):]
+	return strings.TrimLeft(strings.ReplaceAll(strings.ReplaceAll(content, "<think>", ""), "</think>", ""), " \t\r\n")
 }
 
 // accumulateSSEText reassembles choices[0].delta.content across SSE events.
