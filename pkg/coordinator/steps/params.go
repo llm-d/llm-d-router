@@ -30,6 +30,19 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	// ParamForceStream opts the decode step into force-streaming: a
+	// non-streaming client request is sent upstream with stream enabled, and
+	// the streamed response is reassembled into one non-streaming reply.
+	ParamForceStream = "force_stream"
+	// ParamForceStreamBufferSize is the total byte budget, as a human-readable
+	// string ("1GiB"), shared across all concurrent forced requests.
+	ParamForceStreamBufferSize = "force_stream_buffer_size"
+	// ParamForceStreamMaxRequestSize caps the bytes one forced request may
+	// reserve, as a human-readable string ("256KiB"). It keeps a single large
+	// request from claiming a large share of the shared budget and starving
+	// concurrent candidates. Unset defaults to 256KiB (room for roughly 16k output
+	// tokens), capped to force_stream_buffer_size when that is smaller.
+	ParamForceStreamMaxRequestSize = "force_stream_max_request_size"
 )
 
 const ModalityImage = "image"

@@ -75,6 +75,24 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Result label values for force_stream_total, one per candidate outcome. Forced
+// is a request the coordinator streamed from the upstream and reassembled into
+// one non-streaming response. FallbackBudget could have been forced but found
+// the buffer budget full. FallbackUnbounded is a buffered-shape request that
+// cannot be reserved: it declares no output token limit, or the limit it declares
+// would reserve more than the per-request cap allows. FallbackUnsupported is a chat or
+// text request whose reply may carry fields the reassembler drops (tool or
+// function calls, logprobs). ErrorCeiling is a forced request whose reassembled
+// response exceeded its reserved budget and was aborted before any bytes reached
+// the client. The three fallback outcomes take the non-forced pass-through.
+const (
+	ForceStreamResultForced              = "forced"
+	ForceStreamResultFallbackBudget      = "fallback_budget"
+	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
+	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultErrorCeiling        = "error_ceiling"
+)
+
 // Route label values for orchestration_overhead_seconds. These name the
 // coordinator's registered inference routes, not the raw URL path.
 const (
@@ -156,6 +174,8 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		forceStreamBufferedBytes,
+		forceStreamTotal,
 		encodeSubrequests,
 		orchestrationOverhead,
 		mediaItems,

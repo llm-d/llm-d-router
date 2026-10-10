@@ -170,6 +170,32 @@ var (
 	)
 )
 
+// Force-stream family. Recorded by the decode step when force-streaming is
+// enabled: it streams the upstream response and reassembles it into one
+// non-streaming reply. The gauge tracks bytes reserved against the shared
+// buffer budget by the shapes that buffer the whole reply, so an operator can
+// see how close concurrent forced requests run to the limit; the counter
+// attributes each candidate request to the path it took.
+var (
+	forceStreamBufferedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_buffered_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Bytes currently reserved against the force-stream buffer budget by in-flight forced requests.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
+
+	forceStreamTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of force-stream candidate requests by model and outcome: forced (reassembled from a streamed upstream), fallback_budget (budget full), fallback_unbounded (no output token limit to reserve, or an estimate past the per-request cap), fallback_unsupported (chat/text reply may carry fields the reassembler drops), or error_ceiling (aborted for exceeding its reserved budget). The fallback outcomes take the non-forced pass-through.", compbasemetrics.ALPHA),
+		},
+		withLabel(modelLabel, "result"),
+	)
+)
+
 // Per-request pipeline amplification, orchestration cost, media processing,
 // and outbound response size. Recorded once per client request except
 // media_download_duration_seconds, which is one observation per download
