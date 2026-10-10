@@ -133,6 +133,38 @@ func doPost(addr, body string) *http.Response {
 }
 
 var _ = Describe("Chunked Decode", func() {
+	DescribeTable("forwards echo requests unchanged",
+		func(streaming bool) {
+			raw := fmt.Sprintf(`{"messages":[{"role":"assistant","content":"Prefix: "}],"continue_final_message":true,"add_generation_prompt":false,"max_tokens":20,"echo":true,"stream":%t}`, streaming)
+			backendBody := chatResponse("Prefix: done", "stop", 8, 12)
+			contentType := "application/json"
+			if streaming {
+				contentType = "text/event-stream"
+				backendBody = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Prefix: done\"},\"finish_reason\":\"stop\"}]}\n\n" + reqcommon.SSEDone + "\n\n"
+			}
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+				w.Header().Set("Content-Type", contentType)
+				_, err = io.WriteString(w, backendBody)
+				Expect(err).ToNot(HaveOccurred())
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			Expect(response.Header().Get("Content-Type")).To(Equal(contentType))
+			Expect(response.Body.String()).To(Equal(backendBody))
+		},
+		Entry("non-streaming", false),
+		Entry("streaming", true),
+	)
 
 	Describe("non-streaming", func() {
 

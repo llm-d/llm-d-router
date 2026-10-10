@@ -55,6 +55,7 @@ const (
 	FieldMinTokens            = "min_tokens"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
+	FieldEcho                 = "echo"
 	FieldSamplingParams       = "sampling_params"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"

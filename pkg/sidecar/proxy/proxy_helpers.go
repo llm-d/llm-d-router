@@ -218,6 +218,7 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldSamplingParams:       {},
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
+	reqcommon.FieldEcho:                 {},
 	reqcommon.FieldCacheHitThreshold:    {},
 	reqcommon.FieldContinueFinalMessage: {},
 	reqcommon.FieldAddGenerationPrompt:  {},

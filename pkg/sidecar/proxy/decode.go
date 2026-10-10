@@ -89,6 +89,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		semconv.LLMDPDProxyChunkedDecodeStreaming(streamingEnabled),
 	)
 
+	// The decoder echoes the final assistant message, which under chunking is the text of all earlier chunks.
+	if echo, _ := body[reqcommon.FieldEcho].(bool); echo {
+		s.logger.V(logging.DEBUG).Info("chunked decode: echo enabled, using regular decode")
+		s.decoderProxy.ServeHTTP(w, r)
+		return
+	}
+
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
