@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -424,12 +425,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		return err
 	}
 
-	bestAvailable := 0
+	state := &bestAvailableState{predictedCachedTokens: make(map[datalayer.ID]int, len(results))}
 	for _, result := range results {
-		bestAvailable = max(bestAvailable, predictedCachedTokens(result.info))
+		predicted := predictedCachedTokens(result.info)
+		state.predictedCachedTokens[result.endpoint.GetMetadata().ID] = predicted
+		state.cachedTokens = max(state.cachedTokens, predicted)
 	}
-	p.pluginState.Write(request.RequestID, bestAvailableStateKey,
-		&bestAvailableState{cachedTokens: bestAvailable})
+	p.pluginState.Write(request.RequestID, bestAvailableStateKey, state)
 
 	if p.speculativeEnabled {
 		p.pluginState.Write(request.RequestID, blockKeysStateKey,
