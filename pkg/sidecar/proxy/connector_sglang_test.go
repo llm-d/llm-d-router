@@ -211,30 +211,30 @@ var _ = Describe("SGLang Connector", func() {
 		prefillReqs := testInfo.prefillHandler.GetCompletionRequests()
 		warmupReq := prefillReqs[1]
 
-		Expect(warmupReq).To(HaveKeyWithValue(requestFieldBootstrapHost, extractHost(prefillHostPort)))
-		Expect(warmupReq).To(HaveKeyWithValue(requestFieldBootstrapPort, BeNumerically("==", sglangBootstrapPort)))
-		Expect(warmupReq).To(HaveKey(requestFieldBootstrapRoom))
-		Expect(warmupReq).To(HaveKeyWithValue(requestFieldMaxTokens, BeNumerically("==", 1)))
-		Expect(warmupReq).To(HaveKeyWithValue(requestFieldMaxCompletionTokens, BeNumerically("==", 1)))
-		Expect(warmupReq).To(HaveKeyWithValue(requestFieldStream, false))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapHost, extractHost(prefillHostPort)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapPort, BeNumerically("==", sglangBootstrapPort)))
+		Expect(warmupReq).To(HaveKey(reqcommon.FieldBootstrapRoom))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldMaxTokens, BeNumerically("==", 1)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldMaxCompletionTokens, BeNumerically("==", 1)))
+		Expect(warmupReq).To(HaveKeyWithValue(reqcommon.FieldStream, false))
 
-		messages, ok := warmupReq[requestFieldMessages].([]any)
+		messages, ok := warmupReq[reqcommon.FieldMessages].([]any)
 		Expect(ok).To(BeTrue())
 		Expect(messages).To(HaveLen(3))
 		assistantMsg, ok := messages[1].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(assistantMsg).To(HaveKeyWithValue(requestFieldRole, roleAssistant))
-		Expect(assistantMsg).To(HaveKeyWithValue(requestFieldContent, "Hello from decode"))
+		Expect(assistantMsg).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+		Expect(assistantMsg).To(HaveKeyWithValue(reqcommon.FieldContent, "Hello from decode"))
 		placeholderMsg, ok := messages[2].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(placeholderMsg).To(HaveKeyWithValue(requestFieldRole, "user"))
-		Expect(placeholderMsg).To(HaveKeyWithValue(requestFieldContent, " "))
+		Expect(placeholderMsg).To(HaveKeyWithValue(reqcommon.FieldRole, "user"))
+		Expect(placeholderMsg).To(HaveKeyWithValue(reqcommon.FieldContent, " "))
 
 		Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(2))
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		warmupDecodeReq := decodeReqs[1]
-		Expect(warmupDecodeReq).To(HaveKeyWithValue(requestFieldBootstrapHost, extractHost(prefillHostPort)))
-		Expect(warmupDecodeReq).To(HaveKeyWithValue(requestFieldBootstrapRoom, warmupReq[requestFieldBootstrapRoom]))
+		Expect(warmupDecodeReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapHost, extractHost(prefillHostPort)))
+		Expect(warmupDecodeReq).To(HaveKeyWithValue(reqcommon.FieldBootstrapRoom, warmupReq[reqcommon.FieldBootstrapRoom]))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
