@@ -20,10 +20,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -32,6 +37,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionmanager"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -351,4 +358,51 @@ func TestSessionIDSourceOnSessionIDProducerValidates(t *testing.T) {
 	if diff := cmp.Diff([]string{producer.TypedName().String(), scorer.TypedName().String()}, ordered); diff != "" {
 		t.Errorf("order mismatch (-want +got):\n%s", diff)
 	}
+}
+
+func TestSessionAffinityPicksUpSessionManagerStringTag(t *testing.T) {
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+	keyPath := filepath.Join(t.TempDir(), "hmac-key")
+	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	require.NoError(t, os.WriteFile(keyPath, []byte(key), 0o600))
+
+	managerPlugin, err := sessionmanager.Factory("session-manager", json.NewDecoder(strings.NewReader(
+		`{"deploymentID":"prod-a","hmacKeyFile":`+fmt.Sprintf("%q", keyPath)+`}`)), handle)
+	require.NoError(t, err)
+	manager := managerPlugin.(*sessionmanager.Producer)
+
+	scorerPlugin, err := sessionaffinity.Factory("affinity", json.NewDecoder(strings.NewReader(
+		`{"strategy":"session_id","sessionIdConfig":{"sources":[{"attribute":"session-tag","producer":"session-manager"}]}}`,
+	)), handle)
+	require.NoError(t, err)
+	scorer := scorerPlugin.(*sessionaffinity.SessionAffinity)
+
+	endpointA := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}},
+		&fwkdl.Metrics{},
+		nil,
+	)
+	endpointB := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}},
+		&fwkdl.Metrics{},
+		nil,
+	)
+
+	first := &scheduling.InferenceRequest{RequestID: "first"}
+	first.PutAttribute(agentidentity.AgentIdentityKey, "shared-agent")
+	require.NoError(t, manager.RequestHeader(t.Context(), first))
+	require.NoError(t, scorer.PreRequest(t.Context(), first, &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{endpointB}},
+		},
+	}))
+
+	second := &scheduling.InferenceRequest{RequestID: "second"}
+	second.PutAttribute(agentidentity.AgentIdentityKey, "shared-agent")
+	require.NoError(t, manager.RequestHeader(t.Context(), second))
+	assert.Equal(t, map[scheduling.Endpoint]float64{
+		endpointA: 0,
+		endpointB: 1,
+	}, scorer.Score(t.Context(), second, []scheduling.Endpoint{endpointA, endpointB}))
 }

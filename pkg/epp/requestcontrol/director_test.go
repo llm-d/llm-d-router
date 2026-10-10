@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -61,6 +63,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionmanager"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -139,10 +142,14 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 
 type mockAdmissionController struct {
 	admitErr        error
+	admit           func(*handlers.RequestContext) error
 	releaseDispatch func(requestID string)
 }
 
-func (m *mockAdmissionController) Admit(context.Context, *handlers.RequestContext, int) error {
+func (m *mockAdmissionController) Admit(_ context.Context, reqCtx *handlers.RequestContext, _ int) error {
+	if m.admit != nil {
+		return m.admit(reqCtx)
+	}
 	return m.admitErr
 }
 
@@ -2225,6 +2232,61 @@ func newSinglePodDirector(t *testing.T, scheduleResult *fwksched.SchedulingResul
 	candidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
 	dir := NewDirectorWithConfig(ds, &mockScheduler{scheduleResults: scheduleResult}, &mockAdmissionController{}, candidates, cfg)
 	return dir, ctx
+}
+
+func TestDirectorSessionIdentityExistsBeforeAdmission(t *testing.T) {
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "192.168.1.100",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	}, nil, fwkdl.NewAttributes())
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+	dir, ctx := newSinglePodDirector(t, result)
+
+	keyPath := filepath.Join(t.TempDir(), "hmac-key")
+	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	require.NoError(t, os.WriteFile(keyPath, []byte(key), 0o600))
+	raw := fmt.Sprintf(`{"deploymentID":"prod-a","hmacKeyFile":%q}`, keyPath)
+	created, err := sessionmanager.Factory("sessions", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
+	require.NoError(t, err)
+	manager := created.(*sessionmanager.Producer)
+
+	dir.requestControlPlugins = *NewConfig().WithRequestHeaderPlugins(
+		&mockRequestHeaderPlugin{
+			name:           agentidentity.PluginType,
+			attributeKey:   agentidentity.AgentIdentityKey,
+			attributeValue: "agent-session",
+		},
+		manager,
+	)
+	dir.admissionController = &mockAdmissionController{admit: func(reqCtx *handlers.RequestContext) error {
+		identity, ok := fwkrc.ReadSessionIdentity(reqCtx.SchedulingRequest, "sessions")
+		require.True(t, ok, "session identity must exist before Admit")
+		require.NotEmpty(t, identity.SessionTag)
+		return nil
+	}}
+
+	body := []byte(`{"model":"m","prompt":"p"}`)
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{
+			Headers: map[string]string{
+				reqcommon.RequestIDHeaderKey: "identity-before-admit",
+				":path":                      "/v1/completions",
+			},
+			RawBody: body,
+		},
+		Parser: openai.NewOpenAIParser(),
+	}
+	parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
+	require.NoError(t, err)
+
+	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+	require.NoError(t, err)
 }
 
 func TestDirector_ReleasesDispatchReservationAfterPreRequest(t *testing.T) {
