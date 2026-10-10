@@ -14,7 +14,7 @@ ARG ENVTEST_VERSION=release-0.25
 ARG ENVTEST_K8S_VERSION=1.36.2
 ARG GOVULNCHECK_VERSION=v1.8.0
 
-RUN apt-get update && apt-get install -y podman && apt-get clean all
+RUN apt-get update && apt-get install -y podman xz-utils && apt-get clean all
 
 # Install docker CLI and buildx plugin
 RUN ARCH=$(uname -m) && \

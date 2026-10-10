@@ -1,0 +1,717 @@
+groups:
+  - id: registry.llm_d
+    type: attribute_group
+    brief: Custom llm-d router trace attributes.
+    attributes:
+      - id: llm_d.coordinator.pipeline.execution_path
+        type: string
+        brief: "The step combination a request took."
+        stability: development
+        examples: ["decode-only"]
+        annotations:
+          go.name: LLMDCoordinatorPipelineExecutionPath
+      - id: llm_d.coordinator.pipeline.step_count
+        type: int
+        brief: "The number of steps configured in the pipeline."
+        stability: development
+        annotations:
+          go.name: LLMDCoordinatorPipelineStepCount
+      - id: llm_d.ec_proxy.encode_disaggregation_used
+        type: boolean
+        brief: "Whether encode disaggregation was used."
+        stability: development
+        annotations:
+          go.name: LLMDECProxyEncodeDisaggregationUsed
+      - id: llm_d.ec_proxy.encoder_candidates
+        type: int
+        brief: "Candidate encoder count in EC proxy."
+        stability: development
+        annotations:
+          go.name: LLMDECProxyEncoderCandidates
+      - id: llm_d.ec_proxy.encoder_count
+        type: int
+        brief: "Allowed encoder count in EC proxy."
+        stability: development
+        annotations:
+          go.name: LLMDECProxyEncoderCount
+      - id: llm_d.epp.disagg.reason
+        type: string
+        brief: "Disaggregation reason."
+        stability: development
+        examples: ["request_is_nil"]
+        annotations:
+          go.name: LLMDEPPDisaggReason
+      - id: llm_d.epp.encode.disaggregation_used
+        type: boolean
+        brief: "Whether encode disaggregation was used."
+        stability: development
+        annotations:
+          go.name: LLMDEPPEncodeDisaggregationUsed
+      - id: llm_d.epp.encode.endpoints
+        type: string
+        brief: "Encode endpoints."
+        stability: development
+        examples: ["10.0.0.1:8000,10.0.0.2:8000"]
+        annotations:
+          go.name: LLMDEPPEncodeEndpoints
+      - id: llm_d.epp.encode.reason
+        type: string
+        brief: "Encode disaggregation reason."
+        stability: development
+        examples: ["no_encode_profile_result"]
+        annotations:
+          go.name: LLMDEPPEncodeReason
+      - id: llm_d.epp.fairness.id
+        type: string
+        brief: "The resolved fairness identity."
+        stability: development
+        note: "Always paired with llm_d.epp.fairness.source."
+        examples: ["tenant-a"]
+        annotations:
+          go.name: LLMDEPPFairnessID
+      - id: llm_d.epp.fairness.source
+        type: string
+        brief: "How the fairness identity was resolved."
+        stability: development
+        note: "The value header does not establish that the producer was authenticated."
+        examples: ["header"]
+        annotations:
+          go.name: LLMDEPPFairnessSource
+      - id: llm_d.epp.filter.affinity_threshold
+        type: double
+        brief: "The configured prefix cache affinity threshold."
+        stability: development
+        annotations:
+          go.name: LLMDEPPFilterAffinityThreshold
+      - id: llm_d.epp.filter.candidate_endpoints
+        type: int
+        brief: "The number of endpoints a filter received."
+        stability: development
+        annotations:
+          go.name: LLMDEPPFilterCandidateEndpoints
+      - id: llm_d.epp.filter.decision
+        type: string
+        brief: "The outcome a filter decided on."
+        stability: development
+        examples: ["sticky"]
+        annotations:
+          go.name: LLMDEPPFilterDecision
+      - id: llm_d.epp.filter.filtered_endpoints
+        type: int
+        brief: "The number of endpoints a filter returned."
+        stability: development
+        annotations:
+          go.name: LLMDEPPFilterFilteredEndpoints
+      - id: llm_d.epp.filter.sticky_endpoints
+        type: int
+        brief: "The number of endpoints meeting the affinity threshold."
+        stability: development
+        annotations:
+          go.name: LLMDEPPFilterStickyEndpoints
+      - id: llm_d.epp.filter.ttft_penalty_ms
+        type: double
+        brief: "The TTFT penalty the load gate measured, in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDEPPFilterTTFTPenaltyMs
+      - id: llm_d.epp.pd.disaggregation_used
+        type: boolean
+        brief: "Whether PD disaggregation was used."
+        stability: development
+        annotations:
+          go.name: LLMDEPPPDDisaggregationUsed
+      - id: llm_d.epp.pd.prefill_pod_address
+        type: string
+        brief: "Selected prefill pod address."
+        stability: development
+        examples: ["10.0.0.1"]
+        annotations:
+          go.name: LLMDEPPPDPrefillPodAddress
+      - id: llm_d.epp.pd.prefill_pod_port
+        type: string
+        brief: "Selected prefill pod port."
+        stability: development
+        examples: ["8000"]
+        annotations:
+          go.name: LLMDEPPPDPrefillPodPort
+      - id: llm_d.epp.pd.reason
+        type: string
+        brief: "Prefill/decode disaggregation reason."
+        stability: development
+        examples: ["no_prefill_profile_result"]
+        annotations:
+          go.name: LLMDEPPPDReason
+      - id: llm_d.epp.picker.candidate_endpoints
+        type: int
+        brief: "Candidate endpoints entering the picker."
+        stability: development
+        annotations:
+          go.name: LLMDEPPPickerCandidateEndpoints
+      - id: llm_d.epp.picker.top_endpoints
+        type: string[]
+        brief: "The top scored endpoint names."
+        stability: development
+        examples: [["endpoint-a"]]
+        annotations:
+          go.name: LLMDEPPPickerTopEndpoints
+      - id: llm_d.epp.picker.top_scores
+        type: double[]
+        brief: "The top scored endpoint values."
+        stability: development
+        examples: [[1.0]]
+        annotations:
+          go.name: LLMDEPPPickerTopScores
+      - id: llm_d.epp.producer.candidate_endpoints
+        type: int
+        brief: "Producer candidate endpoints count."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProducerCandidateEndpoints
+      - id: llm_d.epp.producer.max_match_blocks
+        type: int
+        brief: "Max matched blocks in producer."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProducerMaxMatchBlocks
+      - id: llm_d.epp.producer.result
+        type: string
+        brief: "Producer result."
+        stability: development
+        examples: ["skipped_no_tokens"]
+        annotations:
+          go.name: LLMDEPPProducerResult
+      - id: llm_d.epp.producer.total_blocks
+        type: int
+        brief: "Total blocks in producer."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProducerTotalBlocks
+      - id: llm_d.epp.profile_handler.decision
+        type: string
+        brief: "The profile handler decision."
+        stability: development
+        examples: ["run_decode"]
+        annotations:
+          go.name: LLMDEPPProfileHandlerDecision
+      - id: llm_d.epp.profile_handler.decode_failed
+        type: boolean
+        brief: "Whether decode execution failed."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProfileHandlerDecodeFailed
+      - id: llm_d.epp.profile_handler.executed_profiles
+        type: int
+        brief: "Executed profiles count."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProfileHandlerExecutedProfiles
+      - id: llm_d.epp.profile_handler.prefill_failed
+        type: boolean
+        brief: "Whether a required prefill execution failed."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProfileHandlerPrefillFailed
+      - id: llm_d.epp.profile_handler.selected_profile
+        type: string
+        brief: "The selected profile name."
+        stability: development
+        examples: ["decode"]
+        annotations:
+          go.name: LLMDEPPProfileHandlerSelectedProfile
+      - id: llm_d.epp.profile_handler.total_profiles
+        type: int
+        brief: "Total profiles evaluated."
+        stability: development
+        annotations:
+          go.name: LLMDEPPProfileHandlerTotalProfiles
+      - id: llm_d.epp.scheduling.profile.name
+        type: string
+        brief: "The scheduled profile name."
+        stability: development
+        examples: ["decode"]
+        annotations:
+          go.name: LLMDEPPProfileName
+      - id: llm_d.epp.scorer.candidate_endpoints
+        type: int
+        brief: "The number of candidate endpoints for a scorer."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerCandidateEndpoints
+      - id: llm_d.epp.scorer.count
+        type: int
+        brief: "The number of scorers configured in a profile."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerCount
+      - id: llm_d.epp.scorer.endpoints_scored
+        type: int
+        brief: "The number of endpoints scored."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerEndpointsScored
+      - id: llm_d.epp.scorer.name
+        type: string
+        brief: "The EPP scorer instance name."
+        stability: development
+        examples: ["queue-scorer"]
+        annotations:
+          go.name: LLMDEPPScorerName
+      - id: llm_d.epp.scorer.score.avg
+        type: double
+        brief: "The average score generated by a scorer."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerScoreAvg
+      - id: llm_d.epp.scorer.score.max
+        type: double
+        brief: "The maximum score generated by a scorer."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerScoreMax
+      - id: llm_d.epp.scorer.type
+        type: string
+        brief: "The EPP scorer type."
+        stability: development
+        examples: ["queue-scorer"]
+        annotations:
+          go.name: LLMDEPPScorerType
+      - id: llm_d.epp.scorer.weight
+        type: double
+        brief: "The EPP scorer weight."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScorerWeight
+      - id: llm_d.epp.scoring.candidate_endpoints
+        type: int
+        brief: "Candidate endpoints entering the scorer chain."
+        stability: development
+        annotations:
+          go.name: LLMDEPPScoringCandidateEndpoints
+      - id: llm_d.epp.token_producer.backend
+        type: string
+        brief: "Token producer backend."
+        stability: development
+        examples: ["vllm"]
+        annotations:
+          go.name: LLMDEPPTokenProducerBackend
+      - id: llm_d.epp.token_producer.result
+        type: string
+        brief: "Token producer result."
+        stability: development
+        examples: ["skipped_no_tokens"]
+        annotations:
+          go.name: LLMDEPPTokenProducerResult
+      - id: llm_d.epp.token_producer.token_count
+        type: int
+        brief: "Token producer token count."
+        stability: development
+        annotations:
+          go.name: LLMDEPPTokenProducerTokenCount
+      - id: llm_d.kv_cache.block_hit_ratio
+        type: double
+        brief: "KV cache block hit ratio."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheBlockHitRatio
+      - id: llm_d.kv_cache.block_keys.count
+        type: int
+        brief: "KV cache block keys count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheBlockKeysCount
+      - id: llm_d.kv_cache.blocks_found
+        type: int
+        brief: "KV cache blocks found."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheBlocksFound
+      - id: llm_d.kv_cache.events.event_count
+        type: int
+        brief: "KV cache event batch count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheEventsEventCount
+      - id: llm_d.kv_cache.events.payload_size_bytes
+        type: int
+        brief: "KV cache event payload size."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheEventsPayloadSizeBytes
+      - id: llm_d.kv_cache.events.pod_id
+        type: string
+        brief: "KV cache event pod ID."
+        stability: development
+        examples: ["10.0.0.1:8003"]
+        annotations:
+          go.name: LLMDKVCacheEventsPodID
+      - id: llm_d.kv_cache.events.sequence
+        type: int
+        brief: "KV cache event sequence."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheEventsSequence
+          go.type: int64
+      - id: llm_d.kv_cache.events.source_endpoint
+        type: string
+        brief: "KV cache event source endpoint."
+        stability: development
+        examples: ["10.0.0.1:8003"]
+        annotations:
+          go.name: LLMDKVCacheEventsSourceEndpoint
+      - id: llm_d.kv_cache.events.topic
+        type: string
+        brief: "KV cache event topic."
+        stability: development
+        examples: ["kv@10.0.0.1:8000@test-model"]
+        annotations:
+          go.name: LLMDKVCacheEventsTopic
+      - id: llm_d.kv_cache.index.add.device_tier_count
+        type: int
+        brief: "KV cache index add device tiers count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexAddDeviceTierCount
+      - id: llm_d.kv_cache.index.add.engine_key_count
+        type: int
+        brief: "KV cache index add engine keys count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexAddEngineKeyCount
+      - id: llm_d.kv_cache.index.add.pod_entry_count
+        type: int
+        brief: "KV cache index add pod entries count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexAddPodEntryCount
+      - id: llm_d.kv_cache.index.add.request_key_count
+        type: int
+        brief: "KV cache index add request keys count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexAddRequestKeyCount
+      - id: llm_d.kv_cache.index.evict.device_tier_count
+        type: int
+        brief: "KV cache index evicted device tiers count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexEvictDeviceTierCount
+      - id: llm_d.kv_cache.index.evict.key_count
+        type: int
+        brief: "KV cache index evicted keys count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexEvictKeyCount
+      - id: llm_d.kv_cache.index.evict.key_type
+        type: string
+        brief: "KV cache index evicted key type."
+        stability: development
+        examples: ["engine"]
+        annotations:
+          go.name: LLMDKVCacheIndexEvictKeyType
+      - id: llm_d.kv_cache.index.evict.pod_entry_count
+        type: int
+        brief: "KV cache index evicted pod entries count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexEvictPodEntryCount
+      - id: llm_d.kv_cache.index.lookup.block_count
+        type: int
+        brief: "KV cache index lookup block count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexLookupBlockCount
+      - id: llm_d.kv_cache.index.walk.key_count
+        type: int
+        brief: "KV cache index walk key count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexWalkKeyCount
+      - id: llm_d.kv_cache.index.walk.keys_present
+        type: int
+        brief: "KV cache index walk keys present."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheIndexWalkKeysPresent
+      - id: llm_d.kv_cache.lookup.blocks_found
+        type: int
+        brief: "KV cache lookup blocks found."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheLookupBlocksFound
+      - id: llm_d.kv_cache.lookup.cache_hit
+        type: boolean
+        brief: "KV cache lookup cache hit."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheLookupCacheHit
+      - id: llm_d.kv_cache.lookup.pod_filter_count
+        type: int
+        brief: "KV cache lookup pod filter count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheLookupPodFilterCount
+      - id: llm_d.kv_cache.pod_count
+        type: int
+        brief: "KV cache pod count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePodCount
+      - id: llm_d.kv_cache.prefix_match.key_count
+        type: int
+        brief: "Prefix match key count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePrefixMatchKeyCount
+      - id: llm_d.kv_cache.prefix_match.longest_chain
+        type: int
+        brief: "Prefix match longest block chain."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePrefixMatchLongestChain
+      - id: llm_d.kv_cache.prefix_match.pod_filter_count
+        type: int
+        brief: "Prefix match pod filter count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePrefixMatchPodFilterCount
+      - id: llm_d.kv_cache.prefix_match.pods_matched
+        type: int
+        brief: "Prefix match matched pods count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePrefixMatchPodsMatched
+      - id: llm_d.kv_cache.prefix_match.walked
+        type: boolean
+        brief: "Whether key walker was used."
+        stability: development
+        annotations:
+          go.name: LLMDKVCachePrefixMatchWalked
+      - id: llm_d.kv_cache.token_count
+        type: int
+        brief: "KV cache token count."
+        stability: development
+        annotations:
+          go.name: LLMDKVCacheTokenCount
+      - id: llm_d.openai.api
+        type: string
+        brief: "OpenAI API endpoint type."
+        stability: development
+        examples: ["chat_completions"]
+        annotations:
+          go.name: LLMDOpenAIAPI
+      - id: llm_d.pd_proxy.bootstrap_room
+        type: int
+        brief: "The SGLang P/D bootstrap room ID."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyBootstrapRoom
+          go.type: int64
+      - id: llm_d.pd_proxy.chunked_decode.chunk_size
+        type: int
+        brief: "Chunked decode chunk size."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyChunkedDecodeChunkSize
+      - id: llm_d.pd_proxy.chunked_decode.chunks
+        type: int
+        brief: "Number of chunks in chunked decode."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyChunkedDecodeChunks
+      - id: llm_d.pd_proxy.chunked_decode.duration_ms
+        type: double
+        brief: "Chunked decode duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyChunkedDecodeDurationMs
+      - id: llm_d.pd_proxy.chunked_decode.streaming
+        type: boolean
+        brief: "Whether chunked decode was streaming."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyChunkedDecodeStreaming
+      - id: llm_d.pd_proxy.chunked_decode.total_tokens
+        type: int
+        brief: "Total tokens in chunked decode."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyChunkedDecodeTotalTokens
+      - id: llm_d.pd_proxy.concurrent_pd
+        type: boolean
+        brief: "Whether concurrent PD was used."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyConcurrentPD
+      - id: llm_d.pd_proxy.connector
+        type: string
+        brief: "PD proxy connector name."
+        stability: development
+        examples: ["nixlv2"]
+        annotations:
+          go.name: LLMDPDProxyConnector
+      - id: llm_d.pd_proxy.coordinator_overhead_ms
+        type: double
+        brief: "Coordinator overhead in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyCoordinatorOverheadMs
+      - id: llm_d.pd_proxy.decode.concurrent_with_prefill
+        type: boolean
+        brief: "Whether decode ran concurrently with prefill."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDecodeConcurrentWithPrefill
+      - id: llm_d.pd_proxy.decode.data_parallel
+        type: boolean
+        brief: "Whether decode used data parallel."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDecodeDataParallel
+      - id: llm_d.pd_proxy.decode.duration_ms
+        type: double
+        brief: "Decode span duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDecodeDurationMs
+      - id: llm_d.pd_proxy.decode.streaming
+        type: boolean
+        brief: "Whether decode used streaming."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDecodeStreaming
+      - id: llm_d.pd_proxy.decode.target
+        type: string
+        brief: "PD proxy decode target host/port."
+        stability: development
+        examples: ["10.0.0.2:8000"]
+        annotations:
+          go.name: LLMDPDProxyDecodeTarget
+      - id: llm_d.pd_proxy.decode_duration_ms
+        type: double
+        brief: "Summary decode duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDecodeDurationMsSummary
+      - id: llm_d.pd_proxy.denied_target
+        type: string
+        brief: "PD proxy denied target address."
+        stability: development
+        examples: ["192.0.2.1:8000"]
+        annotations:
+          go.name: LLMDPDProxyDeniedTarget
+      - id: llm_d.pd_proxy.disaggregation_used
+        type: boolean
+        brief: "Whether PD proxy disaggregation was used."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyDisaggregationUsed
+      - id: llm_d.pd_proxy.ec_connector
+        type: string
+        brief: "PD proxy EC connector name."
+        stability: development
+        examples: ["ec-nixl"]
+        annotations:
+          go.name: LLMDPDProxyECConnector
+      - id: llm_d.pd_proxy.error
+        type: string
+        brief: "PD proxy error classification."
+        stability: development
+        examples: ["ssrf_protection_denied"]
+        annotations:
+          go.name: LLMDPDProxyError
+      - id: llm_d.pd_proxy.kv_cache_source
+        type: string
+        brief: "PD proxy KV cache source header value."
+        stability: development
+        examples: ["10.0.0.1:8000"]
+        annotations:
+          go.name: LLMDPDProxyKVCacheSource
+      - id: llm_d.pd_proxy.kv_connector
+        type: string
+        brief: "PD proxy KV connector name."
+        stability: development
+        examples: ["nixlv2"]
+        annotations:
+          go.name: LLMDPDProxyKVConnector
+      - id: llm_d.pd_proxy.parallel_dispatch
+        type: boolean
+        brief: "Whether parallel dispatch was used."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyParallelDispatch
+      - id: llm_d.pd_proxy.parallel_window_ms
+        type: double
+        brief: "PD proxy parallel window in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyParallelWindowMs
+      - id: llm_d.pd_proxy.prefill.async
+        type: boolean
+        brief: "Whether prefill was asynchronous."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyPrefillAsync
+      - id: llm_d.pd_proxy.prefill.duration_ms
+        type: double
+        brief: "Prefill span duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyPrefillDurationMs
+      - id: llm_d.pd_proxy.prefill.status_code
+        type: int
+        brief: "Prefill HTTP response status code."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyPrefillStatusCode
+      - id: llm_d.pd_proxy.prefill_candidates
+        type: int
+        brief: "PD proxy prefill candidate count."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyPrefillCandidates
+      - id: llm_d.pd_proxy.prefill_duration_ms
+        type: double
+        brief: "Summary prefill duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyPrefillDurationMsSummary
+      - id: llm_d.pd_proxy.prefill_target
+        type: string
+        brief: "PD proxy prefill target host/port."
+        stability: development
+        examples: ["10.0.0.1:8000"]
+        annotations:
+          go.name: LLMDPDProxyPrefillTarget
+      - id: llm_d.pd_proxy.reason
+        type: string
+        brief: "PD proxy decision reason."
+        stability: development
+        examples: ["no_prefill_header"]
+        annotations:
+          go.name: LLMDPDProxyReason
+      - id: llm_d.pd_proxy.request_id
+        type: string
+        brief: "PD proxy request ID."
+        stability: development
+        examples: ["req-123"]
+        annotations:
+          go.name: LLMDPDProxyRequestID
+      - id: llm_d.pd_proxy.request_path
+        type: string
+        brief: "PD proxy request path."
+        stability: development
+        examples: ["/v1/chat/completions"]
+        annotations:
+          go.name: LLMDPDProxyRequestPath
+      - id: llm_d.pd_proxy.total_duration_ms
+        type: double
+        brief: "PD proxy total duration in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyTotalDurationMs
+      - id: llm_d.pd_proxy.true_ttft_ms
+        type: double
+        brief: "PD proxy true TTFT in milliseconds."
+        stability: development
+        annotations:
+          go.name: LLMDPDProxyTrueTTFTMs
