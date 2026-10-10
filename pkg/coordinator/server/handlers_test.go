@@ -565,6 +565,46 @@ func TestHandleInference_StreamedUpstreamErrorClassifiedAndNotOverwritten(t *tes
 	)
 }
 
+func TestHandleInference_StepWrittenErrorClassifiedAndNotOverwritten(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	const stepBody = `{"error":{"message":"unknown mode"}}`
+	step := stubStep{name: "async-broker", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusBadRequest)
+		_, _ = rc.ResponseWriter.Write([]byte(stepBody))
+		return &pipeline.ResponseWrittenError{Step: "async-broker", StatusCode: http.StatusBadRequest, Cause: pipeline.ErrBadRequest}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "step status must survive: no http.Error overwrite")
+	require.Equal(t, stepBody, rec.Body.String(), "step body must survive: no http.Error overwrite")
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeBadRequest})),
+		1e-9,
+	)
+}
+
+func TestHandleInference_PipelineDoneRecordsNoError(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	step := stubStep{name: "async-broker", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusAccepted)
+		return pipeline.ErrPipelineDone
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+}
+
 func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
 	reg := newMetricsRegistry(t)
 

@@ -158,6 +158,25 @@ func TestExecute_FailureMarksStepAndPipelineSpans(t *testing.T) {
 	}
 }
 
+func TestExecute_ResponseWrittenErrorMarksStepAndPipelineSpans(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	steps := []Step{
+		&mockStep{name: "async-broker", fn: func(_ context.Context, _ *RequestContext) error {
+			return &ResponseWrittenError{Step: "async-broker", StatusCode: http.StatusBadRequest, Cause: ErrBadRequest}
+		}},
+	}
+
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+
+	for _, name := range []string{"async-broker", pipelineSpanName} {
+		if got := spanNamed(t, recorder, name).Status().Code; got != codes.Error {
+			t.Errorf("span %q status = %v, want %v", name, got, codes.Error)
+		}
+	}
+}
+
 // The response body of an upstream failure can hold prompt data. UpstreamError
 // keeps it out of Error(), and the span status must not reintroduce it.
 func TestExecute_SpanStatusOmitsUpstreamBody(t *testing.T) {

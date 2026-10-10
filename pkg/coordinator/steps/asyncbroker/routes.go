@@ -29,6 +29,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // validAsyncRequestID mirrors the server's x-request-id validation, so the
@@ -95,7 +97,7 @@ func (s *Step) handleFetch(w http.ResponseWriter, r *http.Request) {
 		// mailbox TTL to the retry grace window. Deleting outright would race
 		// the client's retry of a response lost past the coordinator's write.
 		// DELETE remains the immediate reclaim for tidy clients.
-		if writeResult(w, res) == nil {
+		if _, err := writeResult(w, res); err == nil {
 			graceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if grace := s.cfg.fetchGrace(); grace > 0 {
@@ -243,16 +245,17 @@ func writePending(w http.ResponseWriter, id string) {
 // answer 502 instead). Error codes map:
 // GATE_DROPPED -> 429, DEADLINE_EXCEEDED -> 504, INVALID_REQUEST -> 400,
 // CANCELLED -> 499, everything else -> 502, wrapped in the OpenAI error
-// envelope. Returns the body write error so callers that confirm delivery
-// can act on it; the error-envelope branches always return nil.
-func writeResult(w http.ResponseWriter, res *api.ResultMessage) error {
+// envelope. Returns the pipeline result (ErrPipelineDone, or the error status
+// written) and the body write error, so callers that confirm delivery can act
+// on it; the error-envelope branches never fail the write.
+func writeResult(w http.ResponseWriter, res *api.ResultMessage) (result, writeErr error) {
 	if res.StatusCode > 0 {
 		// The stored result is external data: guard the range rather than
 		// letting WriteHeader panic on a corrupted value.
 		if res.StatusCode < 100 || res.StatusCode > 599 {
 			writeOpenAIError(w, http.StatusBadGateway, "api_error", "MALFORMED_RESULT",
 				fmt.Sprintf("stored result carries invalid status code %d", res.StatusCode))
-			return nil
+			return upstreamFailure(http.StatusBadGateway), nil
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// The upstream body is written verbatim without re-encoding; block
@@ -260,22 +263,41 @@ func writeResult(w http.ResponseWriter, res *api.ResultMessage) error {
 		// script content it may contain.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(res.StatusCode)
-		_, err := w.Write([]byte(res.Payload)) //#nosec G705 -- served as application/json with nosniff
-		return err
+		_, writeErr = w.Write([]byte(res.Payload)) //#nosec G705 -- served as application/json with nosniff
+		if res.StatusCode >= http.StatusBadRequest {
+			return upstreamFailure(res.StatusCode), writeErr
+		}
+		return pipeline.ErrPipelineDone, writeErr
 	}
 	switch res.ErrorCode {
 	case api.ErrCodeGateDropped:
 		writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_error", res.ErrorCode, res.ErrorMessage)
+		return upstreamFailure(http.StatusTooManyRequests), nil
 	case api.ErrCodeDeadlineExceeded:
 		writeOpenAIError(w, http.StatusGatewayTimeout, "timeout_error", res.ErrorCode, res.ErrorMessage)
+		return upstreamFailure(http.StatusGatewayTimeout), nil
 	case api.ErrCodeInvalidRequest:
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", res.ErrorCode, res.ErrorMessage)
+		return upstreamFailure(http.StatusBadRequest), nil
 	case api.ErrCodeCancelled:
 		// 499 Client Closed Request (nginx convention): the caller abandoned
 		// the request and cancellation dropped it pre-dispatch.
 		writeOpenAIError(w, 499, "cancelled", res.ErrorCode, res.ErrorMessage)
+		return upstreamFailure(499), nil
 	default:
 		writeOpenAIError(w, http.StatusBadGateway, "api_error", res.ErrorCode, res.ErrorMessage)
+		return upstreamFailure(http.StatusBadGateway), nil
 	}
-	return nil
+}
+
+// responded reports an error response the step already wrote; cause sets
+// its error_code.
+func responded(status int, cause error) error {
+	return &pipeline.ResponseWrittenError{Step: StepName, StatusCode: status, Cause: cause}
+}
+
+// upstreamFailure reports an error status that originates past the broker:
+// a stored result or a held wait that reached its deadline.
+func upstreamFailure(status int) error {
+	return responded(status, &pipeline.UpstreamError{Step: StepName, StatusCode: status})
 }

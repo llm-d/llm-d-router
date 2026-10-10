@@ -247,7 +247,10 @@ completions prompt is already a token array). See
 
    Upstream response bodies are logged server-side only and never returned to the client.
    A step returning `ErrPipelineDone` instead stops the pipeline and reports success, used
-   by `conditional-decode` when the decode worker serves the request directly.
+   by `conditional-decode` when the decode worker serves the request directly. A step that
+   answers the client with an error status itself returns a `ResponseWrittenError`: the
+   pipeline and server record it under the `error_code` of its `Cause`, and the server
+   writes nothing further (used by `async-broker`).
 4. The final `decode` step proxies the worker response straight back to the client
    through `RequestContext.ResponseWriter`, passing both a streaming SSE response and a
    non-streaming (buffered JSON) response through unchanged. The worker decides which
@@ -530,7 +533,8 @@ type Step interface {
 - `Execute` does the work: it reads and mutates `reqCtx`, and returns an error to abort
   the request or `nil` to continue. Return `pipeline.ErrPipelineDone` to stop the
   pipeline early and report success (the response must already have been written to
-  `reqCtx.ResponseWriter`).
+  `reqCtx.ResponseWriter`). A step that has written an error response itself returns a
+  `pipeline.ResponseWrittenError` instead, so the request still counts as failed.
 - A response-producing step writes the client response to `reqCtx.ResponseWriter`,
   typically by proxying the upstream response with `httputil.ReverseProxy` set to
   `FlushInterval: -1`, which forwards each write immediately (SSE chunks stream through; a
