@@ -466,6 +466,12 @@ func allSubstitutions(nsName string) map[string]string {
 	// tokenizer counts that blob as text: the largest test image is ~97k tokens,
 	// far past the simulator's default 1024-token context. Every vLLM role raises
 	// --max-model-len so the encode sub-request is not rejected as over-length.
+	//
+	// The workers run random mode for the same reason. Echo mode returns the
+	// prompt as the response, which costs a second copy of it: an inlined image
+	// needs twice ~97k tokens of context, past the raised --max-model-len, and it
+	// also requires the output limit to reach the prompt length, which the specs'
+	// max_tokens does not. No assertion here reads response content.
 	vllmArgs := vllmExtraArgs("--force-dummy-tokenizer", "--max-model-len=131072")
 	// ${EPP_NAME} is the zmq endpoint the decode workers publish KV events to. In
 	// the 3-EPP topology that is the decode EPP's Service.
@@ -488,7 +494,7 @@ func allSubstitutions(nsName string) map[string]string {
 		"${KV_CONNECTOR_TYPE}":       "",
 		"${EC_CONNECTOR_TYPE}":       "",
 		"${CONNECTOR_TYPE}":          "",
-		"${VLLM_SIM_MODE}":           "echo",
+		"${VLLM_SIM_MODE}":           "random",
 		"${KV_CACHE_ENABLED}":        "false",
 		"${HF_TOKEN}":                "",
 		"${EPP_NAME}":                workerEPPName,

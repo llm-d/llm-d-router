@@ -50,7 +50,7 @@ var disruptionClient = &http.Client{Timeout: 10 * time.Second}
 
 // sendRawCompletion sends a completion request and returns the HTTP status code.
 func sendRawCompletion() (int, error) {
-	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":10}`, simModelName, simplePrompt)
+	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":%d}`, simModelName, simplePrompt, echoOutputTokens)
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d/v1/completions", getPort()), strings.NewReader(body))
 	if err != nil {
 		return 0, err
@@ -355,7 +355,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 func sendStreamingCompletion(connected chan<- string) error {
 	longPrompt := strings.Repeat("This is a longer prompt to keep the stream open. ", 20)
-	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":100,"stream":true}`, simModelName, longPrompt)
+	body := fmt.Sprintf(`{"model":"%s","prompt":"%s","max_tokens":%d,"stream":true}`, simModelName, longPrompt, echoOutputTokens)
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d/v1/completions", getPort()), strings.NewReader(body))
 	if err != nil {
 		connected <- ""

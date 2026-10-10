@@ -9,7 +9,7 @@ IMAGE_REGISTRY ?= ghcr.io/llm-d
 
 # Image tags
 COORDINATOR_TAG      ?= dev
-VLLM_SIMULATOR_TAG   ?= v0.10.2
+VLLM_SIMULATOR_TAG   ?= v0.12.0
 EPP_TAG              ?= dev
 
 # Full image references (derived; override only if you need a non-standard repo)
