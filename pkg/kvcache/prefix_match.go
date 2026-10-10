@@ -329,6 +329,10 @@ type prefixAccumulator struct {
 	keyStamp uint32
 	first    bool
 
+	// prev is the last fully folded key's entries. A key with the same
+	// entries extends every live chain by one without a full fold.
+	prev []entrySig
+
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
@@ -344,6 +348,7 @@ func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *pr
 	a.keyStamp = 0
 	a.first = true
 	a.weightCache = a.weightCache[:0]
+	a.prev = a.prev[:0]
 	return a
 }
 
@@ -355,6 +360,24 @@ func releaseAccumulator(a *prefixAccumulator) {
 // key folds one key's entries into the chains and reports whether any chain
 // is still alive. entries is borrowed for the duration of the call.
 func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
+	// The previous key returned true and held the same entries, so every
+	// live slot holds this key in the same tiers: apply endKey's increments.
+	if !a.first && a.samePrev(entries) {
+		for _, i := range a.active {
+			s := &a.slots[i]
+			s.matched++
+			s.score += s.weight
+			if s.confirmedAlive {
+				s.confirmed++
+			}
+			for t := range s.tiers {
+				if s.tiers[t].alive {
+					s.tiers[t].count++
+				}
+			}
+		}
+		return len(a.active) > 0
+	}
 	a.keyStamp++
 	if a.first {
 		a.table.reset(len(entries))
@@ -365,8 +388,7 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		ref := &entries[i]
 		// Another rank of an endpoint just folded at this key adds nothing
 		// to its chains.
-		if prev != nil && ref.PodOrdinal == prev.PodOrdinal && ref.TierOrdinal == prev.TierOrdinal &&
-			ref.Speculative == prev.Speculative {
+		if prev != nil && sigOf(ref) == sigOf(prev) {
 			continue
 		}
 		prev = ref
@@ -401,7 +423,34 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
 		}
 	}
+	a.prev = a.prev[:0]
+	for i := range entries {
+		a.prev = append(a.prev, sigOf(&entries[i]))
+	}
 	return a.endKey()
+}
+
+// entrySig is the part of an EntryRef the matching rules read: pod and tier
+// names are fixed by their ordinals within one accumulation.
+type entrySig struct {
+	pod, tier   uint32
+	speculative bool
+}
+
+func sigOf(ref *kvblock.EntryRef) entrySig {
+	return entrySig{pod: ref.PodOrdinal, tier: ref.TierOrdinal, speculative: ref.Speculative}
+}
+
+func (a *prefixAccumulator) samePrev(entries []kvblock.EntryRef) bool {
+	if len(entries) != len(a.prev) {
+		return false
+	}
+	for i := range entries {
+		if sigOf(&entries[i]) != a.prev[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // stampTier marks tier as held at the current key and reports whether the

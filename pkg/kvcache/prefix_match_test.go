@@ -525,6 +525,98 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 	}
 }
 
+// Index runs, consecutive keys that hold the same entries, are what the
+// matcher folds without a full pass. The legacy algorithms decide the
+// expected result on fixtures built from runs, including runs separated by an
+// empty key, keys whose entries match the previous key's only up to order,
+// and pods holding several tiers or ranks at one key.
+func TestMatchBlockKeysMatchesLegacyAlgorithmsOnRuns(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	rng := rand.New(rand.NewSource(2)) //#nosec G404 -- fixed-seed deterministic test fixture
+	tiers := []string{"gpu", "cpu", "disk", kvcache.SpeculativeTier}
+	backends := []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
+	weights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+
+	for iter := 0; iter < 300; iter++ {
+		numKeys, numPods := 1+rng.Intn(60), 1+rng.Intn(5)
+		keys := make([]kvblock.BlockHash, numKeys)
+		for i := range keys {
+			keys[i] = kvblock.BlockHash(i + 1)
+		}
+		fixture := make(map[kvblock.BlockHash][]kvblock.PodEntry, numKeys)
+		var prev []kvblock.PodEntry
+		for start := 0; start < numKeys; {
+			end := min(numKeys, start+1+rng.Intn(15))
+			var run []kvblock.PodEntry
+			switch {
+			case len(prev) > 0 && rng.Intn(4) == 0:
+				// The previous run with one entry's speculative flag flipped.
+				run = slices.Clone(prev)
+				i := rng.Intn(len(run))
+				run[i].Speculative = !run[i].Speculative
+			case rng.Intn(8) != 0: // otherwise an empty run, a gap
+				for p := 0; p < numPods; p++ {
+					if rng.Float64() >= 0.6 {
+						continue
+					}
+					entry := kvblock.PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", p), DeviceTier: tiers[rng.Intn(len(tiers))]}
+					if rng.Intn(3) == 0 {
+						entry.HasGroup, entry.GroupIdx = true, kvblock.GroupID(rng.Intn(2))
+					}
+					if rng.Float64() < 0.15 {
+						entry.Speculative = true
+						if rng.Intn(2) == 0 {
+							entry.DeviceTier = "" // otherwise it shares a tier with confirmed entries
+						}
+					}
+					run = append(run, entry)
+					if rng.Intn(4) == 0 {
+						// A second tier or a second rank of the same pod.
+						extra := entry
+						if rng.Intn(2) == 0 {
+							extra.DeviceTier = tiers[rng.Intn(len(tiers))]
+						} else {
+							extra.HasGroup, extra.GroupIdx = true, kvblock.GroupID(2)
+						}
+						run = append(run, extra)
+					}
+				}
+			}
+			prev = run
+			for i := start; i < end && len(run) > 0; i++ {
+				entries := slices.Clone(run)
+				if rng.Intn(10) == 0 {
+					rng.Shuffle(len(entries), func(a, b int) { entries[a], entries[b] = entries[b], entries[a] })
+				}
+				fixture[keys[i]] = entries
+			}
+			start = end
+		}
+
+		walked, idx := newMatcher(t, backends)
+		populateIndex(t, idx, fixture)
+
+		gotWalked, err := walked.MatchBlockKeys(ctx, keys, nil)
+		require.NoError(t, err)
+		gotMaterialized, err := newMaterializedMatcher(idx, backends).MatchBlockKeys(ctx, keys, nil)
+		require.NoError(t, err)
+		keyToPods, err := idx.Lookup(ctx, keys, nil)
+		require.NoError(t, err)
+
+		want := map[string]kvcache.PodMatch{}
+		for pod, score := range legacyLongestPrefixScore(keys, keyToPods, weights) {
+			want[pod] = kvcache.PodMatch{
+				WeightedScore:   score,
+				MatchedBlocks:   legacyMatchedBlockCount(keys, keyToPods, pod),
+				ConfirmedBlocks: legacyMatchedConfirmedBlockCount(keys, keyToPods, pod),
+				BlocksByTier:    legacyMatchedBlockCountByTier(keys, keyToPods, pod),
+			}
+		}
+		assertPodMatches(t, want, gotWalked)
+		assertPodMatches(t, want, gotMaterialized)
+	}
+}
+
 // legacyLongestPrefixScore is the map-based longest-prefix scorer the matcher
 // replaced.
 func legacyLongestPrefixScore(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
