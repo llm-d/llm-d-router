@@ -112,9 +112,14 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 // resolveFormat's answer instead reflects the encode/prefill wire-format
 // setting, which can differ from the client's own shape.
 func (s *DecodeStep) injectUUIDs(reqCtx *pipeline.RequestContext) {
+	// Without entries there is nothing to stamp, and the prompt items stay raw.
+	if len(reqCtx.MultimodalEntries) == 0 {
+		return
+	}
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 	if items, ok := promptItems(reqCtx.Body, apiType); ok {
 		injectImagePartUUIDs(items, apiType, reqCtx.MultimodalEntries)
+		setPromptItems(reqCtx.Body, apiType, items)
 	}
 }
 

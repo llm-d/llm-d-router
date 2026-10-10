@@ -326,6 +326,46 @@ func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 	}
 }
 
+func TestDecodeStep_InjectUUIDsIntoRawPromptItems(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		path  string
+		field string
+		items string
+	}{
+		{
+			name:  "chat completions",
+			path:  testChatCompletionsPath,
+			field: "messages",
+			items: `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]`,
+		},
+		{
+			name:  "responses",
+			path:  reqcommon.PathResponses,
+			field: "input",
+			items: `[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0, Hash: "hash-raw"}},
+				Body:              map[string]any{tc.field: json.RawMessage(tc.items)},
+			}
+			(&DecodeStep{}).injectUUIDs(reqCtx)
+
+			items, ok := reqCtx.Body[tc.field].([]any)
+			if !ok {
+				t.Fatalf("%s is %T, want the edited array stored back", tc.field, reqCtx.Body[tc.field])
+			}
+			part := items[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+			if part["uuid"] != "hash-raw" {
+				t.Fatalf("expected uuid=hash-raw in image part, got %v", part["uuid"])
+			}
+		})
+	}
+}
+
 func TestDecodeStep_CompletionsFormat_NoRenderedTokens(t *testing.T) {
 	var parsed map[string]any
 

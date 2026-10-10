@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"math"
 	"net"
@@ -243,6 +244,55 @@ func TestReplaceMediaURLsStep_NoImages(t *testing.T) {
 	}
 	if len(reqCtx.MultimodalEntries) != 0 {
 		t.Fatalf("expected 0 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+}
+
+func TestReplaceMediaURLsStep_RawPromptItems(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("jpeg-bytes"))
+	}))
+	defer imageServer.Close()
+
+	for _, tc := range []struct {
+		name  string
+		path  string
+		field string
+		items string
+	}{
+		{
+			name:  "chat completions",
+			path:  reqcommon.PathChatCompletions,
+			field: "messages",
+			items: `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`,
+		},
+		{
+			name:  "responses",
+			path:  reqcommon.PathResponses,
+			field: "input",
+			items: `[{"role":"user","content":[{"type":"input_image","image_url":"` + imageServer.URL + `/photo.jpg"}]}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := newLoopbackStep(t, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         map[string]any{tc.field: json.RawMessage(tc.items)},
+			}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			items, ok := reqCtx.Body[tc.field].([]any)
+			if !ok {
+				t.Fatalf("%s is %T, want the edited array stored back", tc.field, reqCtx.Body[tc.field])
+			}
+			part := items[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+			url, _ := reqcommon.MediaPartURLRef(part)
+			if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
+				t.Fatalf("expected data URI, got %s", url)
+			}
+		})
 	}
 }
 
