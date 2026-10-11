@@ -1292,6 +1292,239 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 	}
 }
 
+func TestChunkedDecodeToolCallingMetrics(t *testing.T) {
+	const fields = `"tools":[{"function":{"parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":null`
+	for _, route := range []string{"direct", "nixl", "peer", "self", "encoder"} {
+		for _, tt := range []struct {
+			name      string
+			stream    bool
+			fallback  bool
+			nonTool   bool
+			failChunk int
+		}{
+			{name: "multiple chunks"},
+			{name: "streaming", stream: true},
+			{name: "single chunk fallback", fallback: true},
+			{name: "non tool", nonTool: true},
+			{name: "second chunk error retains outcomes", failChunk: 2},
+		} {
+			t.Run(route+"/"+tt.name, func(t *testing.T) {
+				t.Setenv("POD_IP", "127.0.0.1")
+				decodeBodies, prefillBodies := make(chan []byte, 3), make(chan []byte, 1)
+				var calls atomic.Int32
+				decode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					decodeBodies <- raw
+					index := int(calls.Add(1))
+					if index == tt.failChunk || index > 2 {
+						statusHandler(http.StatusBadRequest, `{"error":"upstream failure"}`).ServeHTTP(w, r)
+						return
+					}
+					text, reason, tokens := "hello ", finishReasonLength, 3
+					if index == 2 {
+						text, reason = "world", "stop"
+					}
+					if tt.fallback {
+						reason, tokens = "stop", 2
+					}
+					statusHandler(http.StatusOK, chatResponse(text, reason, 8, tokens)).ServeHTTP(w, r)
+				}))
+				defer decode.Close()
+				prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					prefillBodies <- raw
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+				}))
+				defer prefill.Close()
+				decodeURL, err := url.Parse(decode.URL)
+				require.NoError(t, err)
+				prefillURL, err := url.Parse(prefill.URL)
+				require.NoError(t, err)
+				s := NewProxy(Config{Port: "8000", DecoderURL: decodeURL, KVConnector: constants.KVConnectorNIXLV2,
+					ECConnector: constants.ECConnectorNIXL, EnableP2PPull: true, DecodeChunkSize: 3})
+				s.logger = log.Log
+				s.allowlistValidator = &AllowlistValidator{}
+				routes := s.createRoutes()
+				budget := 6
+				if tt.fallback {
+					budget = 2
+				}
+				body := fmt.Sprintf(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":%d,"stream":%t`, budget, tt.stream)
+				if !tt.nonTool {
+					body += "," + fields
+				}
+				body += "}"
+				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				if route == "nixl" || route == "encoder" {
+					r.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
+				}
+				if route == "encoder" {
+					r.Header.Set(routing.EncoderEndpointsHeader, "encoder:8000")
+				}
+				if route == "peer" {
+					r.Header.Set(routing.KVCacheSourceHeader, "peer:8000")
+				}
+				if route == "self" {
+					r.Header.Set(routing.KVCacheSourceHeader, "127.0.0.1:8000")
+				}
+				before := toolFieldCounters(t)
+				rw := httptest.NewRecorder()
+				routes.ServeHTTP(rw, r)
+				code, count := http.StatusOK, 2
+				if tt.failChunk > 0 {
+					code = http.StatusBadRequest
+				}
+				if tt.fallback {
+					count = 1
+				}
+				require.Equal(t, code, rw.Code, rw.Body.String())
+				require.Equal(t, int32(count), calls.Load())
+				require.Equal(t, route == "nixl" || route == "encoder", len(prefillBodies) == 1)
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(body), &original))
+				for _, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+					for len(bodies) > 0 {
+						var received map[string]json.RawMessage
+						require.NoError(t, json.Unmarshal(<-bodies, &received))
+						for _, field := range []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat} {
+							require.Equal(t, original[string(field)], received[string(field)])
+						}
+					}
+				}
+				if tt.failChunk == 0 && !tt.fallback {
+					if tt.stream {
+						require.Equal(t, "text/event-stream", rw.Header().Get("Content-Type"))
+						require.Equal(t, 4, strings.Count(rw.Body.String(), reqcommon.SSEDataPrefix))
+						require.Contains(t, rw.Body.String(), reqcommon.SSEDone)
+					} else {
+						var response map[string]any
+						require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &response))
+						require.Equal(t, "hello world", extractChoiceText(firstChoice(response)))
+						require.Equal(t, 6, countTokensInResponse(response))
+					}
+				}
+				want, delta := map[[2]string]float64{}, map[[2]string]float64{}
+				if !tt.nonTool {
+					for _, field := range []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat} {
+						want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+					}
+				}
+				for key, value := range toolFieldCounters(t) {
+					if change := value - before[key]; change != 0 {
+						delta[key] = change
+					}
+				}
+				require.Equal(t, want, delta)
+			})
+		}
+	}
+}
+
+func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
+	const original = `{"messages":[],"max_tokens":6,"tools":[],"tool_choice":"auto"}`
+	for _, tt := range []struct {
+		name         string
+		mutateFirst  bool
+		mutateNext   bool
+		restoreNext  bool
+		cancelBefore bool
+		cancelAfter  bool
+		marshalFirst bool
+		marshalNext  bool
+		badResponse  bool
+		wantCalls    int
+		wantChoice   toolcalling.FieldStatusValue
+		wantTools    toolcalling.FieldStatusValue
+	}{
+		{name: "later chunk changed and dropped", mutateNext: true, wantCalls: 2, wantChoice: toolcalling.FieldStatusChanged, wantTools: toolcalling.FieldStatusDropped},
+		{name: "restored choice keeps worst outcome", mutateFirst: true, restoreNext: true, wantCalls: 2, wantChoice: toolcalling.FieldStatusChanged, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "canceled before dispatch", cancelBefore: true},
+		{name: "canceled before changed chunk", cancelAfter: true, mutateNext: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "first chunk marshal failure", marshalFirst: true},
+		{name: "changed chunk marshal failure", marshalNext: true, mutateNext: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "invalid response retains dispatched outcomes", badResponse: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := decodeRequestBody([]byte(original))
+			require.NoError(t, err)
+			toolFields, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+			require.NoError(t, err)
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(original))
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			r = r.WithContext(ctx)
+			if tt.cancelBefore {
+				cancel()
+			}
+			if tt.mutateFirst {
+				body[string(toolcalling.FieldToolChoice)] = "none"
+			}
+			if tt.marshalFirst {
+				body[reqcommon.FieldMessages] = make(chan int)
+			}
+			s := NewProxy(Config{DecodeChunkSize: 3})
+			calls := 0
+			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var sent map[string]json.RawMessage
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&sent))
+				if calls == 2 && tt.mutateNext {
+					require.NotContains(t, sent, string(toolcalling.FieldTools))
+					require.Equal(t, json.RawMessage(`"none"`), sent[string(toolcalling.FieldToolChoice)])
+				}
+				if tt.badResponse {
+					statusHandler(http.StatusOK, "not-json").ServeHTTP(w, r)
+					return
+				}
+				statusHandler(http.StatusOK, chatResponse("chunk", finishReasonLength, 8, 3)).ServeHTTP(w, r)
+				if tt.mutateNext {
+					delete(body, string(toolcalling.FieldTools))
+					body[string(toolcalling.FieldToolChoice)] = "none"
+				}
+				if tt.restoreNext {
+					body[string(toolcalling.FieldToolChoice)] = "auto"
+				}
+				if tt.marshalNext {
+					body[reqcommon.FieldModel] = make(chan int)
+				}
+				if tt.cancelAfter {
+					cancel()
+				}
+			})
+			before := toolFieldCounters(t)
+			s.runChunkedDecodeFromMap(httptest.NewRecorder(), r, body, []byte(original), toolFields)
+			require.Equal(t, tt.wantCalls, calls)
+			want := map[toolcalling.Field]toolcalling.FieldStatusValue{}
+			if tt.wantCalls > 0 {
+				want[toolcalling.FieldTools], want[toolcalling.FieldToolChoice] = tt.wantTools, tt.wantChoice
+			}
+			assertToolCallingStatuses(t, toolFields.fieldStatuses(), want)
+			require.Equal(t, before, toolFieldCounters(t), "the caller owns request-level metric recording")
+		})
+	}
+	t.Run("direct decode abort records once", func(t *testing.T) {
+		s := NewProxy(Config{DecodeChunkSize: 3})
+		s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) })
+		before := toolFieldCounters(t)
+		require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+			s.runChunkedDecode(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(original)))
+		})
+		want := map[[2]string]float64{
+			{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}:      1,
+			{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}: 1,
+		}
+		delta := map[[2]string]float64{}
+		for key, value := range toolFieldCounters(t) {
+			if change := value - before[key]; change != 0 {
+				delta[key] = change
+			}
+		}
+		require.Equal(t, want, delta)
+	})
+}
+
 func TestDecoderOnlyToolCallingMetrics(t *testing.T) {
 	const chatBody = ` {"tools":[{"function":{"parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":null} `
 	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}

@@ -362,10 +362,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	if source == self {
 		s.logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
 			"source", sourceHostPort, "self", self)
-		if s.config.DecodeChunkSize <= 0 || apiType != reqcommon.APITypeChatCompletions {
-			_, _ = toolFields.compareDispatched(raw)
-		}
-		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData)
+		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData, raw, toolFields)
 		return
 	}
 
@@ -390,9 +387,5 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		v.Info("decoder request body with p2p source", logging.HTTPBodyKey, string(newBody))
 	}
 
-	// Chunked decode constructs its own dispatched bodies.
-	if s.config.DecodeChunkSize <= 0 || apiType != reqcommon.APITypeChatCompletions {
-		_, _ = toolFields.compareDispatched(newBody)
-	}
-	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData)
+	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData, newBody, toolFields)
 }

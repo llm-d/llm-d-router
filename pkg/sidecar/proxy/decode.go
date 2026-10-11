@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const (
@@ -53,11 +54,13 @@ const (
 // chat completions requests when s.config.DecodeChunkSize > 0.
 // body is the already-parsed JSON map; callers that hold it
 // should use this instead of calling s.decoderProxy directly.
-func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any) {
+// raw supplies regular-decode bytes without rereading the request body.
+func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any, raw []byte, toolFields *toolCallingRequest) {
 	if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
-		s.runChunkedDecodeFromMap(w, r, body)
+		s.runChunkedDecodeFromMap(w, r, body, raw, toolFields)
 		return
 	}
+	_, _ = toolFields.compareDispatched(raw)
 	s.decoderProxy.ServeHTTP(w, r)
 }
 
@@ -69,13 +72,16 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body)
+	toolFields, _ := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, original)
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body, original, toolFields)
 }
 
 // runChunkedDecodeFromMap executes chunked decode given an already-parsed body map.
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
-func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any) {
+// The caller owns aggregate reporting across prefill and decode chunks.
+func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any, raw []byte, toolFields *toolCallingRequest) {
 	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
@@ -109,6 +115,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
+		_, _ = toolFields.compareDispatched(raw)
 		s.decoderProxy.ServeHTTP(w, r)
 		return
 	}
@@ -213,6 +220,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
+		_, _ = toolFields.compareDispatched(chunkBody)
 		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(ctx, r, chunkBody))
 
 		if isHTTPError(bw.statusCode) {
