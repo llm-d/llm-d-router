@@ -17,7 +17,12 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,7 +31,158 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
+
+func TestToolCallingPassthroughBody(t *testing.T) {
+	const body = `{"tools":[],"tool_choice":"auto"}`
+	for _, tt := range []struct {
+		name    string
+		length  int64
+		read    int
+		readErr error
+		want    bool
+	}{
+		{name: "known length without EOF", length: int64(len(body)), read: len(body), want: true},
+		{name: "unknown length with EOF", length: -1, read: len(body), readErr: io.EOF, want: true},
+		{name: "zero length treated as unknown", read: len(body), readErr: io.EOF, want: true},
+		{name: "unknown length without EOF", length: -1, read: len(body)},
+		{name: "partial known length", length: int64(len(body)), read: 4},
+		{name: "short body EOF", length: int64(len(body)) + 1, read: len(body), readErr: io.EOF},
+		{name: "read failure with bytes", length: int64(len(body)), read: len(body), readErr: io.ErrUnexpectedEOF},
+		{name: "canceled read with bytes", length: int64(len(body)), read: len(body), readErr: context.Canceled},
+		{name: "unread body", length: int64(len(body))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			closeErr := errors.New("close failure")
+			source := &toolCallingTestBody{body: body[:tt.read], err: tt.readErr, closeErr: closeErr}
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+			r.Body, r.ContentLength = source, tt.length
+			before := toolFieldCounters(t)
+			observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
+			require.Zero(t, source.reads, "observation must not pre-read")
+			require.Equal(t, tt.length, r.ContentLength)
+			if tt.read > 0 {
+				buf := make([]byte, len(body))
+				n, err := r.Body.Read(buf)
+				require.Equal(t, body[:tt.read], string(buf[:n]))
+				require.Equal(t, tt.readErr, err)
+				_, _ = r.Body.Read(buf) // A second EOF must not duplicate metrics.
+			}
+			require.ErrorIs(t, r.Body.Close(), closeErr)
+			require.Equal(t, 1, source.closes)
+			want := map[[2]string]float64{}
+			if tt.want {
+				want[[2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}] = 1
+				want[[2]string{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			delta := map[[2]string]float64{}
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			require.Equal(t, want, delta)
+		})
+	}
+}
+
+type toolCallingTestBody struct {
+	body     string
+	err      error
+	closeErr error
+	reads    int
+	closes   int
+}
+
+func (b *toolCallingTestBody) Read(p []byte) (int, error) {
+	b.reads++
+	n := copy(p, b.body)
+	b.body = b.body[n:]
+	return n, b.err
+}
+
+func (b *toolCallingTestBody) Close() error {
+	b.closes++
+	return b.closeErr
+}
+
+func TestToolCallingPassthroughConcurrentClose(t *testing.T) {
+	reader, writer := io.Pipe()
+	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+	r.Body, r.ContentLength = reader, -1
+	observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, r.Body)
+		done <- err
+	}()
+	_, err := writer.Write([]byte(`{"tools":`))
+	require.NoError(t, err)
+	require.NoError(t, r.Body.Close())
+	require.ErrorIs(t, <-done, io.ErrClosedPipe)
+	require.NoError(t, writer.Close())
+}
+
+func TestToolCallingPassthroughSkipsUnsupportedOrEmptyBody(t *testing.T) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeCompletions} {
+		for _, body := range []io.ReadCloser{nil, http.NoBody, io.NopCloser(strings.NewReader(`{"tools":[]}`))} {
+			if api == reqcommon.APITypeChatCompletions && body != nil && body != http.NoBody {
+				continue
+			}
+			r := &http.Request{Body: body}
+			observeToolCallingPassthrough(r, api)
+			require.True(t, body == r.Body)
+		}
+	}
+}
+
+func TestToolCallingPassthroughMissingReplica(t *testing.T) {
+	s := NewProxy(Config{})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("local decoder must not run for a missing replica")
+	})
+	source := &toolCallingTestBody{body: `{"tools":[]}`, err: io.EOF}
+	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+	r.Body = source
+	r.Header.Set(routing.DataParallelEndpointHeader, "missing:8000")
+	before := toolFieldCounters(t)
+	rw := httptest.NewRecorder()
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(rw, r)
+	require.Equal(t, http.StatusBadRequest, rw.Code)
+	require.Zero(t, source.reads)
+	require.Same(t, source, r.Body)
+	require.Equal(t, before, toolFieldCounters(t))
+}
+
+func BenchmarkToolCallingPassthrough(b *testing.B) {
+	buf := make([]byte, 32768)
+	decoder := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		for {
+			if _, err := r.Body.Read(buf); err != nil {
+				break
+			}
+		}
+		_ = r.Body.Close()
+	})
+	for _, size := range []int{1024, 1 << 20} {
+		body := `{"messages":[{"content":"` + strings.Repeat("x", size) + `"}]}`
+		for _, observe := range []bool{false, true} {
+			b.Run(strconv.Itoa(size)+"/observe="+strconv.FormatBool(observe), func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(len(body)))
+				for b.Loop() {
+					r := &http.Request{Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body))}
+					if observe {
+						observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
+					}
+					decoder.ServeHTTP(nil, r)
+				}
+			})
+		}
+	}
+}
 
 func TestToolCallingJSONStream(t *testing.T) {
 	for _, body := range []string{

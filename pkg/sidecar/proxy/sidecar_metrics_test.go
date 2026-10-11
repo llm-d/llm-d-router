@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -415,6 +416,86 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
+	}
+}
+
+func TestDecoderOnlyToolCallingMetrics(t *testing.T) {
+	const chatBody = ` {"tools":[{"function":{"parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":null} `
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	for _, tt := range []struct {
+		name          string
+		api           reqcommon.APIType
+		body          string
+		unknownLength bool
+		status        int
+		fields        []toolcalling.Field
+	}{
+		{name: "Chat fields", body: chatBody, fields: chatFields},
+		{name: "Messages fields", api: reqcommon.APITypeMessages, body: chatBody, fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "unknown length", body: chatBody, unknownLength: true, fields: chatFields},
+		{name: "upstream error", body: chatBody, status: 400, fields: chatFields},
+		{name: "non-tool", body: `{"messages":[{"content":"tools \\u1234","tools":[]}]}`},
+		{name: "structured output", body: `{"response_format":{}}`, fields: []toolcalling.Field{toolcalling.FieldResponseFormat}},
+		{name: "malformed", body: `{"tools":[],"broken":`},
+		{name: "invalid suffix", body: `{"tools":[]} invalid`},
+		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody},
+		{name: "Completions excluded", api: reqcommon.APITypeCompletions, body: chatBody},
+		{name: "large prompt", body: `{"messages":[{"content":"` + strings.Repeat("x", 1<<20) + `"}],"tools":[]}`, fields: []toolcalling.Field{toolcalling.FieldTools}},
+	} {
+		for _, dataParallel := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/dataParallel=%t", tt.name, dataParallel), func(t *testing.T) {
+				bodies := make(chan []byte, 1)
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					bodies <- raw
+					code := tt.status
+					if code == 0 {
+						code = http.StatusOK
+					}
+					statusHandler(code, `{"result":"unchanged"}`).ServeHTTP(w, r)
+				}))
+				defer upstream.Close()
+				upstreamURL, err := url.Parse(upstream.URL)
+				require.NoError(t, err)
+				s := NewProxy(Config{DecoderURL: upstreamURL})
+				s.logger = log.Log
+				s.allowlistValidator = &AllowlistValidator{}
+				routes := s.createRoutes()
+				r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+				if tt.unknownLength {
+					r.ContentLength = -1
+				}
+				if dataParallel {
+					s.dataParallelProxies[upstreamURL.Host] = s.decoderProxy
+					s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+						t.Error("local decode must not run after data-parallel selection")
+					})
+					r.Header.Set(routing.DataParallelEndpointHeader, upstreamURL.Host)
+				}
+				before := toolFieldCounters(t)
+				rw := httptest.NewRecorder()
+				routes.ServeHTTP(rw, r)
+				code := tt.status
+				if code == 0 {
+					code = http.StatusOK
+				}
+				require.Equal(t, code, rw.Code)
+				require.Equal(t, `{"result":"unchanged"}`, rw.Body.String())
+				require.Len(t, bodies, 1)
+				require.Equal(t, tt.body, string(<-bodies))
+				want, delta := map[[2]string]float64{}, map[[2]string]float64{}
+				for _, field := range tt.fields {
+					want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+				}
+				for key, value := range toolFieldCounters(t) {
+					if change := value - before[key]; change != 0 {
+						delta[key] = change
+					}
+				}
+				require.Equal(t, want, delta)
+			})
+		}
 	}
 }
 

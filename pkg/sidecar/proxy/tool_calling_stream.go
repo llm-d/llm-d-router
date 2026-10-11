@@ -18,10 +18,69 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
+
+// Only Read owns observation state. Delegated Close can unblock an in-flight
+// transport read without racing with the extractor or changing cleanup.
+type toolCallingPassthroughBody struct {
+	io.ReadCloser
+	stream *toolCallingJSONStream
+	length int64
+	read   int64
+}
+
+func observeToolCallingPassthrough(r *http.Request, api reqcommon.APIType) {
+	if api != reqcommon.APITypeChatCompletions && api != reqcommon.APITypeMessages || r.Body == nil || r.Body == http.NoBody {
+		return
+	}
+	r.Body = &toolCallingPassthroughBody{
+		ReadCloser: r.Body, stream: newToolCallingJSONStream(api), length: r.ContentLength,
+	}
+}
+
+func (b *toolCallingPassthroughBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if b.stream == nil {
+		return n, err
+	}
+	b.read += int64(n)
+	if err != nil && err != io.EOF || b.length > 0 && b.read > b.length {
+		b.stream = nil
+		return n, err
+	}
+	b.stream.feed(p[:n])
+	if b.stream.invalid {
+		b.stream = nil
+		return n, err
+	}
+	// Known-length HTTP transports need not request EOF after the final byte.
+	if err != io.EOF && (b.length <= 0 || b.read != b.length) {
+		return n, err
+	}
+	stream := b.stream
+	b.stream = nil
+	if b.length > 0 && b.read != b.length || len(stream.fields) == 0 {
+		return n, err
+	}
+	raw, ok := stream.finish()
+	if !ok {
+		return n, err
+	}
+	snapshot, captureErr := toolcalling.CaptureRequestJSON(stream.api, raw)
+	if captureErr != nil {
+		return n, err
+	}
+	// Passthrough uses the inbound bytes unchanged; one snapshot suffices.
+	statuses, _ := toolcalling.CompareRequests(snapshot, snapshot)
+	metrics.RecordToolCallingFieldStatuses(statuses)
+	return n, err
+}
 
 type toolJSONState uint8
 
