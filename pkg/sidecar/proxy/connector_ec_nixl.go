@@ -64,7 +64,7 @@ func (s *Server) fanoutEncoderCollect(
 			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
-				reqcommon.FieldECTransferParams, truncateLongStrings(encoderResponse[reqcommon.FieldECTransferParams], 64))
+				logBodyBytesKey, len(pw.bodyBytes()))
 		}
 		ec, ok := encoderResponse[reqcommon.FieldECTransferParams]
 		if !ok || ec == nil {
@@ -88,7 +88,7 @@ func (s *Server) fanoutEncoderCollect(
 		for k, v := range ecMap {
 			if _, exists := params[k]; exists {
 				s.logger.V(logging.DEBUG).Info("duplicate ec_transfer_params key across encoder responses; overwriting",
-					"item", idx, "requestID", requestID, "key", k)
+					"item", idx, "requestID", requestID)
 			}
 			params[k] = v
 		}

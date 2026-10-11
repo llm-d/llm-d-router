@@ -281,7 +281,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			break
 		}
 
-		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
+		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkTextBytes", len(chunkText))
 	}
 
 	span.SetAttributes(

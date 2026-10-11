@@ -42,6 +42,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+const logBodyBytesKey = "bodyBytes"
+
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
 	ln := s.HTTPListener

@@ -62,31 +62,6 @@ func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	}
 }
 
-// truncateLongStrings recursively shortens long string values for logging.
-func truncateLongStrings(v any, maxLen int) any {
-	switch x := v.(type) {
-	case string:
-		if len(x) > maxLen {
-			return fmt.Sprintf("%s...(%d bytes)", x[:maxLen], len(x))
-		}
-		return x
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, vv := range x {
-			out[k] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, vv := range x {
-			out[i] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
 // extractMMItems extracts all multimodal content parts from the request: the
 // messages array of chat completions or Messages, or a Responses input array.
 // Which field to walk is gated on apiType rather than presence, since a client
@@ -370,10 +345,7 @@ func (s *Server) runPDPipeline(
 			"requestID", requestID,
 			"destination", destination,
 			"prefiller", prefillEndPoint,
-			"bodyBytes", len(modifiedBody),
-		}
-		if ec, ok := body[reqcommon.FieldECTransferParams]; ok {
-			kv = append(kv, reqcommon.FieldECTransferParams, truncateLongStrings(ec, 64))
+			logBodyBytesKey, len(modifiedBody),
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}

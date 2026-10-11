@@ -89,7 +89,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("prefill request body", logging.HTTPBodyKey, string(prefillBody))
+		v.Info("prefill request body", logBodyBytesKey, len(prefillBody))
 	}
 
 	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
@@ -111,7 +111,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decode request body", logging.HTTPBodyKey, string(decodeBody))
+		v.Info("decode request body", logBodyBytesKey, len(decodeBody))
 	}
 
 	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, toolFields)
@@ -384,7 +384,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decoder request body with p2p source", logging.HTTPBodyKey, string(newBody))
+		v.Info("decoder request body with p2p source", logBodyBytesKey, len(newBody))
 	}
 
 	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData, newBody, toolFields)

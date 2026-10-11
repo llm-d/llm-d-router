@@ -34,11 +34,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -523,6 +525,87 @@ func TestECPipelineToolCallingOutcomes(t *testing.T) {
 					}
 				}
 				require.Equal(t, want, delta)
+			})
+		}
+	}
+}
+
+func TestSidecarTraceLogPrivacy(t *testing.T) {
+	const requestSecret, responseSecret = "private_tool_schema_fixture", "private_generated_content_fixture"
+	for _, connector := range []string{"nixl", "parallel", "p2p", "peer", "mooncake", "sglang", "shared", "encoder", "chunks"} {
+		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
+			t.Run(fmt.Sprintf("%s/verbosity=%d", connector, verbosity), func(t *testing.T) {
+				prefill := httptest.NewServer(statusHandler(http.StatusOK, fmt.Sprintf(
+					`{"kv_transfer_params":{"opaque":"%s"},"ec_transfer_params":{"%s":{"opaque":"%s"}}}`, responseSecret, responseSecret, responseSecret)))
+				defer prefill.Close()
+				prefillURL, err := url.Parse(prefill.URL)
+				require.NoError(t, err)
+				s := NewProxy(Config{Port: "8000", DecoderURL: prefillURL, KVConnector: constants.KVConnectorNIXLV2,
+					MoRIIOWriteMode: connector == "parallel", MoRIIOParallelDispatch: connector == "parallel",
+					MoRIIODecodePodIP: "127.0.0.1", MoRIIOParallelDecodeWaitTimeout: time.Second, DecodeChunkSize: 3})
+				s.allowlistValidator = &AllowlistValidator{}
+				var mu sync.Mutex
+				var logged []string
+				prefillLogged := make(chan struct{}, 1)
+				s.logger = funcr.New(func(prefix, args string) {
+					mu.Lock()
+					logged = append(logged, prefix+" "+args)
+					mu.Unlock()
+					if strings.Contains(args, "concurrent-dispatch prefill request completed") {
+						prefillLogged <- struct{}{}
+					}
+				}, funcr.Options{Verbosity: verbosity})
+				body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.jpg"}},{"type":"image_url","image_url":{"url":"https://example.com/image.jpg"}}]}],"max_tokens":6,"tools":[{"function":{"name":"%s","parameters":{"description":"%s"}}}],"tool_choice":"auto"}`, requestSecret, requestSecret)
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(body), &original))
+				var decodeCalls atomic.Int32
+				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var received map[string]json.RawMessage
+					assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+					assert.Equal(t, original[string(toolcalling.FieldTools)], received[string(toolcalling.FieldTools)])
+					reason := "stop"
+					if decodeCalls.Add(1) == 1 && connector == "chunks" {
+						reason = finishReasonLength
+					}
+					statusHandler(http.StatusOK, chatResponse(responseSecret, reason, 8, 3)).ServeHTTP(w, r)
+				})
+				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				rw := httptest.NewRecorder()
+				switch connector {
+				case "nixl", "parallel":
+					s.handleNIXLV2(rw, r, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+				case "p2p":
+					s.handleP2P(rw, r, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+				case "peer":
+					s.decodeWithP2PSource(rw, r, "peer:8000")
+				case "mooncake":
+					s.mooncakeEngineIDs.Add(prefillURL.Host, map[string]string{"0": "engine"})
+					s.handleMooncake(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
+				case "sglang":
+					s.handleSGLang(rw, r, prefillURL.Host)
+				case "shared":
+					s.handleSharedStorage(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
+				case "encoder":
+					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, reqcommon.APITypeChatCompletions)
+				case "chunks":
+					s.runChunkedDecode(rw, r)
+				}
+				if connector == "mooncake" || connector == "sglang" {
+					select {
+					case <-prefillLogged:
+					case <-time.After(2 * time.Second):
+						t.Fatal("prefill logging did not complete")
+					}
+				}
+				require.Equal(t, http.StatusOK, rw.Code, rw.Body.String())
+				require.Contains(t, rw.Body.String(), responseSecret, "model output must remain unchanged")
+				mu.Lock()
+				defer mu.Unlock()
+				require.NotEmpty(t, logged, "operational logs must remain available")
+				for _, entry := range logged {
+					require.NotContains(t, entry, requestSecret)
+					require.NotContains(t, entry, responseSecret)
+				}
 			})
 		}
 	}
@@ -1462,7 +1545,7 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 				body[string(toolcalling.FieldToolChoice)] = "none"
 			}
 			if tt.marshalFirst {
-				body[reqcommon.FieldMessages] = make(chan int)
+				body[reqcommon.FieldModel] = make(chan int)
 			}
 			s := NewProxy(Config{DecodeChunkSize: 3})
 			calls := 0

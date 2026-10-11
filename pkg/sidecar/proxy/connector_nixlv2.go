@@ -196,7 +196,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", logging.HTTPBodyKey, string(pbody))
+		trace.Info("Prefill request", logBodyBytesKey, len(pbody))
 	}
 
 	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
@@ -287,7 +287,7 @@ retryLoop:
 	}
 
 	s.logger.V(logging.TRACE).Info("received prefiller response",
-		reqcommon.FieldKVTransferParams, pKVTransferParams,
+		"kvTransferParamsPresent", pKVTransferParams != nil,
 		"cachedTokens", pCachedTokens,
 		"hasCachedTokens", hasPCachedTokens)
 
@@ -409,7 +409,7 @@ retryLoop:
 	// 2. Forward to local decoder.
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
+		trace.Info("sending request to decoder", logBodyBytesKey, len(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
@@ -654,8 +654,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dreq.ContentLength = int64(len(dbody))
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("concurrent-dispatch prefill request body", logging.HTTPBodyKey, string(pbody))
-		trace.Info("concurrent-dispatch decode request body", logging.HTTPBodyKey, string(dbody))
+		trace.Info("concurrent-dispatch prefill request body", logBodyBytesKey, len(pbody))
+		trace.Info("concurrent-dispatch decode request body", logBodyBytesKey, len(dbody))
 	}
 
 	// Decode writes into a deferred writer that buffers everything until we

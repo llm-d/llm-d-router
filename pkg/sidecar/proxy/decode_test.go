@@ -280,7 +280,7 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(err).ToNot(HaveOccurred())
 			response := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(string(original)))
-			server.runChunkedDecodeFromMap(response, request, body)
+			server.runChunkedDecodeFromMap(response, request, body, original, nil)
 			Expect(calls).To(Equal(wantCalls))
 			Expect(response.Code).To(Equal(http.StatusOK))
 			after, err := json.Marshal(body)
