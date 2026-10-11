@@ -17,11 +17,15 @@ limitations under the License.
 package proxy
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+const toolCallingBaselineKey contextKey = "toolCallingBaseline"
 
 // toolCallingRequest is owned by the dispatching goroutine. Comparisons for
 // asynchronous prefill must be aggregated before starting its goroutine, so
@@ -44,6 +48,21 @@ func captureToolCallingRequest(apiType reqcommon.APIType, body []byte) (*toolCal
 		return nil, err
 	}
 	return &toolCallingRequest{surface: apiType, original: original}, nil
+}
+
+// Inference handoffs reuse the client snapshot, with independent dispatch outcomes.
+func captureInferenceToolCallingRequest(r *http.Request, apiType reqcommon.APIType, body []byte) (*toolCallingRequest, error) {
+	baseline, ok := r.Context().Value(toolCallingBaselineKey).(*toolCallingRequest)
+	if !ok {
+		return captureToolCallingRequest(apiType, body)
+	}
+	if baseline == nil {
+		return nil, errors.New("tool-calling client baseline unavailable")
+	}
+	if baseline.surface != apiType {
+		return nil, fmt.Errorf("tool-calling baseline API %s does not match %s", baseline.surface, apiType)
+	}
+	return &toolCallingRequest{surface: apiType, original: baseline.original}, nil
 }
 
 // compareDispatched must be called at dispatch, after local routing checks.

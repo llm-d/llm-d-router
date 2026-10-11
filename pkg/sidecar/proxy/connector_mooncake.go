@@ -61,7 +61,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	for dpRank, engineID = range engineMap {
 		break
 	}
-	toolFields, _ := captureToolCallingRequest(apiType, original)
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
 	transferID := "xfer-" + newUUID()
 	s.logger.V(logging.TRACE).Info("mooncake protocol info",

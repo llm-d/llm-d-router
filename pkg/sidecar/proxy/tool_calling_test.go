@@ -296,6 +296,66 @@ func BenchmarkToolCallingJSONStream(b *testing.B) {
 	}
 }
 
+func TestCaptureInferenceToolCallingRequest(t *testing.T) {
+	const original = `{"tools":[],"tool_choice":"auto"}`
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			baseline, err := captureToolCallingRequest(api, []byte(original))
+			require.NoError(t, err)
+			baseline.rejectFields(toolcalling.FieldTools)
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
+			// A cloned handoff uses the snapshot, not the modified body or prior outcomes.
+			first, err := captureInferenceToolCallingRequest(r.Clone(r.Context()), api, []byte(`{`))
+			require.NoError(t, err)
+			require.Empty(t, first.fieldStatuses())
+			_, err = first.compareDispatched([]byte(`{"tools":[],"tool_choice":"none"}`))
+			require.NoError(t, err)
+			assertToolCallingStatuses(t, first.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusChanged,
+			})
+			second, err := captureInferenceToolCallingRequest(r, api, []byte(`{}`))
+			require.NoError(t, err)
+			require.NotSame(t, first, second)
+			require.Empty(t, second.fieldStatuses())
+			_, err = second.compareDispatched([]byte(original))
+			require.NoError(t, err)
+			assertToolCallingStatuses(t, second.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
+			})
+			assertToolCallingStatuses(t, baseline.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusRejected,
+			})
+		})
+	}
+	t.Run("no handoff", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, []byte(original))
+		require.NoError(t, err)
+		_, err = request.compareDispatched([]byte(`{}`))
+		require.NoError(t, err)
+		assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+			toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped,
+		})
+	})
+	t.Run("failed capture stays disabled", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, (*toolCallingRequest)(nil)))
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, []byte(original))
+		require.Error(t, err)
+		require.Nil(t, request)
+	})
+	t.Run("API mismatch", func(t *testing.T) {
+		baseline, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+		require.NoError(t, err)
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeMessages, []byte(original))
+		require.Error(t, err)
+		require.Nil(t, request)
+	})
+}
+
 func TestToolCallingRequestComparisons(t *testing.T) {
 	tests := []struct {
 		name   string

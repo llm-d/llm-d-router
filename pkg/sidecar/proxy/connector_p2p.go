@@ -60,7 +60,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	if !ok {
 		return
 	}
-	toolFields, _ := captureToolCallingRequest(apiType, original)
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
 	kvRequestID := newUUID()
 	prefillP2PPort := s.p2pPortFor(prefillPodHostPort)
@@ -354,7 +354,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		return
 	}
 	apiType := reqcommon.DetectAPIType(r.URL.Path)
-	toolFields, _ := captureToolCallingRequest(apiType, raw)
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, raw)
 	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 
 	source := normalizeEndpoint(sourceHostPort)

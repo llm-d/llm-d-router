@@ -56,7 +56,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	if !ok {
 		return
 	}
-	toolFields, _ := captureToolCallingRequest(reqcommon.DetectAPIType(r.URL.Path), original)
+	toolFields, _ := captureInferenceToolCallingRequest(r, reqcommon.DetectAPIType(r.URL.Path), original)
 
 	roomID := s.generateSGLangRoomID()
 	// SGLang keys its P/D transfer state and log lines by the bootstrap room.

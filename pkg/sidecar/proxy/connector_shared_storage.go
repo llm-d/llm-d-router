@@ -39,7 +39,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	if !ok {
 		return
 	}
-	toolFields, _ := captureToolCallingRequest(apiType, original)
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 
 	// If "cache_hit_threshold" is present in the request, we try to decode first. The decode node must meet the cache hit threshold in order to execute.

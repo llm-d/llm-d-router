@@ -19,6 +19,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -289,6 +290,9 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 		invalidTarget bool
 		wantCode      int
 		wantFields    []toolcalling.Field
+		baselineBody  string
+		baselineError bool
+		wantChoice    toolcalling.FieldStatusValue
 	}{
 		{name: "chat fields", body: chatBody, wantCode: 200, wantFields: chatFields},
 		{name: "messages fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
@@ -301,6 +305,8 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 		{name: "prefill error does not reject fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantFields: chatFields},
 		{name: "decode error does not reject fields", body: chatBody, decodeStatus: 500, wantCode: 500, wantFields: chatFields},
 		{name: "handler initialization error", body: chatBody, invalidTarget: true, wantCode: 502},
+		{name: "original client choice retained", body: chatBody, baselineBody: `{"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"none","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`, wantCode: 200, wantFields: chatFields, wantChoice: toolcalling.FieldStatusChanged},
+		{name: "failed client capture stays disabled", body: chatBody, baselineError: true, wantCode: 200},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			prefillBodies := make(chan []byte, 1)
@@ -329,6 +335,15 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 			s.allowlistValidator = &AllowlistValidator{enabled: false}
 			routes := s.createRoutes()
 			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+			if tt.baselineBody != "" || tt.baselineError {
+				baselineBody := tt.baselineBody
+				if tt.baselineError {
+					baselineBody = `{`
+				}
+				baseline, captureErr := captureToolCallingRequest(tt.api, []byte(baselineBody))
+				require.Equal(t, tt.baselineError, captureErr != nil)
+				r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
+			}
 			target := prefillURL.Host
 			if tt.invalidTarget {
 				target = "%invalid"
@@ -372,7 +387,11 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 			}
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
-				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+				status := toolcalling.FieldStatusPreserved
+				if field == toolcalling.FieldToolChoice && tt.wantChoice != "" {
+					status = tt.wantChoice
+				}
+				want[[2]string{string(field), string(status)}] = 1
 			}
 			require.Equal(t, want, delta)
 		})
