@@ -531,6 +531,248 @@ func TestMooncakeToolCallingMetrics(t *testing.T) {
 	}
 }
 
+func TestSharedStorageToolCallingMetrics(t *testing.T) {
+	chatBody := `{"model":"m","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	response := `{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`
+	for _, tt := range []struct {
+		name          string
+		api           reqcommon.APIType
+		body          string
+		decodeFirst   bool
+		cacheMiss     bool
+		streaming     bool
+		prefillStatus int
+		decodeStatus  int
+		badResponse   bool
+		invalidTarget bool
+		wantCode      int
+		wantPrefill   int
+		wantDecode    int
+		wantFields    []toolcalling.Field
+	}{
+		{name: "chat fields", body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
+		{name: "messages fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "null and empty fields", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantPrefill: 1, wantDecode: 1, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "non-tool body", body: `{"messages":[]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
+		{name: "nested tools", body: `{"messages":[{"tools":[]}]}`, wantCode: 200, wantPrefill: 1, wantDecode: 1},
+		{name: "malformed body", body: `{"tools":`, wantCode: 400},
+		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200, wantPrefill: 1, wantDecode: 1},
+		{name: "decode-first cache hit", body: chatBody, decodeFirst: true, wantCode: 200, wantDecode: 1, wantFields: chatFields},
+		{name: "decode-first fallback", body: chatBody, decodeFirst: true, cacheMiss: true, wantCode: 200, wantPrefill: 1, wantDecode: 2, wantFields: chatFields},
+		{name: "messages fallback", api: reqcommon.APITypeMessages, body: chatBody, decodeFirst: true, cacheMiss: true, wantCode: 200, wantPrefill: 1, wantDecode: 2, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "streaming cache hit", body: chatBody, decodeFirst: true, streaming: true, wantCode: 200, wantDecode: 1, wantFields: chatFields},
+		{name: "streaming fallback", body: chatBody, decodeFirst: true, cacheMiss: true, streaming: true, wantCode: 200, wantPrefill: 1, wantDecode: 2, wantFields: chatFields},
+		{name: "prefill failure", body: chatBody, prefillStatus: 500, wantCode: 500, wantPrefill: 1, wantFields: chatFields},
+		{name: "decode failure", body: chatBody, decodeStatus: 500, wantCode: 500, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
+		{name: "decode-first error", body: chatBody, decodeFirst: true, decodeStatus: 400, wantCode: 400, wantDecode: 1, wantFields: chatFields},
+		{name: "invalid decode-first response", body: chatBody, decodeFirst: true, badResponse: true, wantCode: 500, wantDecode: 1, wantFields: chatFields},
+		{name: "handler initialization error", body: chatBody, invalidTarget: true, wantCode: 502},
+		{name: "failed prefill initialization after attempt", body: chatBody, decodeFirst: true, cacheMiss: true, invalidTarget: true, wantCode: 502, wantDecode: 1, wantFields: chatFields},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := tt.body
+			if tt.decodeFirst {
+				body = strings.TrimSuffix(body, "}") + `,"cache_hit_threshold":0.5}`
+			}
+			if tt.streaming {
+				body = strings.TrimSuffix(body, "}") + `,"stream":true}`
+			}
+			prefillBodies := make(chan []byte, 1)
+			decodeBodies := make(chan []byte, 2)
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				prefillBodies <- raw
+				code := tt.prefillStatus
+				if code == 0 {
+					code = http.StatusOK
+				}
+				statusHandler(code, `{}`).ServeHTTP(w, r)
+			}))
+			defer prefill.Close()
+			var attempts atomic.Int32
+			wantResponse := response
+			if tt.streaming {
+				wantResponse = fmt.Sprintf("%s %s\n\n", reqcommon.SSEDataPrefix, response)
+			}
+			decode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				decodeBodies <- raw
+				content := response
+				if attempts.Add(1) == 1 && tt.cacheMiss {
+					content = `{"choices":[{"finish_reason":"cache_threshold"}]}`
+				}
+				if tt.badResponse {
+					content = "not-json"
+				}
+				if tt.streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					content = fmt.Sprintf("%s %s\n\n", reqcommon.SSEDataPrefix, content)
+				}
+				code := tt.decodeStatus
+				if code == 0 {
+					code = http.StatusOK
+				}
+				statusHandler(code, content).ServeHTTP(w, r)
+			}))
+			defer decode.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+			decodeURL, err := url.Parse(decode.URL)
+			require.NoError(t, err)
+			s := NewProxy(Config{DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			s.logger = log.Log
+			s.allowlistValidator = &AllowlistValidator{enabled: false}
+			target := prefillURL.Host
+			if tt.invalidTarget {
+				target = "%invalid"
+			}
+			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(body))
+			r.Header.Set(routing.PrefillEndpointHeader, target)
+			rw := httptest.NewRecorder()
+			before := toolFieldCounters(t)
+			s.createRoutes().ServeHTTP(rw, r)
+			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			require.Len(t, prefillBodies, tt.wantPrefill)
+			require.Len(t, decodeBodies, tt.wantDecode)
+			if tt.wantCode == http.StatusOK {
+				require.Equal(t, wantResponse, rw.Body.String())
+			}
+			if tt.wantPrefill+tt.wantDecode > 0 {
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(body), &original))
+				for _, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+					for len(bodies) > 0 {
+						raw := <-bodies
+						var actual map[string]json.RawMessage
+						require.NoError(t, json.Unmarshal(raw, &actual))
+						for _, field := range chatFields {
+							require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
+						}
+					}
+				}
+			}
+			delta := make(map[[2]string]float64)
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			want := make(map[[2]string]float64)
+			for _, field := range tt.wantFields {
+				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			require.Equal(t, want, delta)
+		})
+	}
+}
+
+func TestSharedStoragePrefillToolCalling(t *testing.T) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				body          string
+				invalidTarget bool
+				captureError  bool
+				wantChoice    toolcalling.FieldStatusValue
+			}{
+				{name: "changed choice", body: `{"tools":[],"tool_choice":"none"}`, wantChoice: toolcalling.FieldStatusChanged},
+				{name: "dropped choice", body: `{"tools":[]}`, wantChoice: toolcalling.FieldStatusDropped},
+				{name: "undispatched fields excluded", body: `{"tools":[],"tool_choice":"none"}`, invalidTarget: true},
+				{name: "capture failure preserves routing", body: `{"tools":[],"tool_choice":"none"}`, captureError: true},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					var dispatched atomic.Int32
+					prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						dispatched.Add(1)
+						statusHandler(http.StatusOK, `{}`).ServeHTTP(w, r)
+					}))
+					defer prefill.Close()
+					prefillURL, err := url.Parse(prefill.URL)
+					require.NoError(t, err)
+					s := NewProxy(Config{DecoderURL: prefillURL})
+					s.logger = log.Log
+					original := `{"tools":[],"tool_choice":"auto"}`
+					if tt.captureError {
+						original = `{`
+					}
+					toolFields, captureErr := captureToolCallingRequest(api, []byte(original))
+					require.Equal(t, tt.captureError, captureErr != nil)
+					var body map[string]any
+					require.NoError(t, json.Unmarshal([]byte(tt.body), &body))
+					target := prefillURL.Host
+					if tt.invalidTarget {
+						target = "%invalid"
+					}
+					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(tt.body))
+					prefillErr := s.prefill(httptest.NewRecorder(), r, target, body, api, toolFields)
+					require.Equal(t, tt.invalidTarget, prefillErr != nil)
+					if tt.invalidTarget {
+						require.Zero(t, dispatched.Load())
+					} else {
+						require.Equal(t, int32(1), dispatched.Load())
+					}
+					statuses := toolFields.fieldStatuses()
+					if tt.invalidTarget || tt.captureError {
+						require.Empty(t, statuses)
+					} else {
+						require.Len(t, statuses, 2)
+						for _, result := range statuses {
+							require.True(t, result.Observed)
+							want := toolcalling.FieldStatusPreserved
+							if result.Field == toolcalling.FieldToolChoice {
+								want = tt.wantChoice
+							}
+							require.Equal(t, want, result.Status, "field %s", result.Field)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSharedStorageToolCallingDecodeAbort(t *testing.T) {
+	for _, mode := range []string{"after prefill", "buffered decode first", "streaming decode first"} {
+		t.Run(mode, func(t *testing.T) {
+			prefill := httptest.NewServer(statusHandler(http.StatusOK, `{}`))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+			s := NewProxy(Config{DecoderURL: prefillURL})
+			s.logger = log.Log
+			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				panic(http.ErrAbortHandler)
+			})
+			body := `{"tools":[]}`
+			if mode != "after prefill" {
+				body = `{"tools":[],"cache_hit_threshold":0.5}`
+			}
+			if mode == "streaming decode first" {
+				body = `{"tools":[],"cache_hit_threshold":0.5,"stream":true}`
+			}
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			before := toolFieldCounters(t)
+			require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+				s.handleSharedStorage(httptest.NewRecorder(), r, prefillURL.Host, reqcommon.APITypeChatCompletions)
+			})
+			delta := make(map[[2]string]float64)
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			require.Equal(t, map[[2]string]float64{
+				{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}: 1,
+			}, delta)
+		})
+	}
+}
+
 func TestRunConcurrentPDToolCallingMetrics(t *testing.T) {
 	original := `{"tools":[],"tool_choice":"auto"}`
 	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
