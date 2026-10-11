@@ -630,6 +630,199 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 	}
 }
 
+func TestP2PToolCallingMetrics(t *testing.T) {
+	chatBody := `{"model":"test-model","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	messagesFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}
+	for _, path := range []string{"prefill and decode", "peer source", "self source"} {
+		t.Run(path, func(t *testing.T) {
+			type testCase struct {
+				name          string
+				api           reqcommon.APIType
+				body          string
+				prefillStatus int
+				decodeStatus  int
+				invalidTarget bool
+				wantCode      int
+				wantFields    []toolcalling.Field
+			}
+			tests := []testCase{
+				{name: "chat fields", body: chatBody, wantCode: 200, wantFields: chatFields},
+				{name: "messages fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantFields: messagesFields},
+				{name: "null and empty fields", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantFields: messagesFields},
+				{name: "non-tool body", body: `{"messages":[]}`, wantCode: 200},
+				{name: "nested tools", body: `{"messages":[{"tools":[]}]}`, wantCode: 200},
+				{name: "malformed body", body: `{"tools":`, wantCode: 400},
+				{name: "unsupported API", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200},
+				{name: "decode error", body: chatBody, decodeStatus: 500, wantCode: 500, wantFields: chatFields},
+			}
+			if path == "prefill and decode" {
+				tests = append(tests,
+					testCase{name: "prefill error", body: chatBody, prefillStatus: 400, wantCode: 400, wantFields: chatFields},
+					testCase{name: "handler initialization error", body: chatBody, invalidTarget: true, wantCode: 502},
+				)
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Setenv("POD_IP", "127.0.0.1")
+					prefillBodies := make(chan []byte, 1)
+					decodeBodies := make(chan []byte, 1)
+					upstream := func(bodies chan []byte, code int) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							raw, err := io.ReadAll(r.Body)
+							assert.NoError(t, err)
+							bodies <- raw
+							if code == 0 {
+								code = http.StatusOK
+							}
+							statusHandler(code, `{"choices":[]}`).ServeHTTP(w, r)
+						})
+					}
+					prefill := httptest.NewServer(upstream(prefillBodies, tt.prefillStatus))
+					defer prefill.Close()
+					decode := httptest.NewServer(upstream(decodeBodies, tt.decodeStatus))
+					defer decode.Close()
+					prefillURL, err := url.Parse(prefill.URL)
+					require.NoError(t, err)
+					decodeURL, err := url.Parse(decode.URL)
+					require.NoError(t, err)
+					s := NewProxy(Config{Port: "8000", DecoderURL: decodeURL, KVConnector: constants.KVConnectorOffloading})
+					s.logger = log.Log
+					s.createRoutes()
+					r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+					rw := httptest.NewRecorder()
+					before := toolFieldCounters(t)
+					if path == "prefill and decode" {
+						target := prefillURL.Host
+						if tt.invalidTarget {
+							target = "%invalid"
+						}
+						s.handleP2P(rw, r, target, "10.0.0.2:8000", tt.api)
+					} else {
+						source := "10.0.0.2:8000"
+						if path == "self source" {
+							source = "127.0.0.1:8000"
+						}
+						s.decodeWithP2PSource(rw, r, source)
+					}
+					require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+					wantPrefill, wantDecode := 0, 0
+					if tt.wantCode != 400 || tt.prefillStatus != 0 {
+						if !tt.invalidTarget {
+							wantDecode = 1
+							if path == "prefill and decode" {
+								wantPrefill = 1
+								if tt.prefillStatus != 0 {
+									wantDecode = 0
+								}
+							}
+						}
+					}
+					require.Len(t, prefillBodies, wantPrefill)
+					require.Len(t, decodeBodies, wantDecode)
+					delta := make(map[[2]string]float64)
+					for key, value := range toolFieldCounters(t) {
+						if change := value - before[key]; change != 0 {
+							delta[key] = change
+						}
+					}
+					want := make(map[[2]string]float64)
+					for _, field := range tt.wantFields {
+						want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+					}
+					require.Equal(t, want, delta)
+					if wantPrefill+wantDecode > 0 {
+						var original map[string]json.RawMessage
+						require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
+						for _, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+							for len(bodies) > 0 {
+								raw := <-bodies
+								var actual map[string]json.RawMessage
+								require.NoError(t, json.Unmarshal(raw, &actual))
+								for _, field := range chatFields {
+									require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
+								}
+								if path == "self source" {
+									require.Equal(t, tt.body, string(raw))
+								}
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
+	original := `{"tools":[],"tool_choice":"auto"}`
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				prefill       string
+				decode        string
+				prefillStatus int
+				captureError  bool
+				wantTools     toolcalling.FieldStatusValue
+				wantChoice    toolcalling.FieldStatusValue
+			}{
+				{name: "prefill changed", prefill: `{"tools":[],"tool_choice":"none"}`, decode: original, wantTools: toolcalling.FieldStatusPreserved, wantChoice: toolcalling.FieldStatusChanged},
+				{name: "decode dropped", prefill: original, decode: `{"tool_choice":"auto"}`, wantTools: toolcalling.FieldStatusDropped, wantChoice: toolcalling.FieldStatusPreserved},
+				{name: "worst outcome across stages", prefill: `{"tools":[],"tool_choice":"none"}`, decode: `{"tools":[]}`, wantTools: toolcalling.FieldStatusPreserved, wantChoice: toolcalling.FieldStatusDropped},
+				{name: "undispatched decode excluded", prefill: original, decode: `{}`, prefillStatus: 400, wantTools: toolcalling.FieldStatusPreserved, wantChoice: toolcalling.FieldStatusPreserved},
+				{name: "failed outbound capture", prefill: `{`, decode: original, wantTools: toolcalling.FieldStatusPreserved, wantChoice: toolcalling.FieldStatusPreserved},
+				{name: "failed inbound capture", prefill: original, decode: original, captureError: true},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					code := tt.prefillStatus
+					if code == 0 {
+						code = http.StatusOK
+					}
+					prefill := httptest.NewServer(statusHandler(code, `{}`))
+					defer prefill.Close()
+					prefillURL, err := url.Parse(prefill.URL)
+					require.NoError(t, err)
+					s := NewProxy(Config{DecoderURL: prefillURL})
+					s.logger = log.Log
+					decodeCount := 0
+					s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						decodeCount++
+						body, readErr := io.ReadAll(r.Body)
+						require.NoError(t, readErr)
+						require.Equal(t, tt.decode, string(body))
+						statusHandler(http.StatusOK, `{}`).ServeHTTP(w, r)
+					})
+					captured := original
+					if tt.captureError {
+						captured = `{`
+					}
+					toolFields, captureErr := captureToolCallingRequest(api, []byte(captured))
+					require.Equal(t, tt.captureError, captureErr != nil)
+					before := toolFieldCounters(t)
+					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
+					rw := httptest.NewRecorder()
+					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
+					require.Equal(t, code, rw.Code)
+					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
+					delta := make(map[[2]string]float64)
+					for key, value := range toolFieldCounters(t) {
+						if change := value - before[key]; change != 0 {
+							delta[key] = change
+						}
+					}
+					want := make(map[[2]string]float64)
+					if !tt.captureError {
+						want[[2]string{string(toolcalling.FieldTools), string(tt.wantTools)}] = 1
+						want[[2]string{string(toolcalling.FieldToolChoice), string(tt.wantChoice)}] = 1
+					}
+					require.Equal(t, want, delta)
+				})
+			}
+		})
+	}
+}
+
 func TestHandleP2PMetrics(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -703,14 +896,24 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 	})
 
 	before := snapshotStageMetrics(t)
+	beforeFields := toolFieldCounters(t)
+	body := textChatBody()
+	body[string(toolcalling.FieldTools)] = []any{}
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.handleP2P(httptest.NewRecorder(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+		s.handleP2P(httptest.NewRecorder(), chatRequest(t, body), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
 		snapshotStageMetrics(t).delta(before))
+	for key, value := range toolFieldCounters(t) {
+		want := float64(0)
+		if key == [2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)} {
+			want = 1
+		}
+		assert.Equal(t, want, value-beforeFields[key], "field outcome %v", key)
+	}
 }
 
 func TestRecordDecodeAbort(t *testing.T) {

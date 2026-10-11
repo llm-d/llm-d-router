@@ -56,10 +56,11 @@ const (
 // prefill request runs to completion before decode is dispatched, so the decoder's
 // fetch finds the blocks already stored, matching the NIXL path.
 func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
-	_, requestData, ok := s.readJSONBody(r, w)
+	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureToolCallingRequest(apiType, original)
 
 	kvRequestID := newUUID()
 	prefillP2PPort := s.p2pPortFor(prefillPodHostPort)
@@ -113,7 +114,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		v.Info("decode request body", logging.HTTPBodyKey, string(decodeBody))
 	}
 
-	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort)
+	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort, toolFields)
 }
 
 // handleP2PSequentialRequests runs the prefill request to completion, then
@@ -126,7 +127,8 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // recomputes the prompt locally, which is the work disaggregation exists to
 // avoid. Sequencing the requests also matches the NIXL connector, which forwards to
 // the prefiller and waits for it to return before dispatching decode.
-func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string) {
+func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
@@ -150,6 +152,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	prefillStart := time.Now()
 
 	pw := &bufferedResponseWriter{}
+	_, _ = toolFields.compareDispatched(prefillBody)
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
 	metrics.RecordPrefillDuration(prefillDuration)
@@ -201,6 +204,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	_, _ = toolFields.compareDispatched(decodeBody)
 	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
 	decodeReturned = true
 
@@ -349,12 +353,18 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	if !ok {
 		return
 	}
+	apiType := reqcommon.DetectAPIType(r.URL.Path)
+	toolFields, _ := captureToolCallingRequest(apiType, raw)
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 
 	source := normalizeEndpoint(sourceHostPort)
 	self := normalizeEndpoint(net.JoinHostPort(os.Getenv("POD_IP"), s.config.Port))
 	if source == self {
 		s.logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
 			"source", sourceHostPort, "self", self)
+		if s.config.DecodeChunkSize <= 0 || apiType != reqcommon.APITypeChatCompletions {
+			_, _ = toolFields.compareDispatched(raw)
+		}
 		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData)
 		return
 	}
@@ -380,5 +390,9 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		v.Info("decoder request body with p2p source", logging.HTTPBodyKey, string(newBody))
 	}
 
+	// Chunked decode constructs its own dispatched bodies.
+	if s.config.DecodeChunkSize <= 0 || apiType != reqcommon.APITypeChatCompletions {
+		_, _ = toolFields.compareDispatched(newBody)
+	}
 	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData)
 }
