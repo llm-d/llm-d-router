@@ -47,10 +47,12 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, body, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
 
 	// Generate unique request UUID
 	reqUUID, err := uuid.NewUUID()

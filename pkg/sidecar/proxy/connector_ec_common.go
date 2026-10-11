@@ -388,11 +388,16 @@ func (s *Server) runPDPipeline(
 	}
 
 	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
+	toolFields, _ := captureInferenceToolCallingRequest(pdRequest, apiType, modifiedBody)
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, nil) {
+	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
+		_, _ = toolFields.compareDispatched(modifiedBody)
+	}) {
+		_, _ = toolFields.compareDispatched(modifiedBody)
 		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
 	}
 	decodeReturned = true

@@ -107,10 +107,12 @@ func (s *Server) fanoutEncoderCollect(
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, body, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
 
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
