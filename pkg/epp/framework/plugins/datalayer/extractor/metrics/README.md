@@ -18,6 +18,7 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **KV Cache Usage**: Percentage of KV cache currently utilized.
     -   **LoRA Adapters**: Information about active and waiting LoRA adapters.
     -   **Cache Configuration**: Block size and total number of GPU blocks.
+    -   **Tiered Offloading** (optional): vLLM KV cache tiering metrics (`kv_offload_tiering_*`, vLLM 0.28.0 or later) when vLLM is configured with `TieringOffloadingSpec`. Silently skipped on non-tiering deployments.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
 ### Families with several series
@@ -26,6 +27,7 @@ A model server that runs several engines in one Pod exposes one series per engin
 
 -   `WaitingQueueSize` and `RunningRequestsSize` are the sum over the matching series, so both count requests for the whole Pod. The utilization detector's scrape-lag credit compares their sum with the Pod's in-flight request count, and queue-depth thresholds apply to the Pod total.
 -   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
+-   The tiered offloading attributes are the sum over the matching series, so they cover every engine rank of the Pod. Series of the primary tier (`tier="0:primary"`) are never included.
 
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration and custom metrics read one series.
 
@@ -51,6 +53,19 @@ The built-in `vllm` config also stores the NIXL KV transfer failure counters as 
 
 The EPP exposes the same values per endpoint, see [Inference pool metrics](../../../../../../../docs/metrics.md#inference-pool).
 
+When tiered offloading metrics are detected, the following scalar metric attributes are also produced (stored via `ScalarMetricDataKey`):
+
+-   `tiering_chunk_hits` (float64)
+-   `tiering_chunk_queries` (float64)
+-   `tiering_read_bytes` (float64)
+-   `tiering_read_time` (float64)
+-   `tiering_promotion_failures` (float64)
+-   `tiering_allocation_failures` (float64)
+
+vLLM 0.28.0 or later reports these counters, and only when it runs with `TieringOffloadingSpec`. vLLM creates each series on its first event, so an endpoint that offloads can still lack some of them, for example the failure counters until the first failure. An attribute without a series stays unset, or keeps its last value if its series was reported before. A plugin sees an unset attribute as missing: `endpoint-attribute-scorer` scores the endpoint `0.0`, and `endpoint-attribute-filter` keeps or drops it according to `onMissing`.
+
+No built-in plugin reads these attributes by default. `endpoint-attribute-scorer` reads them through `attributeKey`; `endpoint-attribute-filter` reads them through `attribute`. The values are cumulative counters.
+
 ## Configuration
 
 The plugin config supports:
@@ -58,12 +73,13 @@ The plugin config supports:
 -   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
-    Each engine config can also include `customMetrics` entries. Each entry
-    maps a scalar metric selector to an endpoint attribute key. A missing
-    metric is an extraction error unless the entry sets `optional: true`,
+    Each engineConfig can include `tieredOffloadingSpecs` and `customMetrics` entries.
+    Each entry maps a scalar metric selector to an endpoint attribute key.
+    A missing customMetric is an extraction error unless the entry sets `optional: true`,
     which skips the entry on a scrape where the endpoint does not report it.
-    An engine config named after a built-in engine replaces that built-in
-    config, including its `customMetrics`.
+    `tieredOffloadingSpecs` entries are always optional, so `optional` has no effect on them.
+    An engineConfig named after a built-in engine replaces that built-in config, including its `customMetrics` and `tieredOffloadingSpecs`.
+    Only the built-in vLLM config includes tieredOffloadingSpecs. The built-in SGLang, Atom, TRT-LLM and Triton configs do not extract tieredOffloadingSpecs. An engine that exposes equivalent metrics can be configured with `tieredOffloadingSpecs` entries.
 
 ### Built-in Engine Configurations
 
@@ -82,7 +98,6 @@ metadata:
     llm-d.ai/engine-type: vllm # other options: sglang, atom, trtllm-serve, triton-tensorrt-llm, triton 
 
 ```
-
 
 ### Custom Engine Configuration Example
 
@@ -108,6 +123,80 @@ metadata:
 
 ```
 
+### vLLM Tiered Offloading Configuration
+
+The built-in vLLM selectors do not pin the tier label. Each attribute is the
+sum over all secondary tiers and engine ranks. Deployments that need one total
+for all secondary tiers need no override.
+
+To read the tiers separately, define a vLLM entry in `engineConfigs` with one
+`tieredOffloadingSpecs` item for each tier, and name the tier in each selector.
+`tieredOffloadingSpecs` entries never read the `0:primary` series, even when
+the selector names it. To read the primary tier's lookup counters, use a
+`customMetrics` entry.
+
+vLLM does not label `vllm:kv_offload_tiering_promotion_allocation_failures_total`
+with a tier, so its selector must not name one. A selector that names a tier
+never matches it, and `tiering_allocation_failures` stays unset.
+
+vLLM builds the label as `{position}:{type}`, where `position` is the entry's
+index in `secondary_tiers` plus one and `type` is that entry's `type` string.
+The types built into vLLM 0.28.0 are `fs`, `p2p`, `obj` (S3-compatible stores)
+and `example`; later vLLM versions also build in `kvcr`. An out-of-tree tier
+reports the `type` it declares. Ordering decides the number, so
+`secondary_tiers: [p2p, fs]` reports `1:p2p` and `2:fs`, and the specs here must
+mirror the deployed order.
+
+> [!NOTE]
+> Overriding `engineConfigs` for `"vllm"` replaces the entire built-in
+> config, so all standard metric specs must be re-specified alongside the
+> tiering entries.
+
+```yaml
+type: core-metrics-extractor
+parameters:
+  engineConfigs:
+    - name: "vllm"
+      # Standard specs (required, since overriding replaces the built-in config)
+      queuedRequestsSpec: "vllm:num_requests_waiting"
+      runningRequestsSpec: "vllm:num_requests_running"
+      kvUsageSpec: "vllm:kv_cache_usage_perc"
+      loraSpec: "vllm:lora_requests_info"
+      cacheInfoSpec: "vllm:cache_config_info"
+      # Per-tier offloading specs
+      tieredOffloadingSpecs:
+        - attributeKey: "tiering_chunk_hits_fs"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"1:fs\"}"
+        - attributeKey: "tiering_chunk_hits_p2p"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"2:p2p\"}"
+        - attributeKey: "tiering_chunk_hits_obj"
+          metricSpec: "vllm:kv_offload_tiering_chunk_hits_total{tier=\"3:obj\"}"
+```
+
+### vLLM CPU-Only Offloading
+
+The metrics of `CPUOffloadingSpec` (
+`vllm:kv_offload_cpu_cache_usage_perc`,
+`vllm:kv_offload_cpu_cache_write_usage_perc`,
+`vllm:kv_offload_cpu_cache_read_usage_perc`,
+`vllm:kv_offload_store_bytes_total`,
+`vllm:kv_offload_load_bytes_total`
+) are not extracted by default. Add the ones you need as `customMetrics` entries:
+
+```yaml
+type: core-metrics-extractor
+parameters:
+  engineConfigs:
+    - name: "vllm"
+      # Standard specs (required, overriding replaces the built-in config)
+      queuedRequestsSpec: "vllm:num_requests_waiting"
+      runningRequestsSpec: "vllm:num_requests_running"
+      kvUsageSpec: "vllm:kv_cache_usage_perc"
+      loraSpec: "vllm:lora_requests_info"
+      cacheInfoSpec: "vllm:cache_config_info"
+      customMetrics:
+        - attributeKey: "cpu_offload_usage"
+          metricSpec: "vllm:kv_offload_cpu_cache_usage_perc"
 ```
 
 ## Multi-cluster support
