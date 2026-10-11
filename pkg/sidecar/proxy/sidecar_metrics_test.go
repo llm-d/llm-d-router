@@ -379,6 +379,158 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 	}
 }
 
+func TestMooncakeToolCallingMetrics(t *testing.T) {
+	chatBody := `{"model":"m","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	for _, tt := range []struct {
+		name              string
+		api               reqcommon.APIType
+		body              string
+		bootstrapStatus   int
+		bootstrapResponse string
+		cachedBootstrap   bool
+		invalidTarget     bool
+		denyTarget        bool
+		prefillStatus     int
+		decodeStatus      int
+		wantCode          int
+		wantForward       bool
+		wantQueries       int32
+		wantFields        []toolcalling.Field
+	}{
+		{name: "chat fields", body: chatBody, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: chatFields},
+		{name: "messages fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "cached bootstrap", body: chatBody, cachedBootstrap: true, wantCode: 200, wantForward: true, wantFields: chatFields},
+		{name: "null and empty fields", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "non-tool body", body: `{"messages":[]}`, wantCode: 200, wantForward: true, wantQueries: 1},
+		{name: "nested tools", body: `{"messages":[{"tools":[]}]}`, wantCode: 200, wantForward: true, wantQueries: 1},
+		{name: "malformed body", body: `{"tools":`, wantCode: 400},
+		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200, wantForward: true, wantQueries: 1},
+		{name: "prefill error does not reject fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: chatFields},
+		{name: "decode error does not reject fields", body: chatBody, decodeStatus: 500, wantCode: 500, wantForward: true, wantQueries: 1, wantFields: chatFields},
+		{name: "bootstrap error", body: chatBody, bootstrapStatus: 503, wantCode: 502, wantQueries: 1},
+		{name: "malformed bootstrap response", body: chatBody, bootstrapResponse: `{`, wantCode: 502, wantQueries: 1},
+		{name: "empty engine map", body: chatBody, bootstrapResponse: `{}`, wantCode: 502, wantQueries: 1},
+		{name: "missing engine ID", body: chatBody, bootstrapResponse: `{"3":{}}`, wantCode: 502, wantQueries: 1},
+		{name: "handler initialization error", body: chatBody, cachedBootstrap: true, invalidTarget: true, wantCode: 502},
+		{name: "SSRF denial", body: chatBody, denyTarget: true, wantCode: 403},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var queries atomic.Int32
+			bootstrap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/query", r.URL.Path)
+				queries.Add(1)
+				code := tt.bootstrapStatus
+				if code == 0 {
+					code = http.StatusOK
+				}
+				body := tt.bootstrapResponse
+				if body == "" {
+					body = `{"3":{"engine_id":"engine-3"},"7":{"engine_id":"engine-7"}}`
+				}
+				statusHandler(code, body).ServeHTTP(w, r)
+			}))
+			defer bootstrap.Close()
+			bootstrapURL, err := url.Parse(bootstrap.URL)
+			require.NoError(t, err)
+			var bootstrapPort int
+			_, err = fmt.Sscanf(bootstrapURL.Port(), "%d", &bootstrapPort)
+			require.NoError(t, err)
+			type forwardedRequest struct {
+				body []byte
+				rank string
+			}
+			prefillBodies := make(chan forwardedRequest, 1)
+			decodeBodies := make(chan forwardedRequest, 1)
+			upstream := func(bodies chan forwardedRequest, code int) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, readErr := io.ReadAll(r.Body)
+					assert.NoError(t, readErr)
+					bodies <- forwardedRequest{body: raw, rank: r.Header.Get(requestHeaderDataParallelRank)}
+					if code == 0 {
+						code = http.StatusOK
+					}
+					statusHandler(code, `{"choices":[]}`).ServeHTTP(w, r)
+				})
+			}
+			prefill := httptest.NewServer(upstream(prefillBodies, tt.prefillStatus))
+			defer prefill.Close()
+			decode := httptest.NewServer(upstream(decodeBodies, tt.decodeStatus))
+			defer decode.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+			decodeURL, err := url.Parse(decode.URL)
+			require.NoError(t, err)
+			s := NewProxy(Config{DecoderURL: decodeURL, KVConnector: constants.KVConnectorMooncake, MooncakeBootstrapPort: bootstrapPort})
+			s.logger = log.Log
+			s.allowlistValidator = &AllowlistValidator{enabled: tt.denyTarget}
+			target := prefillURL.Host
+			if tt.invalidTarget {
+				target = "%invalid"
+			}
+			if tt.cachedBootstrap {
+				s.mooncakeEngineIDs.Add(target, map[string]string{"3": "engine-3"})
+			}
+			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+			r.Header.Set(routing.PrefillEndpointHeader, target)
+			rw := httptest.NewRecorder()
+			before := toolFieldCounters(t)
+			beforeStages := snapshotStageMetrics(t)
+			s.createRoutes().ServeHTTP(rw, r)
+			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			require.Equal(t, tt.wantQueries, queries.Load())
+			if tt.wantForward {
+				require.Eventually(t, func() bool {
+					delta := snapshotStageMetrics(t).delta(beforeStages)
+					wantErrors := float64(0)
+					if tt.prefillStatus != 0 && isHTTPError(tt.prefillStatus) {
+						wantErrors = 1
+					}
+					return delta.prefillCount == 1 && delta.prefillErrors == wantErrors
+				}, 5*time.Second, 10*time.Millisecond)
+				require.Len(t, prefillBodies, 1)
+				require.Len(t, decodeBodies, 1)
+				require.Equal(t, `{"choices":[]}`, rw.Body.String())
+				prefilled, decoded := <-prefillBodies, <-decodeBodies
+				require.Contains(t, []string{"3", "7"}, prefilled.rank)
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
+				var transferID json.RawMessage
+				for i, raw := range [][]byte{prefilled.body, decoded.body} {
+					var actual map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(raw, &actual))
+					for _, field := range chatFields {
+						require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
+					}
+					var kv map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(actual[reqcommon.FieldKVTransferParams], &kv))
+					if i == 0 {
+						transferID = kv[requestFieldTransferID]
+						require.NotEmpty(t, transferID)
+					} else {
+						require.Equal(t, transferID, kv[requestFieldTransferID])
+						require.JSONEq(t, fmt.Sprintf("%q", "engine-"+prefilled.rank), string(kv[reqcommon.FieldRemoteEngineID]))
+					}
+				}
+			} else {
+				require.Empty(t, prefillBodies)
+				require.Empty(t, decodeBodies)
+			}
+			delta := make(map[[2]string]float64)
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			want := make(map[[2]string]float64)
+			for _, field := range tt.wantFields {
+				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			require.Equal(t, want, delta)
+		})
+	}
+}
+
 func TestRunConcurrentPDToolCallingMetrics(t *testing.T) {
 	original := `{"tools":[],"tool_choice":"auto"}`
 	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {

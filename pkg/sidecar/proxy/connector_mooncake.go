@@ -41,7 +41,7 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	_, requestData, ok := s.readJSONBody(r, w)
+	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -61,6 +61,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	for dpRank, engineID = range engineMap {
 		break
 	}
+	toolFields, _ := captureToolCallingRequest(apiType, original)
 
 	transferID := "xfer-" + newUUID()
 	s.logger.V(logging.TRACE).Info("mooncake protocol info",
@@ -119,7 +120,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
-	}, nil)
+	}, toolFields)
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.
