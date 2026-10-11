@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,6 +277,205 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 	}
 }
 
+func TestSGLangToolCallingMetrics(t *testing.T) {
+	chatBody := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
+	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
+	for _, tt := range []struct {
+		name          string
+		api           reqcommon.APIType
+		body          string
+		prefillStatus int
+		decodeStatus  int
+		invalidTarget bool
+		wantCode      int
+		wantFields    []toolcalling.Field
+	}{
+		{name: "chat fields", body: chatBody, wantCode: 200, wantFields: chatFields},
+		{name: "messages fields", api: reqcommon.APITypeMessages, body: chatBody, wantCode: 200, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "null and empty fields", body: `{"tools":[],"tool_choice":null}`, wantCode: 200, wantFields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "non-tool body", body: `{"messages":[]}`, wantCode: 200},
+		{name: "nested tools", body: `{"messages":[{"tools":[]}]}`, wantCode: 200},
+		{name: "malformed body", body: `{"tools":`, wantCode: 400},
+		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200},
+		{name: "native generate excluded", api: reqcommon.APITypeSGLangGenerate, body: chatBody, wantCode: 200},
+		{name: "prefill error does not reject fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantFields: chatFields},
+		{name: "decode error does not reject fields", body: chatBody, decodeStatus: 500, wantCode: 500, wantFields: chatFields},
+		{name: "handler initialization error", body: chatBody, invalidTarget: true, wantCode: 502},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prefillBodies := make(chan []byte, 1)
+			decodeBodies := make(chan []byte, 1)
+			upstream := func(bodies chan []byte, code int) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					raw, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					bodies <- raw
+					if code == 0 {
+						code = http.StatusOK
+					}
+					statusHandler(code, `{"choices":[]}`).ServeHTTP(w, r)
+				})
+			}
+			prefill := httptest.NewServer(upstream(prefillBodies, tt.prefillStatus))
+			defer prefill.Close()
+			decode := httptest.NewServer(upstream(decodeBodies, tt.decodeStatus))
+			defer decode.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+			decodeURL, err := url.Parse(decode.URL)
+			require.NoError(t, err)
+			s := NewProxy(Config{DecoderURL: decodeURL, KVConnector: constants.KVConnectorSGLang})
+			s.logger = log.Log
+			s.allowlistValidator = &AllowlistValidator{enabled: false}
+			routes := s.createRoutes()
+			r := httptest.NewRequest(http.MethodPost, tt.api.Path(), strings.NewReader(tt.body))
+			target := prefillURL.Host
+			if tt.invalidTarget {
+				target = "%invalid"
+			}
+			r.Header.Set(routing.PrefillEndpointHeader, target)
+			rw := httptest.NewRecorder()
+			before := toolFieldCounters(t)
+			beforeStages := snapshotStageMetrics(t)
+			routes.ServeHTTP(rw, r)
+			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			if tt.wantCode != 400 && !tt.invalidTarget {
+				require.Eventually(t, func() bool {
+					delta := snapshotStageMetrics(t).delta(beforeStages)
+					wantErrors := float64(0)
+					if tt.prefillStatus != 0 && isHTTPError(tt.prefillStatus) {
+						wantErrors = 1
+					}
+					return delta.prefillCount == 1 && delta.prefillErrors == wantErrors
+				}, 5*time.Second, 10*time.Millisecond)
+				require.Len(t, prefillBodies, 1)
+				require.Len(t, decodeBodies, 1)
+				require.Equal(t, `{"choices":[]}`, rw.Body.String())
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
+				for _, bodies := range []chan []byte{prefillBodies, decodeBodies} {
+					var actual map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(<-bodies, &actual))
+					for _, field := range chatFields {
+						require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
+					}
+				}
+			} else {
+				require.Empty(t, prefillBodies)
+				require.Empty(t, decodeBodies)
+			}
+			delta := make(map[[2]string]float64)
+			for key, value := range toolFieldCounters(t) {
+				if change := value - before[key]; change != 0 {
+					delta[key] = change
+				}
+			}
+			want := make(map[[2]string]float64)
+			for _, field := range tt.wantFields {
+				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			require.Equal(t, want, delta)
+		})
+	}
+}
+
+func TestRunConcurrentPDToolCallingMetrics(t *testing.T) {
+	original := `{"tools":[],"tool_choice":"auto"}`
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			for _, tt := range []struct {
+				name         string
+				prefill      string
+				decode       string
+				captureError bool
+				wantChoice   toolcalling.FieldStatusValue
+			}{
+				{name: "prefill changed", prefill: `{"tools":[],"tool_choice":"none"}`, decode: original, wantChoice: toolcalling.FieldStatusChanged},
+				{name: "decode dropped", prefill: original, decode: `{"tools":[]}`, wantChoice: toolcalling.FieldStatusDropped},
+				{name: "worst outcome across stages", prefill: `{"tools":[]}`, decode: `{"tools":[],"tool_choice":"none"}`, wantChoice: toolcalling.FieldStatusDropped},
+				{name: "failed outbound capture", prefill: `{`, decode: original, wantChoice: toolcalling.FieldStatusPreserved},
+				{name: "failed inbound capture", prefill: original, decode: original, captureError: true},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					prefillBody := make(chan []byte, 1)
+					decodeBody := make(chan []byte, 1)
+					releasePrefill := make(chan struct{})
+					prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						body, err := io.ReadAll(r.Body)
+						assert.NoError(t, err)
+						prefillBody <- body
+						<-releasePrefill
+						statusHandler(http.StatusBadRequest, `{}`).ServeHTTP(w, r)
+					}))
+					defer prefill.Close()
+					var releaseOnce sync.Once
+					release := func() { releaseOnce.Do(func() { close(releasePrefill) }) }
+					defer release()
+					prefillURL, err := url.Parse(prefill.URL)
+					require.NoError(t, err)
+					s := NewProxy(Config{DecoderURL: prefillURL})
+					s.logger = log.Log
+					s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						body, readErr := io.ReadAll(r.Body)
+						assert.NoError(t, readErr)
+						decodeBody <- body
+						statusHandler(http.StatusOK, `{"choices":[]}`).ServeHTTP(w, r)
+					})
+					captured := original
+					if tt.captureError {
+						captured = `{`
+					}
+					toolFields, captureErr := captureToolCallingRequest(api, []byte(captured))
+					require.Equal(t, tt.captureError, captureErr != nil)
+					before := toolFieldCounters(t)
+					beforeStages := snapshotStageMetrics(t)
+					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
+					rw := httptest.NewRecorder()
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						s.runConcurrentPD(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, constants.KVConnectorSGLang, nil, toolFields)
+					}()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Fatal("decode waited for blocked prefill")
+					}
+					require.Equal(t, http.StatusOK, rw.Code)
+					require.Equal(t, `{"choices":[]}`, rw.Body.String())
+					require.Equal(t, tt.decode, string(<-decodeBody))
+					select {
+					case body := <-prefillBody:
+						require.Equal(t, tt.prefill, string(body))
+					case <-time.After(5 * time.Second):
+						t.Fatal("prefill was not dispatched")
+					}
+					after := toolFieldCounters(t)
+					delta := make(map[[2]string]float64)
+					for key, value := range after {
+						if change := value - before[key]; change != 0 {
+							delta[key] = change
+						}
+					}
+					want := make(map[[2]string]float64)
+					if !tt.captureError {
+						want[[2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}] = 1
+						want[[2]string{string(toolcalling.FieldToolChoice), string(tt.wantChoice)}] = 1
+					}
+					require.Equal(t, want, delta)
+					require.Zero(t, snapshotStageMetrics(t).delta(beforeStages).prefillCount)
+					release()
+					require.Eventually(t, func() bool {
+						delta := snapshotStageMetrics(t).delta(beforeStages)
+						return delta.prefillCount == 1 && delta.prefillErrors == 1
+					}, 5*time.Second, 10*time.Millisecond)
+					require.Equal(t, after, toolFieldCounters(t), "late prefill must not count fields again")
+				})
+			}
+		})
+	}
+}
+
 func TestRunConcurrentPDMetrics(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -317,7 +517,7 @@ func TestRunConcurrentPDMetrics(t *testing.T) {
 			before := snapshotStageMetrics(t)
 			body := []byte(`{"model":"m","messages":[]}`)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
-			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
+			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
 
 			// Prefill runs in a goroutine; wait for its sample so it cannot leak
 			// into a later test's delta.
@@ -348,13 +548,16 @@ func TestRunConcurrentPDDecodeAbortMetrics(t *testing.T) {
 	})
 
 	before := snapshotStageMetrics(t)
-	body := []byte(`{"model":"m","messages":[]}`)
+	beforeFields := toolFieldCounters(t)
+	body := []byte(`{"model":"m","messages":[],"tools":[]}`)
+	toolFields, captureErr := captureToolCallingRequest(reqcommon.APITypeChatCompletions, body)
+	require.NoError(t, captureErr)
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
 
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
+		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, toolFields)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 
@@ -363,6 +566,13 @@ func TestRunConcurrentPDDecodeAbortMetrics(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
 		snapshotStageMetrics(t).delta(before))
+	for key, value := range toolFieldCounters(t) {
+		want := float64(0)
+		if key == [2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)} {
+			want = 1
+		}
+		assert.Equal(t, want, value-beforeFields[key], "field outcome %v", key)
+	}
 }
 
 func TestHandleNIXLV2SerialMetrics(t *testing.T) {

@@ -57,7 +57,9 @@ func (s *Server) runConcurrentPD(
 	// prepareRequests lets a connector mutate the cloned requests before dispatch,
 	// e.g. Mooncake sets a DP-rank header so prefill lands on the same rank decode reads from.
 	prepareRequests func(prefillReq, decodeReq *http.Request),
+	toolFields *toolCallingRequest,
 ) {
+	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
 	tracer := tracing.Tracer(tracerScope)
 	ctx, cancelDecode := context.WithCancel(r.Context())
 	defer cancelDecode()
@@ -95,6 +97,8 @@ func (s *Server) runConcurrentPD(
 		return
 	}
 
+	// Aggregate before starting the worker so reporting does not wait for prefill.
+	_, _ = toolFields.compareDispatched(prefillBody)
 	go func() {
 		defer cancelPrefill()
 		defer prefillSpan.End()
@@ -156,6 +160,7 @@ func (s *Server) runConcurrentPD(
 		})
 		context.AfterFunc(prefillCtx, func() { graceTimer.Stop() })
 	}()
+	_, _ = toolFields.compareDispatched(decodeBody)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
 
