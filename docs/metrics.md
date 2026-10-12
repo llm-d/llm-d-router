@@ -379,6 +379,13 @@ is one of:
 | `no_endpoints` | Endpoint discovery has no render endpoint to select. |
 | `other` | Any other failure. |
 
+For requests with captured tool-field attributes, the `tokenize` span records the render
+result in `llm_d.epp.token_producer.result`. A decoded conversation response with no tokens
+sets the producer result to `skipped_no_tokens`. The HTTP client span records `http.response.status_code`;
+HTTP 4xx rejection is a render error with reason `status`, without inferring which tool
+field caused it. Render metrics aggregate tool and non-tool requests. Field preservation
+checks and a successful render do not establish template-intent preservation.
+
 A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
 skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
 render budget, while a render endpoint that is down shows `connection` failures with short

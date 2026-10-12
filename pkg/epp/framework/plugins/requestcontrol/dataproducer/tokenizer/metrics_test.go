@@ -34,9 +34,13 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	otelsemconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -118,6 +122,7 @@ func TestRenderToolFieldMetrics(t *testing.T) {
 }
 
 func TestRenderToolFieldMetrics_Retry(t *testing.T) {
+	recorder := setupSpanRecorder(t)
 	before := renderToolFieldCounts(t)
 	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 	require.NoError(t, err)
@@ -128,6 +133,7 @@ func TestRenderToolFieldMetrics_Retry(t *testing.T) {
 	renderer := &vllmHTTPRenderer{
 		endpointPicker: picker,
 		timeout:        time.Second,
+		pluginName:     fmt.Sprintf("%s-%d", t.Name(), renderTestRuns.Add(1)),
 		client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			calls++
 			status := http.StatusOK
@@ -137,12 +143,62 @@ func TestRenderToolFieldMetrics_Retry(t *testing.T) {
 			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"token_ids":[1]}`))}, nil
 		})},
 	}
-	_, _, err = renderer.RenderChat(t.Context(), fwkrh.RawPayload(`{"tools":[]}`))
+	request := chatRequest()
+	request.Body.Payload = fwkrh.RawPayload(`{"tools":[]}`)
+	err = newTestPlugin(renderer).Produce(t.Context(), request, nil)
 	require.NoError(t, err)
 	require.Equal(t, 2, calls)
 	after := renderToolFieldCounts(t)
 	assert.Equal(t, float64(1), after["tools/preserved"]-before["tools/preserved"])
 	assert.Equal(t, before["tools/rejected"], after["tools/rejected"])
+	count, _ := renderHistogram(t, renderer.pluginName, renderResultSuccess)
+	assert.Equal(t, uint64(1), count)
+	assert.Zero(t, renderSeriesCount(t, renderFailuresTotal, renderer.pluginName))
+	assert.Equal(t, renderResultSuccess, spanAttrs(tokenizeSpan(t, recorder))[semconv.LLMDEPPTokenProducerResultKey].AsString())
+}
+
+func TestProduce_ToolRenderOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, result, reason, spanResult string
+		status                                 int
+	}{
+		{"success", `{"token_ids":[1]}`, renderResultSuccess, "", renderResultSuccess, http.StatusOK},
+		{"HTTP rejection", `{"detail":"private_tool"}`, renderResultError, renderReasonStatus, renderResultError, http.StatusUnprocessableEntity},
+		{"server failure", `{"detail":"private_tool"}`, renderResultError, renderReasonStatus, renderResultError, http.StatusServiceUnavailable},
+		{"decode failure", `{"token_ids":"private_tool"}`, renderResultError, renderReasonDecode, renderResultError, http.StatusOK},
+		{"no tokens", `{"token_ids":[]}`, renderResultSuccess, "", resultSkippedNoTokens, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			renderer := newRenderServer(t, vllmConfig{}, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			request := chatRequest()
+			request.Body.Payload = fwkrh.RawPayload(`{"tools":[{"type":"function","function":{"name":"private_tool"}}]}`)
+			err := newTestPlugin(renderer).Produce(t.Context(), request, nil)
+			require.Equal(t, tc.reason != "", err != nil)
+			assert.Equal(t, tc.reason == "" && tc.spanResult != resultSkippedNoTokens, request.Body.TokenizedRequest != nil)
+			count, _ := renderHistogram(t, renderer.pluginName, tc.result)
+			assert.Equal(t, uint64(1), count)
+			if tc.reason == "" {
+				assert.Zero(t, renderSeriesCount(t, renderFailuresTotal, renderer.pluginName))
+			} else {
+				assert.Equal(t, float64(1), renderFailures(renderer.pluginName, tc.reason))
+				assert.Equal(t, codes.Error, tokenizeSpan(t, recorder).Status().Code)
+			}
+			attrs := spanAttrs(tokenizeSpan(t, recorder))
+			assert.Equal(t, tc.spanResult, attrs[semconv.LLMDEPPTokenProducerResultKey].AsString())
+			assert.True(t, attrs[semconv.LLMDToolCallingPresentKey].AsBool())
+			assert.Equal(t, string(toolcalling.FieldStatusPreserved), attrs[semconv.LLMDToolCallingFieldToolsStatusKey].AsString())
+			require.Len(t, recorder.Ended(), 2)
+			for _, span := range recorder.Ended() {
+				if span.SpanKind() == trace.SpanKindClient {
+					assert.Equal(t, int64(tc.status), spanAttrs(span)[otelsemconv.HTTPResponseStatusCodeKey].AsInt64())
+				}
+			}
+		})
+	}
 }
 
 func TestRenderToolFieldMetrics_NoEndpoints(t *testing.T) {
