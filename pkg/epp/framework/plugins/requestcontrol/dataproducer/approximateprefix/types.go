@@ -176,11 +176,11 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
-	// SyncCrossReplicaState controls whether recent prefix hashes are published
-	// through a configured CrossReplicaSyncer. Unset defaults to true.
+	// SyncCrossReplicaState controls whether recent per-prompt prefix hashes are
+	// published through a configured CrossReplicaSyncer. Unset defaults to true.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
-	// MaxSyncedHashes caps hashes published per endpoint per sync tick.
-	// Unset or <= 0 defaults to defaultMaxSyncedHashes.
+	// MaxSyncedHashes caps total hashes across prompts published per endpoint
+	// per sync tick. Unset or <= 0 defaults to defaultMaxSyncedHashes.
 	MaxSyncedHashes int `json:"maxSyncedHashes,omitempty"`
 }
 

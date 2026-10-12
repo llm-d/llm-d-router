@@ -77,6 +77,9 @@ type dataProducer struct {
 	syncHashDK            plugin.DataKey
 	syncCrossReplicaState bool
 	recent                *recentWindow
+	// registeredEndpoints maps endpointID to the Endpoint pointer last seen on
+	// AddOrUpdate so Extract can ignore stale deletes for a replaced object.
+	registeredEndpoints sync.Map
 }
 
 // TypedName returns the type and name of the plugin.
@@ -313,11 +316,12 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
-// mergeRemoteHashes folds peer recent-window hashes into the local indexer.
-// The syncer-backed attribute is Aggregate(local, peers); local hashes are
+// mergeRemoteHashes folds peer recent-window prompts into the local indexer.
+// The syncer-backed attribute is Aggregate(local, peers); local prompts are
 // skipped so a syncer-less (or peer-empty) Get does not re-warm the indexer
-// from the local recent window on every Produce. Peer hashes are not recorded
-// into the recent window (no echo).
+// from the local recent window on every Produce. Each peer prompt is Added on
+// its own so indexer LRU eviction keeps prompt-prefix semantics. Peer prompts
+// are not recorded into the recent window (no echo).
 func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 	if !p.syncCrossReplicaState || p.indexerInst == nil {
 		return
@@ -328,26 +332,26 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 			continue
 		}
 		set, ok := val.(*attrprefix.PrefixHashSet)
-		if !ok || set == nil || len(set.Hashes) == 0 {
+		if !ok || set == nil || len(set.Prompts) == 0 {
 			continue
 		}
 		endpointID := pod.GetMetadata().ID.String()
 		local := p.recent.snapshot(endpointID)
-		localSet := make(map[uint64]struct{}, len(local))
-		for _, h := range local {
-			localSet[uint64(h)] = struct{}{}
+		localSet := make(map[string]struct{}, len(local))
+		for _, prompt := range local {
+			localSet[promptKey(prompt)] = struct{}{}
 		}
-		var peer []blockHash
-		for _, h := range set.Hashes {
-			if _, ok := localSet[h]; ok {
+		server := p.makeserver(pod)
+		for _, prompt := range set.Prompts {
+			if len(prompt) == 0 {
 				continue
 			}
-			peer = append(peer, blockHash(h))
+			hashes := uint64sToBlockHashes(prompt)
+			if _, ok := localSet[promptKey(hashes)]; ok {
+				continue
+			}
+			p.indexerInst.Add(hashes, server)
 		}
-		if len(peer) == 0 {
-			continue
-		}
-		p.indexerInst.Add(peer, p.makeserver(pod))
 	}
 }
 
@@ -451,51 +455,57 @@ func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		AttributeKey: p.syncHashDK,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Read: func(endpointID string) datalayer.Cloneable {
-			hashes := p.recent.snapshot(endpointID)
-			out := make([]uint64, len(hashes))
-			for i, h := range hashes {
-				out[i] = uint64(h)
-			}
-			return &attrprefix.PrefixHashSet{Hashes: out}
+			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(p.recent.snapshot(endpointID))}
 		},
 		Aggregate: func(values []any) any {
-			seen := make(map[uint64]struct{})
-			var out []uint64
+			seen := make(map[string]struct{})
+			var out [][]blockHash
 			for _, v := range values {
 				set, ok := v.(*attrprefix.PrefixHashSet)
 				if !ok || set == nil {
 					continue
 				}
-				for _, h := range set.Hashes {
-					if _, ok := seen[h]; ok {
+				for _, prompt := range set.Prompts {
+					if len(prompt) == 0 {
 						continue
 					}
-					seen[h] = struct{}{}
-					out = append(out, h)
+					hashes := uint64sToBlockHashes(prompt)
+					key := promptKey(hashes)
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+					out = append(out, hashes)
 				}
 			}
-			if max := p.recent.max; max > 0 && len(out) > max {
-				out = out[len(out)-max:]
-			}
-			return &attrprefix.PrefixHashSet{Hashes: out}
+			out = trimPromptHashes(out, p.recent.max)
+			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(out)}
 		},
 	}
 }
 
 // Extract installs a local placeholder for the sync attribute. The cross-replica
 // publisher overwrites it with a syncer-backed DynamicAttribute on add/update.
-func (p *dataProducer) Extract(_ context.Context, event datalayer.EndpointEvent) error {
+func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
 	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
 		return nil
 	}
 	endpointID := event.Endpoint.GetMetadata().ID.String()
 	switch event.Type {
 	case datalayer.EventDelete:
+		// Same pointer-identity guard as inflightload: an out-of-order delete for
+		// a replaced endpoint must not clear the live recent window.
+		if registered, ok := p.registeredEndpoints.Load(endpointID); ok && registered != event.Endpoint {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", endpointID)
+			return nil
+		}
+		p.registeredEndpoints.Delete(endpointID)
 		if p.recent != nil {
 			p.recent.forget(endpointID)
 		}
 		return nil
 	case datalayer.EventAddOrUpdate:
+		p.registeredEndpoints.Store(endpointID, event.Endpoint)
 		if !p.syncCrossReplicaState {
 			return nil
 		}

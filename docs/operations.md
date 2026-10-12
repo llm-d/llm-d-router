@@ -53,15 +53,16 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
     In Active-Active mode, priority and fairness are enforced
     only within each replica's share of the traffic, and per-band capacity limits apply per
     replica, so the fleet-wide queued volume scales with the replica count.
-  - **Plugin Compatibility**: Without a syncer, EPP replicas keep routing state locally. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix-cache state remains local even with the syncer, so approximate prefix routing can make inconsistent cache decisions across replicas.
+  - **Plugin Compatibility**: EPP replicas do not share routing state by default. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix routing (`approx-prefix-cache-producer`) is supported in Active-Active when a `CrossReplicaSyncer` (for example `redis-syncer`) is configured and `syncCrossReplicaState` is left enabled (the default); without that sync path, each replica only learns prefixes from traffic it routed, so approximate hit rate drops under Active-Active.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
 ##### Sharing in-flight load with Redis (Alpha)
 
 Choose active-active with the syncer when several EPP replicas must handle traffic
-concurrently and the routing plugins need peer in-flight load. Use leader election
-when one active EPP has sufficient capacity and the scheduling profile relies on
-local state that the syncer does not cover, such as approximate prefix state.
+concurrently and the routing plugins need peer in-flight load or shared approximate
+prefix state. Use leader election when one active EPP has sufficient capacity and
+the scheduling profile relies on local state that the syncer does not cover, such
+as flow-control queues.
 
 In the official charts, set `router.epp.crossReplica.enabled: true` and configure
 an external Redis address. This disables leader election, enables the Alpha
@@ -73,8 +74,10 @@ the chart does not deploy it. For values and Secret-based authentication, see
 The `inflight-load-producer` shares its per-endpoint load when
 `syncCrossReplicaState` is true (the default). Consumers such as
 `active-request-scorer` and `token-load-scorer` can use that shared view.
+The `approx-prefix-cache-producer` shares a capped recent window of prefix
+hashes the same way when `syncCrossReplicaState` is true (the default).
 Configuring a syncer does not change the scheduling profile or synchronize
-approximate prefix-cache state, flow-control queues, or fairness accounting.
+flow-control queues or fairness accounting.
 
 Load sharing is eventually consistent. Replicas can make simultaneous decisions
 before receiving each other's updates; this does not provide an atomic

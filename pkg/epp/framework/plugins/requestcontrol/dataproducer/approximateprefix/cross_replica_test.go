@@ -31,14 +31,25 @@ import (
 func TestRecentWindowCapAndSlide(t *testing.T) {
 	w := newRecentWindow(3)
 	w.record("ep", []blockHash{1, 2, 3, 4, 5})
-	require.Equal(t, []blockHash{1, 2, 3}, w.snapshot("ep"))
+	require.Equal(t, [][]blockHash{{1, 2, 3}}, w.snapshot("ep"), "oversized prompt head-capped")
 
 	w.record("ep", []blockHash{6, 7})
-	require.Equal(t, []blockHash{3, 6, 7}, w.snapshot("ep"))
-	require.Equal(t, []blockHash{3, 6, 7}, w.snapshot("ep"), "snapshot must not clear")
+	require.Equal(t, [][]blockHash{{6, 7}}, w.snapshot("ep"), "oldest whole prompt dropped to fit cap")
+	require.Equal(t, [][]blockHash{{6, 7}}, w.snapshot("ep"), "snapshot must not clear")
 
 	w.forget("ep")
 	require.Nil(t, w.snapshot("ep"))
+}
+
+func TestRecentWindowKeepsPromptBoundaries(t *testing.T) {
+	w := newRecentWindow(5)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	require.Equal(t, [][]blockHash{{1, 2}, {3, 4}}, w.snapshot("ep"))
+
+	w.record("ep", []blockHash{5, 6})
+	require.Equal(t, [][]blockHash{{3, 4}, {5, 6}}, w.snapshot("ep"),
+		"drop oldest prompt when total exceeds max")
 }
 
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
@@ -70,7 +81,7 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	agg := specA.Aggregate([]any{localA})
 	set, ok := agg.(*attrprefix.PrefixHashSet)
 	require.True(t, ok)
-	require.ElementsMatch(t, []uint64{101, 102, 103}, set.Hashes)
+	require.Equal(t, [][]uint64{{101, 102, 103}}, set.Prompts)
 
 	ep := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: podID},
@@ -96,6 +107,38 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	require.Nil(t, producerB.recent.snapshot(endpointID))
 }
 
+func TestMergeRemoteHashesPreservesPromptBoundaries(t *testing.T) {
+	syncOn := true
+	cfg := defaultConfig
+	cfg.SyncCrossReplicaState = &syncOn
+	cfg.AutoTune = false
+	cfg.BlockSizeTokens = 64
+	cfg.LRUCapacityPerServer = 2
+
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	require.NoError(t, err)
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	ep := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: podID},
+		fwkdl.NewMetrics(),
+		fwkdl.NewAttributes(),
+	)
+	// Two prompts of two hashes each. A flat Add would insert oldest-first at
+	// the end and keep only the old pair under capacity 2; per-prompt Add keeps
+	// the newest prompt.
+	ep.Put(producer.syncHashDK, &attrprefix.PrefixHashSet{
+		Prompts: [][]uint64{{1, 2}, {3, 4}},
+	})
+
+	producer.mergeRemoteHashes([]fwksched.Endpoint{ep})
+	candidates := []ServerID{ServerID(podID)}
+	require.Equal(t, []int{0}, producer.indexerInst.MatchLongestPrefix([]blockHash{1, 2}, candidates),
+		"older prompt should be evicted under tight LRU")
+	require.Equal(t, []int{2}, producer.indexerInst.MatchLongestPrefix([]blockHash{3, 4}, candidates),
+		"newest prompt must survive when merged with prompt boundaries")
+}
+
 func TestCrossReplicaAggregateUnionsReplicas(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
@@ -107,15 +150,16 @@ func TestCrossReplicaAggregateUnionsReplicas(t *testing.T) {
 	require.NoError(t, err)
 
 	spec := producer.CrossReplicaState()
-	a := &attrprefix.PrefixHashSet{Hashes: []uint64{1, 2, 3}}
-	b := &attrprefix.PrefixHashSet{Hashes: []uint64{3, 4}}
+	a := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1, 2, 3}}}
+	b := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{3, 4}}}
 	got := spec.Aggregate([]any{a, b}).(*attrprefix.PrefixHashSet)
-	require.Equal(t, []uint64{2, 3, 4}, got.Hashes, "union capped to maxSyncedHashes, newest-N of append order")
+	require.Equal(t, [][]uint64{{3, 4}}, got.Prompts,
+		"union drops oldest whole prompt to fit maxSyncedHashes")
 
 	// Get with only local (no peer cache) still returns the local window.
 	producer.recent.record("ns/decode-0", []blockHash{9, 8})
 	onlyLocal := spec.Aggregate([]any{spec.Read("ns/decode-0")}).(*attrprefix.PrefixHashSet)
-	require.ElementsMatch(t, []uint64{9, 8}, onlyLocal.Hashes)
+	require.Equal(t, [][]uint64{{9, 8}}, onlyLocal.Prompts)
 }
 
 func TestCrossReplicaDeclaresSyncHashKey(t *testing.T) {
@@ -170,4 +214,42 @@ func TestMergeRemoteHashesSkipsLocalOnlyWindow(t *testing.T) {
 	producer.mergeRemoteHashes([]fwksched.Endpoint{ep})
 	require.Equal(t, []int{0}, producer.indexerInst.MatchLongestPrefix(hashes, []ServerID{ServerID(podID)}),
 		"local-only attribute must not populate the indexer")
+}
+
+func TestExtractIgnoresStaleDelete(t *testing.T) {
+	syncOn := true
+	cfg := defaultConfig
+	cfg.SyncCrossReplicaState = &syncOn
+	cfg.AutoTune = false
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	require.NoError(t, err)
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	endpointID := podID.String()
+	live := fwkdl.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: podID},
+		fwkdl.NewMetrics(),
+	)
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventAddOrUpdate,
+		Endpoint: live,
+	}))
+	producer.recent.record(endpointID, []blockHash{1, 2, 3})
+
+	stale := fwkdl.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: podID},
+		fwkdl.NewMetrics(),
+	)
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: stale,
+	}))
+	require.Equal(t, [][]blockHash{{1, 2, 3}}, producer.recent.snapshot(endpointID),
+		"stale delete for a replaced endpoint must not clear the live recent window")
+
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: live,
+	}))
+	require.Nil(t, producer.recent.snapshot(endpointID))
 }

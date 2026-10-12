@@ -35,10 +35,12 @@ var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey
 // when a CrossReplicaSyncer is configured.
 var PrefixHashSetDataKey = plugin.NewDataKey("PrefixHashSetDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
-// PrefixHashSet is a capped list of block hashes for one endpoint, published
-// across EPP replicas and union-aggregated before matching.
+// PrefixHashSet is a capped recent window of prompt hash sequences for one
+// endpoint, published across EPP replicas and union-aggregated before matching.
+// Each inner slice is one prompt's block hashes starting at block 0; prompts
+// are ordered oldest to newest.
 type PrefixHashSet struct {
-	Hashes []uint64
+	Prompts [][]uint64
 }
 
 // Clone returns an independent copy of the hash set.
@@ -46,8 +48,12 @@ func (s *PrefixHashSet) Clone() fwkdl.Cloneable {
 	if s == nil {
 		return nil
 	}
-	out := &PrefixHashSet{Hashes: make([]uint64, len(s.Hashes))}
-	copy(out.Hashes, s.Hashes)
+	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts))}
+	for i, p := range s.Prompts {
+		cp := make([]uint64, len(p))
+		copy(cp, p)
+		out.Prompts[i] = cp
+	}
 	return out
 }
 
