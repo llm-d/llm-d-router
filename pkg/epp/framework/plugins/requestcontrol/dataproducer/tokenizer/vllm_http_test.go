@@ -453,6 +453,36 @@ func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 	assert.Contains(t, err.Error(), "500")
 }
 
+func TestVLLMHTTPRenderer_DecodeErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		cause  error
+		result string
+		reason string
+	}{
+		{context.DeadlineExceeded, renderResultTimeout, renderReasonTimeout},
+		{context.Canceled, renderResultCanceled, ""},
+		{io.EOF, renderResultError, renderReasonDecode},
+		{io.ErrUnexpectedEOF, renderResultError, renderReasonDecode},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			renderer := &vllmHTTPRenderer{
+				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: failingRenderBody{err: tc.cause}}, nil
+				})},
+			}
+			var out renderResponse
+			retryable, err := renderer.postJSONAttempt(t.Context(), defaultHTTPRenderURL, chatRenderPath, []byte(`{}`), &out)
+			require.ErrorIs(t, err, errRenderDecode)
+			require.ErrorIs(t, err, tc.cause)
+			assert.Equal(t, tc.cause == io.EOF || tc.cause == io.ErrUnexpectedEOF || tc.cause == context.DeadlineExceeded, retryable)
+			result, reason := classifyRenderError(err)
+			assert.Equal(t, tc.result, result)
+			assert.Equal(t, tc.reason, reason)
+			assert.Equal(t, errRenderDecode.Error(), err.Error())
+		})
+	}
+}
+
 func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",

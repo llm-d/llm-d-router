@@ -96,6 +96,18 @@ func (e *renderStatusError) Error() string {
 // errRenderDecode marks a 2xx render response whose body could not be decoded.
 var errRenderDecode = errors.New("unmarshal response")
 
+// Decoder errors can contain response values. Keep the cause for classification
+// without including it in errors printed by logs or traces.
+type renderDecodeError struct {
+	cause error
+}
+
+func (*renderDecodeError) Error() string { return errRenderDecode.Error() }
+
+func (e *renderDecodeError) Unwrap() []error {
+	return []error{errRenderDecode, e.cause}
+}
+
 // isRenderAuthError reports whether err carries a 401 or 403 render response.
 func isRenderAuthError(err error) bool {
 	var se *renderStatusError
@@ -480,7 +492,7 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		// Connection failures can surface after successful response headers.
 		var networkErr net.Error
 		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		return retryable, fmt.Errorf("%w: %w", errRenderDecode, err)
+		return retryable, &renderDecodeError{cause: err}
 	}
 	return false, nil
 }

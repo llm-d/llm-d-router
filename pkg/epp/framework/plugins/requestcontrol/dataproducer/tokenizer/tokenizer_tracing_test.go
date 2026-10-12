@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -210,6 +211,44 @@ func TestProduce_RenderStatusErrorPrivacy(t *testing.T) {
 				require.Equal(t, codes.Error, tokenizeSpan(t, recorder).Status().Code)
 			})
 		}
+	}
+}
+
+func TestProduce_RenderDecodeErrorPrivacy(t *testing.T) {
+	const privateValue = "123456789012345678901234567890e999"
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"token_ids":[%s]}`, privateValue)
+			}))
+			defer srv.Close()
+			renderer := newHTTPRenderer(t, srv)
+			renderer.pluginName = t.Name()
+			request := chatRequest()
+			if api == reqcommon.APITypeMessages {
+				request.Body.ChatCompletions = nil
+				request.Body.Messages = &fwkrh.MessagesRequest{}
+			}
+			logs := &logCapture{}
+			err := newTestPlugin(renderer).Produce(logs.context(context.Background()), request, nil)
+			require.ErrorIs(t, err, errRenderDecode)
+			var typeErr *json.UnmarshalTypeError
+			require.ErrorAs(t, err, &typeErr)
+			require.Contains(t, typeErr.Value, privateValue)
+			require.Nil(t, request.Body.TokenizedRequest)
+			require.Equal(t, float64(1), renderFailures(renderer.pluginName, renderReasonDecode))
+			require.NotEmpty(t, logs.snapshot())
+			assert.NotContains(t, err.Error(), privateValue)
+			assert.NotContains(t, strings.Join(logs.snapshot(), "\n"), privateValue)
+			for _, span := range recorder.Ended() {
+				assert.NotContains(t, span.Status().Description, privateValue)
+				for _, attr := range span.Attributes() {
+					assert.NotContains(t, attr.Value.String(), privateValue)
+				}
+			}
+			require.Equal(t, codes.Error, tokenizeSpan(t, recorder).Status().Code)
+		})
 	}
 }
 
