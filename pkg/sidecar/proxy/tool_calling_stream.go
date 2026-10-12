@@ -21,6 +21,8 @@ import (
 	"io"
 	"net/http"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
@@ -33,14 +35,17 @@ type toolCallingPassthroughBody struct {
 	stream *toolCallingJSONStream
 	length int64
 	read   int64
+	span   trace.Span
 }
 
 func observeToolCallingPassthrough(r *http.Request, api reqcommon.APIType) {
 	if api != reqcommon.APITypeChatCompletions && api != reqcommon.APITypeMessages || r.Body == nil || r.Body == http.NoBody {
 		return
 	}
+	span, _ := r.Context().Value(toolCallingRequestSpanKey).(trace.Span)
 	r.Body = &toolCallingPassthroughBody{
 		ReadCloser: r.Body, stream: newToolCallingJSONStream(api), length: r.ContentLength,
+		span: span,
 	}
 }
 
@@ -79,6 +84,9 @@ func (b *toolCallingPassthroughBody) Read(p []byte) (int, error) {
 	// Passthrough uses the inbound bytes unchanged; one snapshot suffices.
 	statuses, _ := toolcalling.CompareRequests(snapshot, snapshot)
 	metrics.RecordToolCallingFieldStatuses(statuses)
+	if b.span != nil && b.span.IsRecording() {
+		b.span.SetAttributes(snapshot.SpanAttributes(statuses)...)
+	}
 	return n, err
 }
 

@@ -128,7 +128,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // avoid. Sequencing the requests also matches the NIXL connector, which forwards to
 // the prefiller and waits for it to return before dispatching decode.
 func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
@@ -355,7 +355,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	}
 	apiType := reqcommon.DetectAPIType(r.URL.Path)
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, raw)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 
 	source := normalizeEndpoint(sourceHostPort)
 	self := normalizeEndpoint(net.JoinHostPort(os.Getenv("POD_IP"), s.config.Port))

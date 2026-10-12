@@ -59,7 +59,7 @@ func (s *Server) runConcurrentPD(
 	prepareRequests func(prefillReq, decodeReq *http.Request),
 	toolFields *toolCallingRequest,
 ) {
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx, cancelDecode := context.WithCancel(r.Context())
 	defer cancelDecode()

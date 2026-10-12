@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -48,6 +50,115 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
+
+func TestToolCallingRequestSpans(t *testing.T) {
+	for _, route := range []string{"direct", "shared", "encoder", "chunks", "fallback"} {
+		for _, fields := range []string{`"tools":[{"name":"private_tool"}],"tool_choice":"auto"`, `"response_format":{"type":"json_object"}`, `"messages":[]`} {
+			t.Run(route+"/"+fields, func(t *testing.T) {
+				recorder := tracetest.NewSpanRecorder()
+				provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+				t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+				useTracerProviderForTest(t, provider)
+				prefill := httptest.NewServer(statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`))
+				defer prefill.Close()
+				prefillURL, err := url.Parse(prefill.URL)
+				require.NoError(t, err)
+				s := NewProxy(Config{Port: "8000", DecoderURL: prefillURL})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, err := io.Copy(io.Discard, r.Body)
+					require.NoError(t, err)
+					statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1)).ServeHTTP(w, r)
+				})
+				if route == "chunks" || route == "fallback" {
+					s.config.DecodeChunkSize = 3
+				}
+				budget := 6
+				if route == "fallback" {
+					budget = 2
+				}
+				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions,
+					strings.NewReader(fmt.Sprintf(`{%s,"max_tokens":%d}`, fields, budget)))
+				if route == "shared" {
+					r.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
+					s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, target, _ string, api reqcommon.APIType) {
+						s.handleSharedStorage(w, r, target, api)
+					}
+				}
+				if route == "encoder" {
+					r.Header.Set(routing.EncoderEndpointsHeader, prefillURL.Host)
+					s.handleECConnector = s.handleECNIXL
+				}
+				rw := httptest.NewRecorder()
+				s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(rw, r)
+				require.Equal(t, http.StatusOK, rw.Code, rw.Body.String())
+				snapshot, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte("{"+fields+"}"))
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(snapshot, snapshot)
+				require.NoError(t, err)
+				want := snapshot.SpanAttributes(statuses)
+				foundRoot := false
+				for _, span := range recorder.Ended() {
+					if span.Name() != "forward_request" && span.Name() != "chunked_decode" {
+						continue
+					}
+					foundRoot = foundRoot || span.Name() == "forward_request"
+					var got []attribute.KeyValue
+					for _, attr := range span.Attributes() {
+						require.NotContains(t, attr.Value.String(), "private_tool")
+						if strings.HasPrefix(string(attr.Key), "llm_d.tool_calling.") {
+							got = append(got, attr)
+						}
+					}
+					require.ElementsMatch(t, want, got, span.Name())
+				}
+				require.True(t, foundRoot)
+			})
+		}
+	}
+}
+
+func toolCallingSpanAttributes(span sdktrace.ReadOnlySpan) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	for _, attr := range span.Attributes() {
+		if strings.HasPrefix(string(attr.Key), "llm_d.tool_calling.") {
+			attrs = append(attrs, attr)
+		}
+	}
+	return attrs
+}
+
+func TestChunkedDecodeSpanExcludesPrefillOutcomes(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	useTracerProviderForTest(t, provider)
+	const original = `{"messages":[],"max_tokens":6,"tools":[],"tool_choice":"auto"}`
+	toolFields, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+	require.NoError(t, err)
+	_, err = toolFields.compareDispatched([]byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	s := NewProxy(Config{DecodeChunkSize: 3})
+	s.decoderProxy = statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1))
+	body, err := decodeRequestBody([]byte(original))
+	require.NoError(t, err)
+	ctx, root := provider.Tracer(tracerScope).Start(context.Background(), "forward_request")
+	ctx = context.WithValue(ctx, toolCallingRequestSpanKey, root)
+	ctx, decode := provider.Tracer(tracerScope).Start(ctx, "decode")
+	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(original)).WithContext(ctx)
+	s.runChunkedDecodeFromMap(httptest.NewRecorder(), r, body, []byte(original), toolFields)
+	decode.End()
+	toolFields.report(ctx)
+	root.End()
+	require.Len(t, recorder.Ended(), 3)
+	for _, span := range recorder.Ended()[:2] {
+		require.Contains(t, toolCallingSpanAttributes(span), semconv.LLMDToolCallingFieldToolChoiceStatusKey.String("preserved"))
+	}
+	require.Contains(t, toolCallingSpanAttributes(recorder.Ended()[2]), semconv.LLMDToolCallingFieldToolChoiceStatusKey.String("dropped"))
+	assertToolCallingStatuses(t, toolFields.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+		toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped,
+	})
+}
 
 func TestPDToolCallingStageSpans(t *testing.T) {
 	for _, connector := range []string{"nixl", "parallel", "p2p", "mooncake", "sglang"} {
@@ -87,6 +198,7 @@ func TestPDToolCallingStageSpans(t *testing.T) {
 					encoded, err := json.Marshal(body)
 					require.NoError(t, err)
 					ctx, root := tracing.Tracer(tracerScope).Start(context.Background(), "forward_request")
+					ctx = context.WithValue(ctx, toolCallingRequestSpanKey, root)
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(string(encoded))).WithContext(ctx)
 					rw := httptest.NewRecorder()
 					switch connector {
@@ -110,10 +222,9 @@ func TestPDToolCallingStageSpans(t *testing.T) {
 						received[upstream.SpanID()] = true
 					}
 					for _, span := range recorder.Ended() {
-						if span.Name() == "forward_request" {
-							continue
+						if span.Name() != "forward_request" {
+							require.True(t, received[span.SpanContext().SpanID()], "%s request must carry its stage span", span.Name())
 						}
-						require.True(t, received[span.SpanContext().SpanID()], "%s request must carry its stage span", span.Name())
 						attrs := map[string]any{}
 						for _, attr := range span.Attributes() {
 							require.NotContains(t, attr.Value.String(), "private_")
@@ -145,7 +256,10 @@ func TestToolCallingStageSpanComparisons(t *testing.T) {
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(recorder))
 	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 	const original = `{"tools":[],"tool_choice":"auto"}`
-	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+	ctx, root := provider.Tracer(tracerScope).Start(context.Background(), "forward_request")
+	ctx = context.WithValue(ctx, toolCallingRequestSpanKey, root)
+	inbound := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil).WithContext(ctx)
+	request, err := captureInferenceToolCallingRequest(inbound, reqcommon.APITypeChatCompletions, []byte(original))
 	require.NoError(t, err)
 	for _, stage := range []struct {
 		name   string
@@ -175,6 +289,11 @@ func TestToolCallingStageSpanComparisons(t *testing.T) {
 	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
 		toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusChanged,
 	})
+	request.report(ctx)
+	root.End()
+	rootAttrs := recorder.Ended()[len(recorder.Ended())-1].Attributes()
+	require.Contains(t, rootAttrs, semconv.LLMDToolCallingFieldToolsStatusKey.String("dropped"))
+	require.Contains(t, rootAttrs, semconv.LLMDToolCallingFieldToolChoiceStatusKey.String("changed"))
 	_, span := provider.Tracer(tracerScope).Start(context.Background(), "failed inbound capture")
 	(*toolCallingRequest)(nil).compareDispatchedForSpan([]byte(original), span)
 	span.End()
@@ -214,6 +333,8 @@ func TestConcurrentPDStageSpansDoNotWaitForPrefill(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	ctx, root := provider.Tracer(tracerScope).Start(ctx, "forward_request")
+	ctx = context.WithValue(ctx, toolCallingRequestSpanKey, root)
 	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil).WithContext(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -225,6 +346,7 @@ func TestConcurrentPDStageSpansDoNotWaitForPrefill(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("decode waited for blocked prefill")
 	}
+	root.End()
 	cancel()
 	select {
 	case <-started:
@@ -232,7 +354,8 @@ func TestConcurrentPDStageSpansDoNotWaitForPrefill(t *testing.T) {
 		t.Fatal("prefill was not dispatched")
 	}
 	ended := recorder.Ended()
-	require.Len(t, ended, 1)
+	require.Len(t, ended, 2)
+	require.Contains(t, toolCallingSpanAttributes(ended[1]), semconv.LLMDToolCallingFieldToolChoiceStatusKey.String("dropped"))
 	require.Equal(t, "decode", ended[0].Name())
 	foundChoice := false
 	for _, attr := range ended[0].Attributes() {
@@ -247,7 +370,8 @@ func TestConcurrentPDStageSpansDoNotWaitForPrefill(t *testing.T) {
 	})
 	counts := toolFieldCounters(t)
 	unblock()
-	require.Eventually(t, func() bool { return len(recorder.Ended()) == 2 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return len(recorder.Ended()) == 3 }, time.Second, time.Millisecond)
+	require.Equal(t, ended[1].Attributes(), recorder.Ended()[1].Attributes(), "late prefill must not rewrite the ended request span")
 	require.Equal(t, counts, toolFieldCounters(t), "late prefill completion must not duplicate request metrics")
 	for _, span := range recorder.Ended() {
 		if span.Name() == "prefill" {

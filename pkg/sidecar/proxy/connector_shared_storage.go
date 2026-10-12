@@ -40,7 +40,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		return
 	}
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 
 	// If "cache_hit_threshold" is present in the request, we try to decode first. The decode node must meet the cache hit threshold in order to execute.
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,

@@ -56,6 +56,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		defer span.End()
+		ctx = context.WithValue(ctx, toolCallingRequestSpanKey, span)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
 		// logger is process-scoped, so seed it into the context first. Connectors

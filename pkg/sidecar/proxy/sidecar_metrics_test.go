@@ -37,6 +37,9 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1712,6 +1715,10 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 		{name: "invalid response retains dispatched outcomes", badResponse: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			useTracerProviderForTest(t, provider)
 			body, err := decodeRequestBody([]byte(original))
 			require.NoError(t, err)
 			toolFields, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
@@ -1766,6 +1773,8 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 				want[toolcalling.FieldTools], want[toolcalling.FieldToolChoice] = tt.wantTools, tt.wantChoice
 			}
 			assertToolCallingStatuses(t, toolFields.fieldStatuses(), want)
+			require.Len(t, recorder.Ended(), 1)
+			require.ElementsMatch(t, toolFields.original.SpanAttributes(toolFields.fieldStatuses()), toolCallingSpanAttributes(recorder.Ended()[0]))
 			require.Equal(t, before, toolFieldCounters(t), "the caller owns request-level metric recording")
 		})
 	}
@@ -1815,6 +1824,10 @@ func TestDecoderOnlyToolCallingMetrics(t *testing.T) {
 	} {
 		for _, dataParallel := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/dataParallel=%t", tt.name, dataParallel), func(t *testing.T) {
+				recorder := tracetest.NewSpanRecorder()
+				provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+				t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+				useTracerProviderForTest(t, provider)
 				bodies := make(chan []byte, 1)
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					raw, err := io.ReadAll(r.Body)
@@ -1865,6 +1878,22 @@ func TestDecoderOnlyToolCallingMetrics(t *testing.T) {
 					}
 				}
 				require.Equal(t, want, delta)
+				var wantAttrs []attribute.KeyValue
+				if len(tt.fields) > 0 {
+					snapshot, err := toolcalling.CaptureRequestJSON(tt.api, []byte(tt.body))
+					require.NoError(t, err)
+					statuses, err := toolcalling.CompareRequests(snapshot, snapshot)
+					require.NoError(t, err)
+					wantAttrs = snapshot.SpanAttributes(statuses)
+				}
+				foundRoot := false
+				for _, span := range recorder.Ended() {
+					if span.Name() == "forward_request" {
+						foundRoot = true
+						require.ElementsMatch(t, wantAttrs, toolCallingSpanAttributes(span))
+					}
+				}
+				require.True(t, foundRoot)
 			})
 		}
 	}

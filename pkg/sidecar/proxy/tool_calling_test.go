@@ -28,6 +28,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -55,8 +57,13 @@ func TestToolCallingPassthroughBody(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			closeErr := errors.New("close failure")
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			ctx, span := provider.Tracer(tracerScope).Start(context.Background(), "forward_request")
+			ctx = context.WithValue(ctx, toolCallingRequestSpanKey, span)
 			source := &toolCallingTestBody{body: body[:tt.read], err: tt.readErr, closeErr: closeErr}
-			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil).WithContext(ctx)
 			r.Body, r.ContentLength = source, tt.length
 			before := toolFieldCounters(t)
 			observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
@@ -83,6 +90,16 @@ func TestToolCallingPassthroughBody(t *testing.T) {
 				}
 			}
 			require.Equal(t, want, delta)
+			span.End()
+			if tt.want {
+				snapshot, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(body))
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(snapshot, snapshot)
+				require.NoError(t, err)
+				require.ElementsMatch(t, snapshot.SpanAttributes(statuses), recorder.Ended()[0].Attributes())
+			} else {
+				require.Empty(t, recorder.Ended()[0].Attributes())
+			}
 		})
 	}
 }

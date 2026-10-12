@@ -361,7 +361,7 @@ func (s *Server) runPDPipeline(
 
 	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
 	toolFields, _ := captureInferenceToolCallingRequest(pdRequest, apiType, modifiedBody)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false

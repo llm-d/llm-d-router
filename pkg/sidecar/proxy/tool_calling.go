@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -25,9 +26,11 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const toolCallingBaselineKey contextKey = "toolCallingBaseline"
+const toolCallingRequestSpanKey contextKey = "toolCallingRequestSpan"
 
 // toolCallingRequest is owned by the dispatching goroutine. Comparisons for
 // asynchronous prefill must be aggregated before starting its goroutine, so
@@ -55,16 +58,37 @@ func captureToolCallingRequest(apiType reqcommon.APIType, body []byte) (*toolCal
 // Inference handoffs reuse the client snapshot, with independent dispatch outcomes.
 func captureInferenceToolCallingRequest(r *http.Request, apiType reqcommon.APIType, body []byte) (*toolCallingRequest, error) {
 	baseline, ok := r.Context().Value(toolCallingBaselineKey).(*toolCallingRequest)
+	var captured *toolCallingRequest
 	if !ok {
-		return captureToolCallingRequest(apiType, body)
+		var err error
+		captured, err = captureToolCallingRequest(apiType, body)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if baseline == nil {
+			return nil, errors.New("tool-calling client baseline unavailable")
+		}
+		if baseline.surface != apiType {
+			return nil, fmt.Errorf("tool-calling baseline API %s does not match %s", baseline.surface, apiType)
+		}
+		captured = &toolCallingRequest{surface: apiType, original: baseline.original}
 	}
-	if baseline == nil {
-		return nil, errors.New("tool-calling client baseline unavailable")
+	captured.setRequestSpanAttributes(r.Context())
+	return captured, nil
+}
+
+func (r *toolCallingRequest) setRequestSpanAttributes(ctx context.Context) {
+	span, _ := ctx.Value(toolCallingRequestSpanKey).(trace.Span)
+	if r != nil && span != nil && span.IsRecording() {
+		span.SetAttributes(r.original.SpanAttributes(r.statuses)...)
 	}
-	if baseline.surface != apiType {
-		return nil, fmt.Errorf("tool-calling baseline API %s does not match %s", baseline.surface, apiType)
-	}
-	return &toolCallingRequest{surface: apiType, original: baseline.original}, nil
+}
+
+// The dispatch owner finalizes the request before its span ends, even on abort.
+func (r *toolCallingRequest) report(ctx context.Context) {
+	metrics.RecordToolCallingFieldStatuses(r.fieldStatuses())
+	r.setRequestSpanAttributes(ctx)
 }
 
 // compareDispatched must be called at dispatch, after local routing checks.

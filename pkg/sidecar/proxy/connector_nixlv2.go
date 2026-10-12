@@ -89,7 +89,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Telemetry failure must not change routing or reject an inference request.
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 
 	// Prefill Stage
 	tracer := tracing.Tracer(tracerScope)
@@ -478,7 +478,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	apiType reqcommon.APIType,
 ) {
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)

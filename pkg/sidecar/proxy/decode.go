@@ -33,7 +33,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 const (
@@ -73,7 +72,7 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	toolFields, _ := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, original)
-	defer func() { metrics.RecordToolCallingFieldStatuses(toolFields.fieldStatuses()) }()
+	defer toolFields.report(r.Context())
 	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body, original, toolFields)
 }
 
@@ -88,6 +87,22 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+	// Chunk outcomes exclude prefill results held by the request aggregate.
+	var chunkFields *toolCallingRequest
+	if toolFields != nil && span.IsRecording() {
+		chunkFields = &toolCallingRequest{original: toolFields.original}
+		defer func() {
+			attrs := chunkFields.original.SpanAttributes(chunkFields.statuses)
+			span.SetAttributes(attrs...)
+			trace.SpanFromContext(r.Context()).SetAttributes(attrs...)
+		}()
+	}
+	compareChunk := func(raw []byte) {
+		statuses, err := toolFields.compareDispatched(raw)
+		if chunkFields != nil && err == nil {
+			chunkFields.mergeStatuses(statuses)
+		}
+	}
 
 	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
@@ -115,8 +130,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
-		_, _ = toolFields.compareDispatched(raw)
-		s.decoderProxy.ServeHTTP(w, r)
+		compareChunk(raw)
+		s.decoderProxy.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 
@@ -220,7 +235,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
-		_, _ = toolFields.compareDispatched(chunkBody)
+		compareChunk(chunkBody)
 		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(ctx, r, chunkBody))
 
 		if isHTTPError(bw.statusCode) {
