@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -38,11 +39,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -757,6 +760,75 @@ func TestBuildChatRenderRequest_AudioBlocks(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "input_audio", inputAudio["type"])
 	require.Equal(t, map[string]any{"data": "AAAA", "format": "wav"}, inputAudio["input_audio"])
+}
+
+func BenchmarkHTTPRenderToolTelemetry(b *testing.B) {
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	b.Cleanup(func() { otel.SetTextMapPropagator(originalPropagator) })
+	for _, recording := range []bool{false, true} {
+		b.Run(fmt.Sprintf("tracing_%t", recording), func(b *testing.B) {
+			originalProvider := otel.GetTracerProvider()
+			var provider trace.TracerProvider = noop.NewTracerProvider()
+			if recording {
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+				provider = tp
+				b.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+			}
+			otel.SetTracerProvider(provider)
+			b.Cleanup(func() { otel.SetTracerProvider(originalProvider) })
+			tracer := provider.Tracer("benchmark")
+			for _, size := range []int{1024, 1024 * 1024} {
+				for _, tools := range []bool{false, true} {
+					fields := ""
+					if tools {
+						fields = `,"tools":[{"type":"function","function":{"name":"benchmark_tool","parameters":{"type":"object"}}}],"tool_choice":"auto"`
+					}
+					body := fwkrh.RawPayload(fmt.Sprintf(`{"model":"benchmark","messages":[{"role":"user","content":"%s"}],"max_tokens":64%s}`, strings.Repeat("x", size), fields))
+					for _, transformed := range []bool{false, true} {
+						for _, observed := range []bool{false, true} {
+							b.Run(fmt.Sprintf("bytes_%d/tools_%t/transformed_%t/observed_%t", size, tools, transformed, observed), func(b *testing.B) {
+								renderer, err := newVLLMHTTPRenderer(&vllmConfig{PrefillOnly: transformed, OmitMMKwargs: transformed})
+								if err != nil {
+									b.Fatal(err)
+								}
+								renderer.pluginName = "benchmark"
+								renderer.client.Transport = otelhttp.NewTransport(&renderTraceTransport{base: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+									_, err := io.Copy(io.Discard, req.Body)
+									_ = req.Body.Close()
+									if err != nil {
+										return nil, err
+									}
+									return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"token_ids":[1]}`))}, nil
+								})})
+								baseCtx := context.Background()
+								if !observed {
+									baseCtx = withUnobservedRender(baseCtx)
+								}
+								b.ReportAllocs()
+								b.SetBytes(int64(len(body)))
+								b.ResetTimer()
+								for range b.N {
+									ctx, span := tracer.Start(baseCtx, "tokenize")
+									start := time.Now()
+									var out renderResponse
+									err := renderer.postJSON(ctx, chatRenderPath, body, time.Second, &out)
+									if !observed {
+										// Retain existing render metrics in the observation-disabled baseline.
+										renderer.observeRender(context.Background(), chatRenderPath, time.Second, time.Since(start), err)
+									}
+									span.End()
+									if err != nil || len(out.TokenIDs) != 1 {
+										b.Fatalf("render failed: %v", err)
+									}
+								}
+							})
+						}
+					}
+				}
+			}
+		})
+	}
 }
 
 // Route-specific span names make render calls identifiable in traces.
