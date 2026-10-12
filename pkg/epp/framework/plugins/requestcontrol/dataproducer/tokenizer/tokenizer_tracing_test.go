@@ -214,6 +214,45 @@ func TestProduce_RenderStatusErrorPrivacy(t *testing.T) {
 	}
 }
 
+func TestProduce_RenderRequestErrorPrivacy(t *testing.T) {
+	const privateValue = "123456789012345678901234567890e999"
+	for _, tc := range []struct {
+		name        string
+		payload     fwkrh.RequestPayload
+		prefillOnly bool
+		wantError   string
+	}{
+		{"marshal", fwkrh.PayloadMap{"tools": json.Number("private_render_tool")}, false, "marshal request"},
+		{"budget", fwkrh.RawPayload(privateValue), true, "apply render-only output budget"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			renderer := &vllmHTTPRenderer{prefillOnly: tc.prefillOnly}
+			request := chatRequest()
+			request.Body.Payload = tc.payload
+			err := newTestPlugin(renderer).Produce(context.Background(), request, nil)
+			require.ErrorContains(t, err, tc.wantError)
+			if tc.prefillOnly {
+				var typeErr *json.UnmarshalTypeError
+				require.ErrorAs(t, err, &typeErr)
+				require.Equal(t, "number", typeErr.Value)
+			} else {
+				var payloadErr *renderPayloadError
+				require.ErrorAs(t, err, &payloadErr)
+				require.Contains(t, payloadErr.cause.Error(), "private_render_tool")
+			}
+			require.Nil(t, request.Body.TokenizedRequest)
+			require.Equal(t, tc.payload, request.Body.WirePayload())
+			span := tokenizeSpan(t, recorder)
+			require.Equal(t, codes.Error, span.Status().Code)
+			for _, secret := range []string{privateValue, "private_render_tool"} {
+				assert.NotContains(t, err.Error(), secret)
+				assert.NotContains(t, span.Status().Description, secret)
+			}
+		})
+	}
+}
+
 func TestProduce_RenderDecodeErrorPrivacy(t *testing.T) {
 	const privateValue = "123456789012345678901234567890e999"
 	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
