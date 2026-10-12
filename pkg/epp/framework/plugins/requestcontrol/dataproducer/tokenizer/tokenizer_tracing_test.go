@@ -19,6 +19,12 @@ package tokenizer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -150,6 +156,61 @@ func TestProduce_TokenizeSpanRecordsError(t *testing.T) {
 	span := tokenizeSpan(t, recorder)
 	assert.Equal(t, codes.Error, span.Status().Code)
 	assert.Contains(t, span.Status().Description, "render failed")
+}
+
+func TestProduce_RenderStatusErrorPrivacy(t *testing.T) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		raw := `{"messages":[{"role":"user","content":"private_render_arguments"}],"tools":[{"type":"function","function":{"name":"private_render_tool","parameters":{"description":"private_render_schema"}}}],"tool_choice":"auto"}`
+		if api == reqcommon.APITypeMessages {
+			raw = `{"messages":[{"role":"user","content":"private_render_arguments"}],"tools":[{"name":"private_render_tool","input_schema":{"description":"private_render_schema"}}],"tool_choice":{"type":"auto"}}`
+		}
+		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusServiceUnavailable} {
+			t.Run(fmt.Sprintf("%s/%d", api, status), func(t *testing.T) {
+				recorder := setupSpanRecorder(t)
+				forwarded := make(chan string, 1)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					assert.NoError(t, err)
+					forwarded <- string(body)
+					w.WriteHeader(status)
+					_, _ = w.Write(body)
+				}))
+				defer srv.Close()
+				renderer := newHTTPRenderer(t, srv)
+				renderer.pluginName = t.Name()
+				p := newTestPlugin(renderer)
+				request := chatRequest()
+				if api == reqcommon.APITypeMessages {
+					request.Body.ChatCompletions = nil
+					request.Body.Messages = &fwkrh.MessagesRequest{}
+				}
+				request.Body.Payload = fwkrh.RawPayload(raw)
+				logs := &logCapture{}
+				err := p.Produce(logs.context(context.Background()), request, nil)
+				var statusErr *renderStatusError
+				require.ErrorAs(t, err, &statusErr)
+				require.Equal(t, status, statusErr.StatusCode)
+				require.Equal(t, status == http.StatusUnauthorized || status == http.StatusForbidden, isRenderAuthError(err))
+				require.Contains(t, err.Error(), strconv.Itoa(status))
+				require.Nil(t, request.Body.TokenizedRequest)
+				require.Equal(t, raw, <-forwarded)
+				require.Equal(t, fwkrh.RawPayload(raw), request.Body.WirePayload())
+				require.Equal(t, float64(1), renderFailures(renderer.pluginName, renderReasonStatus))
+				require.NotEmpty(t, logs.snapshot())
+				for _, secret := range []string{"private_render_tool", "private_render_schema", "private_render_arguments"} {
+					assert.NotContains(t, err.Error(), secret)
+					assert.NotContains(t, strings.Join(logs.snapshot(), "\n"), secret)
+					for _, span := range recorder.Ended() {
+						assert.NotContains(t, span.Status().Description, secret)
+						for _, attr := range span.Attributes() {
+							assert.NotContains(t, attr.Value.String(), secret)
+						}
+					}
+				}
+				require.Equal(t, codes.Error, tokenizeSpan(t, recorder).Status().Code)
+			})
+		}
+	}
 }
 
 // The skip path does no tokenization work, so it must not emit a span.

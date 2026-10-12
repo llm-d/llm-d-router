@@ -51,10 +51,8 @@ const (
 	messagesRenderPath    = "/v1/messages/render"
 	responsesRenderPath   = "/v1/responses/render"
 
-	// maxErrorBodySnippetBytes truncates non-2xx response bodies before
-	// embedding them in the returned error, so a misconfigured upstream that
-	// returns a large HTML error page can't blow up log size.
-	maxErrorBodySnippetBytes = 1024
+	// Bound draining while allowing connection reuse for small error responses.
+	maxErrorResponseDrainBytes = 1024
 
 	// vllmAPIKeyEnvVar names the environment variable holding the render
 	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
@@ -89,11 +87,10 @@ func vllmWarmupAuthHeader() string {
 // renderStatusError is a non-2xx response from the render endpoint.
 type renderStatusError struct {
 	StatusCode int
-	Body       string
 }
 
 func (e *renderStatusError) Error() string {
-	return fmt.Sprintf("vLLM render returned status %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("vLLM render returned status %d", e.StatusCode)
 }
 
 // errRenderDecode marks a 2xx render response whose body could not be decoded.
@@ -476,8 +473,8 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
+		_, _ = io.CopyN(io.Discard, httpResp.Body, maxErrorResponseDrainBytes)
+		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
 		// Connection failures can surface after successful response headers.
