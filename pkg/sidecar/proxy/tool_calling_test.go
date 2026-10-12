@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,30 +176,93 @@ func TestToolCallingPassthroughMissingReplica(t *testing.T) {
 
 func BenchmarkToolCallingPassthrough(b *testing.B) {
 	buf := make([]byte, 32768)
-	decoder := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		for {
-			if _, err := r.Body.Read(buf); err != nil {
-				break
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		for _, size := range []int{1024, 1 << 20} {
+			for _, toolRequest := range []bool{false, true} {
+				body := toolCallingBenchmarkBody(b, api, size, toolRequest)
+				for _, observe := range []bool{false, true} {
+					b.Run(fmt.Sprintf("%s/%d/tools=%t/observe=%t", api, size, toolRequest, observe), func(b *testing.B) {
+						decoder := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+							read := 0
+							for {
+								n, err := r.Body.Read(buf)
+								read += n
+								if err == io.EOF {
+									break
+								}
+								if err != nil {
+									b.Fatal(err)
+								}
+							}
+							if read != len(body) {
+								b.Fatalf("read %d bytes, want %d", read, len(body))
+							}
+							if err := r.Body.Close(); err != nil {
+								b.Fatal(err)
+							}
+						})
+						b.ReportAllocs()
+						b.SetBytes(int64(len(body)))
+						for b.Loop() {
+							r := &http.Request{Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body))}
+							if observe {
+								observeToolCallingPassthrough(r, api)
+							}
+							decoder.ServeHTTP(nil, r)
+						}
+					})
+				}
 			}
 		}
-		_ = r.Body.Close()
-	})
-	for _, size := range []int{1024, 1 << 20} {
-		body := `{"messages":[{"content":"` + strings.Repeat("x", size) + `"}]}`
-		for _, observe := range []bool{false, true} {
-			b.Run(strconv.Itoa(size)+"/observe="+strconv.FormatBool(observe), func(b *testing.B) {
-				b.ReportAllocs()
-				b.SetBytes(int64(len(body)))
-				for b.Loop() {
-					r := &http.Request{Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body))}
-					if observe {
-						observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
-					}
-					decoder.ServeHTTP(nil, r)
+	}
+}
+
+// The body is already available to routing; only telemetry work is timed.
+func BenchmarkToolCallingRequestDispatch(b *testing.B) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		for _, size := range []int{1024, 1 << 20} {
+			for _, toolRequest := range []bool{false, true} {
+				body := []byte(toolCallingBenchmarkBody(b, api, size, toolRequest))
+				for _, dispatches := range []int{1, 2} {
+					b.Run(fmt.Sprintf("%s/%d/tools=%t/dispatches=%d", api, size, toolRequest, dispatches), func(b *testing.B) {
+						r := &http.Request{}
+						b.ReportAllocs()
+						b.SetBytes(int64(len(body)))
+						for b.Loop() {
+							fields, err := captureInferenceToolCallingRequest(r, api, body)
+							if err != nil {
+								b.Fatal(err)
+							}
+							for range dispatches {
+								if _, err := fields.compareDispatched(body); err != nil {
+									b.Fatal(err)
+								}
+							}
+							fields.report(r.Context())
+						}
+					})
 				}
-			})
+			}
 		}
 	}
+}
+
+func toolCallingBenchmarkBody(b *testing.B, api reqcommon.APIType, size int, toolRequest bool) string {
+	b.Helper()
+	body := map[string]any{reqcommon.FieldMessages: []any{map[string]any{"role": "user", "content": strings.Repeat("x", size)}}}
+	if toolRequest {
+		schema := map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}}
+		if api == reqcommon.APITypeChatCompletions {
+			body[string(toolcalling.FieldTools)] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "weather", "parameters": schema}}}
+			body[string(toolcalling.FieldToolChoice)] = "auto"
+		} else {
+			body[string(toolcalling.FieldTools)] = []any{map[string]any{"name": "weather", "input_schema": schema}}
+			body[string(toolcalling.FieldToolChoice)] = map[string]any{"type": "auto"}
+		}
+	}
+	encoded, err := json.Marshal(body)
+	require.NoError(b, err)
+	return string(encoded)
 }
 
 func TestToolCallingJSONStream(t *testing.T) {
