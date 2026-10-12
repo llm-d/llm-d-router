@@ -60,7 +60,7 @@ func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map
 		s.runChunkedDecodeFromMap(w, r, body, raw, toolFields)
 		return
 	}
-	_, _ = toolFields.compareDispatched(raw)
+	toolFields.compareDispatchedForSpan(raw, trace.SpanFromContext(r.Context()))
 	s.decoderProxy.ServeHTTP(w, r)
 }
 

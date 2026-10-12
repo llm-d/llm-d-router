@@ -198,7 +198,7 @@ func runConcurrentPDAgainst(ctx context.Context, t *testing.T, prefill *heldPref
 	before := snapshotStageMetrics(t)
 	func() {
 		defer func() { require.Equal(t, wantPanic, recover()) }()
-		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefill.host(), constants.KVConnectorMooncake, nil)
+		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefill.host(), constants.KVConnectorMooncake, nil, nil)
 	}()
 
 	prefill.requireCancelled(t)

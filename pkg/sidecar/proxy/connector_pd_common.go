@@ -80,6 +80,7 @@ func (s *Server) runConcurrentPD(
 	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	prefillReq = prefillReq.WithContext(trace.ContextWithSpan(prefillReq.Context(), prefillSpan))
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillTarget(prefillHost),
 		semconv.LLMDPDProxyConnector(connector),
@@ -98,7 +99,7 @@ func (s *Server) runConcurrentPD(
 	}
 
 	// Aggregate before starting the worker so reporting does not wait for prefill.
-	_, _ = toolFields.compareDispatched(prefillBody)
+	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	go func() {
 		defer cancelPrefill()
 		defer prefillSpan.End()
@@ -160,7 +161,7 @@ func (s *Server) runConcurrentPD(
 		})
 		context.AfterFunc(prefillCtx, func() { graceTimer.Stop() })
 	}()
-	_, _ = toolFields.compareDispatched(decodeBody)
+	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
 

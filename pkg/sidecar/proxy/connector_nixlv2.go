@@ -204,7 +204,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// under load. Retrying the same host avoids expensive local prefill on
 	// decode. Non-transient errors (500/501) fail immediately.
 	// Every attempt uses the same serialized body, so compare it once.
-	_, _ = toolFields.compareDispatched(pbody)
+	toolFields.compareDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
 retryLoop:
 	for attempt := 0; ; attempt++ {
@@ -416,7 +416,7 @@ retryLoop:
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
-		_, _ = toolFields.compareDispatched(dbody)
+		toolFields.compareDispatchedForSpan(dbody, decodeSpan)
 	})
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
@@ -669,7 +669,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// KV wait aborts immediately.
 	var prefillResp *bufferedResponseWriter
 	prefillDone := make(chan struct{})
-	_, _ = toolFields.compareDispatched(pbody)
+	toolFields.compareDispatchedForSpan(pbody, prefillSpan)
 	prefillStartedAt := time.Now()
 	go func() {
 		defer close(prefillDone)
@@ -731,12 +731,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}()
 		// The request goroutine reads the aggregate only after decodeDone closes.
 		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq, func() {
-			_, _ = toolFields.compareDispatched(dbody)
+			toolFields.compareDispatchedForSpan(dbody, decodeSpan)
 		})
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
-			_, _ = toolFields.compareDispatched(dbody)
+			toolFields.compareDispatchedForSpan(dbody, decodeSpan)
 			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))

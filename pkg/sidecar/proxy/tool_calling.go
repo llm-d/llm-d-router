@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -90,6 +92,14 @@ func (r *toolCallingRequest) compareDispatched(body []byte) ([]toolcalling.Field
 func (r *toolCallingRequest) rejectFields(fields ...toolcalling.Field) {
 	if r != nil {
 		r.mergeStatuses(toolcalling.RejectedFieldStatuses(r.original, fields...))
+	}
+}
+
+// Stage spans describe their dispatch; request metrics keep the worst outcome.
+func (r *toolCallingRequest) compareDispatchedForSpan(body []byte, span trace.Span) {
+	statuses, err := r.compareDispatched(body)
+	if r != nil && err == nil && span.IsRecording() {
+		span.SetAttributes(r.original.SpanAttributes(statuses)...)
 	}
 }
 

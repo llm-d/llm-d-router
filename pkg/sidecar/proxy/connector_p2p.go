@@ -152,7 +152,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	prefillStart := time.Now()
 
 	pw := &bufferedResponseWriter{}
-	_, _ = toolFields.compareDispatched(prefillBody)
+	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
 	metrics.RecordPrefillDuration(prefillDuration)
@@ -204,7 +204,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	_, _ = toolFields.compareDispatched(decodeBody)
+	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
 	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
 	decodeReturned = true
 
