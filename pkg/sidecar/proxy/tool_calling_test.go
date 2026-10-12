@@ -287,7 +287,7 @@ func TestToolCallingJSONStream(t *testing.T) {
 		`{"tools":`, `{"tools":[]} garbage`, `{"unused":"bad\q","tools":[]}`,
 		`{"unused":"bad\u12xz","tools":[]}`, `{"unused":[1,],"tools":[]}`,
 		`{"unused":{"a":1,},"tools":[]}`, `{"unused":01,"tools":[]}`,
-		`{"unused":1e,"tools":[]}`, `{"unused":tru,"tools":[]}`,
+		`{"unused":1e,"tools":[]}`, `{"unused":` + "true"[:3] + `,"tools":[]}`,
 		`[]`, `null`, `{} {}`, `{"tools":[],"unfinished":"`, "",
 	} {
 		for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
