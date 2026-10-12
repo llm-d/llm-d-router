@@ -18,12 +18,14 @@ package proxy
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -35,21 +37,295 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
+
+func TestSidecarToolCallingOTLP(t *testing.T) {
+	const toolSecret, schemaSecret, argumentSecret, responseSecret = "private_tool_otlp", "private_schema_otlp", "private_arguments_otlp", "private_response_otlp"
+	for _, connector := range []string{"direct", "nixl", "sglang"} {
+		for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+			for _, outcome := range []string{"success", "error", "interrupted"} {
+				for _, toolRequest := range []bool{true, false} {
+					t.Run(fmt.Sprintf("%s/%s/%s/tools=%t", connector, api, outcome, toolRequest), func(t *testing.T) {
+						var mu sync.Mutex
+						var logged []string
+						logger := funcr.New(func(prefix, args string) {
+							mu.Lock()
+							defer mu.Unlock()
+							logged = append(logged, prefix+" "+args)
+						}, funcr.Options{Verbosity: logging.TRACE})
+						exports, shutdown := startSidecarOTLPCollector(t, logger)
+						recorder := tracetest.NewSpanRecorder()
+						otel.GetTracerProvider().(*sdktrace.TracerProvider).RegisterSpanProcessor(recorder)
+						upstreamContexts := make(chan struct {
+							stage   string
+							context trace.SpanContext
+						}, 2)
+						readRequest := func(r *http.Request, stage string) {
+							_, err := io.Copy(io.Discard, r.Body)
+							assert.NoError(t, err)
+							ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+							upstreamContexts <- struct {
+								stage   string
+								context trace.SpanContext
+							}{stage, trace.SpanContextFromContext(ctx)}
+						}
+						prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							readRequest(r, "prefill")
+							statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+						}))
+						defer prefill.Close()
+						prefillURL, err := url.Parse(prefill.URL)
+						require.NoError(t, err)
+						decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							stage := "decode"
+							if connector == "direct" {
+								stage = "forward_request"
+							}
+							readRequest(r, stage)
+							if outcome == "interrupted" {
+								w.Header().Set("Content-Length", "1000")
+								_, _ = io.WriteString(w, responseSecret)
+								return
+							}
+							code := http.StatusOK
+							if outcome == "error" {
+								code = http.StatusBadRequest
+							}
+							statusHandler(code, fmt.Sprintf(`{"content":"%s"}`, responseSecret)).ServeHTTP(w, r)
+						}))
+						defer decoder.Close()
+						decoderURL, err := url.Parse(decoder.URL)
+						require.NoError(t, err)
+						kvConnector := constants.KVConnectorNIXLV2
+						if connector == "sglang" {
+							kvConnector = constants.KVConnectorSGLang
+						}
+						s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: kvConnector})
+						s.logger = logger
+						s.allowlistValidator = &AllowlistValidator{}
+						handler := otelhttp.NewHandler(s.createRoutes(), "sidecar-http", otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+							return r.Method + " " + r.URL.Path
+						}))
+						completed := make(chan struct{})
+						sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							defer close(completed)
+							handler.ServeHTTP(w, r)
+						}))
+						defer sidecar.Close()
+						body := map[string]any{reqcommon.FieldMessages: []any{map[string]any{"content": argumentSecret}}}
+						if toolRequest {
+							body[string(toolcalling.FieldTools)] = []any{map[string]any{"name": toolSecret, "description": schemaSecret}}
+							choice := map[string]any{"type": "function", "function": map[string]any{"name": toolSecret}}
+							if api == reqcommon.APITypeMessages {
+								choice = map[string]any{"type": "tool", "name": toolSecret}
+							}
+							body[string(toolcalling.FieldToolChoice)] = choice
+						}
+						encoded, err := json.Marshal(body)
+						require.NoError(t, err)
+						r, err := http.NewRequest(http.MethodPost, sidecar.URL+api.Path(), strings.NewReader(string(encoded)))
+						require.NoError(t, err)
+						traceState, err := trace.ParseTraceState("test=tool-telemetry")
+						require.NoError(t, err)
+						incoming := trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled, TraceState: traceState, Remote: true})
+						otel.GetTextMapPropagator().Inject(trace.ContextWithRemoteSpanContext(context.Background(), incoming), propagation.HeaderCarrier(r.Header))
+						if connector != "direct" {
+							r.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
+						}
+						before := toolFieldCounters(t)
+						resp, requestErr := sidecar.Client().Do(r)
+						if requestErr == nil {
+							response, readErr := io.ReadAll(resp.Body)
+							require.NoError(t, resp.Body.Close())
+							if outcome == "interrupted" {
+								require.Error(t, readErr)
+							} else {
+								require.NoError(t, readErr)
+								require.Contains(t, string(response), responseSecret)
+								code := http.StatusOK
+								if outcome == "error" {
+									code = http.StatusBadRequest
+								}
+								require.Equal(t, code, resp.StatusCode)
+							}
+						} else {
+							require.Equal(t, "interrupted", outcome, requestErr)
+						}
+						select {
+						case <-completed:
+						case <-time.After(2 * time.Second):
+							t.Fatal("request handler did not finish")
+						}
+						if connector == "sglang" {
+							require.Eventually(t, func() bool {
+								for _, span := range recorder.Ended() {
+									if span.Name() == "prefill" {
+										return true
+									}
+								}
+								return false
+							}, 2*time.Second, time.Millisecond)
+						}
+						require.NoError(t, shutdown(context.Background()))
+						spans := map[string]*tracepb.Span{}
+						for len(exports) > 0 {
+							exported := <-exports
+							wireJSON, err := protojson.Marshal(exported)
+							assert.NoError(t, err)
+							for _, secret := range []string{toolSecret, schemaSecret, argumentSecret, responseSecret} {
+								require.NotContains(t, string(wireJSON), secret)
+							}
+							for _, resource := range exported.GetResourceSpans() {
+								for _, scope := range resource.GetScopeSpans() {
+									for _, span := range scope.GetSpans() {
+										require.Equal(t, incoming.TraceID().String(), hex.EncodeToString(span.GetTraceId()))
+										spans[hex.EncodeToString(span.GetSpanId())] = span
+									}
+								}
+							}
+						}
+						require.NotEmpty(t, spans)
+						wantAttrs := map[string]any{}
+						if toolRequest {
+							wantAttrs = map[string]any{
+								string(semconv.LLMDToolCallingAPISurfaceKey): api.String(), string(semconv.LLMDToolCallingPresentKey): true,
+								string(semconv.LLMDToolCallingToolChoiceKey): "named", string(semconv.LLMDToolCallingToolCountKey): "1",
+								string(semconv.LLMDToolCallingFieldToolsStatusKey): "preserved", string(semconv.LLMDToolCallingFieldToolChoiceStatusKey): "preserved",
+							}
+						}
+						byName := map[string]*tracepb.Span{}
+						for _, span := range spans {
+							byName[span.GetName()] = span
+							attrs := map[string]any{}
+							for _, attr := range span.GetAttributes() {
+								if strings.HasPrefix(attr.GetKey(), "llm_d.tool_calling.") {
+									if value, ok := attr.GetValue().GetValue().(*commonpb.AnyValue_BoolValue); ok {
+										attrs[attr.GetKey()] = value.BoolValue
+									} else {
+										attrs[attr.GetKey()] = attr.GetValue().GetStringValue()
+									}
+								}
+							}
+							if span.GetName() == "forward_request" || span.GetName() == "prefill" || span.GetName() == "decode" {
+								require.Equal(t, wantAttrs, attrs, span.GetName())
+							} else {
+								require.Empty(t, attrs, span.GetName())
+							}
+						}
+						serverSpanName := http.MethodPost + " " + api.Path()
+						require.Contains(t, byName, serverSpanName)
+						require.Contains(t, byName, "forward_request")
+						require.Equal(t, incoming.SpanID().String(), hex.EncodeToString(byName[serverSpanName].GetParentSpanId()))
+						require.Equal(t, hex.EncodeToString(byName[serverSpanName].GetSpanId()), hex.EncodeToString(byName["forward_request"].GetParentSpanId()))
+						count := 1
+						if connector != "direct" {
+							count = 2
+							for _, stage := range []string{"prefill", "decode"} {
+								require.Contains(t, byName, stage)
+							}
+							rootID, prefillID := hex.EncodeToString(byName["forward_request"].GetSpanId()), hex.EncodeToString(byName["prefill"].GetSpanId())
+							require.Equal(t, rootID, hex.EncodeToString(byName["prefill"].GetParentSpanId()))
+							require.Contains(t, []string{rootID, prefillID}, hex.EncodeToString(byName["decode"].GetParentSpanId()))
+						}
+						require.Len(t, upstreamContexts, count)
+						for len(upstreamContexts) > 0 {
+							upstream := <-upstreamContexts
+							require.Equal(t, incoming.TraceID(), upstream.context.TraceID())
+							require.Equal(t, incoming.TraceState(), upstream.context.TraceState())
+							require.Equal(t, incoming.TraceFlags(), upstream.context.TraceFlags())
+							clientSpan := spans[upstream.context.SpanID().String()]
+							require.NotNil(t, clientSpan)
+							require.Equal(t, tracepb.Span_SPAN_KIND_CLIENT, clientSpan.GetKind())
+							parent := spans[hex.EncodeToString(clientSpan.GetParentSpanId())]
+							require.NotNil(t, parent)
+							require.Equal(t, upstream.stage, parent.GetName())
+						}
+						for key, value := range toolFieldCounters(t) {
+							change := value - before[key]
+							if toolRequest && (key[0] == string(toolcalling.FieldTools) || key[0] == string(toolcalling.FieldToolChoice)) && key[1] == string(toolcalling.FieldStatusPreserved) {
+								require.Equal(t, float64(1), change)
+							} else {
+								require.Zero(t, change)
+							}
+						}
+						mu.Lock()
+						defer mu.Unlock()
+						for _, secret := range []string{toolSecret, schemaSecret, argumentSecret, responseSecret} {
+							require.NotContains(t, strings.Join(logged, "\n"), secret)
+							require.NotContains(t, fmt.Sprint(gatherFamily(t, metricToolFieldStatus)), secret)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func startSidecarOTLPCollector(t *testing.T, logger logr.Logger) (<-chan *coltracepb.ExportTraceServiceRequest, func(context.Context) error) {
+	t.Helper()
+	exports := make(chan *coltracepb.ExportTraceServiceRequest, 64)
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/v1/traces", r.URL.Path)
+		assert.Equal(t, "application/x-protobuf", r.Header.Get("Content-Type"))
+		encoded, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		exported := &coltracepb.ExportTraceServiceRequest{}
+		if !assert.NoError(t, proto.Unmarshal(encoded, exported)) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		exports <- exported
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(collector.Close)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "OTEL_") {
+			t.Setenv(key, "")
+		}
+	}
+	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.URL+"/v1/traces")
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_on")
+	previousProvider, previousPropagator, previousErrorHandler := otel.GetTracerProvider(), otel.GetTextMapPropagator(), otel.GetErrorHandler()
+	shutdown, err := tracing.InitTracing(context.Background(), logger, "sidecar-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, shutdown(context.Background()))
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+		otel.SetErrorHandler(previousErrorHandler)
+	})
+	return exports, shutdown
+}
 
 func TestToolCallingRequestSpans(t *testing.T) {
 	for _, route := range []string{"direct", "shared", "encoder", "chunks", "fallback"} {
