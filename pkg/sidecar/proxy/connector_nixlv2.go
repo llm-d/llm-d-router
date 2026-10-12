@@ -247,7 +247,7 @@ retryLoop:
 		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
-			logging.HTTPBodyKey, pw.buffer.String())
+			logBodyBytesKey, pw.buffer.Len())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
 
@@ -699,7 +699,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancel() // KV will never arrive -> abort decode instead of hanging
 			s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
-				"status", pw.statusCode, "request_id", uuidStr, logging.HTTPBodyKey, pw.buffer.String())
+				"status", pw.statusCode, "request_id", uuidStr, logBodyBytesKey, pw.buffer.Len())
 		}
 	}()
 
@@ -780,12 +780,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				}
 			}
 		}
-		bodySnippet := ""
+		bodyBytes := 0
 		if prefillResp != nil {
-			bodySnippet = truncate(prefillResp.buffer.String(), 256)
+			bodyBytes = prefillResp.buffer.Len()
 		}
 		s.logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
-			"request_id", uuidStr, "p_status", status, "p_body_snippet", bodySnippet)
+			"request_id", uuidStr, "p_status", status, logBodyBytesKey, bodyBytes)
 		clientResponded = true
 		w.WriteHeader(status)
 		if prefillResp != nil {
@@ -861,12 +861,4 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
 		}
 	}
-}
-
-// truncate shortens s to at most n characters, appending "..." if truncated.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

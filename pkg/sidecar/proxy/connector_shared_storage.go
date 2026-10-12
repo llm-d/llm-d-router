@@ -138,7 +138,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	// Parse response to check finish_reason
 	var response map[string]any
 	if err := json.Unmarshal(dw.buffer.Bytes(), &response); err != nil {
-		s.logger.Error(err, "failed to unmarshal decode response", "response", dw.buffer.String())
+		s.logger.Error(err, "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
 
 		if err := errorInternalServerError(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")

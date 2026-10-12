@@ -287,7 +287,7 @@ func (s *Server) fanoutEncoder(
 			// bufferedResponseWriter.Write back-fills 200, so statusCode 0 means
 			// the handler wrote nothing at all. isHTTPError treats it as an error.
 			if isHTTPError(pw.statusCode) {
-				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
+				err := fmt.Errorf("encoder request failed for item %d with status %d", idx, pw.statusCode)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}

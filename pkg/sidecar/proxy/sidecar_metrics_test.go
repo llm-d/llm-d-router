@@ -611,6 +611,103 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 	}
 }
 
+func TestSidecarFailureLogPrivacy(t *testing.T) {
+	const secret = "private_upstream_error_fixture"
+	for _, connector := range []string{"nixl", "parallel", "shared", "encoder-nixl", "encoder-example"} {
+		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
+			t.Run(fmt.Sprintf("%s/verbosity=%d", connector, verbosity), func(t *testing.T) {
+				payload := fmt.Sprintf(`{"error":"%s"}`, secret)
+				upstream := httptest.NewServer(statusHandler(http.StatusBadRequest, payload))
+				defer upstream.Close()
+				upstreamURL, err := url.Parse(upstream.URL)
+				require.NoError(t, err)
+				s := NewProxy(Config{DecoderURL: upstreamURL, KVConnector: constants.KVConnectorNIXLV2,
+					MoRIIOWriteMode: connector == "parallel", MoRIIOParallelDispatch: connector == "parallel",
+					MoRIIODecodePodIP: "127.0.0.1", MoRIIOParallelDecodeWaitTimeout: time.Second})
+				s.allowlistValidator = &AllowlistValidator{}
+				var mu sync.Mutex
+				var logged []string
+				s.logger = funcr.New(func(prefix, args string) {
+					mu.Lock()
+					defer mu.Unlock()
+					logged = append(logged, prefix+" "+args)
+				}, funcr.Options{Verbosity: verbosity})
+				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if connector == "shared" {
+						statusHandler(http.StatusOK, fmt.Sprintf(`{"echo":"%s",`, secret)).ServeHTTP(w, r)
+						return
+					}
+					statusHandler(http.StatusOK, `{"choices":[]}`).ServeHTTP(w, r)
+				})
+				body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.jpg"}}]}],"tools":[],"tool_choice":"auto","cache_hit_threshold":0.5}`
+				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				rw := httptest.NewRecorder()
+				wantCode := http.StatusBadRequest
+				switch connector {
+				case "nixl", "parallel":
+					s.handleNIXLV2(rw, r, upstreamURL.Host, "", reqcommon.APITypeChatCompletions)
+				case "shared":
+					s.handleSharedStorage(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusInternalServerError
+				case "encoder-nixl":
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusBadGateway
+				case "encoder-example":
+					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusBadGateway
+				}
+				require.Equal(t, wantCode, rw.Code, rw.Body.String())
+				if connector == "nixl" || connector == "parallel" {
+					require.Equal(t, payload, rw.Body.String(), "upstream error passthrough must remain exact")
+				} else {
+					require.NotContains(t, rw.Body.String(), secret)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				require.NotEmpty(t, logged)
+				for _, entry := range logged {
+					require.NotContains(t, entry, secret)
+				}
+			})
+		}
+	}
+	for _, value := range []any{secret, errors.New(secret)} {
+		t.Run(fmt.Sprintf("prefill panic/%T", value), func(t *testing.T) {
+			decoderURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			s := NewProxy(Config{DecoderURL: decoderURL})
+			var logged []string
+			var mu sync.Mutex
+			panicLogged := make(chan struct{}, 1)
+			s.logger = funcr.New(func(prefix, args string) {
+				mu.Lock()
+				logged = append(logged, prefix+" "+args)
+				mu.Unlock()
+				if strings.Contains(args, "panic in prefill request") {
+					panicLogged <- struct{}{}
+				}
+			}, funcr.Options{Verbosity: logging.TRACE})
+			s.prefillerProxies.Add("prefill:8000", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(value) }))
+			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
+			rw := httptest.NewRecorder()
+			s.runConcurrentPD(rw, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil),
+				[]byte(`{}`), []byte(`{}`), "prefill:8000", constants.KVConnectorSGLang, nil, nil)
+			select {
+			case <-panicLogged:
+			case <-time.After(time.Second):
+				t.Fatal("recovered prefill panic was not logged")
+			}
+			require.Equal(t, http.StatusOK, rw.Code)
+			require.Equal(t, `{"choices":[]}`, rw.Body.String())
+			mu.Lock()
+			defer mu.Unlock()
+			for _, entry := range logged {
+				require.NotContains(t, entry, secret)
+			}
+		})
+	}
+}
+
 func TestSGLangToolCallingMetrics(t *testing.T) {
 	chatBody := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
 	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
