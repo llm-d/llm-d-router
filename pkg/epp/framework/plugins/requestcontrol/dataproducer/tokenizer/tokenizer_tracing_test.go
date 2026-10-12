@@ -174,7 +174,19 @@ func TestProduce_HTTPToolCallingSummary(t *testing.T) {
 				want[semconv.LLMDToolCallingToolChoiceKey] = attribute.StringValue(tc.choice)
 				if tc.count != "" {
 					want[semconv.LLMDToolCallingToolCountKey] = attribute.StringValue(tc.count)
+					want[semconv.LLMDToolCallingFieldToolsStatusKey] = attribute.StringValue("preserved")
 				}
+				if tc.choice == "named" || tc.choice == "required" {
+					want[semconv.LLMDToolCallingFieldToolChoiceStatusKey] = attribute.StringValue("preserved")
+				}
+				if tc.name == "parallel only" {
+					want[semconv.LLMDToolCallingFieldParallelToolCallsStatusKey] = attribute.StringValue("preserved")
+				}
+			}
+			if tc.name == "structured output only" {
+				want[semconv.LLMDToolCallingAPISurfaceKey] = attribute.StringValue(tc.api.String())
+				want[semconv.LLMDToolCallingPresentKey] = attribute.BoolValue(false)
+				want[semconv.LLMDToolCallingFieldResponseFormatStatusKey] = attribute.StringValue("preserved")
 			}
 			require.Len(t, recorder.Ended(), 2, "one tokenize span and one HTTP client span")
 			tokenize := tokenizeSpan(t, recorder)
@@ -220,6 +232,30 @@ func TestProduce_HTTPTracingDisabled(t *testing.T) {
 	require.Equal(t, fwkrh.RawPayload(raw), request.Body.WirePayload())
 	require.NotNil(t, request.Body.TokenizedRequest)
 	assert.Empty(t, recorder.Ended())
+}
+
+func TestCompareRenderToolFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, outbound, status string
+		wantError              bool
+	}{
+		{"unchanged", `{"tools":[],"max_tokens":4}`, "preserved", false},
+		{"budget only", `{"max_tokens":1,"tools":[],"return_mm_kwargs":false}`, "preserved", false},
+		{"changed", `{"tools":[{"type":"function","function":{"name":"private_tool"}}]}`, "changed", false},
+		{"dropped", `{}`, "dropped", false},
+		{"invalid outbound", `{"tools":[`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot, statuses, err := compareRenderToolFields(reqcommon.APITypeChatCompletions, []byte(`{"tools":[],"max_tokens":4}`), []byte(tc.outbound))
+			require.Equal(t, tc.wantError, err != nil)
+			attrs := map[attribute.Key]attribute.Value{}
+			for _, attr := range snapshot.SpanAttributes(statuses) {
+				attrs[attr.Key] = attr.Value
+			}
+			assert.True(t, attrs[semconv.LLMDToolCallingPresentKey].AsBool())
+			assert.Equal(t, tc.status, attrs[semconv.LLMDToolCallingFieldToolsStatusKey].AsString())
+		})
+	}
 }
 
 // The span must parent to the caller's span so tokenization appears under the

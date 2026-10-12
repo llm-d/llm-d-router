@@ -402,19 +402,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	default:
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
-	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(unobservedRenderCtxKey{}) == nil {
-		switch path {
-		case chatRenderPath, messagesRenderPath, responsesRenderPath:
-			// Telemetry capture failures must not change rendering behavior.
-			if snapshot, captureErr := toolcalling.CaptureRequestJSON(reqcommon.DetectAPIType(path), payload); captureErr == nil {
-				attrs := snapshot.SpanAttributes(nil)
-				span.SetAttributes(attrs...)
-				if len(attrs) > 0 {
-					ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
-				}
-			}
-		}
-	}
+	inboundPayload := payload
 	if r.prefillOnly {
 		if payload, err = renderOnlyBudget(payload); err != nil {
 			return fmt.Errorf("apply render-only output budget: %w", err)
@@ -423,6 +411,18 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	if r.omitMMKwargs {
 		if payload, err = omitMMKwargs(payload); err != nil {
 			return fmt.Errorf("omit multimodal kwargs: %w", err)
+		}
+	}
+	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(unobservedRenderCtxKey{}) == nil {
+		switch path {
+		case chatRenderPath, messagesRenderPath, responsesRenderPath:
+			// Telemetry capture failures must not change rendering behavior.
+			snapshot, statuses, _ := compareRenderToolFields(reqcommon.DetectAPIType(path), inboundPayload, payload)
+			attrs := snapshot.SpanAttributes(statuses)
+			span.SetAttributes(attrs...)
+			if len(attrs) > 0 {
+				ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
+			}
 		}
 	}
 
@@ -449,6 +449,23 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	}
 	_, err = r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
 	return err
+}
+
+// Compare the serialized render copy without re-capturing an unchanged body.
+func compareRenderToolFields(surface reqcommon.APIType, inbound, outbound []byte) (toolcalling.RequestSnapshot, []toolcalling.FieldStatus, error) {
+	before, err := toolcalling.CaptureRequestJSON(surface, inbound)
+	if err != nil {
+		return before, nil, err
+	}
+	after := before
+	if !bytes.Equal(inbound, outbound) {
+		after, err = toolcalling.CaptureRequestJSON(surface, outbound)
+		if err != nil {
+			return before, nil, err
+		}
+	}
+	statuses, err := toolcalling.CompareRequests(before, after)
+	return before, statuses, err
 }
 
 // renderOnlyBudget caps the output budget on the render copy of a JSON
