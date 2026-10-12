@@ -33,8 +33,10 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -46,10 +48,10 @@ import (
 
 // setupSpanRecorder installs an in-memory span recorder as the global tracer
 // provider and returns it, restoring the previous provider on cleanup.
-func setupSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
+func setupSpanRecorder(t *testing.T, options ...sdktrace.TracerProviderOption) *tracetest.SpanRecorder {
 	t.Helper()
 	recorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	tp := sdktrace.NewTracerProvider(append(options, sdktrace.WithSpanProcessor(recorder))...)
 	origTP := otel.GetTracerProvider()
 	otel.SetTracerProvider(tp)
 	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
@@ -108,6 +110,9 @@ func TestProduce_EmitsTokenizeSpan(t *testing.T) {
 }
 
 func TestProduce_HTTPToolCallingSummary(t *testing.T) {
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(originalPropagator) })
 	for _, tc := range []struct {
 		name   string
 		api    reqcommon.APIType
@@ -129,10 +134,12 @@ func TestProduce_HTTPToolCallingSummary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := setupSpanRecorder(t)
 			forwarded := make(chan string, 1)
+			forwardedTrace := make(chan trace.SpanContext, 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				assert.NoError(t, err)
 				forwarded <- string(body)
+				forwardedTrace <- trace.SpanContextFromContext(propagation.TraceContext{}.Extract(r.Context(), propagation.HeaderCarrier(r.Header)))
 				response := `{"token_ids":[1]}`
 				if tc.api == reqcommon.APITypeCompletions {
 					response = "[" + response + "]"
@@ -160,15 +167,6 @@ func TestProduce_HTTPToolCallingSummary(t *testing.T) {
 			require.NoError(t, newTestPlugin(newHTTPRenderer(t, srv)).Produce(ctx, request, nil))
 			require.Equal(t, tc.raw, <-forwarded)
 			require.Equal(t, fwkrh.RawPayload(tc.raw), request.Body.WirePayload())
-			got := map[attribute.Key]attribute.Value{}
-			for key, value := range spanAttrs(tokenizeSpan(t, recorder)) {
-				if strings.HasPrefix(string(key), "llm_d.tool_calling.") {
-					got[key] = value
-				}
-				for _, secret := range []string{"private_tool", "private_schema", "private_prompt"} {
-					assert.NotContains(t, value.String(), secret)
-				}
-			}
 			want := map[attribute.Key]attribute.Value{}
 			if tc.choice != "" {
 				want[semconv.LLMDToolCallingAPISurfaceKey] = attribute.StringValue(tc.api.String())
@@ -178,9 +176,50 @@ func TestProduce_HTTPToolCallingSummary(t *testing.T) {
 					want[semconv.LLMDToolCallingToolCountKey] = attribute.StringValue(tc.count)
 				}
 			}
-			assert.Equal(t, want, got)
+			require.Len(t, recorder.Ended(), 2, "one tokenize span and one HTTP client span")
+			tokenize := tokenizeSpan(t, recorder)
+			for _, span := range recorder.Ended() {
+				if span.SpanKind() == trace.SpanKindClient {
+					assert.Equal(t, tokenize.SpanContext().TraceID(), span.SpanContext().TraceID())
+					assert.Equal(t, tokenize.SpanContext().SpanID(), span.Parent().SpanID())
+					remote := <-forwardedTrace
+					assert.Equal(t, span.SpanContext().TraceID(), remote.TraceID())
+					assert.Equal(t, span.SpanContext().SpanID(), remote.SpanID())
+					assert.Equal(t, span.SpanContext().TraceFlags(), remote.TraceFlags())
+				}
+				got := map[attribute.Key]attribute.Value{}
+				for key, value := range spanAttrs(span) {
+					if strings.HasPrefix(string(key), "llm_d.tool_calling.") {
+						got[key] = value
+					}
+					for _, secret := range []string{"private_tool", "private_schema", "private_prompt"} {
+						assert.NotContains(t, value.String(), secret)
+					}
+				}
+				assert.Equal(t, want, got, span.Name())
+			}
 		})
 	}
+}
+
+func TestProduce_HTTPTracingDisabled(t *testing.T) {
+	recorder := setupSpanRecorder(t, sdktrace.WithSampler(sdktrace.NeverSample()))
+	raw := `{"tools":[{"type":"function","function":{"name":"private_tool"}}],"tool_choice":"auto"}`
+	forwarded := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		forwarded <- string(body)
+		_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+	}))
+	defer srv.Close()
+	request := chatRequest()
+	request.Body.Payload = fwkrh.RawPayload(raw)
+	require.NoError(t, newTestPlugin(newHTTPRenderer(t, srv)).Produce(t.Context(), request, nil))
+	require.Equal(t, raw, <-forwarded)
+	require.Equal(t, fwkrh.RawPayload(raw), request.Body.WirePayload())
+	require.NotNil(t, request.Body.TokenizedRequest)
+	assert.Empty(t, recorder.Ended())
 }
 
 // The span must parent to the caller's span so tokenization appears under the

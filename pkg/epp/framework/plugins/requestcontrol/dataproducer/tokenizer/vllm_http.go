@@ -38,6 +38,7 @@ import (
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
@@ -66,6 +67,21 @@ const (
 // authHeaderCtxKey carries the inbound request's Authorization header from
 // Plugin.Produce to the render call without widening tokenInputProducer.produce.
 type authHeaderCtxKey struct{}
+
+type renderToolAttributesCtxKey struct{}
+
+type renderTraceTransport struct {
+	base http.RoundTripper
+}
+
+func (t *renderTraceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// otelhttp starts the client span before calling the underlying transport.
+	if span := trace.SpanFromContext(req.Context()); span.IsRecording() {
+		attrs, _ := req.Context().Value(renderToolAttributesCtxKey{}).([]attribute.KeyValue)
+		span.SetAttributes(attrs...)
+	}
+	return t.base.RoundTrip(req)
+}
 
 // withAuthHeader returns ctx carrying the Authorization header value verbatim.
 func withAuthHeader(ctx context.Context, value string) context.Context {
@@ -216,7 +232,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		return nil, err
 	}
 	return &vllmHTTPRenderer{
-		client: &http.Client{Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(
+		client: &http.Client{Transport: otelhttp.NewTransport(&renderTraceTransport{base: transport}, otelhttp.WithSpanNameFormatter(
 			// Name the outbound span after the render route instead of the
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
@@ -391,7 +407,11 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		case chatRenderPath, messagesRenderPath, responsesRenderPath:
 			// Telemetry capture failures must not change rendering behavior.
 			if snapshot, captureErr := toolcalling.CaptureRequestJSON(reqcommon.DetectAPIType(path), payload); captureErr == nil {
-				span.SetAttributes(snapshot.SpanAttributes(nil)...)
+				attrs := snapshot.SpanAttributes(nil)
+				span.SetAttributes(attrs...)
+				if len(attrs) > 0 {
+					ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
+				}
 			}
 		}
 	}
