@@ -309,7 +309,7 @@ func TestAddedTokensEntry_Clone(t *testing.T) {
 		fairnessID:   "flow",
 		priority:     "1",
 	}
-	entry.tokens.Store(15)
+	entry.textTokens.Store(15)
 	entry.requests.Store(1)
 
 	cloned := entry.Clone().(*addedTokensEntry)
@@ -318,7 +318,7 @@ func TestAddedTokensEntry_Clone(t *testing.T) {
 	require.Equal(t, entry.producerName, cloned.producerName)
 	require.Equal(t, entry.fairnessID, cloned.fairnessID)
 	require.Equal(t, entry.priority, cloned.priority)
-	require.Equal(t, int64(15), cloned.tokens.Load())
+	require.Equal(t, int64(15), cloned.textTokens.Load())
 	require.Equal(t, int32(1), cloned.requests.Load())
 }
 

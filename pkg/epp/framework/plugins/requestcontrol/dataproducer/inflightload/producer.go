@@ -110,7 +110,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 	return &InFlightLoadProducer{
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
-		tokenTracker:              newConcurrencyTracker(),
+		tokenTracker:              newTokenLoadTracker(),
 		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
 		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
@@ -134,9 +134,11 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName                fwkplugin.TypedName
-	requestTracker           *concurrencyTracker
-	tokenTracker             *concurrencyTracker
+	typedName      fwkplugin.TypedName
+	requestTracker *concurrencyTracker
+	// tokenTracker keeps each endpoint's in-flight text and non-text token
+	// counts in one entry, so a read takes one lock and one lookup.
+	tokenTracker             *tokenLoadTracker
 	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
@@ -162,13 +164,16 @@ type InFlightLoadProducer struct {
 // can race safely: whichever swaps first does the decrement, the other
 // sees 0 and is a no-op.
 type addedTokensEntry struct {
-	tokens atomic.Int64
-	// tokenCounter and requestCounter point at the exact tracker counter instances this request
+	// textTokens and nonTextTokens are the two disjoint halves of the request's
+	// token contribution, released together.
+	textTokens    atomic.Int64
+	nonTextTokens atomic.Int64
+	// tokenCounters and requestCounter point at the exact tracker counter instances this request
 	// incremented in PreRequest. A release decrements these instances directly, so it always lands
 	// on the counter that received the increment. If the endpoint flaps (delete + recreate under the
 	// same NamespacedName) between increment and release, the captured instance is the orphaned
 	// counter; decrementing it leaves the live counter untouched.
-	tokenCounter   *atomic.Int64
+	tokenCounters  *tokenCounters
 	requestCounter *atomic.Int64
 	requests       atomic.Int32
 	endpointName   string
@@ -189,7 +194,7 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 		return nil
 	}
 	clone := &addedTokensEntry{
-		tokenCounter:   e.tokenCounter,
+		tokenCounters:  e.tokenCounters,
 		requestCounter: e.requestCounter,
 		endpointName:   e.endpointName,
 		namespace:      e.namespace,
@@ -197,19 +202,31 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 		fairnessID:     e.fairnessID,
 		priority:       e.priority,
 	}
-	clone.tokens.Store(e.tokens.Load())
+	clone.textTokens.Store(e.textTokens.Load())
+	clone.nonTextTokens.Store(e.nonTextTokens.Load())
 	clone.requests.Store(e.requests.Load())
 	return clone
 }
 
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
-	if t := e.tokens.Swap(0); t != 0 {
-		decrementClamped(e.tokenCounter, t)
-		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
-	}
+	e.releaseTokens()
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
 		inflightRequests.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Dec()
+	}
+}
+
+// releaseTokens rolls back the entry's token contribution, both halves, exactly
+// once: whichever caller swaps first does the decrement. Each half subtracts
+// itself from the inflight-tokens series, which carries the total.
+func (e *addedTokensEntry) releaseTokens() {
+	if t := e.textTokens.Swap(0); t != 0 {
+		decrementClamped(&e.tokenCounters.text, t)
+		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
+	}
+	if n := e.nonTextTokens.Swap(0); n != 0 {
+		decrementClamped(&e.tokenCounters.nonText, n)
+		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(n))
 	}
 }
 
@@ -248,14 +265,12 @@ func (p *InFlightLoadProducer) DumpState() (json.RawMessage, error) {
 }
 
 func (p *InFlightLoadProducer) snapshotState() inFlightLoadState {
-	requestCounts := map[string]int64{}
-	if p.requestTracker != nil {
-		requestCounts = p.requestTracker.snapshot()
-	}
+	requestCounts := p.requestTracker.snapshot()
 
-	tokenCounts := map[string]int64{}
-	if p.tokenTracker != nil {
-		tokenCounts = p.tokenTracker.snapshot()
+	tokenLoads := p.tokenTracker.snapshot()
+	tokenCounts := make(map[string]int64, len(tokenLoads))
+	for endpointID, load := range tokenLoads {
+		tokenCounts[endpointID] = load.Total()
 	}
 
 	endpointSet := make(map[string]struct{}, len(requestCounts)+len(tokenCounts))
@@ -319,10 +334,7 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		AttributeKey: p.dk,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Read: func(endpointID string) datalayer.Cloneable {
-			return &attrconcurrency.InFlightLoad{
-				Requests: p.requestTracker.get(endpointID),
-				Tokens:   p.tokenTracker.get(endpointID),
-			}
+			return p.inFlightLoad(endpointID)
 		},
 		Aggregate: func(values []any) any {
 			total := &attrconcurrency.InFlightLoad{}
@@ -330,6 +342,7 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
 					total.Requests += ifl.Requests
 					total.Tokens += ifl.Tokens
+					total.NonTextTokens += ifl.NonTextTokens
 				}
 			}
 			return total
@@ -370,10 +383,7 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		p.registeredEndpoints.Store(id, event.Endpoint)
 		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
-				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
-				}
+				return p.inFlightLoad(id)
 			},
 		})
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("Injected dynamic attribute into endpoint", "key", p.dk.String(), "endpoint", id)
@@ -392,9 +402,8 @@ func (p *InFlightLoadProducer) Produce(_ context.Context, request *fwksched.Infe
 			continue
 		}
 		if request != nil {
-			tokens := p.estimateRequestTokens(e, request, inputTokens)
 			p.uncachedRequestTokensSlot.Put(e, &attrconcurrency.UncachedRequestTokens{
-				Tokens: tokens,
+				Tokens: p.estimateRequestTokenLoad(e, request, inputTokens),
 			})
 		}
 	}
@@ -467,15 +476,15 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		// Prefer the prefix producer's view (real tokens) when available so the
 		// match-length and the input length are in the same units; fall back to
 		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
+		tokens := p.estimateRequestTokenLoad(endpoint, request, inputTokens)
 
-		tokenCounter := p.tokenTracker.add(eid, tokens)
+		counters := p.tokenTracker.add(eid, tokens)
 
 		inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Inc()
-		inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Add(float64(tokens))
+		inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority).Add(float64(tokens.Total()))
 
 		entry := &addedTokensEntry{
-			tokenCounter:   tokenCounter,
+			tokenCounters:  counters,
 			requestCounter: requestCounter,
 			endpointName:   name,
 			namespace:      namespace,
@@ -483,7 +492,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fairnessID:     fairnessID,
 			priority:       priority,
 		}
-		entry.tokens.Store(tokens)
+		entry.textTokens.Store(tokens.Text)
+		entry.nonTextTokens.Store(tokens.NonText)
 		entry.requests.Store(1)
 		p.PluginState.Write(
 			request.RequestID,
@@ -531,6 +541,28 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 		return adjustedInput + p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return adjustedInput
+}
+
+// estimateRequestTokenLoad splits what estimateRequestTokens charges the
+// endpoint into its text and non-text halves. Estimated output is text, so a
+// decode-only endpoint charged only for output carries no non-text tokens;
+// every other endpoint is charged the prompt, and with it the uncached
+// placeholder tokens. This is the one place the multimodal estimate is capped
+// at the total, so every consumer downstream gets two disjoint counts.
+func (p *InFlightLoadProducer) estimateRequestTokenLoad(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) attrconcurrency.TokenLoad {
+	total := p.estimateRequestTokens(endpoint, request, inputTokens)
+	if total <= 0 {
+		return attrconcurrency.TokenLoad{}
+	}
+
+	// A decode-only endpoint charged only for the output estimate carries no
+	// placeholders: generated output is text.
+	if p.addEstimatedOutputTokens && endpointHasDecodeOnlyRole(endpoint) {
+		return attrconcurrency.TokenLoad{Text: total}
+	}
+
+	nonText := min(uncachedNonTextTokens(endpoint, request, p.prefixMatchInfoDK), total)
+	return attrconcurrency.TokenLoad{Text: total - nonText, NonText: nonText}
 }
 
 // endpointHasPrefillOnlyRole reports whether the endpoint is labeled as a
@@ -674,10 +706,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
-		if t := entry.tokens.Swap(0); t != 0 {
-			decrementClamped(entry.tokenCounter, t)
-			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
-		}
+		entry.releaseTokens()
 	}
 }
 
@@ -701,15 +730,8 @@ func addedTokensKey(endpointID, profileName string) string {
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
 func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
-	if endpoint == nil {
-		return nonNeg(inputTokens)
-	}
-	raw, ok := endpoint.Get(prefixMatchInfoKey)
-	if !ok {
-		return nonNeg(inputTokens)
-	}
-	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
+	info := prefixMatchInfo(endpoint, prefixMatchInfoKey)
+	if info == nil {
 		return nonNeg(inputTokens)
 	}
 
@@ -729,6 +751,57 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 	}
 
 	return uncachedIndexed + tail
+}
+
+// uncachedNonTextTokens returns the multimodal placeholder tokens this endpoint
+// must actually compute: the part of each item's placeholder span that lies past
+// the cached prefix. MultiModalFeature.Offset places the item in its prompt's
+// token IDs, the same positions the prefix match counts blocks over.
+//
+// Only a single-prompt request can be attributed. With several prompts the match
+// info sums each prompt's cached blocks, which no longer says where the cached
+// tokens are, so the request reports no non-text tokens and its whole load counts
+// as text. Multimodal content arrives through chat, which always has one prompt.
+func uncachedNonTextTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, prefixMatchInfoKey fwkplugin.DataKey) int64 {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+		return 0
+	}
+	prompts := request.Body.TokenizedRequest.Prompts
+	if len(prompts) != 1 {
+		return 0
+	}
+
+	var cached int64
+	if info := prefixMatchInfo(endpoint, prefixMatchInfoKey); info != nil {
+		cached = int64(info.MatchBlocks()) * int64(info.BlockSizeTokens())
+	}
+
+	var uncached int64
+	for _, feature := range prompts[0].MultiModalFeatures {
+		start := int64(feature.Offset)
+		end := start + int64(feature.Length)
+		if end > cached {
+			uncached += end - max(start, cached)
+		}
+	}
+	return uncached
+}
+
+// prefixMatchInfo returns the endpoint's prefix-cache match info, or nil when the
+// prefix producer has not populated a usable one.
+func prefixMatchInfo(endpoint fwksched.Endpoint, prefixMatchInfoKey fwkplugin.DataKey) *attrprefix.PrefixCacheMatchInfo {
+	if endpoint == nil {
+		return nil
+	}
+	raw, ok := endpoint.Get(prefixMatchInfoKey)
+	if !ok {
+		return nil
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
+		return nil
+	}
+	return info
 }
 
 func nonNeg(v int64) int64 {
@@ -773,7 +846,18 @@ func (p *InFlightLoadProducer) DeleteEndpoint(endpointID string) {
 }
 
 func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
-	return p.tokenTracker.get(eid)
+	return p.tokenTracker.get(eid).Total()
+}
+
+// inFlightLoad is the endpoint's current in-flight load. Tokens is computed from
+// the same text and non-text read as NonTextTokens, so it never falls below it.
+func (p *InFlightLoadProducer) inFlightLoad(eid string) *attrconcurrency.InFlightLoad {
+	load := p.tokenTracker.get(eid)
+	return &attrconcurrency.InFlightLoad{
+		Tokens:        load.Total(),
+		NonTextTokens: load.NonText,
+		Requests:      p.requestTracker.get(eid),
+	}
 }
 
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
@@ -793,6 +877,10 @@ func newConcurrencyTracker() *concurrencyTracker {
 }
 
 func (t *concurrencyTracker) get(endpointID string) int64 {
+	if t == nil {
+		return 0
+	}
+
 	t.mu.RLock()
 	counter, exists := t.counts[endpointID]
 	t.mu.RUnlock()
@@ -804,6 +892,10 @@ func (t *concurrencyTracker) get(endpointID string) int64 {
 }
 
 func (t *concurrencyTracker) snapshot() map[string]int64 {
+	if t == nil {
+		return map[string]int64{}
+	}
+
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
@@ -873,7 +965,95 @@ func decrementClamped(counter *atomic.Int64, delta int64) {
 }
 
 func (t *concurrencyTracker) delete(endpointID string) {
+	if t == nil {
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.counts, endpointID)
+}
+
+// tokenCounters is one endpoint's in-flight token load, split into text and
+// non-text counts.
+type tokenCounters struct {
+	text    atomic.Int64
+	nonText atomic.Int64
+}
+
+func (c *tokenCounters) load() attrconcurrency.TokenLoad {
+	return attrconcurrency.TokenLoad{Text: c.text.Load(), NonText: c.nonText.Load()}
+}
+
+// tokenLoadTracker manages thread-safe token counters for inflight requests.
+type tokenLoadTracker struct {
+	mu       sync.RWMutex
+	counters map[string]*tokenCounters
+}
+
+func newTokenLoadTracker() *tokenLoadTracker {
+	return &tokenLoadTracker{
+		counters: make(map[string]*tokenCounters),
+	}
+}
+
+func (t *tokenLoadTracker) get(endpointID string) attrconcurrency.TokenLoad {
+	if t == nil {
+		return attrconcurrency.TokenLoad{}
+	}
+
+	t.mu.RLock()
+	counters, exists := t.counters[endpointID]
+	t.mu.RUnlock()
+
+	if !exists {
+		return attrconcurrency.TokenLoad{}
+	}
+	return counters.load()
+}
+
+func (t *tokenLoadTracker) snapshot() map[string]attrconcurrency.TokenLoad {
+	if t == nil {
+		return map[string]attrconcurrency.TokenLoad{}
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	result := make(map[string]attrconcurrency.TokenLoad, len(t.counters))
+	for endpointID, counters := range t.counters {
+		result[endpointID] = counters.load()
+	}
+	return result
+}
+
+// add applies load to the endpoint's counters, creating them if absent, and returns the exact
+// instance that was mutated, for the same reason as concurrencyTracker.add.
+func (t *tokenLoadTracker) add(endpointID string, load attrconcurrency.TokenLoad) *tokenCounters {
+	t.mu.RLock()
+	counters, exists := t.counters[endpointID]
+	t.mu.RUnlock()
+
+	if !exists {
+		t.mu.Lock()
+		if counters, exists = t.counters[endpointID]; !exists {
+			counters = &tokenCounters{}
+			t.counters[endpointID] = counters
+		}
+		t.mu.Unlock()
+	}
+
+	counters.text.Add(load.Text)
+	counters.nonText.Add(load.NonText)
+	return counters
+}
+
+func (t *tokenLoadTracker) delete(endpointID string) {
+	if t == nil {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.counters, endpointID)
 }

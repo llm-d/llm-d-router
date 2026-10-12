@@ -305,13 +305,41 @@ func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
 }
 
 func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
-	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
+	want := &attrconcurrency.InFlightLoad{Tokens: 7, NonTextTokens: 3, Requests: 2}
 	data, err := encodeValue(want)
 	require.NoError(t, err)
 
 	actual, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
 	require.NoError(t, err)
 	require.Equal(t, want, actual)
+}
+
+// TestInFlightLoadDecodesAcrossVersions covers a rolling upgrade: replicas on
+// either side of NonTextTokens read each other's InFlightLoad through the syncer.
+func TestInFlightLoadDecodesAcrossVersions(t *testing.T) {
+	// legacyInFlightLoad is InFlightLoad as EPP versions without NonTextTokens encode it.
+	type legacyInFlightLoad struct {
+		Tokens   int64
+		Requests int64
+	}
+
+	t.Run("old replica to new", func(t *testing.T) {
+		data, err := encodeValue(&legacyInFlightLoad{Tokens: 7, Requests: 2})
+		require.NoError(t, err)
+
+		actual, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
+		require.NoError(t, err)
+		require.Equal(t, &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}, actual)
+	})
+
+	t.Run("new replica to old", func(t *testing.T) {
+		data, err := encodeValue(&attrconcurrency.InFlightLoad{Tokens: 7, NonTextTokens: 3, Requests: 2})
+		require.NoError(t, err)
+
+		actual, err := gobDecode(data, &legacyInFlightLoad{})
+		require.NoError(t, err)
+		require.Equal(t, &legacyInFlightLoad{Tokens: 7, Requests: 2}, actual, "the total survives; only the non-text part is dropped")
+	})
 }
 
 func TestSetRefreshesPreparedAggregate(t *testing.T) {
