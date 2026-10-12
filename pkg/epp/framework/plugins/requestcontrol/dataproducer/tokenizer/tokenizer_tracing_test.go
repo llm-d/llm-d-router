@@ -107,6 +107,82 @@ func TestProduce_EmitsTokenizeSpan(t *testing.T) {
 	assert.Equal(t, int64(0), attrs["mm.hash_count"].AsInt64())
 }
 
+func TestProduce_HTTPToolCallingSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		api    reqcommon.APIType
+		raw    string
+		choice string
+		count  string
+		warmup bool
+	}{
+		{"chat named", reqcommon.APITypeChatCompletions, `{"tools":[{"type":"function","function":{"name":"private_tool","parameters":{"description":"private_schema"}}}],"tool_choice":{"type":"function","function":{"name":"private_tool"}}}`, "named", "1", false},
+		{"messages any", reqcommon.APITypeMessages, `{"tools":[{"name":"private_tool","input_schema":{"description":"private_schema"}}],"tool_choice":{"type":"any"}}`, "required", "1", false},
+		{"responses named", reqcommon.APITypeResponses, `{"tools":[{"type":"function","name":"private_tool","parameters":{"description":"private_schema"}}],"tool_choice":{"type":"function","name":"private_tool"}}`, "named", "1", false},
+		{"parallel only", reqcommon.APITypeChatCompletions, `{"parallel_tool_calls":false}`, "unknown", "", false},
+		{"non tool", reqcommon.APITypeChatCompletions, `{"messages":[{"role":"user","content":"private_prompt tools"}]}`, "", "", false},
+		{"structured output only", reqcommon.APITypeChatCompletions, `{"response_format":{"type":"json_schema","json_schema":{"name":"private_schema"}}}`, "", "", false},
+		{"malformed", reqcommon.APITypeChatCompletions, `{"tools":[`, "", "", false},
+		{"completions", reqcommon.APITypeCompletions, `{"tools":[],"tool_choice":"auto"}`, "", "", false},
+		{"warmup", reqcommon.APITypeChatCompletions, `{"tools":[],"tool_choice":"auto"}`, "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			forwarded := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				forwarded <- string(body)
+				response := `{"token_ids":[1]}`
+				if tc.api == reqcommon.APITypeCompletions {
+					response = "[" + response + "]"
+				}
+				_, _ = io.WriteString(w, response)
+			}))
+			defer srv.Close()
+			request := chatRequest()
+			if tc.api != reqcommon.APITypeChatCompletions {
+				request.Body.ChatCompletions = nil
+			}
+			switch tc.api {
+			case reqcommon.APITypeMessages:
+				request.Body.Messages = &fwkrh.MessagesRequest{}
+			case reqcommon.APITypeResponses:
+				request.Body.Responses = &fwkrh.ResponsesRequest{}
+			case reqcommon.APITypeCompletions:
+				request.Body.Completions = &fwkrh.CompletionsRequest{}
+			}
+			request.Body.Payload = fwkrh.RawPayload(tc.raw)
+			ctx := context.Background()
+			if tc.warmup {
+				ctx = withUnobservedRender(ctx)
+			}
+			require.NoError(t, newTestPlugin(newHTTPRenderer(t, srv)).Produce(ctx, request, nil))
+			require.Equal(t, tc.raw, <-forwarded)
+			require.Equal(t, fwkrh.RawPayload(tc.raw), request.Body.WirePayload())
+			got := map[attribute.Key]attribute.Value{}
+			for key, value := range spanAttrs(tokenizeSpan(t, recorder)) {
+				if strings.HasPrefix(string(key), "llm_d.tool_calling.") {
+					got[key] = value
+				}
+				for _, secret := range []string{"private_tool", "private_schema", "private_prompt"} {
+					assert.NotContains(t, value.String(), secret)
+				}
+			}
+			want := map[attribute.Key]attribute.Value{}
+			if tc.choice != "" {
+				want[semconv.LLMDToolCallingAPISurfaceKey] = attribute.StringValue(tc.api.String())
+				want[semconv.LLMDToolCallingPresentKey] = attribute.BoolValue(true)
+				want[semconv.LLMDToolCallingToolChoiceKey] = attribute.StringValue(tc.choice)
+				if tc.count != "" {
+					want[semconv.LLMDToolCallingToolCountKey] = attribute.StringValue(tc.count)
+				}
+			}
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
 // The span must parent to the caller's span so tokenization appears under the
 // request trace rather than as a detached root.
 func TestProduce_TokenizeSpanParentedToCaller(t *testing.T) {

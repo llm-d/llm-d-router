@@ -31,11 +31,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -382,6 +385,15 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		}
 	default:
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
+	}
+	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(unobservedRenderCtxKey{}) == nil {
+		switch path {
+		case chatRenderPath, messagesRenderPath, responsesRenderPath:
+			// Telemetry capture failures must not change rendering behavior.
+			if snapshot, captureErr := toolcalling.CaptureRequestJSON(reqcommon.DetectAPIType(path), payload); captureErr == nil {
+				span.SetAttributes(snapshot.SpanAttributes(nil)...)
+			}
+		}
 	}
 	if r.prefillOnly {
 		if payload, err = renderOnlyBudget(payload); err != nil {
