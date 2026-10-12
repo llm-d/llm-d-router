@@ -29,12 +29,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
@@ -56,19 +58,25 @@ const (
 var minBlockSizeTokens = 64
 
 var (
-	_ requestcontrol.DataProducer = &dataProducer{}
-	_ requestcontrol.PreRequest   = &dataProducer{}
-	_ plugin.StateDumper          = &dataProducer{}
+	_ requestcontrol.DataProducer       = &dataProducer{}
+	_ requestcontrol.PreRequest         = &dataProducer{}
+	_ plugin.StateDumper                = &dataProducer{}
+	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
+	_ datalayer.Registrant              = &dataProducer{}
+	_ datalayer.CrossReplicaContributor = (*dataProducer)(nil)
 )
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
-	typedName   plugin.TypedName
-	config      config
-	indexerInst indexerInterface
-	pluginState *plugin.PluginState
-	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
-	dk          plugin.DataKey
+	typedName             plugin.TypedName
+	config                config
+	indexerInst           indexerInterface
+	pluginState           *plugin.PluginState
+	wg                    sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk                    plugin.DataKey
+	syncHashDK            plugin.DataKey
+	syncCrossReplicaState bool
+	recent                *recentWindow
 }
 
 // TypedName returns the type and name of the plugin.
@@ -127,16 +135,25 @@ func (p *dataProducer) snapshotState() prefixIndexState {
 
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	out := map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	if p.syncCrossReplicaState {
+		out[p.syncHashDK] = attrprefix.PrefixHashSet{}
+	}
+	return out
 }
 
 // Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
-// is configured.
+// is configured. PrefixHashSet is optional: when a CrossReplicaSyncer is wired,
+// Produce reads the syncer-backed attribute to merge peer recent windows.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
-	return plugin.DataDependencies{
+	deps := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
 	}
+	if p.syncCrossReplicaState {
+		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
+	}
+	return deps
 }
 
 // newDataProducer returns a new DataProducer plugin.
@@ -178,15 +195,27 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 
 	indexer := newIndexer(ctx, config.LRUCapacityPerServer, name, ApproxPrefixCachePluginType)
 
+	syncCrossReplicaState := true
+	if config.SyncCrossReplicaState != nil {
+		syncCrossReplicaState = *config.SyncCrossReplicaState
+	}
+	maxSynced := config.MaxSyncedHashes
+	if maxSynced <= 0 {
+		maxSynced = defaultMaxSyncedHashes
+	}
+
 	p := &dataProducer{
 		typedName: plugin.TypedName{
 			Type: ApproxPrefixCachePluginType,
 			Name: name,
 		},
-		config:      config,
-		indexerInst: indexer,
-		pluginState: plugin.NewPluginState(ctx),
-		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		config:                config,
+		indexerInst:           indexer,
+		pluginState:           plugin.NewPluginState(ctx),
+		dk:                    attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		syncHashDK:            attrprefix.PrefixHashSetDataKey.WithNonEmptyProducerName(name),
+		syncCrossReplicaState: syncCrossReplicaState,
+		recent:                newRecentWindow(maxSynced),
 	}
 
 	go p.CleanUpInactivePods(ctx, handle)
@@ -213,6 +242,9 @@ func (p *dataProducer) CleanUpInactivePods(ctx context.Context, handle plugin.Ha
 			for _, pod := range p.indexerInst.Pods() {
 				if _, ok := activePods[pod]; !ok {
 					p.indexerInst.RemovePod(pod)
+					if p.recent != nil {
+						p.recent.forget(pod.String())
+					}
 					log.FromContext(ctx).V(logutil.VERBOSE).Info("Removed pod not in active set", "pod", pod)
 				}
 			}
@@ -232,6 +264,8 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
+	p.mergeRemoteHashes(pods)
+
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
@@ -279,6 +313,44 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
+// mergeRemoteHashes folds peer recent-window hashes into the local indexer.
+// The syncer-backed attribute is Aggregate(local, peers); local hashes are
+// skipped so a syncer-less (or peer-empty) Get does not re-warm the indexer
+// from the local recent window on every Produce. Peer hashes are not recorded
+// into the recent window (no echo).
+func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
+	if !p.syncCrossReplicaState || p.indexerInst == nil {
+		return
+	}
+	for _, pod := range pods {
+		val, ok := pod.Get(p.syncHashDK)
+		if !ok {
+			continue
+		}
+		set, ok := val.(*attrprefix.PrefixHashSet)
+		if !ok || set == nil || len(set.Hashes) == 0 {
+			continue
+		}
+		endpointID := pod.GetMetadata().ID.String()
+		local := p.recent.snapshot(endpointID)
+		localSet := make(map[uint64]struct{}, len(local))
+		for _, h := range local {
+			localSet[uint64(h)] = struct{}{}
+		}
+		var peer []blockHash
+		for _, h := range set.Hashes {
+			if _, ok := localSet[h]; ok {
+				continue
+			}
+			peer = append(peer, blockHash(h))
+		}
+		if len(peer) == 0 {
+			continue
+		}
+		p.indexerInst.Add(peer, p.makeserver(pod))
+	}
+}
+
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
@@ -309,6 +381,9 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				p.indexerInst.Add(hashes, s)
+				if p.syncCrossReplicaState {
+					p.recent.record(s.String(), hashes)
+				}
 			}
 		}
 	})
@@ -356,6 +431,81 @@ func bestAmongScored(scored []fwksched.ScoredEndpoint, predicted map[ServerID]in
 		}
 	}
 	return best
+}
+
+// RegisterDependencies attaches this producer to endpoint lifecycle events so
+// the cross-replica publisher can discover it as a contributor.
+func (p *dataProducer) RegisterDependencies(r datalayer.Registrar) error {
+	return r.Register(datalayer.PendingRegistration{
+		Owner:         p.TypedName(),
+		SourceType:    sourcenotifications.EndpointNotificationSourceType,
+		Extractor:     p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
+
+// CrossReplicaState publishes recent prefix hashes for peer EPPs to merge.
+func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
+	return datalayer.CrossReplicaSpec{
+		StateKey:     datalayer.StateKey("approx-prefix:" + p.typedName.Name),
+		AttributeKey: p.syncHashDK,
+		SyncDisabled: !p.syncCrossReplicaState,
+		Read: func(endpointID string) datalayer.Cloneable {
+			hashes := p.recent.snapshot(endpointID)
+			out := make([]uint64, len(hashes))
+			for i, h := range hashes {
+				out[i] = uint64(h)
+			}
+			return &attrprefix.PrefixHashSet{Hashes: out}
+		},
+		Aggregate: func(values []any) any {
+			seen := make(map[uint64]struct{})
+			var out []uint64
+			for _, v := range values {
+				set, ok := v.(*attrprefix.PrefixHashSet)
+				if !ok || set == nil {
+					continue
+				}
+				for _, h := range set.Hashes {
+					if _, ok := seen[h]; ok {
+						continue
+					}
+					seen[h] = struct{}{}
+					out = append(out, h)
+				}
+			}
+			if max := p.recent.max; max > 0 && len(out) > max {
+				out = out[len(out)-max:]
+			}
+			return &attrprefix.PrefixHashSet{Hashes: out}
+		},
+	}
+}
+
+// Extract installs a local placeholder for the sync attribute. The cross-replica
+// publisher overwrites it with a syncer-backed DynamicAttribute on add/update.
+func (p *dataProducer) Extract(_ context.Context, event datalayer.EndpointEvent) error {
+	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
+		return nil
+	}
+	endpointID := event.Endpoint.GetMetadata().ID.String()
+	switch event.Type {
+	case datalayer.EventDelete:
+		if p.recent != nil {
+			p.recent.forget(endpointID)
+		}
+		return nil
+	case datalayer.EventAddOrUpdate:
+		if !p.syncCrossReplicaState {
+			return nil
+		}
+		event.Endpoint.GetAttributes().Put(p.syncHashDK, &datalayer.DynamicAttribute{
+			Get: func() datalayer.Cloneable {
+				return p.CrossReplicaState().Read(endpointID)
+			},
+		})
+	}
+	return nil
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
