@@ -60,6 +60,7 @@ const (
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
 	FieldRemoteEngineID       = "remote_engine_id"
+	FieldRemoteRequestID      = "remote_request_id"
 	FieldRemoteHost           = "remote_host"
 	FieldRemotePort           = "remote_port"
 	FieldCacheHitThreshold    = "cache_hit_threshold"

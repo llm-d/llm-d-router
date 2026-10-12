@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -321,6 +322,33 @@ var _ = Describe("createDecoderProxyHandler", func() {
 		resp := w.Result()
 		Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
 		Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
+	})
+
+	It("logs no error for a request its caller cancelled", func() {
+		arrived, stop := make(chan struct{}), make(chan struct{})
+		decoder := httptest.NewServer(blockUntilCancelled(arrived, make(chan struct{}), stop))
+		DeferCleanup(decoder.Close)
+		DeferCleanup(func() { close(stop) })
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+		logged := captureLogs(proxy, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-arrived:
+			case <-ctx.Done():
+			}
+			cancel()
+		}()
+		w := httptest.NewRecorder()
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(w, postBody(`{"model":"m"}`).WithContext(ctx))
+
+		Expect(w.Code).To(Equal(http.StatusBadGateway))
+		Expect(*logged).To(BeEmpty())
 	})
 })
 

@@ -59,6 +59,17 @@ var _ = Describe("Data Parallel support", func() {
 		Expect(got).To(Equal(requestID))
 	})
 
+	It("should share the NIXL push identity cache when cloning", func() {
+		proxy := NewProxy(Config{})
+		clone := proxy.Clone()
+
+		proxy.nixlPushIdentities.put(testNIXLPushEndpoint, testNIXLPushIdentity("prefill-engine"))
+
+		identity, ok := clone.nixlPushIdentities.get(testNIXLPushEndpoint)
+		Expect(ok).To(BeTrue())
+		Expect(identity).To(Equal(testNIXLPushIdentity("prefill-engine")))
+	})
+
 	When("configured with --data-parallel-size > 1", func() {
 		DescribeTable("keeps inference on the selected rank", func(ecConnector string, withPrefill bool) {
 			var rank0Requests, rank1Requests, encoderRequests, prefillRequests atomic.Int32

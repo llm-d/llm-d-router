@@ -61,6 +61,33 @@ func newNIXLV2RequestID() (string, error) {
 	return id.String(), nil
 }
 
+// newNIXLPrefillKVParams returns the kv_transfer_params of a standard NIXLv2
+// prefill request; the prefill engine fills in the remote_* fields of its
+// response.
+func newNIXLPrefillKVParams() map[string]any {
+	return map[string]any{
+		reqcommon.FieldDoRemoteDecode:  true,
+		reqcommon.FieldDoRemotePrefill: false,
+		reqcommon.FieldRemoteEngineID:  nil,
+		reqcommon.FieldRemoteBlockIDs:  nil,
+		reqcommon.FieldRemoteHost:      nil,
+		reqcommon.FieldRemotePort:      nil,
+	}
+}
+
+// marshalRequestBody encodes the body of a prefill or decode request. On
+// failure it answers the client and reports false.
+func (s *Server) marshalRequestBody(w http.ResponseWriter, body map[string]any) ([]byte, bool) {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		if err := errorJSONInvalid(err, w); err != nil {
+			s.logger.Error(err, "failed to send error response to client")
+		}
+		return nil, false
+	}
+	return encoded, true
+}
+
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
 
@@ -87,6 +114,23 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		return
 	}
 
+	// When the parallel dispatch below is retried on the serial path, it counts
+	// as the first prefill attempt, for --prefill-max-retries and for the
+	// prefill duration.
+	attempt := 0
+	prefillStart := time.Now()
+	// A cached NIXL push identity tells the decode request everything it needs
+	// about the prefill pod, so both requests can go out at once instead of one
+	// after the other.
+	if identity, parallel := s.nixlPushParallelIdentity(r.Context(), prefillPodHostPort); parallel {
+		answered := s.runNIXLProtocolV2PushParallel(w, r, body, uuidStr, prefillPodHostPort, kvCacheSource, apiType, identity)
+		if answered {
+			return
+		}
+		recordNIXLPushDispatch(r.Context(), metrics.NIXLPushReasonPrefillRetry)
+		attempt = 1
+	}
+
 	// Prefill Stage
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
@@ -99,7 +143,6 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		semconv.LLMDPDProxyPrefillTarget(prefillPodHostPort),
 		semconv.LLMDPDProxyConnector(constants.KVConnectorNIXLV2),
 	)
-	prefillStart := time.Now()
 
 	// 1. Prepare prefill request
 	preq := r.Clone(ctx)
@@ -154,26 +197,24 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			}
 		}
 	} else {
-		prefillRequest[reqcommon.FieldKVTransferParams] = map[string]any{
-			reqcommon.FieldDoRemoteDecode:  true,
-			reqcommon.FieldDoRemotePrefill: false,
-			reqcommon.FieldRemoteEngineID:  nil,
-			reqcommon.FieldRemoteBlockIDs:  nil,
-			reqcommon.FieldRemoteHost:      nil,
-			reqcommon.FieldRemotePort:      nil,
-		}
+		prefillRequest[reqcommon.FieldKVTransferParams] = newNIXLPrefillKVParams()
+	}
+	prefillKVParams := prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any)
+
+	// transfer_id of the current prefill attempt in NIXL push mode, else empty.
+	var pushTransferID string
+	if s.config.NIXLPushMode {
+		pushTransferID = newTransferID()
+		prefillKVParams[requestFieldTransferID] = pushTransferID
 	}
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
-	pbody, err := json.Marshal(prefillRequest)
-	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
+	pbody, ok := s.marshalRequestBody(w, prefillRequest)
+	if !ok {
 		return
 	}
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
@@ -201,7 +242,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// decode. Non-transient errors (500/501) fail immediately.
 	var pw *bufferedResponseWriter
 retryLoop:
-	for attempt := 0; ; attempt++ {
+	for ; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
@@ -227,6 +268,16 @@ retryLoop:
 		case <-time.After(s.config.PrefillRetryBackoff):
 		case <-preq.Context().Done():
 			break retryLoop
+		}
+
+		// A failed attempt may still finish on P, so each attempt gets its own
+		// transfer_id and D pairs only with the attempt that succeeded.
+		if pushTransferID != "" {
+			pushTransferID = newTransferID()
+			prefillKVParams[requestFieldTransferID] = pushTransferID
+			if pbody, ok = s.marshalRequestBody(w, prefillRequest); !ok {
+				return
+			}
 		}
 	}
 
@@ -267,6 +318,25 @@ retryLoop:
 		return
 	}
 
+	if s.config.NIXLPushMode {
+		s.storeNIXLPushIdentity(prefillPodHostPort, prefillerResponse[reqcommon.FieldKVTransferParams])
+	}
+
+	s.runNIXLProtocolV2Decode(ctx, w, r, body, prefillerResponse, uuidStr, prefillPodHostPort, localDPRank,
+		pushTransferID, prefillStart, prefillDuration)
+}
+
+// runNIXLProtocolV2Decode is the decode stage of a NIXL v2 dispatch. It sends
+// body to the decoder with the kv_transfer_params of prefillerResponse, the
+// parsed prefill response, and writes the decoder's response to w. A non-empty
+// pushTransferID is added to those kv_transfer_params. prefillPodHostPort and
+// localDPRank are used only in MoRI-IO WRITE mode.
+func (s *Server) runNIXLProtocolV2Decode(
+	ctx context.Context, w http.ResponseWriter, r *http.Request,
+	body, prefillerResponse map[string]any,
+	uuidStr, prefillPodHostPort string, localDPRank int,
+	pushTransferID string, prefillStart time.Time, prefillDuration time.Duration,
+) {
 	// 3. Verify response
 
 	pKVTransferParams, ok := prefillerResponse[reqcommon.FieldKVTransferParams]
@@ -287,7 +357,7 @@ retryLoop:
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
+	ctx, decodeSpan := tracing.Tracer(tracerScope).Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -387,6 +457,10 @@ retryLoop:
 				}
 			}
 		}
+	}
+	// P's response carries no transfer_id.
+	if dKVParams, ok := pKVTransferParams.(map[string]any); ok && pushTransferID != "" {
+		dKVParams[requestFieldTransferID] = pushTransferID
 	}
 	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 
@@ -847,6 +921,452 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
 		}
 	}
+}
+
+// nixlPushParallelIdentity returns the cached NIXL push identity of the
+// prefill endpoint when the request can send its prefill and decode requests
+// at once. On a cache miss the serial path runs and learns the identity. In
+// NIXL push mode it records the reason for the dispatch mode.
+//
+// The identity belongs to the vLLM engine that answered. An endpoint with
+// several data-parallel ranks behind one HTTP port answers from a different
+// engine per request, so its cached identity often does not match and decode
+// is sent again.
+// TODO: key the identity by data-parallel rank and pin the prefill request to
+// it with x-data-parallel-rank, once ranks behind one endpoint can be routed to.
+func (s *Server) nixlPushParallelIdentity(ctx context.Context, prefillPodHostPort string) (nixlPushIdentity, bool) {
+	if !s.config.NIXLPushMode {
+		return nixlPushIdentity{}, false
+	}
+	identity, ok := s.nixlPushIdentities.get(prefillPodHostPort)
+	if !ok {
+		recordNIXLPushDispatch(ctx, metrics.NIXLPushReasonCacheMiss)
+		return nixlPushIdentity{}, false
+	}
+	recordNIXLPushDispatch(ctx, metrics.NIXLPushReasonCacheHit)
+	return identity, true
+}
+
+// recordNIXLPushDispatch counts a NIXL push dispatch and sets its reason on the
+// request span, where the reason of a later dispatch of the same request
+// replaces it.
+func recordNIXLPushDispatch(ctx context.Context, reason string) {
+	metrics.RecordNIXLPushDispatch(reason)
+	trace.SpanFromContext(ctx).SetAttributes(semconv.LLMDPDProxyNIXLPushDispatchReason(reason))
+}
+
+// nixlPushDecodeKVParams returns the kv_transfer_params of a decode request
+// sent together with its prefill request. Decode sets remote_block_ids itself
+// and reads remote_num_tokens as optional, so neither is sent.
+func nixlPushDecodeKVParams(identity nixlPushIdentity, requestID, transferID string) map[string]any {
+	kv := identity.kvTransferParams()
+	kv[reqcommon.FieldDoRemotePrefill] = true
+	kv[reqcommon.FieldDoRemoteDecode] = false
+	kv[reqcommon.FieldRemoteRequestID] = requestID
+	kv[requestFieldTransferID] = transferID
+	return kv
+}
+
+// runNIXLProtocolV2PushParallel is the NIXL push-mode concurrent-dispatch path
+// for a prefill endpoint with a cached identity. It builds the decode request's
+// kv_transfer_params from identity and sends the prefill and decode requests at
+// once, so decode registers its KV blocks while prefill runs. Decode's response
+// reaches the client only after a successful prefill response that carries
+// identity. A successful prefill response with another identity cancels decode
+// and sends it again the way the serial path does. It reports whether it
+// answered the client. It does not when prefill answers a retryable status and
+// --prefill-max-retries allows another attempt; the caller then retries on the
+// serial path.
+func (s *Server) runNIXLProtocolV2PushParallel(
+	w http.ResponseWriter, r *http.Request, body map[string]any,
+	uuidStr, prefillPodHostPort, kvCacheSource string,
+	apiType reqcommon.APIType, identity nixlPushIdentity,
+) bool {
+	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (NIXL push concurrent dispatch)",
+		"url", prefillPodHostPort, "request_id", uuidStr)
+
+	tracer := tracing.Tracer(tracerScope)
+	parentCtx := r.Context()
+	requestStartedAt := time.Now()
+	transferID := newTransferID()
+
+	// 1. Prepare both requests
+	// 1.1 Prefill request, as on the serial path
+	prefillRequest := maps.Clone(body)
+	prefillKVParams := newNIXLPrefillKVParams()
+	prefillKVParams[requestFieldTransferID] = transferID
+	prefillRequest[reqcommon.FieldKVTransferParams] = prefillKVParams
+	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
+	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
+	reqcommon.CapSingleToken(prefillRequest, apiType)
+	pbody, ok := s.marshalRequestBody(w, prefillRequest)
+	if !ok {
+		return true
+	}
+
+	// 1.2 Decode request, from the cached identity
+	body[reqcommon.FieldKVTransferParams] = nixlPushDecodeKVParams(identity, uuidStr, transferID)
+	dbody, ok := s.marshalRequestBody(w, body)
+	if !ok {
+		return true
+	}
+	// Chunked decode appends its output to the body it is given, while body is
+	// read during decode and reused when decode is sent again or prefill is
+	// retried.
+	decodeBody := maps.Clone(body)
+
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("concurrent-dispatch prefill request body", logging.HTTPBodyKey, string(pbody))
+		trace.Info("concurrent-dispatch decode request body", logging.HTTPBodyKey, string(dbody))
+	}
+
+	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
+	if err != nil {
+		if err := errorBadGateway(err, w); err != nil {
+			s.logger.Error(err, "failed to send error response to client")
+		}
+		return true
+	}
+
+	// 2. Send both at once, with one context so cancelling decode also cancels
+	// prefill before it writes KV into blocks decode already freed.
+	dispatchCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	// 2.1 Prefill, buffered so a failure reaches the client as it is
+	pCtx, prefillSpan := tracer.Start(dispatchCtx, "prefill",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	prefillSpan.SetAttributes(
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyPrefillTarget(prefillPodHostPort),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorNIXLV2),
+		semconv.LLMDPDProxyParallelDispatch(true),
+	)
+	preq := cloneRequestWithBody(pCtx, r, pbody)
+	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
+
+	var prefillResp *bufferedResponseWriter
+	// Written by the prefill goroutine, read after prefillDone is closed.
+	var prefillDuration time.Duration
+	prefillDone := make(chan struct{})
+	prefillStartedAt := time.Now()
+	go func() {
+		defer close(prefillDone)
+		defer prefillSpan.End()
+		// ErrAbortHandler is only recovered on the request goroutine.
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			if rec != http.ErrAbortHandler {
+				panic(rec)
+			}
+			prefillSpan.SetStatus(codes.Error, "prefill handler aborted")
+			if pCtx.Err() != nil {
+				s.logger.V(logging.DEBUG).Info("concurrent-dispatch prefill handler aborted after the dispatch was cancelled",
+					"request_id", uuidStr)
+				return
+			}
+			cancel()
+			s.logger.Error(nil, "concurrent-dispatch prefill handler aborted", "request_id", uuidStr)
+		}()
+		pw := &bufferedResponseWriter{}
+		prefillHandler.ServeHTTP(pw, preq)
+		prefillResp = pw
+		prefillDuration = time.Since(prefillStartedAt)
+		prefillSpan.SetAttributes(
+			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
+		)
+		if !isHTTPError(pw.statusCode) {
+			return
+		}
+		prefillSpan.SetStatus(codes.Error, "prefill request failed")
+		// A prefill cancelled with the dispatch fails because of decode, the
+		// prefill timeout or the client, which the request goroutine handles.
+		if pCtx.Err() != nil {
+			s.logger.V(logging.DEBUG).Info("concurrent-dispatch prefill cancelled with the dispatch",
+				"status", pw.statusCode, "request_id", uuidStr)
+			return
+		}
+		cancel()
+		s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
+			"status", pw.statusCode, "request_id", uuidStr, logging.HTTPBodyKey, pw.buffer.String())
+	}()
+
+	// 2.2 Decode, held back until prefill's outcome is known
+	dCtx, decodeSpan := tracer.Start(dispatchCtx, "decode",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer decodeSpan.End()
+	decodeSpan.SetAttributes(
+		semconv.LLMDPDProxyRequestID(uuidStr),
+		semconv.LLMDPDProxyConnector(constants.KVConnectorNIXLV2),
+		semconv.LLMDPDProxyParallelDispatch(true),
+	)
+	dreq := cloneRequestWithBody(dCtx, r, dbody)
+	dreq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
+
+	dcw := newDeferredCommitWriter(w)
+	decodeDone := make(chan struct{})
+	// Closed when decode fails before the dispatch is cancelled.
+	decodeFailed := make(chan struct{})
+	decodeStartedAt := time.Now()
+	// Swallowing the abort here keeps the process alive but hides the failure
+	// from the client, so record it and replay it on the request goroutine.
+	var decodeAborted atomic.Bool
+	// Written by the decode goroutine, read after decodeDone is closed.
+	var decodeDuration time.Duration
+	go func() {
+		defer close(decodeDone)
+		defer func() { decodeDuration = time.Since(decodeStartedAt) }()
+		// A decode cancelled with the dispatch fails because of prefill, the
+		// prefill timeout or the client, which the request goroutine handles.
+		defer func() {
+			if dCtx.Err() == nil && (decodeAborted.Load() || dcw.failed()) {
+				close(decodeFailed)
+			}
+		}()
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				return
+			}
+			if rec != http.ErrAbortHandler {
+				panic(rec)
+			}
+			decodeSpan.SetStatus(codes.Error, "decode handler aborted")
+			decodeAborted.Store(true)
+			dcw.abort()
+			if dCtx.Err() != nil {
+				s.logger.V(logging.DEBUG).Info("concurrent-dispatch decode handler aborted after the dispatch was cancelled",
+					"request_id", uuidStr)
+				return
+			}
+			s.logger.Error(nil, "concurrent-dispatch decode handler aborted", "request_id", uuidStr)
+		}()
+		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
+		if !dataParallelUsed {
+			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
+			s.dispatchDecode(dcw, dreq, decodeBody)
+		}
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))
+	}()
+
+	// 3. Wait for prefill's outcome
+	prefillTimeout := s.config.NIXLPushPrefillTimeout
+	if prefillTimeout <= 0 {
+		prefillTimeout = defaultNIXLPushPrefillTimeout
+	}
+	prefillTimer := time.NewTimer(prefillTimeout)
+	defer prefillTimer.Stop()
+
+	// Set once this goroutine has written a terminal response of its own, so an
+	// aborted decode cannot write a second status over it.
+	clientResponded := false
+	// Set when the prefill timeout cancelled the dispatch; decode ran until it fired.
+	timedOut := false
+	// Set when prefill failed or timed out or when decode failed.
+	dispatchFailed := false
+	// Set to the prefill response when it does not carry identity; decode is
+	// then sent again with it.
+	var resendWith map[string]any
+	// Set when decode's response is committed through a cached-tokens rewriter,
+	// which may hold back the end of the response until it is called.
+	var finalizeDecodeWriter func() error
+	// Set when prefill answered a retryable status and the request is retried
+	// on the serial path.
+	retrySerially := false
+
+	select {
+	case <-prefillDone:
+		// 3.1 Prefill succeeded: check its engine, then let decode's response through
+		if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
+			var prefillerResponse map[string]any
+			parseErr := json.Unmarshal(prefillResp.bodyBytes(), &prefillerResponse)
+			if parseErr != nil {
+				s.logger.Error(parseErr, "concurrent-dispatch: failed to parse prefill response; keeping the cached NIXL push identity",
+					"request_id", uuidStr)
+			}
+			// Decode registered with the cached engine. If another engine ran the
+			// prefill, decode waits for KV that never comes, so it is sent again.
+			if parseErr == nil && !s.nixlPushIdentityMatches(prefillPodHostPort, identity, prefillerResponse) {
+				resendWith = prefillerResponse
+			}
+			if resendWith != nil {
+				// Decode registered with an engine that did not run this prefill,
+				// so no KV is written into its blocks once it is cancelled.
+				cancel()
+				dcw.abort()
+				clientResponded = true
+				metrics.RecordNIXLPushIdentityMismatch()
+				s.logger.Info("concurrent-dispatch: prefill response does not carry the NIXL push identity decode was given; sending decode again",
+					"request_id", uuidStr, "target", prefillPodHostPort)
+				break
+			}
+			// As in the serial decode stage, a prefill response without cached
+			// tokens reports zero.
+			pCachedTokens, _ := extractCachedTokens(prefillerResponse)
+			streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+			var decodeWriter http.ResponseWriter
+			decodeWriter, finalizeDecodeWriter = newCachedTokensResponseWriterWithFinalize(w, pCachedTokens, streamingEnabled)
+			if !dcw.commitThrough(decodeWriter) {
+				s.logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
+					"request_id", uuidStr)
+			}
+			break
+		}
+		// 3.2 Prefill failed: cancel decode, then retry on the serial path or
+		// return the prefill error verbatim
+		cancel()
+		dcw.abort()
+		if prefillResp != nil && isRetryableStatus(prefillResp.statusCode) && s.config.PrefillMaxRetries > 0 {
+			s.logger.Info("retrying prefill request",
+				"attempt", 1,
+				"target", prefillPodHostPort,
+				"request_id", uuidStr,
+				"previous_code", prefillResp.statusCode)
+			select {
+			case <-time.After(s.config.PrefillRetryBackoff):
+				retrySerially = true
+			case <-parentCtx.Done():
+			}
+		}
+		if retrySerially {
+			break
+		}
+		metrics.RecordError(metrics.StagePrefill)
+		dispatchFailed = true
+		status := http.StatusBadGateway
+		var prefillBody []byte
+		if prefillResp != nil {
+			status = prefillResp.statusCode
+			prefillBody = prefillResp.bodyBytes()
+			for key, values := range prefillResp.Header() {
+				for _, v := range values {
+					w.Header().Add(key, v)
+				}
+			}
+		}
+		s.logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
+			"request_id", uuidStr, "p_status", status, "p_body_snippet", truncate(string(prefillBody), 256))
+		clientResponded = true
+		w.WriteHeader(status)
+		if _, writeErr := w.Write(prefillBody); writeErr != nil {
+			s.logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
+		}
+	case <-decodeFailed:
+		// 3.3 Decode failed first: cancel prefill. A prefill left running could
+		// write KV into the blocks decode freed.
+		// Decode's error says why the request failed, so it reaches the client.
+		cancel()
+		<-prefillDone
+		s.logger.Info("concurrent-dispatch: decode failed before prefill answered; cancelled prefill",
+			"request_id", uuidStr)
+		dcw.commit()
+	case <-prefillTimer.C:
+		// 3.4 Prefill timed out: cancel both and answer 504
+		cancel()
+		dcw.abort()
+		// Counted here rather than from prefill's own outcome: the cancelled
+		// prefill may still come back 2xx if it completed as the timer fired.
+		metrics.RecordError(metrics.StagePrefill)
+		dispatchFailed = true
+		timedOut = true
+		s.logger.Error(nil, "concurrent-dispatch: prefill did not respond within the NIXL push prefill timeout; aborting",
+			"request_id", uuidStr, "timeout", prefillTimeout.String())
+		clientResponded = true
+		if err := errorGatewayTimeout(errNIXLPushPrefillTimeout, w); err != nil {
+			s.logger.Error(err, "failed to send timeout error to client (concurrent-dispatch)")
+		}
+		<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
+	}
+
+	// Prefill has finished. The serial path samples the prefill stage of a
+	// request it retries. An aborted prefill handler left no response.
+	if !retrySerially && prefillResp != nil {
+		metrics.RecordPrefillDuration(prefillDuration)
+	}
+
+	// 4. Wait for decode, then record metrics and drop a stale identity
+
+	// Wait for decode to finish (streamed on success, or promptly aborted) so
+	// we never leak the decode goroutine or its response body.
+	<-decodeDone
+
+	// A retryable status reports an overloaded or unreachable prefill endpoint,
+	// not a changed identity, so the cached identity stays.
+	if retrySerially {
+		return false
+	}
+
+	if resendWith != nil {
+		// The resent decode request gets its own span.
+		decodeSpan.End()
+		s.runNIXLProtocolV2Decode(parentCtx, w, r, body, resendWith, uuidStr, prefillPodHostPort, 0,
+			transferID, prefillStartedAt, prefillDuration)
+	}
+
+	// The response of an aborted decode is replaced or torn down below, so what
+	// the rewriter holds is dropped.
+	var finalizeErr error
+	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
+		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
+			s.logger.Error(finalizeErr, "failed to flush cached token response writer")
+		}
+	}
+
+	// Decode errors are attributed only when the commit point let decode's
+	// response reach the client. The prefill timeout samples the decode
+	// duration too.
+	if !clientResponded {
+		metrics.RecordDecodeDuration(decodeDuration)
+		if decodeAborted.Load() || dcw.failed() || finalizeErr != nil {
+			metrics.RecordError(metrics.StageDecode)
+			dispatchFailed = true
+		}
+	} else if timedOut {
+		metrics.RecordDecodeDuration(decodeDuration)
+	}
+
+	// A stale identity can cause the failure, so the next request to this
+	// endpoint runs serially and learns the identity again. A client that went
+	// away says nothing about the identity.
+	if dispatchFailed && parentCtx.Err() == nil && s.nixlPushIdentities.dropIfMatches(prefillPodHostPort, identity) {
+		metrics.RecordNIXLPushIdentityDrop()
+		s.logger.V(logging.TRACE).Info("dropped NIXL push identity", "target", prefillPodHostPort, "request_id", uuidStr)
+	}
+
+	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
+		var totalDuration time.Duration
+		if requestStart, ok := parentCtx.Value(requestStartTimeKey).(time.Time); ok {
+			totalDuration = time.Since(requestStart)
+		}
+		currentSpan.SetAttributes(
+			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+			semconv.LLMDPDProxyParallelWindowMs(float64(time.Since(requestStartedAt).Milliseconds())),
+			semconv.LLMDPDProxyParallelDispatch(true),
+			semconv.LLMDPDProxyNIXLPushIdentityMismatch(resendWith != nil),
+		)
+	}
+
+	// Replay the decode abort on the request goroutine, unless the commit point
+	// already wrote the response.
+	if !decodeAborted.Load() || clientResponded {
+		return true
+	}
+	if dcw.responseStarted() {
+		// Decode's response is already on the wire, so the status cannot be
+		// changed; net/http recovers this and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
+	if err := errorBadGateway(errDecodeAborted, w); err != nil {
+		s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
+	}
+	return true
 }
 
 // truncate shortens s to at most n characters, appending "..." if truncated.

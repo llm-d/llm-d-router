@@ -150,6 +150,8 @@ const (
 	LLMDPDProxyChunkedDecodeChunksKey         = attribute.Key("llm_d.pd_proxy.chunked_decode.chunks")
 	LLMDPDProxyChunkedDecodeTotalTokensKey    = attribute.Key("llm_d.pd_proxy.chunked_decode.total_tokens")
 	LLMDPDProxyChunkedDecodeDurationMsKey     = attribute.Key("llm_d.pd_proxy.chunked_decode.duration_ms")
+	LLMDPDProxyNIXLPushDispatchReasonKey      = attribute.Key("llm_d.pd_proxy.nixl_push.dispatch_reason")
+	LLMDPDProxyNIXLPushIdentityMismatchKey    = attribute.Key("llm_d.pd_proxy.nixl_push.identity_mismatch")
 
 	// EC Proxy attributes
 	LLMDECProxyEncodeDisaggregationUsedKey = attribute.Key("llm_d.ec_proxy.encode_disaggregation_used")
@@ -714,6 +716,16 @@ func LLMDPDProxyChunkedDecodeTotalTokens(tokens int) attribute.KeyValue {
 // LLMDPDProxyChunkedDecodeDurationMs returns an attribute for chunked decode duration in milliseconds.
 func LLMDPDProxyChunkedDecodeDurationMs(ms float64) attribute.KeyValue {
 	return LLMDPDProxyChunkedDecodeDurationMsKey.Float64(ms)
+}
+
+// LLMDPDProxyNIXLPushDispatchReason returns an attribute for why a NIXL push request was dispatched in parallel or serially.
+func LLMDPDProxyNIXLPushDispatchReason(reason string) attribute.KeyValue {
+	return LLMDPDProxyNIXLPushDispatchReasonKey.String(reason)
+}
+
+// LLMDPDProxyNIXLPushIdentityMismatch returns an attribute indicating whether the prefill response of a parallel NIXL push dispatch did not carry the NIXL push identity the decode request was built from.
+func LLMDPDProxyNIXLPushIdentityMismatch(mismatch bool) attribute.KeyValue {
+	return LLMDPDProxyNIXLPushIdentityMismatchKey.Bool(mismatch)
 }
 
 // EC Proxy helpers
