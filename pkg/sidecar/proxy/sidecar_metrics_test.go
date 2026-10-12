@@ -708,6 +708,91 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 	}
 }
 
+func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
+	const numberSecret = "987654321098765432109876543210e999"
+	const textSecret = "private_diagnostic_schema_fixture"
+	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "threshold string", "threshold object"} {
+		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
+			t.Run(fmt.Sprintf("%s/verbosity=%d", stage, verbosity), func(t *testing.T) {
+				badResponse := fmt.Sprintf(`{"0":{"engine_id":"engine","argument":%s}}`, numberSecret)
+				upstream := httptest.NewServer(statusHandler(http.StatusOK, badResponse))
+				defer upstream.Close()
+				upstreamURL, err := url.Parse(upstream.URL)
+				require.NoError(t, err)
+				var bootstrapPort int
+				_, err = fmt.Sscanf(upstreamURL.Port(), "%d", &bootstrapPort)
+				require.NoError(t, err)
+				s := NewProxy(Config{DecoderURL: upstreamURL, DecodeChunkSize: 3, MooncakeBootstrapPort: bootstrapPort})
+				s.allowlistValidator = &AllowlistValidator{}
+				var mu sync.Mutex
+				var logged []string
+				s.logger = funcr.New(func(prefix, args string) {
+					mu.Lock()
+					defer mu.Unlock()
+					logged = append(logged, prefix+" "+args)
+				}, funcr.Options{Verbosity: verbosity})
+				body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.jpg"}}]}],"tools":[],"max_tokens":6`
+				switch stage {
+				case "request":
+					body += `,"min_tokens":` + numberSecret
+				case "shared":
+					body += `,"cache_hit_threshold":0.5`
+				case "threshold string":
+					body += fmt.Sprintf(`,"cache_hit_threshold":"%s"`, textSecret)
+				case "threshold object":
+					body += fmt.Sprintf(`,"cache_hit_threshold":{"tools":"%s"}`, textSecret)
+				}
+				body += "}"
+				var original map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(body), &original))
+				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasPrefix(stage, "threshold") {
+						var received map[string]json.RawMessage
+						assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+						assert.Equal(t, original[reqcommon.FieldCacheHitThreshold], received[reqcommon.FieldCacheHitThreshold])
+						statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1)).ServeHTTP(w, r)
+						return
+					}
+					statusHandler(http.StatusOK, badResponse).ServeHTTP(w, r)
+				})
+				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				rw := httptest.NewRecorder()
+				wantCode := http.StatusInternalServerError
+				switch stage {
+				case "request":
+					_, _, ok := s.readJSONBody(r, rw)
+					require.False(t, ok)
+					wantCode = http.StatusBadRequest
+				case "shared", "threshold string", "threshold object":
+					s.handleSharedStorage(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
+					if strings.HasPrefix(stage, "threshold") {
+						wantCode = http.StatusOK
+					}
+				case "chunks":
+					s.runChunkedDecode(rw, r)
+				case "encoder":
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusBadGateway
+				case "bootstrap":
+					s.handleMooncake(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusBadGateway
+				}
+				require.Equal(t, wantCode, rw.Code, rw.Body.String())
+				if !strings.HasPrefix(stage, "threshold") {
+					require.Contains(t, rw.Body.String(), numberSecret, "client-facing parser errors must remain unchanged")
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				require.NotEmpty(t, logged)
+				for _, entry := range logged {
+					require.NotContains(t, entry, numberSecret)
+					require.NotContains(t, entry, textSecret)
+				}
+			})
+		}
+	}
+}
+
 func TestSGLangToolCallingMetrics(t *testing.T) {
 	chatBody := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
 	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}

@@ -84,7 +84,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		wrapped, err = requestMessages(requestData)
 	}
 	if err != nil {
-		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", err)
+		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", jsonErrorForLog(err))
 		return items
 	}
 
@@ -168,7 +168,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(&turn); err != nil {
-			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", err)
+			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", jsonErrorForLog(err))
 			droppedTurns++
 			continue
 		}
@@ -294,7 +294,7 @@ func (s *Server) fanoutEncoder(
 
 			if perItem != nil {
 				if err := perItem(idx, pw); err != nil {
-					s.logger.Error(err, "encoder fanout perItem", "item", idx, "requestID", requestID)
+					s.logger.Error(jsonErrorForLog(err), "encoder fanout perItem", "item", idx, "requestID", requestID)
 					return err
 				}
 			}

@@ -70,7 +70,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
+			s.logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}

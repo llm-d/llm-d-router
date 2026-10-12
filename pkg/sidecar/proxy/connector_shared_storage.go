@@ -46,8 +46,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
+	if _, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first")
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
 		attemptStart := time.Now()
 		attemptWriter, attemptStatus := captureResponseStatus(w)
@@ -71,7 +71,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 			s.logger.V(logging.DEBUG).Info("decode succeeded without prefill")
 			return
 		}
-		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", reqcommon.FieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold")
 	}
 
 	// we clone the completion request to avoid modifying the original request
@@ -138,7 +138,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	// Parse response to check finish_reason
 	var response map[string]any
 	if err := json.Unmarshal(dw.buffer.Bytes(), &response); err != nil {
-		s.logger.Error(err, "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
+		s.logger.Error(jsonErrorForLog(err), "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
 
 		if err := errorInternalServerError(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")

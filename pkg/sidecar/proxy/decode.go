@@ -235,7 +235,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		var chunkResponse map[string]any
 		if err := json.Unmarshal(bw.bodyBytes(), &chunkResponse); err != nil {
-			s.logger.Error(err, "failed to unmarshal chunk response", "chunk", chunkIndex)
+			s.logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
 			if err := errorInternalServerError(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}
