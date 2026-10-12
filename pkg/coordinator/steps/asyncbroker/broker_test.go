@@ -366,6 +366,53 @@ func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) e
 	return err
 }
 
+// disconnectingSubmitter submits through the real producer, then cancels the
+// request context, as a client that disconnects during the enqueue does.
+type disconnectingSubmitter struct {
+	asyncSubmitter
+	disconnect context.CancelFunc
+}
+
+func (d disconnectingSubmitter) SubmitRequest(ctx context.Context, req api.Request) error {
+	err := d.asyncSubmitter.SubmitRequest(ctx, req)
+	d.disconnect()
+	return err
+}
+
+// A client gone once the enqueue succeeds never learns a coordinator-generated
+// id, so the queued request is cancelled. A client-chosen id stays queued for
+// a fetch or re-POST by that id.
+func TestAsyncBrokerEnqueueCancelsUnreachableRequest(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientID      string
+		wantCancelled bool
+	}{
+		{name: "generated id", wantCancelled: true},
+		{name: "replaced malformed id", clientID: "not valid!", wantCancelled: true},
+		{name: "client-chosen id", clientID: "req-test-1", wantCancelled: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			headers := map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"}
+			if tc.clientID != "" {
+				headers["X-Request-Id"] = tc.clientID
+			}
+			reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			step.sub = disconnectingSubmitter{asyncSubmitter: step.sub, disconnect: cancel}
+
+			err := step.Execute(ctx, reqCtx)
+			require.True(t, errors.Is(err, pipeline.ErrPipelineDone), "want ErrPipelineDone, got %v", err)
+			cancelled, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "req-test-1"))).Result()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCancelled, cancelled == 1)
+		})
+	}
+}
+
 func upstreamRequestCount(t *testing.T, reg *prometheus.Registry, upstream string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()

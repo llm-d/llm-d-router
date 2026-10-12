@@ -304,6 +304,18 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 
 	if mode == asyncModeEnqueue {
+		if ctx.Err() != nil && reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) != reqCtx.RequestID {
+			// The client left before the 202 and never learned the generated
+			// id, so nothing can fetch, cancel or delete the request: cancel
+			// it pre-dispatch (best effort). A client-chosen id stays queued
+			// for a fetch or re-POST by that id.
+			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelFn()
+			if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, reqCtx.RequestID)}); err != nil {
+				log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel unreachable request", "id", reqCtx.RequestID)
+			}
+			return pipeline.ErrPipelineDone
+		}
 		writePending(w, reqCtx.RequestID)
 		return pipeline.ErrPipelineDone
 	}
