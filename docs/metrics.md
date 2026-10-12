@@ -161,9 +161,15 @@ include field values or request content.
 
 Request checks cover Chat Completions (`tools`, `tool_choice`, `parallel_tool_calls`,
 `response_format`), Messages (`tools`, `tool_choice`), and Responses (`tools`, `tool_choice`,
-`parallel_tool_calls`). Provider-prefixed inference endpoints are supported. Render,
-count-token, and response-management subpaths do not emit these request-integrity metrics.
+`parallel_tool_calls`). Provider-prefixed inference endpoints are supported. For
+`component="epp"`, render, count-token, and response-management subpaths are excluded.
 Responses structured output (`text.format`) is outside these field checks.
+
+The `component` label distinguishes the EPP inference-request boundary (`epp`) from the
+EPP-side HTTP tokenizer client (`tokenizer_http`). The tokenizer compares the serialized
+input with the render copy after render-only transformations, once per call across retries.
+Its counters check local request-field preservation, not render success or template intent.
+Warmup calls, absent fields, unavailable endpoints, and failed telemetry capture are excluded.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
@@ -175,8 +181,8 @@ Chat Completions `response_format` is compared separately for integrity. Request
 only `response_format` report its field status and `present=false`, without tool-choice or
 tool-count attributes.
 
-Request errors unrelated to tool fields, scheduling failures, and failures to read fields
-for telemetry produce no field-status metrics. The trace retains summary metadata, such as tool presence,
+At the EPP inference-request boundary, errors unrelated to tool fields, scheduling failures,
+and failures to read fields for telemetry produce no field-status metrics. The trace retains summary metadata, such as tool presence,
 tool-choice mode, and a tool-count bucket, when it can be read from the incoming request.
 EPP reports `rejected` only for a supported field identified by the parser as causing the
 request to fail. This covers invalid JSON types in `tools` for Chat Completions and Messages,

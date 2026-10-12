@@ -33,6 +33,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
@@ -50,10 +51,11 @@ const (
 	defaultHTTPRenderTimeout   = 5 * time.Second
 	defaultHTTPRenderMMTimeout = 30 * time.Second
 
-	completionsRenderPath = "/v1/completions/render"
-	chatRenderPath        = "/v1/chat/completions/render"
-	messagesRenderPath    = "/v1/messages/render"
-	responsesRenderPath   = "/v1/responses/render"
+	completionsRenderPath  = "/v1/completions/render"
+	chatRenderPath         = "/v1/chat/completions/render"
+	messagesRenderPath     = "/v1/messages/render"
+	responsesRenderPath    = "/v1/responses/render"
+	componentTokenizerHTTP = "tokenizer_http"
 
 	// Bound draining while allowing connection reuse for small error responses.
 	maxErrorResponseDrainBytes = 1024
@@ -413,15 +415,21 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 			return fmt.Errorf("omit multimodal kwargs: %w", err)
 		}
 	}
-	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(unobservedRenderCtxKey{}) == nil {
+	var toolStatuses []toolcalling.FieldStatus
+	if ctx.Value(unobservedRenderCtxKey{}) == nil {
 		switch path {
 		case chatRenderPath, messagesRenderPath, responsesRenderPath:
 			// Telemetry capture failures must not change rendering behavior.
-			snapshot, statuses, _ := compareRenderToolFields(reqcommon.DetectAPIType(path), inboundPayload, payload)
-			attrs := snapshot.SpanAttributes(statuses)
-			span.SetAttributes(attrs...)
-			if len(attrs) > 0 {
-				ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
+			snapshot, statuses, compareErr := compareRenderToolFields(reqcommon.DetectAPIType(path), inboundPayload, payload)
+			if compareErr == nil {
+				toolStatuses = statuses
+			}
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				attrs := snapshot.SpanAttributes(statuses)
+				span.SetAttributes(attrs...)
+				if len(attrs) > 0 {
+					ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
+				}
 			}
 		}
 	}
@@ -435,6 +443,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	if err != nil {
 		return fmt.Errorf("pick render endpoint: %w", err)
 	}
+	eppmetrics.RecordToolCallingFieldStatuses(componentTokenizerHTTP, toolcalling.DirectionRequest, toolStatuses)
 	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
 	retryable, attemptErr := r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
 	if attemptErr == nil || !retryable || !canRetry || reqCtx.Err() != nil {
