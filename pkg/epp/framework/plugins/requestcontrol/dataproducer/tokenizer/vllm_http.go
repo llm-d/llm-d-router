@@ -55,7 +55,7 @@ const (
 	chatRenderPath         = "/v1/chat/completions/render"
 	messagesRenderPath     = "/v1/messages/render"
 	responsesRenderPath    = "/v1/responses/render"
-	componentTokenizerHTTP = "tokenizer_http"
+	componentTokenizerHTTP = "tokenizer_http" //#nosec G101 – metric component label, not a credential
 
 	// Bound draining while allowing connection reuse for small error responses.
 	maxErrorResponseDrainBytes = 1024
