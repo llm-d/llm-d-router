@@ -380,6 +380,9 @@ func TestECToolCallingMetrics(t *testing.T) {
 					}
 				}
 				body := `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.jpg"}}]}]`
+				if tt.api == reqcommon.APITypeMessages {
+					body = `{"model":"m","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/img.jpg"}}]}]`
+				}
 				if tt.textOnly {
 					body = `{"model":"m","messages":[]`
 				}
