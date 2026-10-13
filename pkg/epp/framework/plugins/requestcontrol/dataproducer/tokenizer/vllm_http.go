@@ -72,6 +72,13 @@ type authHeaderCtxKey struct{}
 
 type renderToolAttributesCtxKey struct{}
 
+type renderToolBaselineCtxKey struct{}
+
+type renderToolBaseline struct {
+	source     toolcalling.RequestSnapshot
+	comparison toolcalling.RequestSnapshot
+}
+
 type renderTraceTransport struct {
 	base http.RoundTripper
 }
@@ -420,7 +427,21 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		switch path {
 		case chatRenderPath, messagesRenderPath, responsesRenderPath:
 			// Telemetry capture failures must not change rendering behavior.
-			snapshot, statuses, compareErr := compareRenderToolFields(reqcommon.DetectAPIType(path), inboundPayload, payload)
+			var snapshot toolcalling.RequestSnapshot
+			var statuses []toolcalling.FieldStatus
+			var compareErr error
+			if baseline, ok := ctx.Value(renderToolBaselineCtxKey{}).(*renderToolBaseline); ok {
+				if baseline != nil {
+					snapshot = baseline.source
+					var forwarded toolcalling.RequestSnapshot
+					forwarded, compareErr = toolcalling.CaptureRequestJSON(reqcommon.DetectAPIType(path), payload)
+					if compareErr == nil {
+						statuses, compareErr = toolcalling.CompareRequests(baseline.comparison, forwarded)
+					}
+				}
+			} else {
+				snapshot, statuses, compareErr = compareRenderToolFields(reqcommon.DetectAPIType(path), inboundPayload, payload)
+			}
 			if compareErr == nil {
 				toolStatuses = statuses
 			}

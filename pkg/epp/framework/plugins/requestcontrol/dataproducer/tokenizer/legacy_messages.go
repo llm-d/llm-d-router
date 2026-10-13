@@ -29,6 +29,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
@@ -111,8 +112,10 @@ func (m *legacyMessagesMode) useLegacy(ctx context.Context, tk tokenizer, model 
 	return m.mode == messagesRenderModeLegacy, nil
 }
 
-func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.MessagesRequest) (*fwkrh.TokenizedRequest, error) {
-	payload := legacyMessagesPayload(msg)
+func (b renderBackend) renderLegacyMessages(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
+	payload := legacyMessagesPayload(body.Messages)
+	baseline := prepareLegacyMessagesToolFields(body, payload)
+	ctx = context.WithValue(ctx, renderToolBaselineCtxKey{}, baseline)
 	payload["model"] = b.modelName
 	tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, payload)
 	if err != nil {
@@ -122,6 +125,107 @@ func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.Mess
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 	}}}, nil
+}
+
+// Compare the expected Chat representation of the original Messages fields.
+// Request spans retain the original API surface and sanitized summary.
+func prepareLegacyMessagesToolFields(body *fwkrh.InferenceRequestBody, payload fwkrh.PayloadMap) *renderToolBaseline {
+	var raw []byte
+	switch source := body.WirePayload().(type) {
+	case fwkrh.RawPayload:
+		raw = source
+	case fwkrh.Marshaler:
+		var err error
+		raw, err = source.Marshal()
+		if err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	var fields struct {
+		Tools      json.RawMessage `json:"tools"`
+		ToolChoice json.RawMessage `json:"tool_choice"`
+	}
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	sourceSnapshot, err := toolcalling.CaptureValidatedRequestJSON(reqcommon.APITypeMessages, raw)
+	if err != nil {
+		return nil
+	}
+	// Struct decoding accepts case-insensitive keys; telemetry uses exact API names.
+	present, _ := toolcalling.CompareRequests(sourceSnapshot, sourceSnapshot)
+	for _, field := range present {
+		if !field.Observed && field.Field == toolcalling.FieldTools {
+			fields.Tools = nil
+		}
+	}
+	if !sourceSnapshot.Summary().ToolChoicePresent {
+		fields.ToolChoice = nil
+	}
+	expected := fwkrh.PayloadMap{}
+	if fields.Tools != nil {
+		var tools []fwkrh.AnthropicTool
+		if json.Unmarshal(fields.Tools, &tools) != nil {
+			return nil
+		}
+		var converted any = convertAnthropicTools(tools)
+		if tools != nil && len(tools) == 0 {
+			converted = []any{}
+		}
+		expected[string(toolcalling.FieldTools)] = converted
+		if len(tools) == 0 && len(body.Messages.Tools) == 0 {
+			payload[string(toolcalling.FieldTools)] = converted
+		}
+	}
+	if fields.ToolChoice != nil {
+		choice, parallel := legacyMessagesToolChoice(fields.ToolChoice)
+		payload[string(toolcalling.FieldToolChoice)] = choice
+		expected[string(toolcalling.FieldToolChoice)] = choice
+		if parallel != nil {
+			payload[string(toolcalling.FieldParallelToolCalls)] = *parallel
+			expected[string(toolcalling.FieldParallelToolCalls)] = *parallel
+		}
+	}
+	normalized, err := expected.Marshal()
+	if err != nil {
+		return nil
+	}
+	comparison, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, normalized)
+	if err != nil {
+		return nil
+	}
+	return &renderToolBaseline{source: sourceSnapshot, comparison: comparison}
+}
+
+func legacyMessagesToolChoice(raw json.RawMessage) (any, *bool) {
+	var choice struct {
+		Type                   string `json:"type"`
+		Name                   string `json:"name"`
+		DisableParallelToolUse *bool  `json:"disable_parallel_tool_use"`
+	}
+	if json.Unmarshal(raw, &choice) != nil {
+		return raw, nil
+	}
+	var translated any
+	switch choice.Type {
+	case string(toolcalling.ToolChoiceAuto):
+		translated = toolcalling.ToolChoiceAuto
+	case string(toolcalling.ToolChoiceNone):
+		translated = toolcalling.ToolChoiceNone
+	case "any":
+		translated = toolcalling.ToolChoiceRequired
+	case "tool":
+		translated = map[string]any{"type": "function", "function": map[string]any{"name": choice.Name}}
+	default:
+		return raw, nil
+	}
+	if choice.DisableParallelToolUse == nil {
+		return translated, nil
+	}
+	parallel := !*choice.DisableParallelToolUse
+	return translated, &parallel
 }
 
 func legacyMessagesPayload(msg *fwkrh.MessagesRequest) fwkrh.PayloadMap {

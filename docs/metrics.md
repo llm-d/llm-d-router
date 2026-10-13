@@ -168,6 +168,9 @@ Responses structured output (`text.format`) is outside these field checks.
 The `component` label distinguishes the EPP inference-request boundary (`epp`) from the
 EPP-side HTTP tokenizer client (`tokenizer_http`). The tokenizer compares the serialized
 input with the render copy after render-only transformations, once per call across retries.
+For HTTP Messages compatibility conversion, the comparison baseline is the original
+tool fields translated to Chat Completions format. Tool-choice modes and
+`disable_parallel_tool_use` are translated, and spans retain the Messages API summary.
 Its counters check local request-field preservation, not render success or template intent.
 Warmup calls, absent fields, unavailable endpoints, and failed telemetry capture are excluded.
 

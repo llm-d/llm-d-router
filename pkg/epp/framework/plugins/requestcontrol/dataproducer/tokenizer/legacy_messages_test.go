@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -936,6 +939,137 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				assert.Equal(t, want.Content.Structured, got.Content.Structured,
 					"message %d: Structured content mismatch", i)
 			}
+		})
+	}
+}
+
+func TestLegacyProduceMessagesToolChoice(t *testing.T) {
+	for _, tc := range []struct {
+		name, choice, want, mode, tools string
+	}{
+		{"auto", `{"type":"auto"}`, `"auto"`, "auto", ""},
+		{"any", `{"type":"any"}`, `"required"`, "required", ""},
+		{"none", `{"type":"none"}`, `"none"`, "none", ""},
+		{"named", `{"type":"tool","name":"private_tool"}`, `{"type":"function","function":{"name":"private_tool"}}`, "named", ""},
+		{"parallel disabled", `{"type":"any","disable_parallel_tool_use":true}`, `"required"`, "required", ""},
+		{"parallel enabled", `{"type":"auto","disable_parallel_tool_use":false}`, `"auto"`, "auto", ""},
+		{"null", `null`, `null`, "unknown", ""},
+		{"absent", "", "", "unknown", ""},
+		{"empty tools", "", "", "unknown", `[]`},
+		{"null tools", "", "", "unknown", `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			before := renderToolFieldCounts(t)
+			var received map[string]json.RawMessage
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, chatRenderPath, r.URL.Path)
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			}))
+			defer srv.Close()
+			tools := tc.tools
+			if tools == "" {
+				tools = `[{"name":"private_tool","input_schema":{"maximum":9007199254740993}}]`
+			}
+			raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":` + tools
+			if tc.choice != "" {
+				raw += `,"tool_choice":` + tc.choice
+			}
+			raw += "}"
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
+			require.NoError(t, err)
+			p := newTestPlugin(newHTTPRenderer(t, srv))
+			p.backend = renderBackend{tk: p.backend.(renderBackend).tk, modelName: "m", legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
+			require.NoError(t, p.Produce(t.Context(), &scheduling.InferenceRequest{Body: parsed.Body}, nil))
+			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
+			if tc.want == "" {
+				require.NotContains(t, received, "tool_choice")
+			} else {
+				require.JSONEq(t, tc.want, string(received["tool_choice"]))
+			}
+			if tc.tools == "" {
+				require.Contains(t, string(received["tools"]), "9007199254740993")
+			} else {
+				require.JSONEq(t, tc.tools, string(received["tools"]))
+			}
+			if strings.HasPrefix(tc.name, "parallel") {
+				require.Equal(t, strconv.FormatBool(tc.name == "parallel enabled"), string(received["parallel_tool_calls"]))
+			}
+			after := renderToolFieldCounts(t)
+			require.Equal(t, float64(1), after["tools/preserved"]-before["tools/preserved"])
+			if tc.choice != "" {
+				require.Equal(t, float64(1), after["tool_choice/preserved"]-before["tool_choice/preserved"])
+			}
+			require.Len(t, recorder.Ended(), 2)
+			for _, span := range recorder.Ended() {
+				attrs := spanAttrs(span)
+				require.Equal(t, "messages", attrs[semconv.LLMDToolCallingAPISurfaceKey].AsString())
+				require.Equal(t, tc.mode, attrs[semconv.LLMDToolCallingToolChoiceKey].AsString())
+				for _, value := range attrs {
+					require.NotContains(t, value.String(), "private_tool")
+					require.NotContains(t, value.String(), "9007199254740993")
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyMessagesRenderFieldChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, status string
+		value               any
+	}{
+		{"dropped tools", "tools", "dropped", nil},
+		{"changed projected tools", "tools", "changed", "private_replaced_tool"},
+		{"dropped choice", "tool_choice", "dropped", nil},
+		{"changed choice", "tool_choice", "changed", "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"private_tool","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}`
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
+			require.NoError(t, err)
+			if tc.field == "tools" && tc.value != nil {
+				parsed.Body.Messages.Tools[0].Name = tc.value.(string)
+			}
+			payload := legacyMessagesPayload(parsed.Body.Messages)
+			baseline := prepareLegacyMessagesToolFields(parsed.Body, payload)
+			require.NotNil(t, baseline)
+			if tc.value == nil {
+				delete(payload, tc.field)
+			} else if tc.field != "tools" {
+				payload[tc.field] = tc.value
+			}
+			renderer := newRenderServer(t, vllmConfig{PrefillOnly: true, OmitMMKwargs: true}, func(w http.ResponseWriter, r *http.Request) {
+				var received map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+				switch {
+				case tc.value == nil:
+					assert.NotContains(t, received, tc.field)
+				case tc.field == "tools":
+					assert.Contains(t, string(received[tc.field]), tc.value)
+				default:
+					assert.JSONEq(t, `"none"`, string(received[tc.field]))
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			})
+			before := renderToolFieldCounts(t)
+			ctx := context.WithValue(t.Context(), renderToolBaselineCtxKey{}, baseline)
+			var out renderResponse
+			require.NoError(t, renderer.postJSON(ctx, chatRenderPath, payload, time.Second, &out))
+			after := renderToolFieldCounts(t)
+			for key, value := range before {
+				after[key] -= value
+			}
+			for key, value := range after {
+				if value == 0 {
+					delete(after, key)
+				}
+			}
+			want := map[string]float64{"tools/preserved": 1, "tool_choice/preserved": 1}
+			delete(want, tc.field+"/"+string(toolcalling.FieldStatusPreserved))
+			want[tc.field+"/"+tc.status] = 1
+			require.Equal(t, want, after)
 		})
 	}
 }
