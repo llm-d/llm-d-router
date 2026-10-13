@@ -395,26 +395,27 @@ func RecordInferencePoolReadyPods(name string, runningPods float64) {
 }
 
 // RecordSchedulerE2ELatency records the end-to-end scheduling latency.
-func RecordSchedulerE2ELatency(ctx context.Context, duration time.Duration) {
-	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
+func RecordSchedulerE2ELatency(ctx context.Context, apiSurface string, duration time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(boundAPISurface(apiSurface)), duration.Seconds())
 }
 
 // RecordRequestProcessingLatency records the EPP request processing latency,
 // measured from request receipt until the request body has been handled.
-func RecordRequestProcessingLatency(duration time.Duration) {
-	llmdRequestProcessingLatency.WithLabelValues().Observe(duration.Seconds())
+func RecordRequestProcessingLatency(apiSurface string, duration time.Duration) {
+	llmdRequestProcessingLatency.WithLabelValues(boundAPISurface(apiSurface)).Observe(duration.Seconds())
 }
 
 // RecordResponseProcessingLatency records the EPP response processing latency
 // for a single request.
-func RecordResponseProcessingLatency(duration time.Duration) {
-	llmdResponseProcessingLatency.WithLabelValues().Observe(duration.Seconds())
+func RecordResponseProcessingLatency(apiSurface string, duration time.Duration) {
+	llmdResponseProcessingLatency.WithLabelValues(boundAPISurface(apiSurface)).Observe(duration.Seconds())
 }
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
-func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.SchedulingResult) {
+func RecordSchedulerAttempt(err error, targetModelName, apiSurface string, result *fwksched.SchedulingResult) {
+	apiSurface = boundAPISurface(apiSurface)
 	if err != nil {
-		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
+		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "", apiSurface).Inc()
 		return
 	}
 
@@ -426,14 +427,14 @@ func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.
 			if len(primaryResults.TargetEndpoints) > 0 {
 				metadata := primaryResults.TargetEndpoints[0].GetMetadata()
 				if metadata != nil {
-					llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port).Inc()
+					llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port, apiSurface).Inc()
 					return
 				}
 			}
 		}
 	}
 
-	llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "").Inc()
+	llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "", apiSurface).Inc()
 }
 
 const (

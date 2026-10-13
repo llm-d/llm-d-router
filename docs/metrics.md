@@ -332,10 +332,14 @@ These metrics are owned by EPP scheduler instrumentation.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
+| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | `api_surface` | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port`, `api_surface` | Scheduling attempts. |
 | `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
 | `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+
+Each scheduler invocation records an attempt and latency, including failures. The API
+surface is captured before scheduler plugins run and uses the bounded values described
+in [Request and latency](#request-and-latency).
 
 `reason` is one of:
 
@@ -354,8 +358,11 @@ These metrics are owned by EPP request and response processing instrumentation.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_request_processing_duration_seconds` | Histogram | - | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `llm_d_epp_flow_control_request_queue_duration_seconds` separates it out. |
-| `llm_d_epp_response_processing_duration_seconds` | Histogram | - | Sum of the per-chunk handler slices for a streamed response, so model server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+| `llm_d_epp_request_processing_duration_seconds` | Histogram | `api_surface` | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `llm_d_epp_flow_control_request_queue_duration_seconds` separates it out. |
+| `llm_d_epp_response_processing_duration_seconds` | Histogram | `api_surface` | Sum of the per-chunk handler slices for a streamed response, so model server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+
+Request processing observations include parsing and admission failures. Response processing
+observations include interrupted streams that reached the response phase.
 
 ### Plugin, info, and model rewrite
 

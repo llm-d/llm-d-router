@@ -67,9 +67,10 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 
 	scheduleStart := time.Now()
 	var failureReason string
+	apiSurface := request.APISurface
 	defer func() {
-		metrics.RecordSchedulerE2ELatency(ctx, time.Since(scheduleStart))
-		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
+		metrics.RecordSchedulerE2ELatency(ctx, apiSurface, time.Since(scheduleStart))
+		metrics.RecordSchedulerAttempt(err, request.TargetModel, apiSurface, result)
 		if err != nil {
 			metrics.RecordSchedulerFailure(failureReason)
 		}

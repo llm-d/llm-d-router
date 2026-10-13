@@ -116,9 +116,10 @@ func latencyRecorders() []latencyRecorder {
 		{
 			name: "scheduler",
 			record: func(ctx context.Context) {
-				RecordSchedulerE2ELatency(ctx, 3*time.Millisecond)
+				RecordSchedulerE2ELatency(ctx, reqcommon.APITypeMessages.String(), 3*time.Millisecond)
 			},
-			vec: llmdSchedulerE2ELatency,
+			vec:    llmdSchedulerE2ELatency,
+			labels: []string{reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "flow_control_queue",

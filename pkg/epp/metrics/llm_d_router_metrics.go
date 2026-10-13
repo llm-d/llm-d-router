@@ -233,7 +233,7 @@ var (
 				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 
 	llmdSchedulerAttemptsTotal = prometheus.NewCounterVec(
@@ -242,7 +242,7 @@ var (
 			Name:      "scheduler_attempts_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of scheduling attempts.", compbasemetrics.ALPHA),
 		},
-		append([]string{"status", "target_model_name"}, llmdEndpointLabels...),
+		append(append([]string{"status", "target_model_name"}, llmdEndpointLabels...), "api_surface"),
 	)
 
 	llmdSchedulerFilterEliminatedTotal = prometheus.NewCounterVec(
@@ -298,7 +298,7 @@ var (
 				0.0005, 0.001, 0.002, 0.005, 0.01, 0.015, 0.025, 0.04, 0.06, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 
 	llmdResponseProcessingLatency = prometheus.NewHistogramVec(
@@ -310,7 +310,7 @@ var (
 				0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 )
 

@@ -43,6 +43,8 @@ type RequestObjectives struct {
 type InferenceRequest struct {
 	// RequestID is assigned by the EPP and unique per request. Use it to key per-request state.
 	RequestID string
+	// APISurface is the generation API captured before request parsing and routing rewrites.
+	APISurface string
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.

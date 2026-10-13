@@ -273,6 +273,11 @@ func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Pars
 	return parser, nil
 }
 
+// APISurface returns the generation API captured at ingress.
+func (r *RequestContext) APISurface() string {
+	return r.apiSurface
+}
+
 // apiType classifies the request by its path. A request rejected before its
 // headers are copied has no path and classifies as chat completions.
 func (r *RequestContext) apiType() reqcommon.APIType {
@@ -422,7 +427,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	// Flow-control rejections carry the queue wait and are the slowest samples;
 	// dropping them would bias the histogram low.
 	recordRequestProcessing := sync.OnceFunc(func() {
-		metrics.RecordRequestProcessingLatency(time.Since(reqCtx.RequestReceivedTimestamp))
+		metrics.RecordRequestProcessingLatency(reqCtx.apiSurface, time.Since(reqCtx.RequestReceivedTimestamp))
 	})
 
 	// Record EPP response processing latency once when the stream ends. Using a
@@ -432,7 +437,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	// requests that never reached the response phase.
 	defer func() {
 		if reqCtx.responseProcessingDuration > 0 {
-			metrics.RecordResponseProcessingLatency(reqCtx.responseProcessingDuration)
+			metrics.RecordResponseProcessingLatency(reqCtx.apiSurface, reqCtx.responseProcessingDuration)
 		}
 	}()
 

@@ -95,10 +95,12 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 
 			want := map[string]float64{
 				"llm_d_epp_request_total": tt.wantRequests, "llm_d_epp_request_error_total": tt.wantErrors,
-				"llm_d_epp_request_duration_seconds": tt.wantLatency,
-				"llm_d_epp_request_size_bytes":       tt.wantRequests,
-				"llm_d_epp_response_size_bytes":      tt.wantLatency,
-				"llm_d_epp_request_running":          tt.wantRequests,
+				"llm_d_epp_request_duration_seconds":             tt.wantLatency,
+				"llm_d_epp_request_size_bytes":                   tt.wantRequests,
+				"llm_d_epp_response_size_bytes":                  tt.wantLatency,
+				"llm_d_epp_request_running":                      tt.wantRequests,
+				"llm_d_epp_request_processing_duration_seconds":  1,
+				"llm_d_epp_response_processing_duration_seconds": tt.wantRequests,
 			}
 			got := make(map[string]float64)
 			families, err := ctrlmetrics.Registry.Gather()
