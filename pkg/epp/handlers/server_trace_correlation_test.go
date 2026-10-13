@@ -41,7 +41,9 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
@@ -160,6 +162,45 @@ func TestProcessOmitsCorrelationWhenTracingDisabled(t *testing.T) {
 	require.Contains(t, entry, "req-correlation-2")
 	require.NotContains(t, entry, tracing.LogKeyTraceID)
 	require.NotContains(t, entry, tracing.LogKeySpanID)
+}
+
+func TestProcessAttributesAPISurface(t *testing.T) {
+	for _, tt := range []struct {
+		name, path, body, surface string
+	}{
+		{name: "plain messages", path: reqcommon.PathMessages, body: `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, surface: "messages"},
+		{name: "plain chat", path: reqcommon.PathChatCompletions, body: `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, surface: "chat_completions"},
+		{name: "malformed messages", path: reqcommon.PathMessages, body: `{"model":`, surface: "messages"},
+		{name: "unknown path", path: "/v1/embeddings", body: `{}`, surface: "unknown"},
+		{name: "missing path", surface: "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+			reqs := []*extProcPb.ProcessingRequest{newRequestHeaders(map[string]string{":path": tt.path, "traceparent": upstreamTraceparent})}
+			if tt.body != "" {
+				reqs = append(reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+					Body: []byte(tt.body), EndOfStream: true,
+				}}})
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}, logr.Discard())
+			srv := &scriptedProcessServer{ctx: context.Background(), reqs: reqs}
+			_ = NewStreamingServer(nil, &agentIdentityDirector{}, registry, 0).Process(srv)
+
+			var requestSpans []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+			attrs := attribute.NewSet(requestSpans[0].Attributes()...)
+			surface, ok := attrs.Value(semconv.LLMDEPPAPISurfaceKey)
+			require.True(t, ok, "API attribution must include requests without tools and parser failures")
+			require.Equal(t, tt.surface, surface.AsString())
+			require.Equal(t, upstreamTraceID, requestSpans[0].SpanContext().TraceID().String())
+		})
+	}
 }
 
 // agentIdentityDirector resolves the fairness identity inside HandleRequest, as
