@@ -20,13 +20,29 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
+
+// stubSyncerPlugin satisfies plugin.Plugin so tests can mark a CrossReplicaSyncer
+// as configured without exercising Redis.
+type stubSyncerPlugin struct{}
+
+func (stubSyncerPlugin) TypedName() plugin.TypedName {
+	return plugin.TypedName{Type: "test-syncer", Name: "test"}
+}
+
+func testHandleWithSyncer() plugin.Handle {
+	h := plugin.NewEppHandle(context.Background(), nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	h.SetCrossReplicaSyncer(stubSyncerPlugin{})
+	return h
+}
 
 func TestRecentWindowCapAndSlide(t *testing.T) {
 	w := newRecentWindow(3)
@@ -62,9 +78,9 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	cfg.LRUCapacityPerServer = 100
 
 	ctx := context.Background()
-	producerA, err := newDataProducer(ctx, ApproxPrefixCachePluginType, cfg, testHandle())
+	producerA, err := newDataProducer(ctx, ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
-	producerB, err := newDataProducer(ctx, ApproxPrefixCachePluginType, cfg, testHandle())
+	producerB, err := newDataProducer(ctx, ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
 
 	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
@@ -115,7 +131,7 @@ func TestMergeRemoteHashesPreservesPromptBoundaries(t *testing.T) {
 	cfg.BlockSizeTokens = 64
 	cfg.LRUCapacityPerServer = 2
 
-	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
 
 	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
@@ -139,6 +155,67 @@ func TestMergeRemoteHashesPreservesPromptBoundaries(t *testing.T) {
 		"newest prompt must survive when merged with prompt boundaries")
 }
 
+func TestMergeRemoteHashesAddsPeerPromptsOnce(t *testing.T) {
+	syncOn := true
+	cfg := defaultConfig
+	cfg.SyncCrossReplicaState = &syncOn
+	cfg.AutoTune = false
+	cfg.BlockSizeTokens = 64
+	cfg.LRUCapacityPerServer = 2
+
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
+	require.NoError(t, err)
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	ep := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: podID},
+		fwkdl.NewMetrics(),
+		fwkdl.NewAttributes(),
+	)
+	ep.Put(producer.syncHashDK, &attrprefix.PrefixHashSet{
+		Prompts: [][]uint64{{1, 2}, {3, 4}},
+	})
+	candidates := []ServerID{ServerID(podID)}
+
+	producer.mergeRemoteHashes([]fwksched.Endpoint{ep})
+	require.Equal(t, []int{2}, producer.indexerInst.MatchLongestPrefix([]blockHash{3, 4}, candidates))
+
+	// Seed a local prompt that a re-Add of the peer window would evict under
+	// capacity 2. A second merge must not LRU-touch the peer prompts.
+	producer.indexerInst.Add([]blockHash{9, 10}, server{ServerID: ServerID(podID), NumOfGPUBlocks: 2})
+	require.Equal(t, []int{2}, producer.indexerInst.MatchLongestPrefix([]blockHash{9, 10}, candidates))
+
+	producer.mergeRemoteHashes([]fwksched.Endpoint{ep})
+	require.Equal(t, []int{2}, producer.indexerInst.MatchLongestPrefix([]blockHash{9, 10}, candidates),
+		"re-merge must not re-Add peer prompts and evict newer local entries")
+}
+
+func TestMergeRemoteHashesNoopWithoutSyncer(t *testing.T) {
+	syncOn := true
+	cfg := defaultConfig
+	cfg.SyncCrossReplicaState = &syncOn
+	cfg.AutoTune = false
+	cfg.BlockSizeTokens = 64
+	cfg.LRUCapacityPerServer = 100
+
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	require.NoError(t, err)
+	require.False(t, producer.syncerActive())
+
+	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
+	ep := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: podID},
+		fwkdl.NewMetrics(),
+		fwkdl.NewAttributes(),
+	)
+	ep.Put(producer.syncHashDK, &attrprefix.PrefixHashSet{
+		Prompts: [][]uint64{{1, 2, 3}},
+	})
+	producer.mergeRemoteHashes([]fwksched.Endpoint{ep})
+	require.Equal(t, []int{0}, producer.indexerInst.MatchLongestPrefix([]blockHash{1, 2, 3}, []ServerID{ServerID(podID)}),
+		"merge must not run when no CrossReplicaSyncer is configured")
+}
+
 func TestCrossReplicaAggregateUnionsReplicas(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
@@ -146,20 +223,39 @@ func TestCrossReplicaAggregateUnionsReplicas(t *testing.T) {
 	cfg.AutoTune = false
 	cfg.LRUCapacityPerServer = 100
 	cfg.MaxSyncedHashes = 3
-	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
 
 	spec := producer.CrossReplicaState()
 	a := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1, 2, 3}}}
 	b := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{3, 4}}}
 	got := spec.Aggregate([]any{a, b}).(*attrprefix.PrefixHashSet)
-	require.Equal(t, [][]uint64{{3, 4}}, got.Prompts,
-		"union drops oldest whole prompt to fit maxSyncedHashes")
+	require.Equal(t, [][]uint64{{1, 2, 3}, {3, 4}}, got.Prompts,
+		"union keeps each replica's already-capped window without re-trimming")
 
 	// Get with only local (no peer cache) still returns the local window.
 	producer.recent.record("ns/decode-0", []blockHash{9, 8})
 	onlyLocal := spec.Aggregate([]any{spec.Read("ns/decode-0")}).(*attrprefix.PrefixHashSet)
 	require.Equal(t, [][]uint64{{9, 8}}, onlyLocal.Prompts)
+}
+
+func TestCrossReplicaAggregateKeepsAllReplicas(t *testing.T) {
+	syncOn := true
+	cfg := defaultConfig
+	cfg.SyncCrossReplicaState = &syncOn
+	cfg.AutoTune = false
+	cfg.MaxSyncedHashes = 1
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
+	require.NoError(t, err)
+
+	spec := producer.CrossReplicaState()
+	// Three replicas each publish a full one-hash window. A global cap of 1
+	// would keep only the last replica ID's prompt under redis-syncer's sort.
+	a := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1}}}
+	b := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{2}}}
+	c := &attrprefix.PrefixHashSet{Prompts: [][]uint64{{3}}}
+	got := spec.Aggregate([]any{a, b, c}).(*attrprefix.PrefixHashSet)
+	require.Equal(t, [][]uint64{{1}, {2}, {3}}, got.Prompts)
 }
 
 func TestCrossReplicaDeclaresSyncHashKey(t *testing.T) {
@@ -191,7 +287,7 @@ func TestMergeRemoteHashesSkipsLocalOnlyWindow(t *testing.T) {
 	cfg.AutoTune = false
 	cfg.BlockSizeTokens = 64
 	cfg.LRUCapacityPerServer = 100
-	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
 
 	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
@@ -221,7 +317,7 @@ func TestExtractIgnoresStaleDelete(t *testing.T) {
 	cfg := defaultConfig
 	cfg.SyncCrossReplicaState = &syncOn
 	cfg.AutoTune = false
-	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	producer, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
 	require.NoError(t, err)
 
 	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
