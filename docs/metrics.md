@@ -117,16 +117,16 @@ lifecycle handled by the router.
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
 | `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
-| `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
-| `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
-| `llm_d_epp_request_output_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Output token count. |
-| `llm_d_epp_request_cached_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Prompt tokens served from cache. |
-| `llm_d_epp_request_running` | Gauge | `model_name`, `target_model_name`, `fairness_id`, `priority` | Requests currently in flight. |
-| `llm_d_epp_request_ntpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Normalized time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
+| `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Response body size. |
+| `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Input token count. |
+| `llm_d_epp_request_output_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Output token count. |
+| `llm_d_epp_request_cached_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Prompt tokens served from cache. |
+| `llm_d_epp_request_running` | Gauge | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests currently in flight. |
+| `llm_d_epp_request_ntpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Normalized time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
 
 Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
 `llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
@@ -149,6 +149,11 @@ sum by (api_surface) (rate(llm_d_epp_request_error_total[5m]))
 The request counter excludes parsing and scheduling failures; the error counter includes
 those failures. Their ratio does not represent the error fraction of all incoming requests.
 Latency observations require response completion and exclude interrupted requests.
+Token usage is observed once on response completion, including usage accumulated across
+Messages streaming events. Input tokens include uncached and cached prompt tokens;
+`request_cached_tokens` records the cache-read subset reported by the model server.
+Interrupted streams contribute no completed-request token observations. The running-request
+gauge releases each request when it completes or its ext_proc stream closes.
 
 Per-surface p95 latency uses the histogram buckets:
 

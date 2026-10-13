@@ -34,27 +34,46 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
 	received := time.Now()
+	record := func(surface string) {
+		RecordRequestCounter("model", "target", surface, "", 0)
+		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
+		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+		RecordRequestSizes("model", "target", surface, "", "0", 100)
+		RecordResponseSizes("model", "target", surface, "", "0", 200)
+		RecordInputTokens("model", "target", surface, "", "0", 10)
+		RecordOutputTokens("model", "target", surface, "", "0", 10)
+		RecordPromptCachedTokens("model", "target", surface, "", "0", 5)
+		require.True(t, RecordNormalizedTimePerOutputToken(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second), 10))
+		require.True(t, RecordRequestTTFT(context.Background(), "model", "target", surface, "", "0", true, received, received.Add(time.Millisecond)))
+		require.True(t, RecordRequestTPOT(context.Background(), "model", "target", surface, "", "0", true, received, received.Add(time.Millisecond), received.Add(time.Second), 10))
+		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
+		IncRunningRequests("model", "target", surface, "", "0")
+		DecRunningRequests("model", "target", surface, "", "0")
+	}
 	for _, apiType := range []reqcommon.APIType{
 		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses,
 		reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
 	} {
-		surface := apiType.String()
-		RecordRequestCounter("model", "target", surface, "", 0)
-		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
-		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+		record(apiType.String())
 	}
 	for i := 0; i < 1000; i++ {
-		surface := fmt.Sprintf("/unrecognized/%d", i)
-		RecordRequestCounter("model", "target", surface, "", 0)
-		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
-		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+		record(fmt.Sprintf("/unrecognized/%d", i))
 	}
-	for _, collector := range []prometheus.Collector{llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies} {
+	for _, collector := range []prometheus.Collector{
+		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
+		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
+		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
+	} {
 		require.Equal(t, 7, promtestutil.CollectAndCount(collector), "six supported surfaces plus unknown must bound the series count")
 	}
 	require.Equal(t, float64(1000), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
 		boundModel("model"), boundModel("target"), "", "0", reqcommon.APISurfaceUnknown,
 	)))
+	for _, surface := range []string{reqcommon.APITypeMessages.String(), reqcommon.APISurfaceUnknown} {
+		require.Zero(t, promtestutil.ToFloat64(llmdRunningRequests.WithLabelValues(
+			boundModel("model"), boundModel("target"), "", "0", surface,
+		)))
+	}
 }
 
 // resetFairnessLabelLimit restores the shared fairness cap to its default after a test.

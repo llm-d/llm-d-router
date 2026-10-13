@@ -498,7 +498,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			}
 		}
 		if reqCtx.requestRunning {
-			metrics.DecRunningRequests(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority)
+			metrics.DecRunningRequests(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority)
 		}
 
 		// If we scheduled a pod (TargetPod != nil) but never marked the response  as complete (e.g. error, disconnect,
@@ -694,7 +694,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				fairnessID, priority := extractFairnessAndPriority(reqCtx)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, reqCtx.Priority)
-				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
+				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.RequestSize)
 
 				if parseResult.SkipResponseProcessing {
 					reqCtx.requestState = requestResponseProcessingSkipped
@@ -985,7 +985,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		logger.V(logutil.DEFAULT).Info("EPP sent request body response(s) to proxy", "modelName", r.IncomingModelName, "targetModelName", r.TargetModelName)
 		r.requestState = bodyRequestResponsesComplete
 		fairnessID, priority := extractFairnessAndPriority(r)
-		metrics.IncRunningRequests(r.IncomingModelName, r.TargetModelName, fairnessID, priority)
+		metrics.IncRunningRequests(r.IncomingModelName, r.TargetModelName, r.apiSurface, fairnessID, priority)
 		r.requestRunning = true
 		// Dump the response so a new stream message can begin
 		r.reqBodyResp = nil

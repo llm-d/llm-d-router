@@ -43,6 +43,8 @@ type apiSurfaceDirector struct {
 }
 
 func (d *apiSurfaceDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+	reqCtx.IncomingModelName = "m"
+	reqCtx.TargetModelName = "m"
 	if d.rewritePath != "" {
 		reqCtx.Request.Headers[":path"] = d.rewritePath
 	}
@@ -54,11 +56,13 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 	for _, tt := range []struct {
 		name, path, body, surface, rewritePath, status string
 		wantRequests, wantErrors, wantLatency          float64
+		interrupted                                    bool
 	}{
 		{name: "plain messages", path: reqcommon.PathMessages, body: `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, surface: "messages", wantRequests: 1, wantLatency: 1},
 		{name: "plain chat", path: reqcommon.PathChatCompletions, body: `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, surface: "chat_completions", wantRequests: 1, wantLatency: 1},
 		{name: "rewritten messages path", path: reqcommon.PathMessages, body: `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, surface: "messages", rewritePath: reqcommon.PathChatCompletions, wantRequests: 1, wantLatency: 1},
 		{name: "messages backend error", path: reqcommon.PathMessages, body: `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, surface: "messages", status: "502", wantRequests: 1, wantErrors: 1, wantLatency: 1},
+		{name: "messages interrupted response", path: reqcommon.PathMessages, body: `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, surface: "messages", interrupted: true, wantRequests: 1},
 		{name: "malformed messages", path: reqcommon.PathMessages, body: `{"model":`, surface: "messages", wantErrors: 1},
 		{name: "unknown path", path: "/v1/embeddings", body: `{}`, surface: "unknown", wantErrors: 1},
 		{name: "missing path", body: `{`, surface: "unknown", wantErrors: 1},
@@ -81,7 +85,7 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 						Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{{Key: ":status", RawValue: []byte(responseStatus)}, {Key: "content-type", RawValue: []byte("application/json")}}},
 					}}},
 					&extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseBody{ResponseBody: &extProcPb.HttpBody{
-						Body: []byte(`{"model":"m","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"output_tokens":1}}`), EndOfStream: true,
+						Body: []byte(`{"model":"m","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"output_tokens":1}}`), EndOfStream: !tt.interrupted,
 					}}},
 				)
 			}
@@ -92,6 +96,9 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 			want := map[string]float64{
 				"llm_d_epp_request_total": tt.wantRequests, "llm_d_epp_request_error_total": tt.wantErrors,
 				"llm_d_epp_request_duration_seconds": tt.wantLatency,
+				"llm_d_epp_request_size_bytes":       tt.wantRequests,
+				"llm_d_epp_response_size_bytes":      tt.wantLatency,
+				"llm_d_epp_request_running":          tt.wantRequests,
 			}
 			got := make(map[string]float64)
 			families, err := ctrlmetrics.Registry.Gather()
@@ -104,6 +111,9 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 					require.True(t, metricHasLabels(metric, map[string]string{"api_surface": tt.surface}), "wrong API attribution for %s", family.GetName())
 					if metric.GetCounter() != nil {
 						got[family.GetName()] += metric.GetCounter().GetValue()
+					} else if metric.GetGauge() != nil {
+						require.Zero(t, metric.GetGauge().GetValue(), "running requests must be released")
+						got[family.GetName()]++
 					} else {
 						got[family.GetName()] += float64(metric.GetHistogram().GetSampleCount())
 					}

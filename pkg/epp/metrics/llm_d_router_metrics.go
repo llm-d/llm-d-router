@@ -31,10 +31,10 @@ const (
 
 var (
 	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels                       = []string{"endpoint_name", "namespace", "port"}
-	modelLabelsWithFairnessPriority          = append(append([]string{}, modelLabels...), "fairness_id", "priority")
-	modelLabelsWithFairnessPriorityStreaming = append(append([]string{}, modelLabelsWithFairnessPriority...), "streaming")
-	requestLabelsWithAPISurface              = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
+	llmdEndpointLabels                   = []string{"endpoint_name", "namespace", "port"}
+	modelLabelsWithFairnessPriority      = append(append([]string{}, modelLabels...), "fairness_id", "priority")
+	requestLabelsWithAPISurface          = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
+	requestLabelsWithAPISurfaceStreaming = append(append([]string{}, requestLabelsWithAPISurface...), "streaming")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -74,7 +74,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.RequestSizeBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdResponseSizes = prometheus.NewHistogramVec(
@@ -84,7 +84,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Outgoing response body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdInputTokens = prometheus.NewHistogramVec(
@@ -94,7 +94,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Input token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.TokenCountBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdOutputTokens = prometheus.NewHistogramVec(
@@ -104,7 +104,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Output token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdPromptCachedTokens = prometheus.NewHistogramVec(
@@ -114,7 +114,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Distribution of prompt tokens read from cache per request, as reported by the model server in the response.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.TokenCountBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRunningRequests = prometheus.NewGaugeVec(
@@ -123,7 +123,7 @@ var (
 			Name:      "request_running",
 			Help:      metricsutil.HelpMsgWithStability("Current number of active running requests.", compbasemetrics.ALPHA),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdNormalizedTimePerOutputToken = prometheus.NewHistogramVec(
@@ -135,7 +135,7 @@ var (
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
 			},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestTTFT = prometheus.NewHistogramVec(
@@ -148,7 +148,7 @@ var (
 				8, 10, 15, 20, 30, 45, 60, 120,
 			},
 		},
-		modelLabelsWithFairnessPriorityStreaming,
+		requestLabelsWithAPISurfaceStreaming,
 	)
 
 	llmdRequestTPOT = newRequestTPOTHistogram(DefaultRequestTPOTBuckets)
