@@ -34,6 +34,7 @@ var (
 	llmdEndpointLabels                       = []string{"endpoint_name", "namespace", "port"}
 	modelLabelsWithFairnessPriority          = append(append([]string{}, modelLabels...), "fairness_id", "priority")
 	modelLabelsWithFairnessPriorityStreaming = append(append([]string{}, modelLabelsWithFairnessPriority...), "streaming")
+	requestLabelsWithAPISurface              = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -44,7 +45,7 @@ var (
 			Name:      "request_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of processed requests.", compbasemetrics.ALPHA),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestErrCounter = prometheus.NewCounterVec(
@@ -53,7 +54,7 @@ var (
 			Name:      "request_error_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of request errors.", compbasemetrics.ALPHA),
 		},
-		append(modelLabelsWithFairnessPriority, "error_code"),
+		append(append([]string{}, requestLabelsWithAPISurface...), "error_code"),
 	)
 
 	llmdRequestLatencies = prometheus.NewHistogramVec(
@@ -63,7 +64,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestSizes = prometheus.NewHistogramVec(
