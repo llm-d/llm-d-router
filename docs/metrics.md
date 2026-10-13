@@ -114,9 +114,9 @@ lifecycle handled by the router.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority` | Total requests. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `error_code` | Errored requests. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
-| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
+| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
 | `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
 | `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
@@ -131,6 +131,37 @@ lifecycle handled by the router.
 Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
 `llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
 `llm_d_epp_request_error_total` with empty `model_name` and `target_model_name` labels.
+
+The `api_surface` label distinguishes `messages`, `chat_completions`, `completions`,
+`responses`, `vllm_generate`, and `sglang_generate`. Missing or unrecognized generation
+paths, including auxiliary token-count and render routes, use `unknown`. EPP captures
+the surface from the incoming path before routing can rewrite it. The corresponding
+request span carries `llm_d.epp.api_surface`, including requests without tools and
+requests rejected during parsing.
+
+Request volume and errors per second can be queried separately by surface:
+
+```promql
+sum by (api_surface) (rate(llm_d_epp_request_total[5m]))
+sum by (api_surface) (rate(llm_d_epp_request_error_total[5m]))
+```
+
+The request counter excludes parsing and scheduling failures; the error counter includes
+those failures. Their ratio does not represent the error fraction of all incoming requests.
+Latency observations require response completion and exclude interrupted requests.
+
+Per-surface p95 latency uses the histogram buckets:
+
+```promql
+histogram_quantile(0.95,
+  sum by (le, api_surface) (rate(llm_d_epp_request_duration_seconds_bucket[5m]))
+)
+```
+
+Selectors return a separate series for each surface. Use `sum without (api_surface)`
+for counters and histogram buckets to combine surfaces while preserving other labels.
+Queries joining these metrics to metrics without `api_surface` need explicit aggregation
+or vector matching.
 
 #### Streaming latency buckets
 

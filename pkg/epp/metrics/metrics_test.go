@@ -35,6 +35,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -131,7 +132,7 @@ func TestRecordRequestCounterandSizes(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestCounter(req.modelName, req.targetModelName, req.fairnessID, 0)
+				RecordRequestCounter(req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, req.fairnessID, 0)
 				RecordRequestSizes(req.modelName, req.targetModelName, req.fairnessID, "0", req.reqSize)
 			}
 
@@ -198,7 +199,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestErrCounter(req.modelName, req.targetModelName, "", "0", req.error)
+				RecordRequestErrCounter(req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.error)
 			}
 
 			// Verify llm_d_epp metric.
@@ -274,7 +275,7 @@ func TestRecordRequestLatencies(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, "", "0", req.receivedTime, req.completeTime)
+				success := RecordRequestLatencies(ctx, req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.receivedTime, req.completeTime)
 				if success == scenario.invalid {
 					t.Errorf("got record success(%v), but the request expects invalid(%v)", success, scenario.invalid)
 				}

@@ -22,11 +22,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+func TestRequestMetricsBoundAPISurface(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	received := time.Now()
+	for _, apiType := range []reqcommon.APIType{
+		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses,
+		reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
+	} {
+		surface := apiType.String()
+		RecordRequestCounter("model", "target", surface, "", 0)
+		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
+		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+	}
+	for i := 0; i < 1000; i++ {
+		surface := fmt.Sprintf("/unrecognized/%d", i)
+		RecordRequestCounter("model", "target", surface, "", 0)
+		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
+		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+	}
+	for _, collector := range []prometheus.Collector{llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies} {
+		require.Equal(t, 7, promtestutil.CollectAndCount(collector), "six supported surfaces plus unknown must bound the series count")
+	}
+	require.Equal(t, float64(1000), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
+		boundModel("model"), boundModel("target"), "", "0", reqcommon.APISurfaceUnknown,
+	)))
+}
 
 // resetFairnessLabelLimit restores the shared fairness cap to its default after a test.
 func resetFairnessLabelLimit(t *testing.T) {
@@ -48,9 +77,9 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 
 	PreAdmitModelLabels("llama-70b", "llama-70b-canary")
 	for i := 0; i < 1000; i++ {
-		RecordRequestCounter(fmt.Sprintf("junk-%d", i), "target", "fairness", 0)
+		RecordRequestCounter(fmt.Sprintf("junk-%d", i), "target", reqcommon.APISurfaceUnknown, "fairness", 0)
 	}
-	RecordRequestCounter("llama-70b", "llama-70b-canary", "fairness", 0)
+	RecordRequestCounter("llama-70b", "llama-70b-canary", reqcommon.APISurfaceUnknown, "fairness", 0)
 
 	series := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, series, testCap+2, "cardinality must stay bounded, got %d series", series)
@@ -73,7 +102,7 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	})
 
 	for i := 0; i < 1000; i++ {
-		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", "fairness", 0)
+		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", reqcommon.APISurfaceUnknown, "fairness", 0)
 	}
 
 	count := promtestutil.CollectAndCount(llmdRequestCounter)
@@ -140,7 +169,7 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	})
 
 	for i := 0; i < 100; i++ {
-		RecordRequestCounter("model-a", "model-a", fmt.Sprintf("tenant-%d", i), 0)
+		RecordRequestCounter("model-a", "model-a", reqcommon.APISurfaceUnknown, fmt.Sprintf("tenant-%d", i), 0)
 	}
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdRequestCounter),

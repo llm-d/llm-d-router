@@ -18,6 +18,7 @@ package metrics
 
 import (
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // Model name labels are populated from the request body, which is not validated
@@ -56,4 +57,16 @@ func boundModel(modelName string) string {
 // boundModels caps the model-name labels shared by request metrics.
 func boundModels(modelName, targetModelName string) (string, string) {
 	return modelLabelLimiter.Bound(modelName), modelLabelLimiter.Bound(targetModelName)
+}
+
+// boundAPISurface keeps raw paths and unsupported API names out of metric labels.
+func boundAPISurface(surface string) string {
+	switch surface {
+	case reqcommon.APITypeChatCompletions.String(), reqcommon.APITypeCompletions.String(),
+		reqcommon.APITypeResponses.String(), reqcommon.APITypeMessages.String(),
+		reqcommon.APITypeVLLMGenerate.String(), reqcommon.APITypeSGLangGenerate.String():
+		return surface
+	default:
+		return reqcommon.APISurfaceUnknown
+	}
 }

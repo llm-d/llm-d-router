@@ -170,6 +170,7 @@ type RequestContext struct {
 	FlowControlQueueDuration time.Duration
 
 	// Lifecycle bookkeeping.
+	apiSurface                 string
 	firstTokenTimestamp        time.Time
 	lastChunkReceivedTimestamp time.Time
 	responseCompleteTimestamp  time.Time
@@ -399,6 +400,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 	// See https://github.com/envoyproxy/envoy/issues/17540.
 	reqCtx := &RequestContext{
 		requestState: requestReceived,
+		apiSurface:   reqcommon.APISurfaceUnknown,
 		Request: &Request{
 			Headers:  make(map[string]string),
 			Metadata: make(map[string]any),
@@ -483,9 +485,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		if reqCtx.responseStatusCode != "" {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.responseStatusCode)
+			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
 		} else if err != nil {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, errcommon.CanonicalCode(err))
+			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
 		if span != nil {
 			if err != nil {
@@ -552,6 +554,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
+			// Capture the client API before routing or rendering can rewrite the path.
+			reqCtx.apiSurface = reqcommon.DetectAPISurface(envoy.ExtractHeaderValue(v, ":path"))
 			reqCtx.Request.ID = uuid.NewString()
 			requestID := envoy.ExtractHeaderValue(v, reqcommon.RequestIDHeaderKey)
 			if len(requestID) == 0 {
@@ -569,7 +573,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			ctx = extractTraceContext(ctx, v)
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqcommon.DetectAPISurface(envoy.ExtractHeaderValue(v, ":path")))),
+				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface)),
 			)
 
 			// Tag every log line of this request with the trace it belongs to.
@@ -689,7 +693,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
 				fairnessID, priority := extractFairnessAndPriority(reqCtx)
-				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, reqCtx.Priority)
+				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestSize)
 
 				if parseResult.SkipResponseProcessing {

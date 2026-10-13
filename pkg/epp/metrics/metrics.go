@@ -192,19 +192,19 @@ func Reset() {
 }
 
 // RecordRequestCounter records the number of requests.
-func RecordRequestCounter(modelName, targetModelName, fairnessID string, priority int) {
+func RecordRequestCounter(modelName, targetModelName, apiSurface, fairnessID string, priority int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	prioStr := strconv.Itoa(priority)
-	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr).Inc()
+	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr, boundAPISurface(apiSurface)).Inc()
 }
 
 // RecordRequestErrCounter records the number of error requests.
-func RecordRequestErrCounter(modelName, targetModelName, fairnessID, priority string, code string) {
+func RecordRequestErrCounter(modelName, targetModelName, apiSurface, fairnessID, priority string, code string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if code != "" {
-		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, code).Inc()
+		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, boundAPISurface(apiSurface), code).Inc()
 	}
 }
 
@@ -216,7 +216,7 @@ func RecordRequestSizes(modelName, targetModelName, fairnessID, priority string,
 }
 
 // RecordRequestLatencies records duration of request.
-func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time) bool {
+func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, apiSurface, fairnessID, priority string, received time.Time, complete time.Time) bool {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if !complete.After(received) {
@@ -226,7 +226,7 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
 	metricsutil.ObserveWithTraceExemplar(ctx,
-		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority),
+		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority, boundAPISurface(apiSurface)),
 		elapsedSeconds)
 	return true
 }
