@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 )
@@ -96,10 +97,7 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 			assert.Equal(t, `{"error":{"message":"request evicted by flow control","type":"rate_limit_error","code":429}}`, string(ir.Body))
 
 			require.NotNil(t, ir.Headers, "Should label the body as JSON")
-			gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
-			for _, header := range ir.Headers.SetHeaders {
-				gotHeaders[header.Header.Key] = string(header.Header.RawValue)
-			}
+			gotHeaders := envoy.SetHeadersMap(ir.Headers.SetHeaders)
 			wantHeaders := map[string]string{"content-type": "application/json"}
 			if tt.wantHeader {
 				wantHeaders[errcommon.RequestDroppedReasonHeaderKey] = string(tt.requestDroppedReason)
@@ -127,9 +125,12 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 func TestTerminationCause(t *testing.T) {
 	t.Parallel()
 
+	answer := &Answer{Status: envoyTypePb.StatusCode_NoContent, Headers: map[string]string{"x-answer": "yes"}}
 	tests := []struct {
 		name   string
 		state  streamRequestState
+		answer *Answer
+		reqErr error
 		ctxErr error
 		want   fwkrc.TerminationCause
 	}{
@@ -138,6 +139,28 @@ func TestTerminationCause(t *testing.T) {
 			state:  requestEvicted,
 			ctxErr: context.Canceled,
 			want:   fwkrc.TerminationCauseEvicted,
+		},
+		{
+			name:   "a delivered answer is answered",
+			state:  requestReceived,
+			answer: answer,
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseAnswered,
+		},
+		{
+			name:   "an answer the caller never received is an error",
+			state:  requestReceived,
+			answer: answer,
+			reqErr: errors.New("send failed"),
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name:   "an answer lost to a client disconnect is a disconnect",
+			state:  requestReceived,
+			answer: answer,
+			reqErr: errors.New("send failed"),
+			ctxErr: context.Canceled,
+			want:   fwkrc.TerminationCauseClientDisconnect,
 		},
 		{
 			name:   "a cancelled context is the client going away",
@@ -160,8 +183,8 @@ func TestTerminationCause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			reqCtx := &RequestContext{requestState: tt.state}
-			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+			reqCtx := &RequestContext{requestState: tt.state, Answer: tt.answer}
+			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.reqErr, tt.ctxErr))
 		})
 	}
 }

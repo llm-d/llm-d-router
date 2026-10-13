@@ -65,6 +65,22 @@ const (
 	// 412 Precondition Failed so the coordinator restarts the pipeline.
 	PreferIfAvailable = "if-available"
 
+	// PreferReserveEndpoint is the preference token the coordinator sets to ask
+	// which endpoint EPP would pick for a request without sending the request
+	// there. EPP answers 204 with the picked <ip:port> on ReservedEndpointHeader
+	// and forwards nothing.
+	PreferReserveEndpoint = "reserve-endpoint"
+
+	// PreferenceAppliedHeader is the standard RFC 7240 response header that names
+	// the Prefer tokens the server applied.
+	PreferenceAppliedHeader = "preference-applied"
+
+	// ReservedEndpointHeader is the response header that carries the <ip:port>
+	// EPP picked on a "Prefer: reserve-endpoint" request. The header name is the
+	// same for every scheduling profile, since a per-phase EPP runs its only
+	// profile under a name of its own.
+	ReservedEndpointHeader = "x-llm-d-reserved-host-port"
+
 	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled
 	// on. The endpoint-pin-screener keeps only that endpoint.
 	EndpointPinHeader = "x-llm-d-pin-host-port"

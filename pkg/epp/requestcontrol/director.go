@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -55,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	requtil "github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 const (
@@ -328,9 +330,21 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err != nil {
 		return reqCtx, err
 	}
+	// An answered request is not forwarded: it is not tracked for eviction and
+	// its body is not rewritten. A forwarded request is tracked before the
+	// reservation is released, so an eviction pass on the freed capacity sees it.
+	if reqCtx.Answer == nil && d.requestEvictor != nil {
+		// A tracking failure only costs evictability, so the request still proceeds.
+		if err := d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to track request for in-flight eviction")
+		}
+	}
 	if reservationPending {
 		reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
 		reservationPending = false
+	}
+	if reqCtx.Answer != nil {
+		return reqCtx, nil
 	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
@@ -481,25 +495,22 @@ func (d *Director) selectWeightedModel(ctx context.Context, models []v1alpha2.Ta
 // for allowing plugging customized logic based on the scheduling result.
 func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestContext, result *fwksched.SchedulingResult) (*handlers.RequestContext, error) {
 	logger := log.FromContext(ctx)
-	if result == nil || len(result.ProfileResults) == 0 {
-		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "results must be greater than zero"}
-	}
 	// primary profile is used to set destination
+	primary := result.PrimaryEndpoint()
+	if primary == nil {
+		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "primary profile picked no endpoint"}
+	}
 	primaryResult := result.ProfileResults[result.PrimaryProfileName]
-	targetMetadatas := []*fwkdl.EndpointMetadata{}
-	targetEndpoints := []string{}
-
+	targetEndpoints := make([]string, 0, len(primaryResult.TargetEndpoints))
 	for _, pod := range primaryResult.TargetEndpoints {
 		curMetadata := pod.GetMetadata()
-		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
-		targetMetadatas = append(targetMetadatas, curMetadata)
-		targetEndpoints = append(targetEndpoints, curEndpoint)
+		targetEndpoints = append(targetEndpoints, net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort()))
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
 	logger.V(logutil.VERBOSE).Info("Request handled", "objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModel", reqCtx.TargetModelName, "endpoint", multiEndpointString)
 
-	reqCtx.TargetPod = targetMetadatas[0]
+	reqCtx.TargetPod = primary.GetMetadata()
 	reqCtx.TargetEndpoint = multiEndpointString
 
 	if len(primaryResult.ScoredCandidates) > 0 {
@@ -541,14 +552,37 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		}
 	}
 
-	if d.requestEvictor != nil {
-		// A tracking failure only costs evictability, so the request still proceeds.
-		if err := d.requestEvictor.PreRequest(ctx, reqCtx.SchedulingRequest, result); err != nil {
-			log.FromContext(ctx).Error(err, "Failed to track request for in-flight eviction")
+	// "Prefer: reserve-endpoint" asks which endpoint EPP picks, without
+	// forwarding. Default-deny when no PreRequest plugin handled it, so an EPP
+	// without the plugin never sends the request to a model server.
+	if routing.HasPreference(reqCtx.SchedulingRequest.Headers, routing.PreferReserveEndpoint) {
+		endpoint, handled := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, fwkrc.ReservedEndpointAttributeKey)
+		if !handled || endpoint == "" {
+			return reqCtx, errcommon.Error{
+				Code: errcommon.Internal,
+				Msg:  "reserve-endpoint request received but no plugin handled it",
+			}
 		}
+		reqCtx.Answer = reserveEndpointAnswer(endpoint, reqCtx.SchedulingRequest.Headers)
 	}
 
 	return reqCtx, nil
+}
+
+// reserveEndpointAnswer builds the "Prefer: reserve-endpoint" answer: 204 with
+// the picked endpoint, Preference-Applied, and the InternalRoutingHeaders set
+// on the request. The caller gets them instead of the sidecar.
+func reserveEndpointAnswer(endpoint string, requestHeaders map[string]string) *handlers.Answer {
+	headers := map[string]string{
+		routing.ReservedEndpointHeader:  endpoint,
+		routing.PreferenceAppliedHeader: routing.PreferReserveEndpoint,
+	}
+	for key := range requtil.InternalRoutingHeaders {
+		if value, ok := requestHeaders[key]; ok {
+			headers[key] = value
+		}
+	}
+	return &handlers.Answer{Status: envoyTypePb.StatusCode_NoContent, Headers: headers}
 }
 
 // SetRequestEvictor wires the in-flight eviction tracker into the request lifecycle.

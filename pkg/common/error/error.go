@@ -21,8 +21,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
-	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"google.golang.org/grpc/codes"
@@ -58,8 +58,10 @@ const (
 
 // Error is an error struct for errors returned by the epp/bbr server.
 type Error struct {
-	Code    string
-	Msg     string
+	Code string
+	Msg  string
+	// Headers are set on the error response with lowercase keys. The response
+	// body is JSON, so a content-type entry is replaced by application/json.
 	Headers map[string]string
 }
 
@@ -168,18 +170,10 @@ func BuildErrResponse(err error, apiType reqcommon.APIType) (*extProcPb.Processi
 		return nil, status.Errorf(codes.Internal, "failed to encode error response: %v", encodeErr)
 	}
 
-	contentType := &configPb.HeaderValueOption{
-		Header: &configPb.HeaderValue{Key: reqcommon.HeaderContentType, RawValue: []byte(reqcommon.ContentTypeJSON)},
+	headers := make(map[string]string, len(e.Headers)+1)
+	for key, value := range e.Headers {
+		headers[strings.ToLower(key)] = value
 	}
-	setHeaders := append([]*configPb.HeaderValueOption{contentType}, envoy.GenerateHeadersMutation(e.Headers)...)
-
-	return &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: code.httpCode},
-				Body:    body,
-				Headers: &extProcPb.HeaderMutation{SetHeaders: setHeaders},
-			},
-		},
-	}, nil
+	headers[reqcommon.HeaderContentType] = reqcommon.ContentTypeJSON
+	return envoy.BuildImmediateResponse(code.httpCode, headers, body), nil
 }

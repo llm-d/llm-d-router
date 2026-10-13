@@ -36,6 +36,8 @@ import (
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -143,6 +145,14 @@ func TestHandleRequestHeaders(t *testing.T) {
 				{Key: "X-Test", Value: "val"},
 			},
 			wantHeaders: map[string]string{"x-test": "val"},
+		},
+		{
+			name: "Joins repeated header entries into one list value",
+			headers: []*configPb.HeaderValue{
+				{Key: "Prefer", Value: "wait=10"},
+				{Key: "prefer", Value: routing.PreferReserveEndpoint},
+			},
+			wantHeaders: map[string]string{routing.PreferHeader: "wait=10, " + routing.PreferReserveEndpoint},
 		},
 		{
 			name: "Prefers RawValue over Value",
@@ -307,10 +317,7 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 
 	results := server.generateHeaders(context.Background(), reqCtx)
 
-	gotHeaders := make(map[string]string)
-	for _, h := range results {
-		gotHeaders[h.Header.Key] = string(h.Header.RawValue)
-	}
+	gotHeaders := envoy.SetHeadersMap(results)
 
 	assert.Contains(t, gotHeaders, "x-user-data")
 	assert.NotContains(t, gotHeaders, metadata.ObjectiveKey)
@@ -515,10 +522,7 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
 				GetRequestHeaders().GetResponse().GetHeaderMutation()
 
-			gotSet := make(map[string]string)
-			for _, h := range mutation.GetSetHeaders() {
-				gotSet[h.Header.Key] = string(h.Header.RawValue)
-			}
+			gotSet := envoy.SetHeadersMap(mutation.GetSetHeaders())
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
@@ -594,6 +598,65 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 			} else {
 				assert.Nil(t, reqCtx.reqBodyResp)
 			}
+		})
+	}
+}
+
+// TestHandleRequestHeaders_Bodyless covers a request whose headers carry
+// EndOfStream. It is routed to a random endpoint, except a "Prefer:
+// reserve-endpoint" request, which is rejected: a reservation cannot be
+// scheduled without a body and must never reach a model server.
+func TestHandleRequestHeaders_Bodyless(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		prefer []string // one Prefer header entry per element
+		// noHeaderMap sends a headers message with no header map at all.
+		noHeaderMap bool
+		wantCode    string
+	}{
+		{name: "no preference falls back to a random endpoint"},
+		{name: "no header map falls back to a random endpoint", noHeaderMap: true},
+		{name: "another preference falls back to a random endpoint", prefer: []string{routing.PreferIfAvailable}},
+		{name: "reserve-endpoint is rejected", prefer: []string{routing.PreferReserveEndpoint}, wantCode: errcommon.BadRequest},
+		{name: "reserve-endpoint among tokens is rejected", prefer: []string{"if-available, Reserve-Endpoint"}, wantCode: errcommon.BadRequest},
+		{name: "reserve-endpoint in the last repeated entry is rejected", prefer: []string{"wait=10", routing.PreferReserveEndpoint}, wantCode: errcommon.BadRequest},
+		{name: "reserve-endpoint in the first repeated entry is rejected", prefer: []string{routing.PreferReserveEndpoint, "wait=10"}, wantCode: errcommon.BadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{director: &mockDirectorRequest{}}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{Headers: make(map[string]string)},
+			}
+			var headers []*configPb.HeaderValue
+			for _, prefer := range tc.prefer {
+				headers = append(headers, &configPb.HeaderValue{Key: "Prefer", RawValue: []byte(prefer)})
+			}
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers:     &configPb.HeaderMap{Headers: headers},
+					EndOfStream: true,
+				},
+			}
+			if tc.noHeaderMap {
+				req.RequestHeaders.Headers = nil
+			}
+
+			err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
+			if tc.wantCode == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint)
+				return
+			}
+			var e errcommon.Error
+			require.ErrorAs(t, err, &e)
+			assert.Equal(t, tc.wantCode, e.Code)
+			assert.Empty(t, reqCtx.TargetEndpoint, "a rejected reservation picks no endpoint")
+			assert.Nil(t, reqCtx.reqHeaderResp, "a rejected reservation prepares no routing response")
 		})
 	}
 }
