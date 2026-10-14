@@ -34,7 +34,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/metrics"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/response"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
 
@@ -51,7 +53,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 			cfg := standaloneConfig()
 			cfg.Tracing = true
 			router := standalone.Create(cfg, config, 1, 8000)
-			prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
+			prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
 			gomega.Expect(decodePods).To(gomega.HaveLen(1))
 			if topology == "P/D" {
 				gomega.Expect(prefillPods).To(gomega.HaveLen(1))
@@ -73,7 +75,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 					before := apiSurfaceMetrics(metricsURL)
 					prefillBefore := 0
 					if topology == "P/D" {
-						prefillBefore = utils.GetPodRequestCount(testConfig, getNamespace(), prefillPods[0])
+						prefillBefore = metrics.GetPodRequestCount(testConfig, getNamespace(), prefillPods[0])
 						gomega.Expect(prefillBefore).To(gomega.BeNumerically(">=", 0))
 					}
 					ginkgo.By(fmt.Sprintf("POST %s stream=%t", apiType.Path(), stream))
@@ -99,7 +101,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 						gomega.Expect(usage["output_tokens"]).To(gomega.BeNumerically(">", 1))
 					} else if stream {
 						gomega.Expect(string(raw)).To(gomega.ContainSubstring("data: [DONE]"))
-						gomega.Expect(utils.ExtractFinishReasonFromStreaming(string(raw))).To(gomega.Equal("stop"))
+						gomega.Expect(response.ExtractFinishReasonFromStreaming(string(raw))).To(gomega.Equal("stop"))
 					} else {
 						var reply struct {
 							Choices []struct {
@@ -113,7 +115,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 						gomega.Expect(reply.Choices[0].Message.Content).To(gomega.Equal(prompt))
 					}
 					if topology == "P/D" {
-						gomega.Expect(utils.GetPodRequestCount(testConfig, getNamespace(), prefillPods[0])).To(gomega.BeNumerically(">", prefillBefore), "the native request must reach prefill")
+						gomega.Expect(metrics.GetPodRequestCount(testConfig, getNamespace(), prefillPods[0])).To(gomega.BeNumerically(">", prefillBefore), "the native request must reach prefill")
 					}
 					surface := apiType.String()
 					gomega.Eventually(func(g gomega.Gomega) {
@@ -274,7 +276,7 @@ func decodeMessagesResponse(raw []byte, streaming bool) (messagesResponse, error
 
 func apiSurfaceMetrics(metricsURL string) map[string]map[string]float64 {
 	parser := expfmt.NewTextParser(model.LegacyValidation)
-	families, err := parser.TextToMetricFamilies(strings.NewReader(strings.Join(utils.GetMetrics(metricsURL), "\n") + "\n"))
+	families, err := parser.TextToMetricFamilies(strings.NewReader(strings.Join(metrics.GetMetrics(metricsURL), "\n") + "\n"))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	values := map[string]map[string]float64{}
 	for name, family := range families {
