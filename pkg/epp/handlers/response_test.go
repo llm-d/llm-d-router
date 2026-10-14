@@ -19,7 +19,9 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -1261,5 +1263,101 @@ func TestGenerateResponseBodyResponses_DynamicMetadata(t *testing.T) {
 				assert.Nil(t, r.DynamicMetadata, "chunk %d should not have DynamicMetadata", i)
 			}
 		})
+	}
+}
+
+// BenchmarkObserveToolCallingResponse includes span creation, response observation,
+// deferred response finalization, detector cleanup, and span completion. Providers
+// have no exporters; the benchmark measures local work for one complete response.
+func BenchmarkObserveToolCallingResponse(b *testing.B) {
+	ctx := context.Background()
+	recording := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	unsampled := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()))
+	b.Cleanup(func() {
+		if err := recording.Shutdown(ctx); err != nil {
+			b.Fatal(err)
+		}
+		if err := unsampled.Shutdown(ctx); err != nil {
+			b.Fatal(err)
+		}
+	})
+
+	for _, size := range []int{1024, 64 * 1024} {
+		padding := strings.Repeat("x", size)
+		for _, api := range []struct {
+			surface reqcommon.APIType
+			json    string
+			sse     string
+		}{
+			{
+				surface: reqcommon.APITypeChatCompletions,
+				json:    `{"choices":[{"message":{"content":"` + padding + `","tool_calls":[{"id":"call_1","type":"function","function":{"name":"sentinel_name","arguments":"{}"}}]}}]}`,
+				sse:     "data: " + `{"choices":[{"delta":{"content":"` + padding + `"}}]}` + "\n\ndata: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"sentinel_name","arguments":"{}"}}]}}]}` + "\n\n",
+			},
+			{
+				surface: reqcommon.APITypeMessages,
+				json:    `{"content":[{"type":"text","text":"` + padding + `"},{"type":"tool_use","id":"call_1","name":"sentinel_name","input":{}}]}`,
+				sse:     "event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + padding + `"}}` + "\n\nevent: content_block_start\ndata: " + `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"sentinel_name","input":{}}}` + "\n\n",
+			},
+		} {
+			for _, mode := range []struct {
+				name        string
+				body        []byte
+				eventStream bool
+			}{
+				{name: "JSON", body: []byte(api.json)},
+				{name: "SSE", body: []byte(api.sse), eventStream: true},
+			} {
+				chunks := [][]byte{mode.body}
+				if mode.eventStream {
+					chunks = nil
+					for offset := 0; offset < len(mode.body); offset += 128 {
+						chunks = append(chunks, mode.body[offset:min(offset+128, len(mode.body))])
+					}
+				}
+				detector, err := toolcalling.NewResponseDetector(api.surface, mode.eventStream)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for i, chunk := range chunks {
+					if found := detector.Observe(chunk, i == len(chunks)-1); i == len(chunks)-1 && !found {
+						b.Fatal("benchmark response must contain a detectable tool call")
+					}
+				}
+				for _, tracing := range []struct {
+					name     string
+					provider trace.TracerProvider
+				}{
+					{name: "disabled", provider: noop.NewTracerProvider()},
+					{name: "unsampled", provider: unsampled},
+					{name: "recording", provider: recording},
+				} {
+					for _, toolRequest := range []bool{false, true} {
+						request := "non_tool"
+						if toolRequest {
+							request = "tool"
+						}
+						b.Run(fmt.Sprintf("%s/%s/%d/%s/%s", api.surface, mode.name, size, tracing.name, request), func(b *testing.B) {
+							tracer := tracing.provider.Tracer("benchmark")
+							b.ReportAllocs()
+							for b.Loop() {
+								_, span := tracer.Start(ctx, "request")
+								reqCtx := &RequestContext{
+									toolCallingSurface:             api.surface,
+									toolCallingRequest:             toolRequest,
+									toolCallingResponseEventStream: mode.eventStream,
+								}
+								for i, chunk := range chunks {
+									reqCtx.observeToolCallingResponse(chunk, chunk, i == len(chunks)-1, span)
+								}
+								reqCtx.recordToolCallingResponse(span, true)
+								reqCtx.clearToolCallingResponseDetectors()
+								span.End()
+							}
+						})
+					}
+				}
+			}
+		}
 	}
 }
