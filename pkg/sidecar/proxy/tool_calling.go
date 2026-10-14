@@ -103,6 +103,10 @@ func (r *toolCallingRequest) compareDispatched(body []byte) ([]toolcalling.Field
 	if err != nil {
 		return nil, err
 	}
+	// Empty captures would only allocate unobserved outcomes.
+	if r.original.CanSkipCapture(nil) && after.CanSkipCapture(nil) {
+		return nil, nil
+	}
 	statuses, err := toolcalling.CompareRequests(r.original, after)
 	if err != nil {
 		return nil, err

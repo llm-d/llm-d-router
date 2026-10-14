@@ -3031,6 +3031,51 @@ func TestCaptureInferenceToolCallingRequest(t *testing.T) {
 	})
 }
 
+func TestToolCallingRequestNonToolDispatch(t *testing.T) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			for _, tt := range []struct {
+				name, body string
+				wantField  toolcalling.Field
+			}{
+				{name: "plain", body: `{"messages":[{"content":"hello"}]}`},
+				{name: "escaped prompt", body: `{"messages":[{"content":"\u0061"}]}`},
+				{name: "nested field", body: `{"messages":[{"tools":[]}]}`},
+				{name: "field name in prompt", body: `{"messages":[{"content":"tools"}]}`},
+				{name: "introduced field", body: `{"tools":[]}`, wantField: toolcalling.FieldTools},
+				{name: "introduced escaped field", body: `{"to\u006fls":null}`, wantField: toolcalling.FieldTools},
+				{name: "structured output only", body: `{"response_format":null}`, wantField: toolcalling.FieldResponseFormat},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					request, err := captureToolCallingRequest(api, []byte(`{}`))
+					require.NoError(t, err)
+					body := []byte(tt.body)
+					_, err = request.compareDispatched(body)
+					require.NoError(t, err)
+					want := map[toolcalling.Field]toolcalling.FieldStatusValue{}
+					if tt.wantField != "" && (api == reqcommon.APITypeChatCompletions || tt.wantField != toolcalling.FieldResponseFormat) {
+						want[tt.wantField] = toolcalling.FieldStatusChanged
+					}
+					assertToolCallingStatuses(t, request.fieldStatuses(), want)
+					// An empty dispatch cannot erase an earlier mutation.
+					_, err = request.compareDispatched([]byte(`{}`))
+					require.NoError(t, err)
+					assertToolCallingStatuses(t, request.fieldStatuses(), want)
+					if tt.name == "plain" {
+						allocations := testing.AllocsPerRun(20, func() {
+							_, err = request.compareDispatched(body)
+							if err != nil {
+								panic(err)
+							}
+						})
+						require.Zero(t, allocations, "non-tool dispatch comparison must not allocate")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestToolCallingRequestAggregatesDispatches(t *testing.T) {
 	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[1],"tool_choice":"auto"}`))
 	require.NoError(t, err)
@@ -3061,6 +3106,13 @@ func TestToolCallingRequestAggregatesDispatches(t *testing.T) {
 }
 
 func TestToolCallingRequestCaptureFailures(t *testing.T) {
+	nonTool, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{}`))
+	require.NoError(t, err)
+	for _, body := range []string{`{"messages":`, `null`, `[]`, `{} true`, "\u00a0{}", "{}\u0085", ``} {
+		_, err = nonTool.compareDispatched([]byte(body))
+		require.Error(t, err, body)
+		require.Empty(t, nonTool.fieldStatuses())
+	}
 	for _, body := range []string{`{"tools":`, `null`, `[]`, ``} {
 		request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(body))
 		require.Error(t, err)
