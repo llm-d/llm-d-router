@@ -116,6 +116,8 @@ func TestResponseDetectorReportsUnreadablePayload(t *testing.T) {
 		{name: "valid SSE without tools", eventStream: true, body: `data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"},
 		{name: "SSE control events", eventStream: true, body: strings.Join([]string{": keepalive", "data:", "data: [DONE]"}, "\n\n") + "\n\n"},
 		{name: "SSE unfinished control line", eventStream: true, body: ": keepalive\nid: 7\nretry: 1000\nevent: ping"},
+		{name: "SSE partial BOM at EOF", eventStream: true, body: "\xef"},
+		{name: "SSE two-byte BOM prefix at EOF", eventStream: true, body: "\xef\xbb"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, tt.eventStream)
@@ -223,6 +225,49 @@ func TestResponseDetectorSSEEventFraming(t *testing.T) {
 					require.True(t, detector.Observe([]byte(event[split:]), false), "split at byte %d", split)
 					require.False(t, detector.DetectionIncomplete())
 					require.Empty(t, detector.eventData)
+				}
+			})
+		}
+	}
+}
+
+func TestResponseDetectorSSEByteOrderMark(t *testing.T) {
+	for _, api := range []struct {
+		surface reqcommon.APIType
+		payload string
+	}{
+		{reqcommon.APITypeChatCompletions, `{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`},
+		{reqcommon.APITypeMessages, `{"type":"content_block_start","content_block":{"type":"tool_use"}}`},
+	} {
+		for _, tt := range []struct {
+			name, prefix, ending string
+			want, incomplete     bool
+		}{
+			{name: "plain", ending: "\n\n", want: true},
+			{name: "initial BOM", prefix: "\xef\xbb\xbf", ending: "\n\n", want: true},
+			{name: "BOM before empty line", prefix: "\xef\xbb\xbf\n", ending: "\n\n", want: true},
+			{name: "BOM after empty line", prefix: "\n\xef\xbb\xbf", ending: "\n\n"},
+			{name: "BOM after short comment", prefix: ":\n\xef\xbb\xbf", ending: "\n\n"},
+			{name: "BOM after comment", prefix: ": keepalive\n\xef\xbb\xbf", ending: "\n\n"},
+			{name: "repeated BOM", prefix: "\xef\xbb\xbf\xef\xbb\xbf", ending: "\n\n"},
+			{name: "partial BOM before field", prefix: "\xef\xbb", ending: "\n\n"},
+			{name: "unfinished BOM-prefixed event", prefix: "\xef\xbb\xbf", ending: "\n", incomplete: true},
+		} {
+			t.Run(api.surface.String()+"/"+tt.name, func(t *testing.T) {
+				body := []byte(tt.prefix + "data: " + api.payload + tt.ending)
+				for _, split := range []int{0, 1, 2, 3, len(body)} {
+					detector, err := NewResponseDetector(api.surface, true)
+					require.NoError(t, err)
+					detector.Observe(body[:split], false)
+					for i := split; i < len(body); i++ {
+						detector.Observe(body[i:i+1], false)
+					}
+					require.Equal(t, tt.want, detector.Observe(nil, true), "split at byte %d", split)
+					require.Equal(t, tt.incomplete, detector.DetectionIncomplete())
+					require.Empty(t, detector.line)
+					require.Empty(t, detector.eventData)
+					require.Equal(t, strings.Repeat("\x00", cap(detector.line)), string(detector.line[:cap(detector.line)]))
+					require.Equal(t, strings.Repeat("\x00", cap(detector.eventData)), string(detector.eventData[:cap(detector.eventData)]))
 				}
 			})
 		}

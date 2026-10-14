@@ -71,6 +71,7 @@ type ResponseDetector struct {
 	discardingLine      bool
 	discardingEvent     bool
 	afterCR             bool
+	bomChecked          bool
 	line                []byte
 	eventData           []byte
 	finished            bool
@@ -141,6 +142,7 @@ func (detector *ResponseDetector) Close() {
 }
 
 func (detector *ResponseDetector) observeSSE(chunk []byte) {
+	const utf8BOM = "\xef\xbb\xbf"
 	for _, b := range chunk {
 		// Treat CRLF as one boundary even when it spans two body chunks.
 		if detector.afterCR {
@@ -150,6 +152,7 @@ func (detector *ResponseDetector) observeSSE(chunk []byte) {
 			}
 		}
 		if b == '\n' || b == '\r' {
+			detector.bomChecked = true
 			detector.afterCR = b == '\r'
 			detector.processSSELine()
 			if detector.toolCallPresent {
@@ -167,6 +170,12 @@ func (detector *ResponseDetector) observeSSE(chunk []byte) {
 			continue
 		}
 		detector.line = append(detector.line, b)
+		if !detector.bomChecked && len(detector.line) == len(utf8BOM) {
+			detector.bomChecked = true
+			if bytes.Equal(detector.line, []byte(utf8BOM)) {
+				detector.clearLine()
+			}
+		}
 	}
 }
 
