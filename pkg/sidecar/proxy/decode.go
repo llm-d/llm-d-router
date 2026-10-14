@@ -103,6 +103,10 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			chunkFields.mergeStatuses(statuses)
 		}
 	}
+	regularDecode := func() {
+		compareChunk(raw)
+		s.decoderProxy.ServeHTTP(w, r.WithContext(ctx))
+	}
 
 	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
@@ -115,14 +119,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// The decoder echoes the final assistant message, which under chunking is the text of all earlier chunks.
 	if echo, _ := body[reqcommon.FieldEcho].(bool); echo {
 		s.logger.V(logging.DEBUG).Info("chunked decode: echo enabled, using regular decode")
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
 	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
 		s.logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 
@@ -130,14 +134,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
-		compareChunk(raw)
-		s.decoderProxy.ServeHTTP(w, r.WithContext(ctx))
+		regularDecode()
 		return
 	}
 
 	messages, err := requestMessages(body)
 	if err != nil {
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + roleAssistant + `"`)}
@@ -148,13 +151,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Only an assistant message can carry the accumulated text; any other final message is sent as is.
 		if len(messages) == 0 || json.Unmarshal(messages[len(messages)-1], &finalMessage) != nil ||
 			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != roleAssistant {
-			s.decoderProxy.ServeHTTP(w, r)
+			regularDecode()
 			return
 		}
 		content := finalMessage[reqcommon.FieldContent]
 		// Content parts arrays and null have no string to extend.
 		if len(content) == 0 || content[0] != '"' || json.Unmarshal(content, &prefix) != nil {
-			s.decoderProxy.ServeHTTP(w, r)
+			regularDecode()
 			return
 		}
 		messages = messages[:len(messages)-1]

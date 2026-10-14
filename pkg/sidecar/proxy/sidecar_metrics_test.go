@@ -40,6 +40,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/set"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1697,6 +1698,7 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 	const original = `{"messages":[],"max_tokens":6,"tools":[],"tool_choice":"auto"}`
 	for _, tt := range []struct {
 		name         string
+		fallback     string
 		mutateFirst  bool
 		mutateNext   bool
 		restoreNext  bool
@@ -1716,17 +1718,26 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 		{name: "first chunk marshal failure", marshalFirst: true},
 		{name: "changed chunk marshal failure", marshalNext: true, mutateNext: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
 		{name: "invalid response retains dispatched outcomes", badResponse: true, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "echo fallback", fallback: `"messages":[],"echo":true`, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "multiple choices fallback", fallback: `"messages":[],"n":2`, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "invalid messages fallback", fallback: `"messages":{}`, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "non-assistant continuation fallback", fallback: `"messages":[{"role":"user","content":"hi"}],"continue_final_message":true`, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
+		{name: "structured continuation fallback", fallback: `"messages":[{"role":"assistant","content":[]}],"continue_final_message":true`, wantCalls: 1, wantChoice: toolcalling.FieldStatusPreserved, wantTools: toolcalling.FieldStatusPreserved},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := tracetest.NewSpanRecorder()
 			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 			useTracerProviderForTest(t, provider)
-			body, err := decodeRequestBody([]byte(original))
+			requestBody := original
+			if tt.fallback != "" {
+				requestBody = `{"max_tokens":6,"tools":[],"tool_choice":"auto",` + tt.fallback + "}"
+			}
+			body, err := decodeRequestBody([]byte(requestBody))
 			require.NoError(t, err)
-			toolFields, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+			toolFields, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(requestBody))
 			require.NoError(t, err)
-			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(original))
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(requestBody))
 			ctx, cancel := context.WithCancel(r.Context())
 			defer cancel()
 			r = r.WithContext(ctx)
@@ -1743,8 +1754,14 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 			calls := 0
 			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
+				sentBody, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
 				var sent map[string]json.RawMessage
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&sent))
+				require.NoError(t, json.Unmarshal(sentBody, &sent))
+				if tt.fallback != "" {
+					require.Equal(t, []byte(requestBody), sentBody)
+					assert.Equal(t, recorder.Started()[0].SpanContext(), trace.SpanFromContext(r.Context()).SpanContext())
+				}
 				if calls == 2 && tt.mutateNext {
 					require.NotContains(t, sent, string(toolcalling.FieldTools))
 					require.Equal(t, json.RawMessage(`"none"`), sent[string(toolcalling.FieldToolChoice)])
@@ -1769,7 +1786,7 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 				}
 			})
 			before := toolFieldCounters(t)
-			s.runChunkedDecodeFromMap(httptest.NewRecorder(), r, body, []byte(original), toolFields)
+			s.runChunkedDecodeFromMap(httptest.NewRecorder(), r, body, []byte(requestBody), toolFields)
 			require.Equal(t, tt.wantCalls, calls)
 			want := map[toolcalling.Field]toolcalling.FieldStatusValue{}
 			if tt.wantCalls > 0 {
