@@ -818,7 +818,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 }
 
 func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
-	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
 		return
 	}
 	if r.toolCallingUpstreamDetector == nil || r.toolCallingForwardedDetector == nil {
@@ -843,19 +843,17 @@ func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, 
 }
 
 func (r *RequestContext) recordToolCallingResponse(span trace.Span, interrupted bool) {
-	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
 		return
 	}
 	r.toolCallingResponseRecorded = true
-	if span != nil {
-		span.SetAttributes((toolcalling.ResponseSummary{
-			ToolCallingRequested:         true,
-			UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
-			ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
-			UpstreamDetectionIncomplete:  interrupted || r.toolCallingUpstreamDetector.DetectionIncomplete(),
-			ForwardedDetectionIncomplete: interrupted || r.toolCallingForwardedDetector.DetectionIncomplete(),
-		}).SpanAttributes()...)
-	}
+	span.SetAttributes((toolcalling.ResponseSummary{
+		ToolCallingRequested:         true,
+		UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
+		ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
+		UpstreamDetectionIncomplete:  interrupted || r.toolCallingUpstreamDetector.DetectionIncomplete(),
+		ForwardedDetectionIncomplete: interrupted || r.toolCallingForwardedDetector.DetectionIncomplete(),
+	}).SpanAttributes()...)
 }
 
 func (r *RequestContext) clearToolCallingResponseDetectors() {

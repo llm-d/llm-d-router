@@ -256,6 +256,101 @@ func loggedValue(t *testing.T, rec, key string) string {
 	return m[1]
 }
 
+func TestProcessToolCallingPassthroughWithNonRecordingSpan(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		name := "unsampled"
+		if disabled {
+			name = "disabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()), sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			if disabled {
+				useTracerProvider(t, noop.NewTracerProvider())
+			} else {
+				useTracerProvider(t, provider)
+			}
+			eppmetrics.Register()
+			t.Cleanup(eppmetrics.Reset)
+
+			for _, api := range []struct {
+				path     string
+				response string
+			}{
+				{path: reqcommon.PathChatCompletions, response: `{"choices":[{"message":{"tool_calls":[{"id":"call_1"}]}}]}`},
+				{path: reqcommon.PathMessages, response: `{"content":[{"type":"tool_use","id":"call_1","name":"sentinel_name","input":{}}]}`},
+			} {
+				for _, eventStream := range []bool{false, true} {
+					mode := "JSON"
+					if eventStream {
+						mode = "SSE"
+					}
+					t.Run(api.path+"/"+mode, func(t *testing.T) {
+						eppmetrics.Reset()
+						requestBody := []byte(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"tools":[]}`)
+						contentType, response := "application/json", api.response
+						if eventStream {
+							contentType, response = "text/event-stream", "data: "+api.response+"\n\n"
+						}
+						srv := &replayProcessServer{
+							ctx: context.Background(),
+							reqs: []*extProcPb.ProcessingRequest{
+								newRequestHeaders(map[string]string{":path": api.path, "traceparent": upstreamTraceparent}),
+								{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{Body: requestBody, EndOfStream: true}}},
+								{Request: &extProcPb.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{{Key: "content-type", RawValue: []byte(contentType)}}}}}},
+							},
+						}
+						chunks := []string{response}
+						if eventStream {
+							chunks = []string{response[:3], response[3:]}
+						}
+						for i, chunk := range chunks {
+							srv.reqs = append(srv.reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseBody{ResponseBody: &extProcPb.HttpBody{Body: []byte(chunk), EndOfStream: i == len(chunks)-1}}})
+						}
+						registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}, logr.Discard())
+						require.NoError(t, NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv))
+
+						var forwardedRequest, forwardedResponse []byte
+						for _, sent := range srv.sentResponses {
+							if chunk := sent.GetRequestBody(); chunk != nil {
+								forwardedRequest = append(forwardedRequest, chunk.GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()...)
+							}
+							if chunk := sent.GetResponseBody(); chunk != nil {
+								forwardedResponse = append(forwardedResponse, chunk.GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()...)
+							}
+						}
+						require.Equal(t, requestBody, forwardedRequest)
+						require.Equal(t, response, string(forwardedResponse))
+						require.Empty(t, recorder.Ended())
+
+						families, err := ctrlmetrics.Registry.Gather()
+						require.NoError(t, err)
+						foundMetric := false
+						for _, family := range families {
+							if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+								continue
+							}
+							foundMetric = true
+							require.Len(t, family.GetMetric(), 1)
+							sample := family.GetMetric()[0]
+							require.Len(t, sample.GetLabel(), 4)
+							require.True(t, metricHasLabels(sample, map[string]string{
+								toolcalling.MetricLabelComponent: toolcalling.ComponentEPP,
+								toolcalling.MetricLabelDirection: toolcalling.DirectionRequest,
+								toolcalling.MetricLabelField:     string(toolcalling.FieldTools),
+								toolcalling.MetricLabelStatus:    string(toolcalling.FieldStatusPreserved),
+							}))
+							require.Equal(t, float64(1), sample.GetCounter().GetValue())
+						}
+						require.True(t, foundMetric, "request metrics must be recorded independently of tracing")
+					})
+				}
+			}
+		})
+	}
+}
+
 func TestProcessExportsToolCallingTelemetryOverOTLP(t *testing.T) {
 	exported := make(chan *coltracepb.ExportTraceServiceRequest, 16)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

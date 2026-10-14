@@ -31,6 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -335,6 +337,62 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 	}
 }
 
+func TestToolCallingResponseSkipsNonRecordingSpan(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, unsampled := provider.Tracer("test").Start(context.Background(), "request")
+	t.Cleanup(func() { unsampled.End() })
+	_, disabled := noop.NewTracerProvider().Tracer("test").Start(context.Background(), "request")
+	t.Cleanup(func() { disabled.End() })
+
+	for _, tt := range []struct {
+		name string
+		span trace.Span
+	}{
+		{name: "nil"},
+		{name: "disabled", span: disabled},
+		{name: "unsampled", span: unsampled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.span != nil {
+				require.False(t, tt.span.IsRecording())
+			}
+			for _, eventStream := range []bool{false, true} {
+				name := "JSON"
+				if eventStream {
+					name = "SSE"
+				}
+				t.Run(name, func(t *testing.T) {
+					reqCtx := &RequestContext{
+						toolCallingSurface:             reqcommon.APITypeChatCompletions,
+						toolCallingRequest:             true,
+						toolCallingResponseEventStream: eventStream,
+					}
+					payload := []byte(`{"choices":[{"message":{"tool_calls":[{"id":"call_1"}]}}]}`)
+					if eventStream {
+						payload = []byte("data: " + string(payload) + "\n\n")
+						reqCtx.observeToolCallingResponse(payload[:3], payload[:3], false, tt.span)
+						assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+						assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+						payload = payload[3:]
+					}
+					reqCtx.observeToolCallingResponse(payload, payload, true, tt.span)
+					assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
+					assert.Nil(t, reqCtx.toolCallingForwardedDetector)
+					assert.False(t, reqCtx.toolCallingUpstreamPresent)
+					assert.False(t, reqCtx.toolCallingForwardedPresent)
+					assert.False(t, reqCtx.toolCallingResponseRecorded)
+				})
+			}
+			t.Run("interrupted", func(t *testing.T) {
+				reqCtx := &RequestContext{toolCallingRequest: true}
+				reqCtx.recordToolCallingResponse(tt.span, true)
+				assert.False(t, reqCtx.toolCallingResponseRecorded)
+			})
+		})
+	}
+}
+
 func TestObserveToolCallingResponseRecordsUpstreamAndForwardedPresence(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
@@ -395,6 +453,11 @@ func TestObserveToolCallingResponseReportsOversizedSSEDetection(t *testing.T) {
 }
 
 func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+
 	reqCtx := &RequestContext{
 		toolCallingSurface:             reqcommon.APITypeMessages,
 		toolCallingRequest:             true,
@@ -402,17 +465,34 @@ func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
 	}
 	first := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",")
 	second := []byte("\"content_block\":{\"type\":\"tool_use\"}}\n")
-	reqCtx.observeToolCallingResponse(first, first, false, nil)
-	reqCtx.observeToolCallingResponse(second, second, true, nil)
+	reqCtx.observeToolCallingResponse(first, first, false, span)
+	require.False(t, reqCtx.toolCallingUpstreamPresent)
+	require.False(t, reqCtx.toolCallingForwardedPresent)
+	require.False(t, reqCtx.toolCallingResponseRecorded)
+	reqCtx.observeToolCallingResponse(second, second, true, span)
 
 	require.True(t, reqCtx.toolCallingResponseRecorded)
 	require.True(t, reqCtx.toolCallingUpstreamPresent)
 	require.True(t, reqCtx.toolCallingForwardedPresent)
+	span.End()
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	require.ElementsMatch(t, (toolcalling.ResponseSummary{
+		ToolCallingRequested:     true,
+		UpstreamToolCallPresent:  true,
+		ForwardedToolCallPresent: true,
+	}).SpanAttributes(), ended[0].Attributes())
 }
 
 func TestObserveToolCallingResponseSkipsNonToolRequest(t *testing.T) {
+	provider := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	_, span := provider.Tracer("test").Start(context.Background(), "request")
+	t.Cleanup(func() { span.End() })
+	require.True(t, span.IsRecording())
+
 	reqCtx := &RequestContext{toolCallingSurface: reqcommon.APITypeChatCompletions}
-	reqCtx.observeToolCallingResponse([]byte(`{"choices":[]}`), []byte(`{"choices":[]}`), true, nil)
+	reqCtx.observeToolCallingResponse([]byte(`{"choices":[]}`), []byte(`{"choices":[]}`), true, span)
 
 	assert.Nil(t, reqCtx.toolCallingUpstreamDetector)
 	assert.Nil(t, reqCtx.toolCallingForwardedDetector)
