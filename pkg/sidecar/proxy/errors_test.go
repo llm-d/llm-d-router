@@ -17,38 +17,13 @@ limitations under the License.
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"testing"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
-	"github.com/stretchr/testify/require"
 )
-
-func TestJSONErrorForLog(t *testing.T) {
-	require.Nil(t, jsonErrorForLog(nil))
-	other := errors.New("read failure")
-	require.Same(t, other, jsonErrorForLog(other))
-	var target struct {
-		Value int `json:"private_schema_property"`
-	}
-	err := json.Unmarshal([]byte(`{"private_schema_property":987654321098765432109876543210e999}`), &target)
-	require.Error(t, err)
-	var typeError *json.UnmarshalTypeError
-	require.ErrorAs(t, err, &typeError)
-	require.Contains(t, err.Error(), "private_schema_property")
-	wrapped := fmt.Errorf("private_wrapper: %w", err)
-	require.EqualError(t, jsonErrorForLog(wrapped), fmt.Sprintf("invalid JSON value at byte %d", typeError.Offset))
-	require.Contains(t, wrapped.Error(), "987654321098765432109876543210e999", "logging must not mutate the original error")
-	err = json.Unmarshal([]byte(`{"private_schema_property":`), &target)
-	var syntaxError *json.SyntaxError
-	require.ErrorAs(t, err, &syntaxError)
-	require.EqualError(t, jsonErrorForLog(fmt.Errorf("private_wrapper: %w", err)), fmt.Sprintf("invalid JSON syntax at byte %d", syntaxError.Offset))
-}
 
 var _ = Describe("sendError", func() {
 	// Without an explicit header, net/http sniffs the JSON body as text/plain.

@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -33,30 +32,7 @@ const (
 	metricEncodeDuration  = "llm_d_disagg_sidecar_encode_duration_seconds"
 	metricPrefillDuration = "llm_d_disagg_sidecar_prefill_duration_seconds"
 	metricDecodeDuration  = "llm_d_disagg_sidecar_decode_duration_seconds"
-	metricToolFieldStatus = "llm_d_disagg_sidecar_tool_calling_field_status_total"
 )
-
-// toolFieldCounters snapshots all field/status series so unexpected outcomes
-// are included in before/after comparisons.
-func toolFieldCounters(t *testing.T) map[[2]string]float64 {
-	t.Helper()
-	values := make(map[[2]string]float64)
-	family := gatherFamily(t, metricToolFieldStatus)
-	if family == nil {
-		return values
-	}
-	for _, metric := range family.GetMetric() {
-		labels := make(map[string]string)
-		for _, label := range metric.GetLabel() {
-			labels[label.GetName()] = label.GetValue()
-		}
-		require.Len(t, labels, 4)
-		require.Equal(t, "routing_sidecar", labels[toolcalling.MetricLabelComponent])
-		require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
-		values[[2]string{labels[toolcalling.MetricLabelField], labels[toolcalling.MetricLabelStatus]}] = metric.GetCounter().GetValue()
-	}
-	return values
-}
 
 // gatherFamily returns the named metric family from the controller-runtime
 // registry, or nil if it has no samples yet.

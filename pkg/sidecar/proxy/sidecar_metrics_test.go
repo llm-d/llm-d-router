@@ -53,6 +53,77 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
+const metricToolFieldStatus = "llm_d_disagg_sidecar_tool_calling_field_status_total"
+
+// toolFieldCounters snapshots all field/status series so unexpected outcomes
+// are included in before/after comparisons.
+func toolFieldCounters(t *testing.T) map[[2]string]float64 {
+	t.Helper()
+	values := make(map[[2]string]float64)
+	family := gatherFamily(t, metricToolFieldStatus)
+	if family == nil {
+		return values
+	}
+	for _, metric := range family.GetMetric() {
+		labels := make(map[string]string)
+		for _, label := range metric.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		require.Len(t, labels, 4)
+		require.Equal(t, "routing_sidecar", labels[toolcalling.MetricLabelComponent])
+		require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
+		values[[2]string{labels[toolcalling.MetricLabelField], labels[toolcalling.MetricLabelStatus]}] = metric.GetCounter().GetValue()
+	}
+	return values
+}
+
+func toolFieldDelta(before, after map[[2]string]float64) map[[2]string]float64 {
+	delta := make(map[[2]string]float64)
+	for key, value := range after {
+		if change := value - before[key]; change != 0 {
+			delta[key] = change
+		}
+	}
+	return delta
+}
+
+func TestSidecarMetricsEndpoints(t *testing.T) {
+	const modelMetrics = "vllm_test_requests_total 1\n"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/metrics", r.URL.Path)
+		_, _ = io.WriteString(w, modelMetrics)
+	}))
+	defer backend.Close()
+	decoderURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	s := NewProxy(Config{DecoderURL: decoderURL})
+	s.MetricsListener = reserveListener(t)
+	metrics.RecordToolCallingFieldStatuses([]toolcalling.FieldStatus{
+		{Field: toolcalling.FieldTools, Status: toolcalling.FieldStatusPreserved, Observed: true},
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.serveMetrics(ctx) }()
+	client := &http.Client{Timeout: 2 * time.Second}
+	require.Eventually(t, func() bool {
+		resp, err := client.Get("http://" + s.MetricsListener.Addr().String() + "/metrics")
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		return err == nil && resp.StatusCode == http.StatusOK && strings.Contains(string(body),
+			metricToolFieldStatus+`{component="routing_sidecar",direction="request",field="tools",status="preserved"} `)
+	}, 2*time.Second, 20*time.Millisecond)
+	rw := httptest.NewRecorder()
+	s.createRoutes().ServeHTTP(rw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rw.Code)
+	require.Equal(t, modelMetrics, rw.Body.String())
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
 // stageMetrics is a point-in-time copy of the per-stage metrics, compared
 // before and after a request because the collectors are process-global.
 type stageMetrics struct {
@@ -446,12 +517,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 						want[[2]string{string(field), string(status)}] = 1
 					}
 				}
-				delta := map[[2]string]float64{}
-				for key, value := range toolFieldCounters(t) {
-					if change := value - before[key]; change != 0 {
-						delta[key] = change
-					}
-				}
+				delta := toolFieldDelta(before, toolFieldCounters(t))
 				require.Equal(t, want, delta)
 			})
 		}
@@ -525,12 +591,7 @@ func TestECPipelineToolCallingOutcomes(t *testing.T) {
 					want[[2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusDropped)}] = 1
 					want[[2]string{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusChanged)}] = 1
 				}
-				delta := map[[2]string]float64{}
-				for key, value := range toolFieldCounters(t) {
-					if change := value - before[key]; change != 0 {
-						delta[key] = change
-					}
-				}
+				delta := toolFieldDelta(before, toolFieldCounters(t))
 				require.Equal(t, want, delta)
 			})
 		}
@@ -713,6 +774,27 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestJSONErrorForLog(t *testing.T) {
+	require.Nil(t, jsonErrorForLog(nil))
+	other := errors.New("read failure")
+	require.Same(t, other, jsonErrorForLog(other))
+	var target struct {
+		Value int `json:"private_schema_property"`
+	}
+	err := json.Unmarshal([]byte(`{"private_schema_property":987654321098765432109876543210e999}`), &target)
+	require.Error(t, err)
+	var typeError *json.UnmarshalTypeError
+	require.ErrorAs(t, err, &typeError)
+	require.Contains(t, err.Error(), "private_schema_property")
+	wrapped := fmt.Errorf("private_wrapper: %w", err)
+	require.EqualError(t, jsonErrorForLog(wrapped), fmt.Sprintf("invalid JSON value at byte %d", typeError.Offset))
+	require.Contains(t, wrapped.Error(), "987654321098765432109876543210e999", "logging must not mutate the original error")
+	err = json.Unmarshal([]byte(`{"private_schema_property":`), &target)
+	var syntaxError *json.SyntaxError
+	require.ErrorAs(t, err, &syntaxError)
+	require.EqualError(t, jsonErrorForLog(fmt.Errorf("private_wrapper: %w", err)), fmt.Sprintf("invalid JSON syntax at byte %d", syntaxError.Offset))
 }
 
 func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
@@ -911,12 +993,7 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 				require.Empty(t, prefillBodies)
 				require.Empty(t, decodeBodies)
 			}
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				status := toolcalling.FieldStatusPreserved
@@ -1077,12 +1154,7 @@ func TestMooncakeToolCallingMetrics(t *testing.T) {
 				require.Empty(t, prefillBodies)
 				require.Empty(t, decodeBodies)
 			}
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
@@ -1215,12 +1287,7 @@ func TestSharedStorageToolCallingMetrics(t *testing.T) {
 					}
 				}
 			}
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
@@ -1321,12 +1388,7 @@ func TestSharedStorageToolCallingDecodeAbort(t *testing.T) {
 			require.PanicsWithValue(t, http.ErrAbortHandler, func() {
 				s.handleSharedStorage(httptest.NewRecorder(), r, prefillURL.Host, reqcommon.APITypeChatCompletions)
 			})
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			require.Equal(t, map[[2]string]float64{
 				{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}: 1,
 			}, delta)
@@ -1406,12 +1468,7 @@ func TestRunConcurrentPDToolCallingMetrics(t *testing.T) {
 						t.Fatal("prefill was not dispatched")
 					}
 					after := toolFieldCounters(t)
-					delta := make(map[[2]string]float64)
-					for key, value := range after {
-						if change := value - before[key]; change != 0 {
-							delta[key] = change
-						}
-					}
+					delta := toolFieldDelta(before, after)
 					want := make(map[[2]string]float64)
 					if !tt.captureError {
 						want[[2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}] = 1
@@ -1697,17 +1754,13 @@ func TestChunkedDecodeToolCallingMetrics(t *testing.T) {
 						require.Equal(t, 6, countTokensInResponse(response))
 					}
 				}
-				want, delta := map[[2]string]float64{}, map[[2]string]float64{}
+				want := map[[2]string]float64{}
 				if !tt.nonTool {
 					for _, field := range []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat} {
 						want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
 					}
 				}
-				for key, value := range toolFieldCounters(t) {
-					if change := value - before[key]; change != 0 {
-						delta[key] = change
-					}
-				}
+				delta := toolFieldDelta(before, toolFieldCounters(t))
 				require.Equal(t, want, delta)
 			})
 		}
@@ -1829,12 +1882,7 @@ func TestChunkedDecodeToolCallingDispatchBoundaries(t *testing.T) {
 			{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}:      1,
 			{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}: 1,
 		}
-		delta := map[[2]string]float64{}
-		for key, value := range toolFieldCounters(t) {
-			if change := value - before[key]; change != 0 {
-				delta[key] = change
-			}
-		}
+		delta := toolFieldDelta(before, toolFieldCounters(t))
 		require.Equal(t, want, delta)
 	})
 }
@@ -1908,15 +1956,11 @@ func TestDecoderOnlyToolCallingMetrics(t *testing.T) {
 				require.Equal(t, `{"result":"unchanged"}`, rw.Body.String())
 				require.Len(t, bodies, 1)
 				require.Equal(t, tt.body, string(<-bodies))
-				want, delta := map[[2]string]float64{}, map[[2]string]float64{}
+				want := map[[2]string]float64{}
 				for _, field := range tt.fields {
 					want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
 				}
-				for key, value := range toolFieldCounters(t) {
-					if change := value - before[key]; change != 0 {
-						delta[key] = change
-					}
-				}
+				delta := toolFieldDelta(before, toolFieldCounters(t))
 				require.Equal(t, want, delta)
 				var wantAttrs []attribute.KeyValue
 				if len(tt.fields) > 0 {
@@ -2039,12 +2083,7 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 			require.Len(t, prefillBodies, tt.wantPrefill)
 			require.Len(t, decodeBodies, tt.wantDecode)
 
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
@@ -2160,12 +2199,7 @@ func TestP2PToolCallingMetrics(t *testing.T) {
 					}
 					require.Len(t, prefillBodies, wantPrefill)
 					require.Len(t, decodeBodies, wantDecode)
-					delta := make(map[[2]string]float64)
-					for key, value := range toolFieldCounters(t) {
-						if change := value - before[key]; change != 0 {
-							delta[key] = change
-						}
-					}
+					delta := toolFieldDelta(before, toolFieldCounters(t))
 					want := make(map[[2]string]float64)
 					for _, field := range tt.wantFields {
 						want[[2]string{string(field), string(toolcalling.FieldStatusPreserved)}] = 1
@@ -2245,12 +2279,7 @@ func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
 					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
 					require.Equal(t, code, rw.Code)
 					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
-					delta := make(map[[2]string]float64)
-					for key, value := range toolFieldCounters(t) {
-						if change := value - before[key]; change != 0 {
-							delta[key] = change
-						}
-					}
+					delta := toolFieldDelta(before, toolFieldCounters(t))
 					want := make(map[[2]string]float64)
 					if !tt.captureError {
 						want[[2]string{string(toolcalling.FieldTools), string(tt.wantTools)}] = 1
@@ -2573,12 +2602,7 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 			if tt.wantCode == http.StatusOK {
 				require.Equal(t, `{"choices":[]}`, rw.Body.String())
 			}
-			delta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - before[key]; change != 0 {
-					delta[key] = change
-				}
-			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
 			want := make(map[[2]string]float64)
 			for _, field := range tt.wantFields {
 				status := toolcalling.FieldStatusPreserved
@@ -2831,12 +2855,7 @@ func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
-			fieldDelta := make(map[[2]string]float64)
-			for key, value := range toolFieldCounters(t) {
-				if change := value - beforeFields[key]; change != 0 {
-					fieldDelta[key] = change
-				}
-			}
+			fieldDelta := toolFieldDelta(beforeFields, toolFieldCounters(t))
 			assert.Equal(t, map[[2]string]float64{
 				{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}:      1,
 				{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}: 1,
