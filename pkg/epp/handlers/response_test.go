@@ -255,6 +255,7 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 		nonTool      bool
 		skipResponse bool
 		unreadable   bool
+		trailers     bool
 	}{
 		{name: "SSE EOF after tool call", eventStream: true, body: toolEvent, terminalErr: io.EOF, wantPresent: true},
 		{name: "SSE cancelled after tool call", eventStream: true, body: toolEvent, terminalErr: status.Error(codes.Canceled, "cancelled"), wantPresent: true},
@@ -263,6 +264,10 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 		{name: "JSON incomplete response", body: `{"choices":[`, terminalErr: io.EOF},
 		{name: "response headers only", terminalErr: io.EOF},
 		{name: "completed SSE", eventStream: true, body: toolEvent, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
+		{name: "SSE missing final newline", eventStream: true, body: strings.TrimSuffix(toolEvent, "\n"), endOfStream: true, terminalErr: io.EOF, unreadable: true},
+		{name: "SSE unterminated line at EOS", eventStream: true, body: strings.TrimSuffix(toolEvent, "\n\n"), endOfStream: true, terminalErr: io.EOF, unreadable: true},
+		{name: "SSE completed through trailers", eventStream: true, body: toolEvent, trailers: true, terminalErr: io.EOF, wantPresent: true},
+		{name: "SSE unfinished event through trailers", eventStream: true, body: strings.TrimSuffix(toolEvent, "\n"), trailers: true, terminalErr: io.EOF, unreadable: true},
 		{name: "completed JSON", body: toolJSON, endOfStream: true, terminalErr: io.EOF, wantPresent: true},
 		{name: "malformed SSE at EOS", eventStream: true, body: "data: {invalid json}\n\n", endOfStream: true, terminalErr: io.EOF, unreadable: true},
 		{name: "truncated JSON at EOS", body: `{"choices":[`, endOfStream: true, terminalErr: io.EOF, unreadable: true},
@@ -307,6 +312,11 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 					ResponseBody: &extProcPb.HttpBody{Body: []byte(tt.body), EndOfStream: tt.endOfStream},
 				}})
 			}
+			if tt.trailers {
+				srv.reqs = append(srv.reqs, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseTrailers{
+					ResponseTrailers: &extProcPb.HttpTrailers{Trailers: &configPb.HeaderMap{}},
+				}})
+			}
 			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
 			err := NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv)
 			if tt.wantErr {
@@ -325,8 +335,8 @@ func TestProcessRetainsToolCallingTelemetryOnResponseTermination(t *testing.T) {
 			for key, want := range map[string]bool{
 				toolcalling.ResponseAttributeUpstreamToolCallPresent:      tt.wantPresent,
 				toolcalling.ResponseAttributeForwardedToolCallPresent:     tt.wantPresent,
-				toolcalling.ResponseAttributeUpstreamDetectionIncomplete:  !tt.endOfStream || tt.unreadable,
-				toolcalling.ResponseAttributeForwardedDetectionIncomplete: !tt.endOfStream || tt.unreadable,
+				toolcalling.ResponseAttributeUpstreamDetectionIncomplete:  (!tt.endOfStream && !tt.trailers) || tt.unreadable,
+				toolcalling.ResponseAttributeForwardedDetectionIncomplete: (!tt.endOfStream && !tt.trailers) || tt.unreadable,
 			} {
 				if tt.nonTool || tt.skipResponse {
 					require.NotContains(t, attributes, key)
@@ -466,7 +476,7 @@ func TestObserveToolCallingResponseHandlesFragmentedSSE(t *testing.T) {
 		toolCallingResponseEventStream: true,
 	}
 	first := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",")
-	second := []byte("\"content_block\":{\"type\":\"tool_use\"}}\n")
+	second := []byte("\"content_block\":{\"type\":\"tool_use\"}}\n\n")
 	reqCtx.observeToolCallingResponse(first, first, false, span)
 	require.False(t, reqCtx.toolCallingUpstreamPresent)
 	require.False(t, reqCtx.toolCallingForwardedPresent)

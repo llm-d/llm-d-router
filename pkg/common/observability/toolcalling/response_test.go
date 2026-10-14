@@ -115,6 +115,7 @@ func TestResponseDetectorReportsUnreadablePayload(t *testing.T) {
 		{name: "truncated SSE event", eventStream: true, body: `data: {"choices":[`, wantIncomplete: true},
 		{name: "valid SSE without tools", eventStream: true, body: `data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"},
 		{name: "SSE control events", eventStream: true, body: strings.Join([]string{": keepalive", "data:", "data: [DONE]"}, "\n\n") + "\n\n"},
+		{name: "SSE unfinished control line", eventStream: true, body: ": keepalive\nid: 7\nretry: 1000\nevent: ping"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, tt.eventStream)
@@ -159,7 +160,7 @@ func TestResponseDetectorSSEAcrossChunkBoundaries(t *testing.T) {
 			chunks: []string{
 				`data: {"choices":[{"delta":{"tool_`,
 				`calls":[{"index":0,"function":{"name":"sentinel_name",`,
-				`"arguments":"sentinel_arguments"}}]}}]}` + "\r\n",
+				`"arguments":"sentinel_arguments"}}]}}]}` + "\r\n\r\n",
 			},
 		},
 		{
@@ -269,14 +270,42 @@ func TestResponseDetectorDoesNotMatchIrrelevantOrInvalidSSE(t *testing.T) {
 	require.False(t, detector.Observe(nil, true))
 }
 
-func TestResponseDetectorFlushesFinalSSELineAtEndOfStream(t *testing.T) {
-	detector, err := NewResponseDetector(reqcommon.APITypeChatCompletions, true)
-	require.NoError(t, err)
-	payload := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`)
-	require.False(t, detector.Observe(payload, false), "an incomplete SSE line is not parsed before its boundary")
-	require.True(t, detector.Observe(nil, true), "the final unterminated SSE line is parsed at end of stream")
-	require.Empty(t, detector.line)
-	require.Equal(t, make([]byte, cap(detector.line)), detector.line[:cap(detector.line)], "flushed event data is cleared from the detector buffer")
+func TestResponseDetectorRequiresFinalSSEEventBoundary(t *testing.T) {
+	for _, api := range []struct {
+		surface reqcommon.APIType
+		payload string
+	}{
+		{reqcommon.APITypeChatCompletions, `{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`},
+		{reqcommon.APITypeMessages, `{"type":"content_block_start","content_block":{"type":"tool_use"}}`},
+	} {
+		for _, ending := range []struct {
+			name, suffix string
+			complete     bool
+		}{
+			{name: "none"},
+			{name: "LF", suffix: "\n"},
+			{name: "CR", suffix: "\r"},
+			{name: "CRLF", suffix: "\r\n"},
+			{name: "LF-LF", suffix: "\n\n", complete: true},
+			{name: "CR-CR", suffix: "\r\r", complete: true},
+			{name: "CRLF-CRLF", suffix: "\r\n\r\n", complete: true},
+		} {
+			t.Run(api.surface.String()+"/"+ending.name, func(t *testing.T) {
+				detector, err := NewResponseDetector(api.surface, true)
+				require.NoError(t, err)
+				require.False(t, detector.Observe([]byte("data: "+api.payload), false))
+				for _, b := range []byte(ending.suffix) {
+					detector.Observe([]byte{b}, false)
+				}
+				require.Equal(t, ending.complete, detector.Observe(nil, true))
+				require.Equal(t, !ending.complete, detector.DetectionIncomplete())
+				require.Empty(t, detector.line)
+				require.Empty(t, detector.eventData)
+				require.Equal(t, make([]byte, cap(detector.line)), detector.line[:cap(detector.line)])
+				require.Equal(t, make([]byte, cap(detector.eventData)), detector.eventData[:cap(detector.eventData)])
+			})
+		}
+	}
 }
 
 func TestResponseDetectorMessagesSSEWithoutToolUse(t *testing.T) {

@@ -86,8 +86,8 @@ func NewResponseDetector(surface reqcommon.APIType, eventStream bool) (*Response
 
 // Observe adds a body chunk and returns whether a tool call has been observed.
 // Non-streaming responses are parsed once at endOfStream; streaming responses
-// are parsed one completed SSE event at a time. A final unterminated payload
-// is also inspected at endOfStream.
+// are parsed one completed SSE event at a time. Unfinished data events at
+// endOfStream are discarded and marked incomplete.
 func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 	if detector == nil {
 		return false
@@ -104,11 +104,11 @@ func (detector *ResponseDetector) Observe(chunk []byte, endOfStream bool) bool {
 
 	if detector.eventStream {
 		detector.observeSSE(chunk)
-		if endOfStream && !detector.toolCallPresent && !detector.discardingEvent {
-			detector.processSSELine()
-			if !detector.toolCallPresent && !detector.discardingEvent {
-				detector.processSSEEvent()
+		if endOfStream && !detector.toolCallPresent {
+			if len(detector.line) > 0 {
+				detector.processSSELine()
 			}
+			detector.detectionIncomplete = detector.detectionIncomplete || len(detector.eventData) > 0
 		}
 	} else if endOfStream {
 		detector.observeJSON(chunk)
