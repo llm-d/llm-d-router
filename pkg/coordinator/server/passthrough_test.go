@@ -280,8 +280,8 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 		{path: reqcommon.PathChatCompletions, openAI: true},
 		{path: reqcommon.PathCompletions, openAI: true},
 		{path: reqcommon.PathResponses, openAI: true},
-		{path: "/v1/models", openAI: true},
-		{path: "/v1/embeddings", openAI: true},
+		{path: reqcommon.PathModels, openAI: true},
+		{path: reqcommon.PathEmbeddings, openAI: true},
 		{path: reqcommon.PathMessages},
 		{path: reqcommon.PathVLLMGenerate},
 		{path: reqcommon.PathSGLangGenerate},
@@ -337,7 +337,7 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 }
 
 func TestPassthrough_UpstreamErrorsAreForwarded(t *testing.T) {
-	for _, path := range []string{"/v1/models", "/v1/messages/count_tokens"} {
+	for _, path := range []string{reqcommon.PathModels, "/v1/messages/count_tokens"} {
 		t.Run(path, func(t *testing.T) {
 			const body = `{"upstream_error":"preserve this response"}`
 			upstream, _ := newCapturingUpstream(t, http.StatusBadGateway, body)
