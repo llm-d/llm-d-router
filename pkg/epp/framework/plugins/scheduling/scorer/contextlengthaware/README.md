@@ -65,13 +65,12 @@ tokenizer-free `estimate` backend when none is configured.
 A request can carry several prompts, for example a `/v1/completions` prompt
 array. The model server checks each prompt against its maximum model length
 separately, so the routing length is the token count of the longest prompt.
-With cache subtraction it is the total across all prompts.
 
 When `reusableTokensProducerName` is configured, the plugin requires the
 name-bound attribute from that `p2p-source-producer`. Missing request data at
 runtime leaves the total prompt length unchanged. This includes requests for
 which the producer finds no pullable source. The default configuration does
-not consume this attribute and always uses the longest prompt's token count.
+not consume this attribute.
 
 #### P2P Cache-Aware Prefill Work
 
