@@ -430,7 +430,7 @@ func TestProcessExportsToolCallingTelemetryOverOTLP(t *testing.T) {
 			event:    `data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"sentinel_name","input":{"secret":"sentinel_arguments"}}}` + "\n\n",
 		},
 	} {
-		for _, mode := range []string{"JSON", "SSE", "non-tool"} {
+		for _, mode := range []string{"JSON", "SSE", "non-tool", "SSE_value", "SSE_parameters", "SSE_mixed_case", "SSE_raw_precedence", "JSON_SSE_parameter"} {
 			t.Run(api.surface.String()+"/"+mode, func(t *testing.T) {
 				eppmetrics.Reset()
 				body := map[string]any{"model": "m", "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "sentinel_prompt"}}}
@@ -445,16 +445,29 @@ func TestProcessExportsToolCallingTelemetryOverOTLP(t *testing.T) {
 				requestBody, err := json.Marshal(body)
 				require.NoError(t, err)
 				contentType, chunks := "application/json", []string{api.response}
-				if mode == "SSE" {
+				if strings.HasPrefix(mode, "SSE") {
 					contentType = "text/event-stream"
 					chunks = []string{api.event[:3], api.event[3:]}
+				}
+				header := &configPb.HeaderValue{Key: reqcommon.HeaderContentType, RawValue: []byte(contentType)}
+				switch mode {
+				case "SSE_parameters":
+					header.RawValue = []byte("text/event-stream; charset=utf-8")
+				case "SSE_mixed_case":
+					header.RawValue = []byte("Text/Event-Stream")
+				case "JSON_SSE_parameter":
+					header.RawValue = []byte(`application/json; note="text/event-stream"`)
+				case "SSE_value":
+					header.Value, header.RawValue = contentType, nil
+				case "SSE_raw_precedence":
+					header.Value = "application/json"
 				}
 				srv := &replayProcessServer{
 					ctx: context.Background(),
 					reqs: []*extProcPb.ProcessingRequest{
 						newRequestHeaders(map[string]string{":path": api.path, "traceparent": upstreamTraceparent, reqcommon.RequestIDHeaderKey: api.surface.String() + "-" + mode}),
 						{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{Body: requestBody, EndOfStream: true}}},
-						{Request: &extProcPb.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{{Key: "content-type", RawValue: []byte(contentType)}}}}}},
+						{Request: &extProcPb.ProcessingRequest_ResponseHeaders{ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{header}}}}},
 					},
 				}
 				for i, chunk := range chunks {
