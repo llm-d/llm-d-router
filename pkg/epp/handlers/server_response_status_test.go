@@ -111,12 +111,13 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 				}
 				for _, metric := range family.GetMetric() {
 					require.True(t, metricHasLabels(metric, map[string]string{"api_surface": tt.surface}), "wrong API attribution for %s", family.GetName())
-					if metric.GetCounter() != nil {
+					switch {
+					case metric.GetCounter() != nil:
 						got[family.GetName()] += metric.GetCounter().GetValue()
-					} else if metric.GetGauge() != nil {
+					case metric.GetGauge() != nil:
 						require.Zero(t, metric.GetGauge().GetValue(), "running requests must be released")
 						got[family.GetName()]++
-					} else {
+					default:
 						got[family.GetName()] += float64(metric.GetHistogram().GetSampleCount())
 					}
 				}
