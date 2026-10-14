@@ -66,14 +66,18 @@ func TestStandaloneChart(t *testing.T) {
 		namespace string
 		replicas  int
 		ports     []int32
+		tracing   bool
 	}{
-		{"single", "e2e-1", 1, []int32{8000}},
-		{"leader-election", "e2e-2", 3, []int32{8000}},
-		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}},
+		{"single", "e2e-1", 1, []int32{8000}, false},
+		{"leader-election", "e2e-2", 3, []int32{8000}, false},
+		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}, false},
+		{"tracing", "e2e-4", 1, []int32{8000}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := "registry.example:5000/team/router:dev"
-			router, err := renderRouter(context.Background(), testConfig(tc.namespace, image), simpleConfig, tc.replicas, tc.ports)
+			cfg := testConfig(tc.namespace, image)
+			cfg.Tracing = tc.tracing
+			router, err := renderRouter(context.Background(), cfg, simpleConfig, tc.replicas, tc.ports)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,6 +128,22 @@ func TestStandaloneChart(t *testing.T) {
 			for _, flag := range []string{"--allow-experimental-plugins=true", "--drain-timeout=0", "--metrics-endpoint-auth=false"} {
 				if !strings.Contains(strings.Join(args, "\n"), flag) {
 					t.Errorf("missing EPP flag %s", flag)
+				}
+			}
+			if tc.tracing {
+				if !strings.Contains(strings.Join(args, "\n"), "--tracing=true") {
+					t.Fatal("tracing is not enabled")
+				}
+				env, _, _ := unstructured.NestedSlice(epp, "env")
+				values := map[string]string{}
+				for _, entry := range env {
+					e := entry.(map[string]any)
+					if value, ok := e["value"].(string); ok {
+						values[e["name"].(string)] = value
+					}
+				}
+				if values["OTEL_TRACES_EXPORTER"] != "console" || values["OTEL_TRACES_SAMPLER"] != "always_on" {
+					t.Fatalf("unexpected trace export/sampling: %v", values)
 				}
 			}
 			hasElection := strings.Contains(strings.Join(args, "\n"), "--ha-enable-leader-election")
