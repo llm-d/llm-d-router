@@ -178,6 +178,8 @@ type RequestContext struct {
 	toolCallingForwardedDetector   *toolcalling.ResponseDetector
 	toolCallingUpstreamPresent     bool
 	toolCallingForwardedPresent    bool
+	toolCallingForwardedComplete   bool
+	toolCallingForwardedBody       []byte
 	toolCallingResponseRecorded    bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
@@ -399,9 +401,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		},
 	}
 	defer func() {
-		// Finalize observations before detector cleanup and span.End on early exit.
+		// Finalize observations before detector cleanup and span.End.
 		if !reqCtx.responseHeadersReceivedAt.IsZero() {
-			reqCtx.recordToolCallingResponse(span, true)
+			reqCtx.recordToolCallingResponse(span)
 		}
 		reqCtx.clearToolCallingResponseDetectors()
 	}()
@@ -526,7 +528,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if s.evictionLookup != nil {
 				reqCtx.requestDroppedReason = s.evictionLookup.GetReason(evictionRequestID)
 			}
-			if sendErr := reqCtx.updateStateAndSendIfNeeded(srv, logger); sendErr != nil {
+			if sendErr := reqCtx.updateStateAndSendIfNeeded(srv, logger, span); sendErr != nil {
 				return sendErr
 			}
 			return nil
@@ -725,10 +727,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.responseComplete = true
 					reqCtx.responseCompleteTimestamp = time.Now()
 				}
+				reqCtx.observeToolCallingResponse(upstreamChunk, endOfStream, false, span)
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
 				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
-				reqCtx.observeToolCallingResponse(upstreamChunk, chunk, endOfStream, span)
+				if endOfStream && !reqCtx.toolCallingResponseEventStream && reqCtx.toolCallingUpstreamDetector != nil {
+					reqCtx.toolCallingForwardedBody = chunk
+				}
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -769,7 +774,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return nil
 		}
 		loggerTrace.Info("checking", "request state", reqCtx.requestState)
-		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {
+		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger, span); err != nil {
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
@@ -803,15 +808,18 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	start := time.Now()
 	reqCtx.responseComplete = true
 	reqCtx.responseCompleteTimestamp = time.Now()
-	upstreamBody := body
+	reqCtx.observeToolCallingResponse(body, true, false, span)
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
 		body, _ = rewriteModelName(body, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
+		if reqCtx.toolCallingUpstreamDetector != nil {
+			// JSON detection requires the complete document even when Envoy sends split it.
+			reqCtx.toolCallingForwardedBody = body
+		}
 	}
-	reqCtx.observeToolCallingResponse(upstreamBody, body, true, span)
 	if modelStreaming || reqCtx.responseHeadersReceivedAt.IsZero() {
 		reqCtx.responseProcessingDuration += time.Since(start)
 	} else {
@@ -821,32 +829,28 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	}
 }
 
-func (r *RequestContext) observeToolCallingResponse(upstream, forwarded []byte, endOfStream bool, span trace.Span) {
+func (r *RequestContext) observeToolCallingResponse(body []byte, endOfStream, forwarded bool, span trace.Span) {
 	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
 		return
 	}
-	if r.toolCallingUpstreamDetector == nil || r.toolCallingForwardedDetector == nil {
-		upstreamDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
+	detector, present := &r.toolCallingUpstreamDetector, &r.toolCallingUpstreamPresent
+	if forwarded {
+		// Include inspection cost in response processing without timing the Send call.
+		start := time.Now()
+		defer func() { r.responseProcessingDuration += time.Since(start) }()
+		detector, present = &r.toolCallingForwardedDetector, &r.toolCallingForwardedPresent
+	}
+	if *detector == nil {
+		responseDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
 		if err != nil {
 			return
 		}
-		forwardedDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
-		if err != nil {
-			return
-		}
-		r.toolCallingUpstreamDetector = upstreamDetector
-		r.toolCallingForwardedDetector = forwardedDetector
+		*detector = responseDetector
 	}
-
-	r.toolCallingUpstreamPresent = r.toolCallingUpstreamDetector.Observe(upstream, endOfStream)
-	r.toolCallingForwardedPresent = r.toolCallingForwardedDetector.Observe(forwarded, endOfStream)
-	if !endOfStream {
-		return
-	}
-	r.recordToolCallingResponse(span, false)
+	*present = (*detector).Observe(body, endOfStream)
 }
 
-func (r *RequestContext) recordToolCallingResponse(span trace.Span, interrupted bool) {
+func (r *RequestContext) recordToolCallingResponse(span trace.Span) {
 	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
 		return
 	}
@@ -855,8 +859,8 @@ func (r *RequestContext) recordToolCallingResponse(span trace.Span, interrupted 
 		ToolCallingRequested:         true,
 		UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
 		ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
-		UpstreamDetectionIncomplete:  interrupted || r.toolCallingUpstreamDetector.DetectionIncomplete(),
-		ForwardedDetectionIncomplete: interrupted || r.toolCallingForwardedDetector.DetectionIncomplete(),
+		UpstreamDetectionIncomplete:  !r.responseComplete || r.toolCallingUpstreamDetector.DetectionIncomplete(),
+		ForwardedDetectionIncomplete: !r.toolCallingForwardedComplete || r.toolCallingForwardedDetector.DetectionIncomplete(),
 	}).SpanAttributes()...)
 }
 
@@ -864,6 +868,7 @@ func (r *RequestContext) clearToolCallingResponseDetectors() {
 	if r == nil {
 		return
 	}
+	r.toolCallingForwardedBody = nil
 	if r.toolCallingUpstreamDetector != nil {
 		r.toolCallingUpstreamDetector.Close()
 		r.toolCallingUpstreamDetector = nil
@@ -901,7 +906,7 @@ func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, b
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.
 // Order of requests matter in FULL_DUPLEX_STREAMING. For both request and response, the order of response sent back MUST be: Header->Body->Trailer, with trailer being optional.
-func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger) error {
+func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger, span trace.Span) error {
 	loggerTrace := logger.V(logutil.TRACE)
 
 	// Handle eviction — send ImmediateResponse(429) to Envoy to reset the upstream connection.
@@ -981,6 +986,17 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 			if err := srv.Send(response); err != nil {
 				return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
 			}
+			body := response.GetResponseBody().GetResponse().GetBodyMutation().GetStreamedResponse()
+			if r.toolCallingResponseEventStream {
+				r.observeToolCallingResponse(body.GetBody(), body.GetEndOfStream(), true, span)
+			}
+			if body.GetEndOfStream() {
+				r.toolCallingForwardedComplete = true
+			}
+		}
+		if len(r.respBodyResp) > 0 && r.responseComplete && !r.toolCallingResponseEventStream {
+			r.observeToolCallingResponse(r.toolCallingForwardedBody, true, true, span)
+			r.toolCallingForwardedBody = nil
 		}
 		if r.responseComplete {
 			logger.V(logutil.DEFAULT).Info("EPP sent response body back to proxy")
@@ -994,6 +1010,8 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		if err := srv.Send(r.respTrailerResp); err != nil {
 			return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
 		}
+		r.observeToolCallingResponse(nil, true, true, span)
+		r.toolCallingForwardedComplete = true
 		logger.V(logutil.DEBUG).Info("EPP sent trailer back to proxy")
 	}
 	return nil
