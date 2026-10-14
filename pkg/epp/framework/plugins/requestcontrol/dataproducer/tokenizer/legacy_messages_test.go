@@ -947,16 +947,19 @@ func TestLegacyProduceMessagesToolChoice(t *testing.T) {
 	for _, tc := range []struct {
 		name, choice, want, mode, tools string
 	}{
-		{"auto", `{"type":"auto"}`, `"auto"`, "auto", ""},
-		{"any", `{"type":"any"}`, `"required"`, "required", ""},
-		{"none", `{"type":"none"}`, `"none"`, "none", ""},
-		{"named", `{"type":"tool","name":"private_tool"}`, `{"type":"function","function":{"name":"private_tool"}}`, "named", ""},
-		{"parallel disabled", `{"type":"any","disable_parallel_tool_use":true}`, `"required"`, "required", ""},
-		{"parallel enabled", `{"type":"auto","disable_parallel_tool_use":false}`, `"auto"`, "auto", ""},
-		{"null", `null`, `null`, "unknown", ""},
+		{"auto", `"tool_choice":{"type":"auto"}`, `"auto"`, "auto", ""},
+		{"any", `"tool_choice":{"type":"any"}`, `"required"`, "required", ""},
+		{"none", `"tool_choice":{"type":"none"}`, `"none"`, "none", ""},
+		{"named", `"tool_choice":{"type":"tool","name":"private_tool"}`, `{"type":"function","function":{"name":"private_tool"}}`, "named", ""},
+		{"parallel disabled", `"tool_choice":{"type":"any","disable_parallel_tool_use":true}`, `"required"`, "required", ""},
+		{"parallel enabled", `"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, `"auto"`, "auto", ""},
+		{"null", `"tool_choice":null`, `null`, "unknown", ""},
 		{"absent", "", "", "unknown", ""},
 		{"empty tools", "", "", "unknown", `[]`},
 		{"null tools", "", "", "unknown", `null`},
+		{"uppercase choice after canonical", `"tool_choice":{"type":"auto"},"TOOL_CHOICE":{"type":"any"}`, `"auto"`, "auto", ""},
+		{"uppercase choice before canonical", `"TOOL_CHOICE":{"type":"any"},"tool_choice":{"type":"auto"}`, `"auto"`, "auto", ""},
+		{"uppercase choice only", `"TOOL_CHOICE":{"type":"any"}`, "", "unknown", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := setupSpanRecorder(t)
@@ -974,7 +977,7 @@ func TestLegacyProduceMessagesToolChoice(t *testing.T) {
 			}
 			raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":` + tools
 			if tc.choice != "" {
-				raw += `,"tool_choice":` + tc.choice
+				raw += "," + tc.choice
 			}
 			raw += "}"
 			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
@@ -998,14 +1001,23 @@ func TestLegacyProduceMessagesToolChoice(t *testing.T) {
 			}
 			after := renderToolFieldCounts(t)
 			require.Equal(t, float64(1), after["tools/preserved"]-before["tools/preserved"])
-			if tc.choice != "" {
+			if tc.want != "" {
 				require.Equal(t, float64(1), after["tool_choice/preserved"]-before["tool_choice/preserved"])
+			} else {
+				for key, count := range after {
+					if strings.HasPrefix(key, "tool_choice/") {
+						require.Equal(t, before[key], count)
+					}
+				}
 			}
 			require.Len(t, recorder.Ended(), 2)
 			for _, span := range recorder.Ended() {
 				attrs := spanAttrs(span)
 				require.Equal(t, "messages", attrs[semconv.LLMDToolCallingAPISurfaceKey].AsString())
 				require.Equal(t, tc.mode, attrs[semconv.LLMDToolCallingToolChoiceKey].AsString())
+				if tc.want == "" {
+					require.NotContains(t, attrs, semconv.LLMDToolCallingFieldToolChoiceStatusKey)
+				}
 				for _, value := range attrs {
 					require.NotContains(t, value.String(), "private_tool")
 					require.NotContains(t, value.String(), "9007199254740993")
@@ -1019,17 +1031,23 @@ func TestLegacyMessagesRenderFieldChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name, field, status string
 		value               any
+		tools               string
 	}{
-		{"dropped tools", "tools", "dropped", nil},
-		{"changed projected tools", "tools", "changed", "private_replaced_tool"},
-		{"dropped choice", "tool_choice", "dropped", nil},
-		{"changed choice", "tool_choice", "changed", "none"},
+		{"dropped tools", "tools", "dropped", nil, ""},
+		{"changed projected tools", "tools", "changed", "private_replaced_tool", ""},
+		{"dropped choice", "tool_choice", "dropped", nil, ""},
+		{"changed choice", "tool_choice", "changed", "none", ""},
+		{"uppercase tools after canonical", "tools", "changed", "private_replaced_tool", `"tools":[{"name":"private_tool","input_schema":{"type":"object"}}],"TOOLS":[{"name":"private_replaced_tool","input_schema":{"type":"object"}}]`},
+		{"uppercase tools before canonical", "tools", "preserved", "private_tool", `"TOOLS":[{"name":"private_replaced_tool","input_schema":{"type":"object"}}],"tools":[{"name":"private_tool","input_schema":{"type":"object"}}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := `{"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"private_tool","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}`
+			if tc.tools != "" {
+				raw = `{"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"any"},` + tc.tools + "}"
+			}
 			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
 			require.NoError(t, err)
-			if tc.field == "tools" && tc.value != nil {
+			if tc.field == "tools" && tc.value != nil && tc.tools == "" {
 				parsed.Body.Messages.Tools[0].Name = tc.value.(string)
 			}
 			payload := legacyMessagesPayload(parsed.Body.Messages)

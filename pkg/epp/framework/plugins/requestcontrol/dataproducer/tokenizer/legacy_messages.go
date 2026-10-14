@@ -143,26 +143,20 @@ func prepareLegacyMessagesToolFields(body *fwkrh.InferenceRequestBody, payload f
 	default:
 		return nil
 	}
-	var fields struct {
-		Tools      json.RawMessage `json:"tools"`
-		ToolChoice json.RawMessage `json:"tool_choice"`
-	}
-	if json.Unmarshal(raw, &fields) != nil {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
 		return nil
+	}
+	fields := struct {
+		Tools      json.RawMessage
+		ToolChoice json.RawMessage
+	}{
+		Tools:      envelope[string(toolcalling.FieldTools)],
+		ToolChoice: envelope[string(toolcalling.FieldToolChoice)],
 	}
 	sourceSnapshot, err := toolcalling.CaptureValidatedRequestJSON(reqcommon.APITypeMessages, raw)
 	if err != nil {
 		return nil
-	}
-	// Struct decoding accepts case-insensitive keys; telemetry uses exact API names.
-	present, _ := toolcalling.CompareRequests(sourceSnapshot, sourceSnapshot)
-	for _, field := range present {
-		if !field.Observed && field.Field == toolcalling.FieldTools {
-			fields.Tools = nil
-		}
-	}
-	if !sourceSnapshot.Summary().ToolChoicePresent {
-		fields.ToolChoice = nil
 	}
 	expected := fwkrh.PayloadMap{}
 	if fields.Tools != nil {
