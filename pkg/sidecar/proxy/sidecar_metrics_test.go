@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2861,5 +2862,382 @@ func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
 				{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}: 1,
 			}, fieldDelta)
 		})
+	}
+}
+
+func TestToolCallingPassthroughMissingReplica(t *testing.T) {
+	s := NewProxy(Config{})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("local decoder must not run for a missing replica")
+	})
+	source := &toolCallingTestBody{body: `{"tools":[]}`, err: io.EOF}
+	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+	r.Body = source
+	r.Header.Set(routing.DataParallelEndpointHeader, "missing:8000")
+	before := toolFieldCounters(t)
+	rw := httptest.NewRecorder()
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(rw, r)
+	require.Equal(t, http.StatusBadRequest, rw.Code)
+	require.Zero(t, source.reads)
+	require.Same(t, source, r.Body)
+	require.Equal(t, before, toolFieldCounters(t))
+}
+
+func BenchmarkToolCallingPassthrough(b *testing.B) {
+	buf := make([]byte, 32768)
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		for _, size := range []int{1024, 1 << 20} {
+			for _, toolRequest := range []bool{false, true} {
+				body := toolCallingBenchmarkBody(b, api, size, toolRequest)
+				for _, observe := range []bool{false, true} {
+					b.Run(fmt.Sprintf("%s/%d/tools=%t/observe=%t", api, size, toolRequest, observe), func(b *testing.B) {
+						decoder := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+							read := 0
+							for {
+								n, err := r.Body.Read(buf)
+								read += n
+								if err == io.EOF {
+									break
+								}
+								if err != nil {
+									b.Fatal(err)
+								}
+							}
+							if read != len(body) {
+								b.Fatalf("read %d bytes, want %d", read, len(body))
+							}
+							if err := r.Body.Close(); err != nil {
+								b.Fatal(err)
+							}
+						})
+						b.ReportAllocs()
+						b.SetBytes(int64(len(body)))
+						for b.Loop() {
+							r := &http.Request{Body: io.NopCloser(strings.NewReader(body)), ContentLength: int64(len(body))}
+							if observe {
+								observeToolCallingPassthrough(r, api)
+							}
+							decoder.ServeHTTP(nil, r)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// The body is already available to routing; only telemetry work is timed.
+func BenchmarkToolCallingRequestDispatch(b *testing.B) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		for _, size := range []int{1024, 1 << 20} {
+			for _, toolRequest := range []bool{false, true} {
+				body := []byte(toolCallingBenchmarkBody(b, api, size, toolRequest))
+				for _, dispatches := range []int{1, 2} {
+					b.Run(fmt.Sprintf("%s/%d/tools=%t/dispatches=%d", api, size, toolRequest, dispatches), func(b *testing.B) {
+						r := &http.Request{}
+						b.ReportAllocs()
+						b.SetBytes(int64(len(body)))
+						for b.Loop() {
+							fields, err := captureInferenceToolCallingRequest(r, api, body)
+							if err != nil {
+								b.Fatal(err)
+							}
+							for range dispatches {
+								if _, err := fields.compareDispatched(body); err != nil {
+									b.Fatal(err)
+								}
+							}
+							fields.report(r.Context())
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func toolCallingBenchmarkBody(b *testing.B, api reqcommon.APIType, size int, toolRequest bool) string {
+	b.Helper()
+	body := map[string]any{reqcommon.FieldMessages: []any{map[string]any{"role": "user", "content": strings.Repeat("x", size)}}}
+	if toolRequest {
+		schema := map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}}
+		if api == reqcommon.APITypeChatCompletions {
+			body[string(toolcalling.FieldTools)] = []any{map[string]any{"type": "function", "function": map[string]any{"name": "weather", "parameters": schema}}}
+			body[string(toolcalling.FieldToolChoice)] = "auto"
+		} else {
+			body[string(toolcalling.FieldTools)] = []any{map[string]any{"name": "weather", "input_schema": schema}}
+			body[string(toolcalling.FieldToolChoice)] = map[string]any{"type": "auto"}
+		}
+	}
+	encoded, err := json.Marshal(body)
+	require.NoError(b, err)
+	return string(encoded)
+}
+
+func TestToolCallingJSONStream(t *testing.T) {
+	for _, body := range []string{
+		`{}`, ` { "tools" : null } `,
+		`{"tools":[{"a":9007199254740993,"b":-1.20e+3}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{}}`,
+		`{"messages":[{"tools":[],"content":"tools \\\" \\u1234"}],"to\u006fls":[]}`,
+		`{"tools":[1],"tools":null,"tool_choice":true}`,
+		`{"messages":["` + strings.Repeat("x", 1<<20) + `"],"tools":[]}`,
+		`{"` + strings.Repeat("x", 1<<20) + `":1,"tool_choice":"none"}`,
+		`{"unused":[{},[],true,false,null,-0,1.5e-2],"tools":[]}`,
+		`{"\u0070\u0061\u0072\u0061\u006c\u006c\u0065\u006c\u005f\u0074\u006f\u006f\u006c\u005f\u0063\u0061\u006c\u006c\u0073":true}`,
+		`{"tools":["` + strings.Repeat("x", 128<<10) + `"]}`,
+		`{"unused":` + strings.Repeat("9", 128<<10) + `,"tools":[]}`,
+		`{"unused":` + strings.Repeat("[", 9999) + `0` + strings.Repeat("]", 9999) + `,"tools":[]}`,
+		`{"unused":` + strings.Repeat("[", 10000) + `0` + strings.Repeat("]", 10000) + `,"tools":[]}`,
+		`{"tools":[],"unused":1.0E+20}`, `{"unused":"\ud800","tools":[]}`,
+		`{"unused":[],"tools":[],}`, `{"unused":[}`, `{"unused":{]}`,
+		`{"unused":truefalse}`, `{"unused":false null}`, `{"unused":-}`,
+		`{"unused":1.}`, `{"unused":1e+}`, `{"unused":+1}`, `{"unused":NaN}`,
+		"{\"unused\":\"\x00\",\"tools\":[]}",
+		`{"tools":`, `{"tools":[]} garbage`, `{"unused":"bad\q","tools":[]}`,
+		`{"unused":"bad\u12xz","tools":[]}`, `{"unused":[1,],"tools":[]}`,
+		`{"unused":{"a":1,},"tools":[]}`, `{"unused":01,"tools":[]}`,
+		`{"unused":1e,"tools":[]}`, `{"unused":` + "true"[:3] + `,"tools":[]}`,
+		`[]`, `null`, `{} {}`, `{"tools":[],"unfinished":"`, "",
+	} {
+		for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+			before, wantErr := toolcalling.CaptureRequestJSON(api, []byte(body))
+			for _, chunkSize := range []int{1, 7, 32768} {
+				stream := newToolCallingJSONStream(api)
+				for offset := 0; offset < len(body); offset += chunkSize {
+					stream.feed([]byte(body[offset:min(offset+chunkSize, len(body))]))
+				}
+				raw, ok := stream.finish()
+				require.Equal(t, wantErr == nil, ok, "body prefix %q, chunk %d", body[:min(60, len(body))], chunkSize)
+				if !ok {
+					continue
+				}
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(raw, &fields))
+				for field := range fields {
+					require.Contains(t, []string{string(toolcalling.FieldTools), string(toolcalling.FieldToolChoice), string(toolcalling.FieldParallelToolCalls), string(toolcalling.FieldResponseFormat)}, field)
+				}
+				after, err := toolcalling.CaptureRequestJSON(api, raw)
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(before, after)
+				require.NoError(t, err)
+				for _, status := range statuses {
+					require.Equal(t, toolcalling.FieldStatusPreserved, status.Status)
+				}
+				require.Equal(t, before.Summary(), after.Summary())
+			}
+		}
+	}
+}
+
+func TestToolCallingJSONStreamSkipsUnsupportedAPI(t *testing.T) {
+	stream := newToolCallingJSONStream(reqcommon.APITypeResponses)
+	stream.feed([]byte(`{"tools":[]}`))
+	_, ok := stream.finish()
+	require.False(t, ok)
+}
+
+func FuzzToolCallingJSONStream(f *testing.F) {
+	for _, body := range []string{
+		`{}`, `{"tools":[],"tool_choice":"auto"}`, `{"text":"escaped\"","tools":null}`,
+		`{"a":[1,true,null]}`, `{"tools":[]}x`, `{"to\u006fls":[{"x":-0.123E+4}]}`,
+		`{"tools":[],"tools":null}`, `{"text":"\ud800\udc00","tool_choice":{"name":"f"}}`,
+	} {
+		f.Add(body, uint8(1))
+	}
+	f.Fuzz(func(t *testing.T, body string, split uint8) {
+		stream := newToolCallingJSONStream(reqcommon.APITypeChatCompletions)
+		chunkSize := int(split) + 1
+		for offset := 0; offset < len(body); offset += chunkSize {
+			stream.feed([]byte(body[offset:min(offset+chunkSize, len(body))]))
+		}
+		raw, ok := stream.finish()
+		before, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(body))
+		require.Equal(t, err == nil, ok)
+		if ok {
+			after, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, raw)
+			require.NoError(t, err)
+			statuses, err := toolcalling.CompareRequests(before, after)
+			require.NoError(t, err)
+			for _, status := range statuses {
+				require.Equal(t, toolcalling.FieldStatusPreserved, status.Status)
+			}
+		}
+	})
+}
+
+func BenchmarkToolCallingJSONStream(b *testing.B) {
+	for _, size := range []int{1024, 1 << 20} {
+		body, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", size)})
+		require.NoError(b, err)
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				stream := newToolCallingJSONStream(reqcommon.APITypeChatCompletions)
+				for offset := 0; offset < len(body); offset += 32768 {
+					stream.feed(body[offset:min(offset+32768, len(body))])
+				}
+				_, ok := stream.finish()
+				if !ok {
+					b.Fatal("valid body was not captured")
+				}
+			}
+		})
+	}
+}
+
+func TestCaptureInferenceToolCallingRequest(t *testing.T) {
+	const original = `{"tools":[],"tool_choice":"auto"}`
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
+		t.Run(api.String(), func(t *testing.T) {
+			baseline, err := captureToolCallingRequest(api, []byte(original))
+			require.NoError(t, err)
+			_, err = baseline.compareDispatched([]byte(`{}`))
+			require.NoError(t, err)
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
+			// A cloned handoff uses the snapshot, not the modified body or prior outcomes.
+			first, err := captureInferenceToolCallingRequest(r.Clone(r.Context()), api, []byte(`{`))
+			require.NoError(t, err)
+			require.Empty(t, first.fieldStatuses())
+			_, err = first.compareDispatched([]byte(`{"tools":[],"tool_choice":"none"}`))
+			require.NoError(t, err)
+			assertToolCallingStatuses(t, first.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusChanged,
+			})
+			second, err := captureInferenceToolCallingRequest(r, api, []byte(`{}`))
+			require.NoError(t, err)
+			require.NotSame(t, first, second)
+			require.Empty(t, second.fieldStatuses())
+			_, err = second.compareDispatched([]byte(original))
+			require.NoError(t, err)
+			assertToolCallingStatuses(t, second.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
+			})
+			assertToolCallingStatuses(t, baseline.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+				toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped,
+			})
+		})
+	}
+	t.Run("no handoff", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, []byte(original))
+		require.NoError(t, err)
+		_, err = request.compareDispatched([]byte(`{}`))
+		require.NoError(t, err)
+		assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
+			toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped,
+		})
+	})
+	t.Run("failed capture stays disabled", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, (*toolCallingRequest)(nil)))
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, []byte(original))
+		require.Error(t, err)
+		require.Nil(t, request)
+	})
+	t.Run("API mismatch", func(t *testing.T) {
+		baseline, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(original))
+		require.NoError(t, err)
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
+		request, err := captureInferenceToolCallingRequest(r, reqcommon.APITypeMessages, []byte(original))
+		require.Error(t, err)
+		require.Nil(t, request)
+	})
+}
+
+func TestToolCallingRequestAggregatesDispatches(t *testing.T) {
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[1],"tool_choice":"auto"}`))
+	require.NoError(t, err)
+	// Preparing a request without dispatching it supplies no preservation evidence.
+	require.Empty(t, request.fieldStatuses())
+	for _, body := range []string{
+		`{"tools":[1],"tool_choice":"auto"}`,
+		`{"tools":[2],"tool_choice":"auto"}`,
+		`{"tool_choice":"auto"}`,
+		`{"tools":[1],"tool_choice":"auto"}`,
+		`{"tools":[1],"tool_choice":"auto"}`,
+	} {
+		_, err := request.compareDispatched([]byte(body))
+		require.NoError(t, err)
+	}
+	want := map[toolcalling.Field]toolcalling.FieldStatusValue{
+		toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
+	}
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+	// Callers cannot change the aggregate through a returned slice.
+	statuses := request.fieldStatuses()
+	statuses[0].Status = toolcalling.FieldStatusChanged
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+	stage, err := request.compareDispatched([]byte(`{"tools":[1],"tool_choice":"auto"}`))
+	require.NoError(t, err)
+	require.Equal(t, toolcalling.FieldStatusPreserved, stage[0].Status)
+	assertToolCallingStatuses(t, request.fieldStatuses(), want)
+}
+
+func TestToolCallingRequestCaptureFailures(t *testing.T) {
+	for _, body := range []string{`{"tools":`, `null`, `[]`, ``} {
+		request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(body))
+		require.Error(t, err)
+		require.Nil(t, request)
+		_, err = request.compareDispatched([]byte(`{"tools":[]}`))
+		require.NoError(t, err)
+		require.Empty(t, request.fieldStatuses())
+	}
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	_, err = request.compareDispatched([]byte(`{"tools":`))
+	require.Error(t, err)
+	require.Empty(t, request.fieldStatuses())
+	_, err = request.compareDispatched([]byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	_, err = request.compareDispatched([]byte(`null`))
+	require.Error(t, err)
+	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusPreserved})
+}
+
+func TestToolCallingRequestUnsupportedAPI(t *testing.T) {
+	request, err := captureToolCallingRequest(reqcommon.APITypeResponses, []byte(`{"tools":[]}`))
+	require.Error(t, err)
+	require.Nil(t, request)
+}
+
+func TestToolCallingRequestStatusPrecedence(t *testing.T) {
+	statuses := []toolcalling.FieldStatusValue{toolcalling.FieldStatusPreserved, toolcalling.FieldStatusChanged, toolcalling.FieldStatusDropped, toolcalling.FieldStatusRejected}
+	for i, first := range statuses {
+		for j, second := range statuses {
+			t.Run(string(first)+"/"+string(second), func(t *testing.T) {
+				request := &toolCallingRequest{}
+				for _, status := range []toolcalling.FieldStatusValue{first, second} {
+					request.mergeStatuses([]toolcalling.FieldStatus{{Field: toolcalling.FieldTools, Status: status, Observed: true}})
+				}
+				assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: statuses[max(i, j)]})
+			})
+		}
+	}
+}
+
+func TestToolCallingRequestOwnsSnapshot(t *testing.T) {
+	body := []byte(`{"tools":[1]}`)
+	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, body)
+	require.NoError(t, err)
+	copy(body, `{"tools":[2]}`)
+	_, err = request.compareDispatched(body)
+	require.NoError(t, err)
+	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusChanged})
+}
+
+func assertToolCallingStatuses(t *testing.T, statuses []toolcalling.FieldStatus, want map[toolcalling.Field]toolcalling.FieldStatusValue) {
+	t.Helper()
+	require.Len(t, statuses, len(want))
+	seen := make(map[toolcalling.Field]bool, len(statuses))
+	for _, result := range statuses {
+		require.True(t, result.Observed)
+		require.False(t, seen[result.Field], "duplicate outcome for %s", result.Field)
+		seen[result.Field] = true
+		require.Contains(t, want, result.Field)
+		require.Equal(t, want[result.Field], result.Status)
 	}
 }

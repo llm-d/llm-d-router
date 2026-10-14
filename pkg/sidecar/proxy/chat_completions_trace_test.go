@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -330,6 +331,119 @@ func startSidecarOTLPCollector(t *testing.T, logger logr.Logger) (<-chan *coltra
 		otel.SetErrorHandler(previousErrorHandler)
 	})
 	return exports, shutdown
+}
+
+func TestToolCallingPassthroughBody(t *testing.T) {
+	const body = `{"tools":[],"tool_choice":"auto"}`
+	for _, tt := range []struct {
+		name    string
+		length  int64
+		read    int
+		readErr error
+		want    bool
+	}{
+		{name: "known length without EOF", length: int64(len(body)), read: len(body), want: true},
+		{name: "unknown length with EOF", length: -1, read: len(body), readErr: io.EOF, want: true},
+		{name: "zero length treated as unknown", read: len(body), readErr: io.EOF, want: true},
+		{name: "unknown length without EOF", length: -1, read: len(body)},
+		{name: "partial known length", length: int64(len(body)), read: 4},
+		{name: "short body EOF", length: int64(len(body)) + 1, read: len(body), readErr: io.EOF},
+		{name: "read failure with bytes", length: int64(len(body)), read: len(body), readErr: io.ErrUnexpectedEOF},
+		{name: "canceled read with bytes", length: int64(len(body)), read: len(body), readErr: context.Canceled},
+		{name: "unread body", length: int64(len(body))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			closeErr := errors.New("close failure")
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			ctx, span := provider.Tracer(tracerScope).Start(context.Background(), "forward_request")
+			ctx = context.WithValue(ctx, toolCallingRequestSpanKey, span)
+			source := &toolCallingTestBody{body: body[:tt.read], err: tt.readErr, closeErr: closeErr}
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil).WithContext(ctx)
+			r.Body, r.ContentLength = source, tt.length
+			before := toolFieldCounters(t)
+			observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
+			require.Zero(t, source.reads, "observation must not pre-read")
+			require.Equal(t, tt.length, r.ContentLength)
+			if tt.read > 0 {
+				buf := make([]byte, len(body))
+				n, err := r.Body.Read(buf)
+				require.Equal(t, body[:tt.read], string(buf[:n]))
+				require.Equal(t, tt.readErr, err)
+				_, _ = r.Body.Read(buf) // A second EOF must not duplicate metrics.
+			}
+			require.ErrorIs(t, r.Body.Close(), closeErr)
+			require.Equal(t, 1, source.closes)
+			want := map[[2]string]float64{}
+			if tt.want {
+				want[[2]string{string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved)}] = 1
+				want[[2]string{string(toolcalling.FieldToolChoice), string(toolcalling.FieldStatusPreserved)}] = 1
+			}
+			delta := toolFieldDelta(before, toolFieldCounters(t))
+			require.Equal(t, want, delta)
+			span.End()
+			if tt.want {
+				snapshot, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(body))
+				require.NoError(t, err)
+				statuses, err := toolcalling.CompareRequests(snapshot, snapshot)
+				require.NoError(t, err)
+				require.ElementsMatch(t, snapshot.SpanAttributes(statuses), recorder.Ended()[0].Attributes())
+			} else {
+				require.Empty(t, recorder.Ended()[0].Attributes())
+			}
+		})
+	}
+}
+
+type toolCallingTestBody struct {
+	body     string
+	err      error
+	closeErr error
+	reads    int
+	closes   int
+}
+
+func (b *toolCallingTestBody) Read(p []byte) (int, error) {
+	b.reads++
+	n := copy(p, b.body)
+	b.body = b.body[n:]
+	return n, b.err
+}
+
+func (b *toolCallingTestBody) Close() error {
+	b.closes++
+	return b.closeErr
+}
+
+func TestToolCallingPassthroughConcurrentClose(t *testing.T) {
+	reader, writer := io.Pipe()
+	r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+	r.Body, r.ContentLength = reader, -1
+	observeToolCallingPassthrough(r, reqcommon.APITypeChatCompletions)
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, r.Body)
+		done <- err
+	}()
+	_, err := writer.Write([]byte(`{"tools":`))
+	require.NoError(t, err)
+	require.NoError(t, r.Body.Close())
+	require.ErrorIs(t, <-done, io.ErrClosedPipe)
+	require.NoError(t, writer.Close())
+}
+
+func TestToolCallingPassthroughSkipsUnsupportedOrEmptyBody(t *testing.T) {
+	for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeCompletions} {
+		for _, body := range []io.ReadCloser{nil, http.NoBody, io.NopCloser(strings.NewReader(`{"tools":[]}`))} {
+			if api == reqcommon.APITypeChatCompletions && body != nil && body != http.NoBody {
+				continue
+			}
+			r := &http.Request{Body: body}
+			observeToolCallingPassthrough(r, api)
+			require.True(t, body == r.Body)
+		}
+	}
 }
 
 func TestToolCallingRequestSpans(t *testing.T) {
