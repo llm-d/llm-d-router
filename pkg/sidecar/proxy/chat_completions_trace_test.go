@@ -91,8 +91,10 @@ func TestSidecarToolCallingOTLP(t *testing.T) {
 								context trace.SpanContext
 							}{stage, trace.SpanContextFromContext(ctx)}
 						}
+						prefillReceived := make(chan struct{})
 						prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 							readRequest(r, "prefill")
+							close(prefillReceived)
 							statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
 						}))
 						defer prefill.Close()
@@ -104,6 +106,9 @@ func TestSidecarToolCallingOTLP(t *testing.T) {
 								stage = "forward_request"
 							}
 							readRequest(r, stage)
+							if connector == "sglang" {
+								<-prefillReceived
+							}
 							if outcome == "interrupted" {
 								w.Header().Set("Content-Length", "1000")
 								_, _ = io.WriteString(w, responseSecret)

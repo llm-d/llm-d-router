@@ -824,7 +824,7 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 		{name: "malformed body", body: `{"tools":`, wantCode: 400},
 		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200},
 		{name: "native generate excluded", api: reqcommon.APITypeSGLangGenerate, body: chatBody, wantCode: 200},
-		{name: "prefill error does not reject fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantFields: chatFields},
+		{name: "prefill error after decode preserves fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantFields: chatFields},
 		{name: "decode error does not reject fields", body: chatBody, decodeStatus: 500, wantCode: 500, wantFields: chatFields},
 		{name: "handler initialization error", body: chatBody, invalidTarget: true, wantCode: 502},
 		{name: "original client choice retained", body: chatBody, baselineBody: `{"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"none","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`, wantCode: 200, wantFields: chatFields, wantChoice: toolcalling.FieldStatusChanged},
@@ -833,11 +833,20 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prefillBodies := make(chan []byte, 1)
 			decodeBodies := make(chan []byte, 1)
+			prefillReceived, decodeDone := make(chan struct{}), make(chan struct{})
 			upstream := func(bodies chan []byte, code int) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					raw, err := io.ReadAll(r.Body)
 					assert.NoError(t, err)
 					bodies <- raw
+					if bodies == prefillBodies {
+						close(prefillReceived)
+						if code != 0 && isHTTPError(code) {
+							<-decodeDone
+						}
+					} else {
+						<-prefillReceived
+					}
 					if code == 0 {
 						code = http.StatusOK
 					}
@@ -875,6 +884,7 @@ func TestSGLangToolCallingMetrics(t *testing.T) {
 			before := toolFieldCounters(t)
 			beforeStages := snapshotStageMetrics(t)
 			routes.ServeHTTP(rw, r)
+			close(decodeDone)
 			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 			if tt.wantCode != 400 && !tt.invalidTarget {
 				require.Eventually(t, func() bool {
@@ -947,7 +957,7 @@ func TestMooncakeToolCallingMetrics(t *testing.T) {
 		{name: "nested tools", body: `{"messages":[{"tools":[]}]}`, wantCode: 200, wantForward: true, wantQueries: 1},
 		{name: "malformed body", body: `{"tools":`, wantCode: 400},
 		{name: "Responses excluded", api: reqcommon.APITypeResponses, body: chatBody, wantCode: 200, wantForward: true, wantQueries: 1},
-		{name: "prefill error does not reject fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: chatFields},
+		{name: "prefill error after decode preserves fields", body: chatBody, prefillStatus: 400, wantCode: 200, wantForward: true, wantQueries: 1, wantFields: chatFields},
 		{name: "decode error does not reject fields", body: chatBody, decodeStatus: 500, wantCode: 500, wantForward: true, wantQueries: 1, wantFields: chatFields},
 		{name: "bootstrap error", body: chatBody, bootstrapStatus: 503, wantCode: 502, wantQueries: 1},
 		{name: "malformed bootstrap response", body: chatBody, bootstrapResponse: `{`, wantCode: 502, wantQueries: 1},
@@ -983,11 +993,20 @@ func TestMooncakeToolCallingMetrics(t *testing.T) {
 			}
 			prefillBodies := make(chan forwardedRequest, 1)
 			decodeBodies := make(chan forwardedRequest, 1)
+			prefillReceived, decodeDone := make(chan struct{}), make(chan struct{})
 			upstream := func(bodies chan forwardedRequest, code int) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					raw, readErr := io.ReadAll(r.Body)
 					assert.NoError(t, readErr)
 					bodies <- forwardedRequest{body: raw, rank: r.Header.Get(requestHeaderDataParallelRank)}
+					if bodies == prefillBodies {
+						close(prefillReceived)
+						if code != 0 && isHTTPError(code) {
+							<-decodeDone
+						}
+					} else {
+						<-prefillReceived
+					}
 					if code == 0 {
 						code = http.StatusOK
 					}
@@ -1018,6 +1037,7 @@ func TestMooncakeToolCallingMetrics(t *testing.T) {
 			before := toolFieldCounters(t)
 			beforeStages := snapshotStageMetrics(t)
 			s.createRoutes().ServeHTTP(rw, r)
+			close(decodeDone)
 			require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 			require.Equal(t, tt.wantQueries, queries.Load())
 			if tt.wantForward {
