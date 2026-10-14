@@ -111,14 +111,6 @@ func (r *toolCallingRequest) compareDispatched(body []byte) ([]toolcalling.Field
 	return statuses, nil
 }
 
-// rejectFields is only for explicit rejection of the captured client fields.
-// Network failures, cancellation, and generic HTTP errors do not establish it.
-func (r *toolCallingRequest) rejectFields(fields ...toolcalling.Field) {
-	if r != nil {
-		r.mergeStatuses(toolcalling.RejectedFieldStatuses(r.original, fields...))
-	}
-}
-
 // Stage spans describe their dispatch; request metrics keep the worst outcome.
 func (r *toolCallingRequest) compareDispatchedForSpan(body []byte, span trace.Span) {
 	statuses, err := r.compareDispatched(body)

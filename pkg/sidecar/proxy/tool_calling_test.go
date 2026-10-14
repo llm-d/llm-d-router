@@ -383,7 +383,8 @@ func TestCaptureInferenceToolCallingRequest(t *testing.T) {
 		t.Run(api.String(), func(t *testing.T) {
 			baseline, err := captureToolCallingRequest(api, []byte(original))
 			require.NoError(t, err)
-			baseline.rejectFields(toolcalling.FieldTools)
+			_, err = baseline.compareDispatched([]byte(`{}`))
+			require.NoError(t, err)
 			r := httptest.NewRequest(http.MethodPost, "/", nil)
 			r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, baseline))
 			// A cloned handoff uses the snapshot, not the modified body or prior outcomes.
@@ -405,7 +406,7 @@ func TestCaptureInferenceToolCallingRequest(t *testing.T) {
 				toolcalling.FieldTools: toolcalling.FieldStatusPreserved, toolcalling.FieldToolChoice: toolcalling.FieldStatusPreserved,
 			})
 			assertToolCallingStatuses(t, baseline.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
-				toolcalling.FieldTools: toolcalling.FieldStatusRejected,
+				toolcalling.FieldTools: toolcalling.FieldStatusDropped, toolcalling.FieldToolChoice: toolcalling.FieldStatusDropped,
 			})
 		})
 	}
@@ -520,23 +521,6 @@ func TestToolCallingRequestAggregatesDispatches(t *testing.T) {
 	assertToolCallingStatuses(t, request.fieldStatuses(), want)
 }
 
-func TestToolCallingRequestExplicitRejection(t *testing.T) {
-	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[],"tool_choice":null}`))
-	require.NoError(t, err)
-	_, err = request.compareDispatched([]byte(`{}`))
-	require.NoError(t, err)
-	request.rejectFields(toolcalling.FieldTools, toolcalling.FieldToolChoice)
-	_, err = request.compareDispatched([]byte(`{"tools":[],"tool_choice":null}`))
-	require.NoError(t, err)
-	assertToolCallingStatuses(t, request.fieldStatuses(), map[toolcalling.Field]toolcalling.FieldStatusValue{
-		toolcalling.FieldTools: toolcalling.FieldStatusRejected, toolcalling.FieldToolChoice: toolcalling.FieldStatusRejected,
-	})
-	plain, err := captureToolCallingRequest(reqcommon.APITypeMessages, []byte(`{"messages":[]}`))
-	require.NoError(t, err)
-	plain.rejectFields(toolcalling.FieldTools)
-	require.Empty(t, plain.fieldStatuses())
-}
-
 func TestToolCallingRequestCaptureFailures(t *testing.T) {
 	for _, body := range []string{`{"tools":`, `null`, `[]`, ``} {
 		request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(body))
@@ -544,7 +528,6 @@ func TestToolCallingRequestCaptureFailures(t *testing.T) {
 		require.Nil(t, request)
 		_, err = request.compareDispatched([]byte(`{"tools":[]}`))
 		require.NoError(t, err)
-		request.rejectFields(toolcalling.FieldTools)
 		require.Empty(t, request.fieldStatuses())
 	}
 	request, err := captureToolCallingRequest(reqcommon.APITypeChatCompletions, []byte(`{"tools":[]}`))
@@ -563,31 +546,6 @@ func TestToolCallingRequestUnsupportedAPI(t *testing.T) {
 	request, err := captureToolCallingRequest(reqcommon.APITypeResponses, []byte(`{"tools":[]}`))
 	require.Error(t, err)
 	require.Nil(t, request)
-}
-
-func TestToolCallingRequestRejectsOnlyIdentifiedFields(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		body   string
-		fields []toolcalling.Field
-		want   map[toolcalling.Field]toolcalling.FieldStatusValue
-	}{
-		{name: "unspecified"},
-		{name: "absent field", body: `{"tool_choice":null}`, fields: []toolcalling.Field{toolcalling.FieldTools}},
-		{name: "unsupported field", fields: []toolcalling.Field{toolcalling.FieldResponseFormat}},
-		{name: "one identified field", fields: []toolcalling.Field{toolcalling.FieldTools}, want: map[toolcalling.Field]toolcalling.FieldStatusValue{toolcalling.FieldTools: toolcalling.FieldStatusRejected}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			body := tt.body
-			if body == "" {
-				body = `{"tools":[],"tool_choice":null,"response_format":null}`
-			}
-			request, err := captureToolCallingRequest(reqcommon.APITypeMessages, []byte(body))
-			require.NoError(t, err)
-			request.rejectFields(tt.fields...)
-			assertToolCallingStatuses(t, request.fieldStatuses(), tt.want)
-		})
-	}
 }
 
 func TestToolCallingRequestStatusPrecedence(t *testing.T) {
