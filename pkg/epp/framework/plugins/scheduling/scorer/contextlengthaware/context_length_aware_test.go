@@ -73,14 +73,14 @@ func createHundredTokenRequest() *scheduling.InferenceRequest {
 }
 
 func createPromptsRequest(promptLengths ...int) *scheduling.InferenceRequest {
-	prompts := make([]fwkrh.PromptTokens, len(promptLengths))
+	arrays := make([][]uint32, len(promptLengths))
 	for i, n := range promptLengths {
-		prompts[i] = fwkrh.PromptTokens{TokenIDs: make([]uint32, n)}
+		arrays[i] = make([]uint32, n)
 	}
 	return &scheduling.InferenceRequest{
 		RequestID: "test-request",
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: prompts},
+			TokenizedRequest: fwkrh.NewTokenizedRequest(arrays),
 		},
 	}
 }
@@ -236,7 +236,7 @@ func TestReusableTokensFilter(t *testing.T) {
 			"10.0.0.2", map[string]string{testPrefillWorkRangeLabel: "51-100"}),
 	}
 
-	t.Run("disabled configuration keeps total length", func(t *testing.T) {
+	t.Run("disabled configuration ignores reusable tokens", func(t *testing.T) {
 		plugin := NewContextLengthAware("default", &contextLengthAwareParameters{
 			Label:           testPrefillWorkRangeLabel,
 			EnableFiltering: true,
@@ -318,14 +318,20 @@ func TestReusableTokensFilter(t *testing.T) {
 		assert.Equal(t, "short", filtered[0].GetMetadata().ID.Name)
 	})
 
-	t.Run("multi-prompt work counts every prompt", func(t *testing.T) {
+	t.Run("multi-prompt subtracts reusable tokens from the total", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
 		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
 			Label:                      testPrefillWorkRangeLabel,
 			EnableFiltering:            true,
-			ReusableTokensProducerName: testReusableTokensProducerName,
+			ReusableTokensProducerName: producerName,
 		})
+		request := createPromptsRequest(50, 50)
+		request.PutAttribute(
+			attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			attrprefix.ReusablePrefixTokens(10),
+		)
 
-		filtered := plugin.Filter(ctx, createPromptsRequest(50, 50), endpoints)
+		filtered := plugin.Filter(ctx, request, endpoints)
 		require.Len(t, filtered, 1)
 		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
 	})
