@@ -129,6 +129,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// kv_transfer_params tells a model server which pod to pull KV from, so
+	// only the KV connector and the EPP may write it. Prefill and decode
+	// replace it, but the conditional-decode probe forwards the client body
+	// as is, so a client copy is dropped here for every step.
+	delete(parsed, reqcommon.FieldKVTransferParams)
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 

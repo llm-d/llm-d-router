@@ -352,6 +352,40 @@ func TestIsTCPPort(t *testing.T) {
 	}
 }
 
+func TestParseHostPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		wantHost string
+		wantPort int
+		wantOK   bool
+	}{
+		{"ipv4", "10.0.0.7:7779", "10.0.0.7", 7779, true},
+		{"ipv6", "[fd00::2]:7777", "fd00::2", 7777, true},
+		{"surrounding whitespace", " 10.0.0.7:7779\t", "10.0.0.7", 7779, true},
+		{"lowest port", "10.0.0.7:1", "10.0.0.7", 1, true},
+		{"highest port", "10.0.0.7:65535", "10.0.0.7", 65535, true},
+		{"empty", "", "", 0, false},
+		{"whitespace only", "  ", "", 0, false},
+		{"no port", "10.0.0.7", "", 0, false},
+		{"no host", ":7779", "", 0, false},
+		{"port not a number", "10.0.0.7:p2p", "", 0, false},
+		{"port zero", "10.0.0.7:0", "", 0, false},
+		{"port above the TCP range", "10.0.0.7:65536", "", 0, false},
+		{"negative port", "10.0.0.7:-1", "", 0, false},
+		{"space inside", "10.0.0.7: 7779", "", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, port, ok := ParseHostPort(tt.value)
+			if host != tt.wantHost || port != tt.wantPort || ok != tt.wantOK {
+				t.Errorf("ParseHostPort(%q) = %q, %d, %v, want %q, %d, %v",
+					tt.value, host, port, ok, tt.wantHost, tt.wantPort, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestAllHeaderNames(t *testing.T) {
 	// Each name's spellings in HeaderNames order, then its retired names.
 	got := AllHeaderNames(KVCacheSourceHeader, PrefillEndpointHeader)

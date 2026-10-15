@@ -32,6 +32,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -1042,6 +1043,65 @@ func TestPrefillStep_CapturesPeerTopologyHeader(t *testing.T) {
 	}
 	if got, want := reqCtx.PeerTopology, "host=node12,zone=us-east1-a"; got != want {
 		t.Fatalf("reqCtx.PeerTopology = %q, want %q", got, want)
+	}
+}
+
+// runPrefillWithP2PAddress runs the prefill step against a gateway whose
+// response carries p2pAddress on the prefill P2P header, or no header when
+// p2pAddress is empty.
+func runPrefillWithP2PAddress(t *testing.T, connector, p2pAddress string) (*pipeline.RequestContext, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if p2pAddress != "" {
+			w.Header().Set(routing.KVCachePrefillHeader, p2pAddress)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	params := map[string]any{}
+	if connector != "" {
+		params[ParamKVConnector] = connector
+	}
+	step, err := NewPrefillStep(gwClient, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-1",
+		Model:            "test",
+		OriginalPath:     reqcommon.PathVLLMGenerate,
+		TokenIDs:         []int{1, 2345},
+		KVTransferParams: make(map[string]any),
+	}
+	return reqCtx, step.Execute(context.Background(), reqCtx)
+}
+
+// A connector that reads the prefill response (kv-offloading) gets the
+// header, and its error fails the request before decode is sent.
+func TestPrefillStep_ReadsPrefillResponseForConnector(t *testing.T) {
+	reqCtx, err := runPrefillWithP2PAddress(t, kv.Offloading, "10.0.0.7:7779")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqCtx.PrefillHost != "10.0.0.7" || reqCtx.PrefillP2PPort != 7779 {
+		t.Fatalf("read %q:%d, want 10.0.0.7:7779", reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
+	}
+
+	if _, err := runPrefillWithP2PAddress(t, kv.Offloading, ""); err == nil {
+		t.Fatal("expected error without the prefill response header")
+	}
+}
+
+// Other connectors never read the header, malformed or not.
+func TestPrefillStep_OtherConnectors_IgnorePrefillResponseHeaders(t *testing.T) {
+	reqCtx, err := runPrefillWithP2PAddress(t, kv.NIXL, "10.0.0.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqCtx.PrefillHost != "" || reqCtx.PrefillP2PPort != 0 {
+		t.Fatalf("read %q:%d, want empty", reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
 	}
 }
 

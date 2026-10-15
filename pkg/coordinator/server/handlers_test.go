@@ -693,6 +693,30 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	}
 }
 
+func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
+	step := &capturingStep{}
+	srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	body := `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
+		`{"kv_request_id":"x","remote_host":"10.9.9.9","remote_port":7777}}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	srv.handleInference(httptest.NewRecorder(), req)
+
+	if step.captured == nil {
+		t.Fatal("pipeline step did not run")
+	}
+	if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
+		t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
+	}
+	for _, field := range []string{"model", "messages"} {
+		if _, ok := step.captured.Body[field]; !ok {
+			t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
+		}
+	}
+}
+
 func TestRoutesRegistered(t *testing.T) {
 	// With the NotFound passthrough in place, an unregistered path no longer
 	// returns 404 — it reverse-proxies to the stub gateway and returns 502.
