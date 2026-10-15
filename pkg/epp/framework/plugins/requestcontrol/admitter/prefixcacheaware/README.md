@@ -15,7 +15,7 @@ A denial looks to the client exactly like flow control's own saturation backpres
 
 The decision is stateless: it depends only on `S` and the request's hit ratios at that moment. There is no hysteresis; the threshold is a plain comparison, so the plugin never rejects while `S` is below `T`, and nothing is lost on an EPP restart.
 
-`S` is computed over the candidate endpoints the admitter receives, which is after screeners. Flow control computes its `S` over the pool before screeners run. With screeners configured, the two can differ, and `T` should be read against this plugin's `..._saturation` gauge rather than flow control's.
+`S` is evaluated the way flow control evaluates it: per pipeline stage by the `llm-d.ai/role` label (prefill, decode; interleaved endpoints count in both), taking the maximum, so an idle decode tier cannot hide a saturated prefill tier. Endpoints without a role label are decode, so a monolithic pool is one stage. One difference remains: the admitter sees the candidate endpoints after screeners, flow control the pool before them. With screeners configured the two can differ, and `T` should be read against this plugin's `..._saturation` gauge rather than flow control's.
 
 ## Placement
 

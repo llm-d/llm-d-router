@@ -28,26 +28,43 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
-// fakeDetector returns a fixed saturation and records the pool size it was asked about.
+// fakeDetector returns a fixed saturation, or a per-stage one when byStage is
+// set, and records the pool size and stage of every call.
 type fakeDetector struct {
 	saturation float64
+	byStage    map[string]float64
 	poolSizes  []int
+	stages     []string
 }
 
 func (f *fakeDetector) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "fake-detector", Name: "fake"}
 }
 
-func (f *fakeDetector) Saturation(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+func (f *fakeDetector) Saturation(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
+	stage := flowcontrol.SaturationStageFromContext(ctx)
 	f.poolSizes = append(f.poolSizes, len(endpoints))
+	f.stages = append(f.stages, stage)
+	if v, ok := f.byStage[stage]; ok {
+		return v
+	}
 	return f.saturation
+}
+
+// withRole labels an endpoint with an llm-d.ai/role value.
+func withRole(ep fwksched.Endpoint, role string) fwksched.Endpoint {
+	ep.GetMetadata().Labels = map[string]string{bylabel.RoleLabel: role}
+	return ep
 }
 
 // makeEndpoint creates an endpoint with hit blocks out of 100 and the given
@@ -227,7 +244,8 @@ func TestAdmitDecisions(t *testing.T) {
 				assert.Equal(t, shedMessage, d.Msg)
 			}
 			if len(tc.endpoints) > 0 {
-				assert.Equal(t, []int{len(tc.endpoints)}, det.poolSizes, "saturation is read over the full pool")
+				assert.Equal(t, []int{len(tc.endpoints)}, det.poolSizes, "an unlabelled pool is one decode stage, read whole")
+				assert.Equal(t, []string{flowcontrol.SaturationStageDecode}, det.stages)
 				assert.Equal(t, tc.saturation, testutil.ToFloat64(observedSaturation.WithLabelValues("test")))
 			}
 			assert.Equal(t, 1.0, decisionCount(tc.wantOutcome), "exactly one decision, with outcome %q", tc.wantOutcome)
@@ -267,6 +285,53 @@ func TestAdmitIgnoresRequest(t *testing.T) {
 	assert.Error(t, p.Admit(context.Background(), nil, cold))
 	assert.Error(t, p.Admit(context.Background(), &fwksched.InferenceRequest{RequestID: "r1"}, cold))
 	assert.NoError(t, p.Admit(context.Background(), nil, hot))
+}
+
+// TestPoolSaturationByStage checks that S is evaluated per pipeline stage and
+// the maximum taken, as flow control does, so one saturated stage is not
+// averaged away by an idle one.
+func TestPoolSaturationByStage(t *testing.T) {
+	prefill := withRole(makeEndpoint("p1", 0, 9000), bylabel.RolePrefill)
+	decode := withRole(makeEndpoint("d1", 0, 9000), bylabel.RoleDecode)
+	both := withRole(makeEndpoint("pd1", 0, 9000), bylabel.RolePrefillDecode)
+	encode := withRole(makeEndpoint("e1", 0, 9000), bylabel.RoleEncode)
+
+	t.Run("saturated prefill tier sheds despite idle decode tier", func(t *testing.T) {
+		resetMetrics()
+		det := &fakeDetector{byStage: map[string]float64{
+			flowcontrol.SaturationStagePrefill: 0.9,
+			flowcontrol.SaturationStageDecode:  0.1,
+		}}
+		p := mustNew(t, validConfig(), det)
+
+		require.Error(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, decode}))
+		assert.Equal(t, []string{flowcontrol.SaturationStagePrefill, flowcontrol.SaturationStageDecode}, det.stages)
+		assert.Equal(t, []int{1, 1}, det.poolSizes)
+		assert.Equal(t, 0.9, testutil.ToFloat64(observedSaturation.WithLabelValues("test")), "the gauge reports the maximum")
+	})
+
+	t.Run("interleaved endpoints count in both stages", func(t *testing.T) {
+		det := &fakeDetector{}
+		p := mustNew(t, validConfig(), det)
+		require.NoError(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, decode, both}))
+		assert.Equal(t, []int{2, 2}, det.poolSizes)
+	})
+
+	t.Run("a stage with no endpoints is skipped", func(t *testing.T) {
+		det := &fakeDetector{}
+		p := mustNew(t, validConfig(), det)
+		require.NoError(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, encode}))
+		assert.Equal(t, []string{flowcontrol.SaturationStagePrefill}, det.stages, "encode-only endpoints are not a stage")
+		assert.Equal(t, []int{1}, det.poolSizes)
+	})
+
+	t.Run("no stage at all falls back to the whole pool", func(t *testing.T) {
+		det := &fakeDetector{saturation: 1.0}
+		p := mustNew(t, validConfig(), det)
+		require.Error(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{encode}), "S = 1.0 over the whole pool and no prefix hit: shed")
+		assert.Equal(t, []string{""}, det.stages, "unpartitioned evaluation carries no stage")
+		assert.Equal(t, []int{1}, det.poolSizes)
+	})
 }
 
 func TestNewRejectsInvalidConfig(t *testing.T) {
@@ -335,6 +400,18 @@ func TestFactory(t *testing.T) {
 		require.NotNil(t, d, "no endpoint has the prefix")
 		assert.Equal(t, errcommon.ResourceExhausted, d.Code)
 		assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), d.Headers[errcommon.RequestDroppedReasonHeaderKey])
+
+		// Disaggregated pool: the prefill endpoint is at its request limit, the
+		// decode endpoint is idle. Averaged together the detector would say 0.5;
+		// per stage, prefill is 1.0, so a cold request is shed.
+		resetMetrics()
+		fullPrefill := withRole(makeEndpoint("prefill", 0, 10), bylabel.RolePrefill)
+		fullPrefill.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 2})
+		idleDecode := withRole(makeEndpoint("decode", 0, 10), bylabel.RoleDecode)
+		strict, err := Factory("strict", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.9}`)), newHandle(t, true))
+		require.NoError(t, err)
+		require.Error(t, strict.(fwkrc.Admitter).Admit(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{fullPrefill, idleDecode}))
+		assert.Equal(t, 1.0, testutil.ToFloat64(observedSaturation.WithLabelValues("strict")))
 	})
 
 	t.Run("missing ref", func(t *testing.T) {
