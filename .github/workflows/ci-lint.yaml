@@ -55,6 +55,8 @@ jobs:
               - .typos.toml
               - scripts/**
               - hack/**
+              - pkg/common/observability/semconv/registry/**
+              - docs/telemetry.md
               - test/**
               - .github/workflows/ci-lint.yaml
 
@@ -96,6 +98,12 @@ jobs:
           key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
             go-cache-${{ runner.os }}-
+
+      - name: Verify telemetry generation and contracts
+        env:
+          GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
+          GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
+        run: make verify-telemetry-docs test-telemetry
 
       - name: Run make build
         env:
