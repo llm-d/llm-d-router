@@ -104,6 +104,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/softreflectiveceiling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/prefixcacheaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
@@ -824,6 +825,9 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, fwkplugin.StabilityBeta, latencyslo.LatencyAdmissionFactory)
 	fwkplugin.Register(probabilisticadmitter.Type, fwkplugin.StabilityBeta, probabilisticadmitter.Factory)
+	// Alpha
+	fwkplugin.RegisterWithPluginDependencies(prefixcacheaware.PluginType, fwkplugin.StabilityAlpha,
+		prefixcacheaware.Factory, prefixcacheaware.ConfigParser)
 
 	// Latency scoring and filtering plugins
 	// Beta
