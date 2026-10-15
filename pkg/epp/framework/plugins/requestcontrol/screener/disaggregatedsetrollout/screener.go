@@ -78,9 +78,7 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 	// request in P/D must use the revision stamped by prefill; it must not depend
 	// on the two EPPs sharing a CrossReplicaSyncer.
 	if chosenRevision == "" {
-		draw := rand.Float64() //#nosec G404 -- traffic split across revisions, not security-sensitive
-		drawn := pickWeightedRevision(shares, draw)
-		overflowed := c.overflowRevision(ctx, request, endpoints, shares, drawn, draw)
+		drawn, overflowed := c.chooseRevision(ctx, request, endpoints, shares)
 		chosenRevision = overflowed
 		decided := false
 		if decisionID := revisionDecisionID(request); distribution.needsCoordination && decisionID != "" && chosenRevision != "" {
@@ -102,6 +100,31 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 		recordStrictRevisionNoMatch(c.typedName.Name)
 	}
 	return result
+}
+
+func (c *Screener) chooseRevision(
+	ctx context.Context,
+	request *fwksched.InferenceRequest,
+	endpoints []fwksched.Endpoint,
+	shares map[string]float64,
+) (string, string) {
+	if len(shares) <= 1 {
+		for revision := range shares {
+			return revision, revision
+		}
+		return "", ""
+	}
+	if key, keyed := c.affinityKey(ctx, request); keyed {
+		drawn := pickRendezvousRevision(shares, key)
+		return drawn, c.overflowRevision(ctx, request, endpoints, shares, drawn, func(withRoom map[string]float64) string {
+			return pickRendezvousRevision(withRoom, key)
+		})
+	}
+	draw := rand.Float64() //#nosec G404 -- traffic split across revisions, not security-sensitive
+	drawn := pickWeightedRevision(shares, draw)
+	return drawn, c.overflowRevision(ctx, request, endpoints, shares, drawn, func(withRoom map[string]float64) string {
+		return pickWeightedRevision(withRoom, drawWithin(shares, drawn, draw))
+	})
 }
 
 func (c *Screener) requestedRevision(request *fwksched.InferenceRequest) string {

@@ -91,16 +91,25 @@ func (c *SessionIDConfig) ApplyDefaults() {
 // a usable eviction schedule. It expects a config already passed through
 // applyDefaults.
 func (c *SessionIDConfig) Validate() error {
-	for i, source := range c.Sources {
-		if err := source.validate(); err != nil {
-			return fmt.Errorf("sources[%d]: %w", i, err)
-		}
+	if err := ValidateSources(c.Sources); err != nil {
+		return err
 	}
 	if c.EvictionTTLSeconds <= 0 {
 		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
 	}
 	if c.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	}
+	return nil
+}
+
+// ValidateSources rejects a source that does not set exactly one of Header or
+// Attribute.
+func ValidateSources(sources []SessionIDSource) error {
+	for i, source := range sources {
+		if err := source.validate(); err != nil {
+			return fmt.Errorf("sources[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -145,8 +154,14 @@ type SessionIDHeader struct {
 // The value witness is nil because attributeString accepts any value of string
 // kind, so no single concrete type describes the key.
 func (s *SessionIDHeader) Consumes() plugin.DataDependencies {
+	return SourcesConsumes(s.sources)
+}
+
+// SourcesConsumes declares the request attributes named by sources as optional
+// dependencies; see SessionIDHeader.Consumes.
+func SourcesConsumes(sources []SessionIDSource) plugin.DataDependencies {
 	optional := map[plugin.DataKey]any{}
-	for _, source := range s.sources {
+	for _, source := range sources {
 		if source.Attribute == "" {
 			continue
 		}
@@ -198,10 +213,16 @@ type binding struct {
 // generated: a router-minted value is unique per request, so it could never
 // match a stored binding.
 func (s *SessionIDHeader) resolveSessionID(ctx context.Context, request *scheduling.InferenceRequest) string {
+	return ResolveSessionID(ctx, request, s.sources)
+}
+
+// ResolveSessionID returns the trimmed session identifier from the first of
+// sources that yields a non-empty value, or "" when none do.
+func ResolveSessionID(ctx context.Context, request *scheduling.InferenceRequest, sources []SessionIDSource) string {
 	if request == nil {
 		return ""
 	}
-	for _, source := range s.sources {
+	for _, source := range sources {
 		if source.Header != "" {
 			if id := strings.TrimSpace(request.Headers[NormalizeHeader(source.Header)]); id != "" {
 				return id
