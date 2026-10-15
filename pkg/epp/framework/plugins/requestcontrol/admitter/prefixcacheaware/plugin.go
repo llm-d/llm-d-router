@@ -48,6 +48,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 const (
@@ -160,7 +161,7 @@ func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		return nil
 	}
 
-	saturation := p.detector.Saturation(ctx, asPool(endpoints))
+	saturation := p.poolSaturation(ctx, endpoints)
 	recordSaturation(p.typedName.Name, saturation)
 	if saturation < p.config.ShedThreshold {
 		recordDecision(p.typedName.Name, outcomeAdmittedBelowThreshold)
@@ -248,6 +249,62 @@ func (p *Plugin) smallestUncached(endpoints []fwksched.Endpoint) (smallest int64
 		}
 	}
 	return smallest, known
+}
+
+// poolSaturation evaluates S the way flow control does: per pipeline stage,
+// taking the maximum. Averaging prefill and decode endpoints together would let
+// an idle decode tier hide a saturated prefill tier (or the reverse), and a
+// stage-scoped composite detector would lose its stage selection. Interleaved
+// endpoints serve both stages and count in both, as in flow control. A pool
+// with no endpoint in either stage (encode-only or unrecognised roles) is
+// evaluated whole. Mirrors pkg/epp/flowcontrol/controller/internal/processor.go.
+func (p *Plugin) poolSaturation(ctx context.Context, endpoints []fwksched.Endpoint) float64 {
+	prefill, decode, interleaved := partitionByStage(endpoints)
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+
+	saturation := -1.0
+	for _, stage := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{flowcontrol.SaturationStagePrefill, prefill},
+		{flowcontrol.SaturationStageDecode, decode},
+	} {
+		if len(stage.endpoints) == 0 {
+			continue
+		}
+		saturation = max(saturation, p.detector.Saturation(flowcontrol.WithSaturationStage(ctx, stage.name), stage.endpoints))
+	}
+	if saturation < 0 {
+		return p.detector.Saturation(ctx, asPool(endpoints))
+	}
+	return saturation
+}
+
+// partitionByStage buckets endpoints by their llm-d.ai/role label. No label or
+// no metadata counts as decode, so a monolithic pool is one decode stage.
+// Encode-only and unrecognised roles receive no prefill or decode traffic and
+// are left out so they do not dilute either stage.
+func partitionByStage(endpoints []fwksched.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		role := ""
+		if meta := ep.GetMetadata(); meta != nil && meta.Labels != nil {
+			role = meta.Labels[bylabel.RoleLabel]
+		}
+		switch role {
+		case bylabel.RolePrefill, bylabel.RoleEncodePrefill:
+			prefill = append(prefill, poolEndpoint{ep})
+		case bylabel.RoleDecode, "":
+			decode = append(decode, poolEndpoint{ep})
+		case bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
+			interleaved = append(interleaved, poolEndpoint{ep})
+		}
+	}
+	return prefill, decode, interleaved
 }
 
 // poolEndpoint adapts a scheduling endpoint to the datalayer endpoint the
