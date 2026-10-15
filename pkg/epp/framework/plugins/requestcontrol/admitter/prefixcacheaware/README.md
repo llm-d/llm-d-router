@@ -9,7 +9,9 @@ Stability: Alpha.
 Let `S` be the pool saturation reported by the referenced saturation detector, `T` the shed threshold and `H` the minimum hit ratio.
 
 - `S < T`: every request is admitted.
-- `S >= T`: a request is admitted only if some endpoint has a prefix cache hit ratio `>= H` for it. Otherwise the request is denied.
+- `S >= T`: a request is admitted only if some endpoint has a prefix cache hit ratio `>= H` for it, or if it adds fewer than `minUncachedTokens` uncached tokens on some endpoint (off by default). Otherwise the request is denied.
+
+The hit ratio is the fraction of the prompt the cache already holds, so it ranks requests by how much of their prefill is free rather than by absolute size: a 20K-token turn with 16K cached (80 %) is a better use of a slot than a 1K prompt with 600 cached (60 %), and a shed of the former risks a 20K recompute on retry. `minUncachedTokens` is the absolute complement: a request whose prefill is small is not worth shedding whatever its ratio.
 
 A denial looks to the client exactly like flow control's own saturation backpressure: HTTP `shedStatusCode` (429 by default, 503 optional), header `x-llm-d-request-dropped-reason: rejected-saturated`, body `pool saturated, request rejected`. Shedding is a platform decision; nothing about the request's cache state is exposed to the client. The decision inputs (`saturation`, `bestHitRatio`) are in the debug log, and the outcome is in the plugin's metrics.
 
@@ -30,7 +32,7 @@ Below `T` the admitter changes nothing.
 | `saturationDetectorRef` | required | Name of a saturation detector instance (any plugin implementing `flowcontrol.SaturationDetector`, typically the `concurrency-detector` flow control already uses). It supplies `S`. |
 | `shedThreshold` | `0.85` | `T`, in `(0, 1]`. |
 | `minHitRatio` | `0.6` | `H`, in `[0, 1]`. |
-| `minUncachedTokens` | `0` | A request that adds fewer uncached tokens than this on its cheapest endpoint is never shed. `0` disables. When set, `UncachedRequestTokens` becomes a required attribute; an endpoint without it is ignored, and a request with the count unknown on every endpoint is not exempted. A value larger than any prompt (for example `1000000000`) exempts everything and so acts as a kill switch without removing the plugin. |
+| `minUncachedTokens` | `0` | Cost floor: a request that adds fewer uncached tokens than this on its cheapest endpoint is never shed, because its prefill is too small to matter for the TTFT or ITL of other requests. A fraction of the model server's prefill chunk (for example a quarter of `max_num_batched_tokens`) is a reasonable value. `0` disables. When set, `UncachedRequestTokens` becomes a required attribute; an endpoint without it is ignored, and a request with the count unknown on every endpoint is not exempted. A value larger than any prompt (for example `1000000000`) exempts everything and so acts as a kill switch without removing the plugin. |
 | `shedStatusCode` | `429` | `429` or `503`. |
 | `prefixMatchInfoProducerName` | approx producer | Producer of `PrefixCacheMatchInfo`. |
 | `inFlightLoadProducerName` | in-flight load producer | Producer of `InFlightLoad` and `UncachedRequestTokens`. Must match the detector's producer. |
@@ -85,3 +87,4 @@ Admitters are not listed in a scheduling profile; declaring the plugin is enough
 ## Notes
 
 - With more than one EPP replica, each replica sees only the in-flight load it dispatched. Share the detector limits across replicas as you do for flow control.
+- A prefix shared by every request, such as a common system prompt, counts toward the hit ratio on every endpoint. A 500-token system prompt in a 700-token first-turn request is a 71 % hit and is admitted at the default `H`. That request is cheap (200 uncached tokens), so admitting it costs little; a first-turn request with substantial new content behind the same prompt (500 shared of 1800) is 28 % and is still shed. But where request slots, not tokens, are the binding limit and the flood consists of short first-turn requests behind a shared prompt, the plugin sheds little. Set `H` above the shared-prefix fraction in that case (for example `0.9` with the prompt above), accepting that a hot turn with a long new message (3K cached, 1K new = 75 %) is then shed too.
