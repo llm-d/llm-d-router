@@ -2859,13 +2859,18 @@ func toolCallingBenchmarkBody(b *testing.B, api reqcommon.APIType, size int, too
 }
 
 func TestToolCallingJSONStream(t *testing.T) {
-	for _, body := range []string{
+	bodies := []string{
 		`{}`, ` { "tools" : null } `,
 		`{"tools":[{"a":9007199254740993,"b":-1.20e+3}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{}}`,
 		`{"messages":[{"tools":[],"content":"tools \\\" \\u1234"}],"to\u006fls":[]}`,
 		`{"tools":[1],"tools":null,"tool_choice":true}`,
 		`{"messages":["` + strings.Repeat("x", 1<<20) + `"],"tools":[]}`,
 		`{"` + strings.Repeat("x", 1<<20) + `":1,"tool_choice":"none"}`,
+		`{"` + strings.Repeat("x", 128) + `\u0061\"":0,"tools":[]}`,
+		`{"unused":"ordinary\"\\\/\b\f\n\r\t\u0061\ud800\udc00","tools":[]}`,
+		`{"tools":[{"description":"ordinary\"\\\/\b\f\n\r\t\u0061\ud800\udc00"}],"tool_choice":"\u0061uto"}`,
+		"{\"unused\":\"ordinary\xff\xe2\x82\xac\",\"tools\":[]}",
+		`{"unused":"ordinary\u1"}`, `{"unused":"ordinary\`,
 		`{"unused":[{},[],true,false,null,-0,1.5e-2],"tools":[]}`,
 		`{"\u0070\u0061\u0072\u0061\u006c\u006c\u0065\u006c\u005f\u0074\u006f\u006f\u006c\u005f\u0063\u0061\u006c\u006c\u0073":true}`,
 		`{"tools":["` + strings.Repeat("x", 128<<10) + `"]}`,
@@ -2876,13 +2881,16 @@ func TestToolCallingJSONStream(t *testing.T) {
 		`{"unused":[],"tools":[],}`, `{"unused":[}`, `{"unused":{]}`,
 		`{"unused":truefalse}`, `{"unused":false null}`, `{"unused":-}`,
 		`{"unused":1.}`, `{"unused":1e+}`, `{"unused":+1}`, `{"unused":NaN}`,
-		"{\"unused\":\"\x00\",\"tools\":[]}",
 		`{"tools":`, `{"tools":[]} garbage`, `{"unused":"bad\q","tools":[]}`,
 		`{"unused":"bad\u12xz","tools":[]}`, `{"unused":[1,],"tools":[]}`,
 		`{"unused":{"a":1,},"tools":[]}`, `{"unused":01,"tools":[]}`,
 		`{"unused":1e,"tools":[]}`, `{"unused":` + "true"[:3] + `,"tools":[]}`,
 		`[]`, `null`, `{} {}`, `{"tools":[],"unfinished":"`, "",
-	} {
+	}
+	for control := byte(0); control < 0x20; control++ {
+		bodies = append(bodies, `{"tools":[],"unused":"`+strings.Repeat("x", 33)+string(control)+`"}`)
+	}
+	for _, body := range bodies {
 		for _, api := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages} {
 			before, wantErr := toolcalling.CaptureRequestJSON(api, []byte(body))
 			for _, chunkSize := range []int{1, 7, 32768} {
@@ -2925,6 +2933,9 @@ func FuzzToolCallingJSONStream(f *testing.F) {
 		`{}`, `{"tools":[],"tool_choice":"auto"}`, `{"text":"escaped\"","tools":null}`,
 		`{"a":[1,true,null]}`, `{"tools":[]}x`, `{"to\u006fls":[{"x":-0.123E+4}]}`,
 		`{"tools":[],"tools":null}`, `{"text":"\ud800\udc00","tool_choice":{"name":"f"}}`,
+		`{"text":"ordinary\"\\\/\b\f\n\r\t\u0061","tools":[]}`,
+		`{"tools":[{"description":"ordinary\"\\\u0061"}],"tool_choice":"\u0061uto"}`,
+		`{"` + strings.Repeat("x", 128) + `\u0061\"":0,"tools":[]}`,
 	} {
 		f.Add(body, uint8(1))
 	}

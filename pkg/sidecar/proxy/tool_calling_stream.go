@@ -151,11 +151,33 @@ func (s *toolCallingJSONStream) fail() {
 }
 
 func (s *toolCallingJSONStream) feed(data []byte) {
-	for _, b := range data {
+	for len(data) > 0 {
 		if s.invalid {
 			return
 		}
-		s.consume(b)
+		// Ordinary string bytes preserve parser state and can be copied together.
+		if s.mode == 's' && (s.key == nil || s.keyTooBig) {
+			if !s.escaped && s.unicode == 0 {
+				i := 0
+				for i < len(data) && data[i] >= 0x20 && data[i] != '"' && data[i] != '\\' {
+					i++
+				}
+				if s.capture != nil {
+					s.capture = append(s.capture, data[:i]...)
+				}
+				data = data[i:]
+				if len(data) == 0 {
+					return
+				}
+			}
+			if s.capture != nil {
+				s.capture = append(s.capture, data[0])
+			}
+			s.consumeString(data[0])
+		} else {
+			s.consume(data[0])
+		}
+		data = data[1:]
 	}
 }
 
