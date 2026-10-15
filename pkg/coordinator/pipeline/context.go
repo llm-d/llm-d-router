@@ -36,17 +36,20 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator; a client copy is
-// dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
-// Prefer: if-available, the conditional-decode probe's signal, with 412 on
-// any other leg.
+// internalForwardingHeaders are set only by the coordinator or read by it
+// from a phase response; a client copy is dropped, and so is a value of
+// forward_response_headers under these names. EPP routes on epp-profile and
+// x-llm-d-pin-host-port, and answers Prefer: if-available, the
+// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// P2P address names the prefill pod a decode request pulls from, so a client
+// cannot choose it.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
+	routing.KVCachePrefillHeader:          true,
 }
 
 func isForwardableHeader(name string) bool {
@@ -206,6 +209,11 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
+	// KVRequestID, PrefillHost and PrefillP2PPort carry the kv-offloading
+	// connector's prefill-to-decode state; empty with any other connector.
+	KVRequestID    string
+	PrefillHost    string
+	PrefillP2PPort int
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string

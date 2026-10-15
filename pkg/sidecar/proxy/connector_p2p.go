@@ -123,11 +123,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
 	prefillData := maps.Clone(requestData)
-	prefillKVParams := map[string]any{
-		reqcommon.FieldRemoteDecoder: map[string]any{
-			reqcommon.FieldKVRequestID: kvRequestID,
-		},
-	}
+	prefillKVParams := reqcommon.RemoteDecoderParams(kvRequestID)
 	addP2PPullToPrefill(prefillKVParams, p2p.source)
 	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
@@ -146,9 +142,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
 	decodeData := maps.Clone(requestData)
-	decodeData[reqcommon.FieldKVTransferParams] = map[string]any{
-		reqcommon.FieldRemotePrefiller: reqcommon.P2PPeerParams(kvRequestID, p2p.prefill.host, p2p.prefill.port),
-	}
+	decodeData[reqcommon.FieldKVTransferParams] = reqcommon.RemotePrefillerParams(kvRequestID, p2p.prefill.host, p2p.prefill.port)
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
@@ -352,9 +346,8 @@ func parsePrefillP2P(logger logr.Logger, value string) *p2pPeer {
 	if value == "" {
 		return nil
 	}
-	host, portStr, err := net.SplitHostPort(value)
-	port, convErr := strconv.Atoi(portStr)
-	if err != nil || host == "" || convErr != nil || !routing.IsTCPPort(port) {
+	host, port, ok := routing.ParseHostPort(value)
+	if !ok {
 		logger.Info("ignoring malformed prefill P2P address header", "value", value)
 		return nil
 	}

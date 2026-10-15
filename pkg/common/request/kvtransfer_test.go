@@ -21,6 +21,22 @@ import (
 	"testing"
 )
 
+func TestRemoteDecoderParams(t *testing.T) {
+	got := RemoteDecoderParams("k")
+	want := map[string]any{"remote_decoder": map[string]any{"kv_request_id": "k"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RemoteDecoderParams() = %v, want %v", got, want)
+	}
+}
+
+func TestRemotePrefillerParams(t *testing.T) {
+	got := RemotePrefillerParams("k", "10.0.0.7", 7779)
+	want := map[string]any{"remote_prefiller": map[string]any{"kv_request_id": "k", "remote_host": "10.0.0.7", "remote_port": 7779}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RemotePrefillerParams() = %v, want %v", got, want)
+	}
+}
+
 func TestP2PPeerParams(t *testing.T) {
 	got := P2PPeerParams("k", "10.0.0.7", 7779)
 	want := map[string]any{"kv_request_id": "k", "remote_host": "10.0.0.7", "remote_port": 7779}
