@@ -33,6 +33,7 @@ package prefixcacheaware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 
@@ -91,12 +92,22 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
-	return New(name, *config, det), nil
+	return New(name, *config, det)
 }
 
-// New builds the admitter around an already resolved detector. Config must be valid.
-func New(name string, config Config, det flowcontrol.SaturationDetector) *Plugin {
-	code, _ := config.errorCode()
+// New builds the admitter around an already resolved detector. It validates
+// the config, so a caller cannot end up with an empty error code.
+func New(name string, config Config, det flowcontrol.SaturationDetector) (*Plugin, error) {
+	if err := config.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	if det == nil {
+		return nil, errors.New("saturation detector is required")
+	}
+	code, err := config.errorCode()
+	if err != nil {
+		return nil, err
+	}
 	return &Plugin{
 		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
 		config:                       config,
@@ -105,7 +116,7 @@ func New(name string, config Config, det flowcontrol.SaturationDetector) *Plugin
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
-	}
+	}, nil
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {
@@ -113,16 +124,22 @@ func (p *Plugin) TypedName() fwkplugin.TypedName {
 }
 
 // Consumes declares the endpoint attributes the admitter and its detector read.
+// UncachedRequestTokens is required only when the small-request exemption is
+// on; a missing value never exempts a request (see smallestUncached).
 func (p *Plugin) Consumes() fwkplugin.DataDependencies {
-	return fwkplugin.DataDependencies{
+	deps := fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
 			p.prefixMatchDataKey:  attrprefix.PrefixCacheMatchInfo{},
 			p.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
 		},
-		Optional: map[fwkplugin.DataKey]any{
-			p.uncachedRequestTokensDataKey: attrconcurrency.UncachedRequestTokens{},
-		},
+		Optional: map[fwkplugin.DataKey]any{},
 	}
+	if p.config.MinUncachedTokens > 0 {
+		deps.Required[p.uncachedRequestTokensDataKey] = attrconcurrency.UncachedRequestTokens{}
+	} else {
+		deps.Optional[p.uncachedRequestTokensDataKey] = attrconcurrency.UncachedRequestTokens{}
+	}
+	return deps
 }
 
 // shedMessage is the response body of a shed. It is deliberately the generic
@@ -132,6 +149,10 @@ const shedMessage = "pool saturated, request rejected"
 // Admit applies the shed rule. It returns nil to admit, or a typed
 // errcommon.Error carrying the configured status code and the
 // rejected-saturated reason header to deny. See the package documentation.
+//
+// The request is intentionally unused: everything the rule needs, the prefix
+// match and the uncached token count, has already been projected onto the
+// endpoints by the data producers. A nil request is therefore fine.
 func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	logger := log.FromContext(ctx).V(logutil.DEBUG)
 	if len(endpoints) == 0 {
@@ -166,11 +187,13 @@ func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		return nil
 	}
 
-	if p.config.MinUncachedTokens > 0 && p.smallestUncached(endpoints) < p.config.MinUncachedTokens {
-		logger.Info("PrefixCacheAwareAdmitter: shedding, small request exempt",
-			"saturation", saturation, "minUncachedTokens", p.config.MinUncachedTokens)
-		recordDecision(p.typedName.Name, outcomeAdmittedSmallRequest)
-		return nil
+	if p.config.MinUncachedTokens > 0 {
+		if smallest, known := p.smallestUncached(endpoints); known && smallest < p.config.MinUncachedTokens {
+			logger.Info("PrefixCacheAwareAdmitter: shedding, small request exempt",
+				"saturation", saturation, "uncachedTokens", smallest, "minUncachedTokens", p.config.MinUncachedTokens)
+			recordDecision(p.typedName.Name, outcomeAdmittedSmallRequest)
+			return nil
+		}
 	}
 
 	logger.Info("PrefixCacheAwareAdmitter: shedding cold request",
@@ -192,32 +215,39 @@ func (p *Plugin) hitRatio(ep fwksched.Endpoint) float64 {
 	if !ok || info == nil || info.TotalBlocks() <= 0 {
 		return 0
 	}
-	ratio := float64(info.MatchBlocks()) / float64(info.TotalBlocks())
-	if math.IsNaN(ratio) {
-		return 0
-	}
-	return ratio
+	return float64(info.MatchBlocks()) / float64(info.TotalBlocks())
 }
 
-func (p *Plugin) uncachedTokens(ep fwksched.Endpoint) int64 {
-	if raw, ok := ep.Get(p.uncachedRequestTokensDataKey); ok {
-		if tokens, ok := raw.(*attrconcurrency.UncachedRequestTokens); ok && tokens != nil {
-			return tokens.Tokens
-		}
+// uncachedTokens reads the request's uncached token projection on one endpoint.
+// The second result is false when the endpoint has no such attribute.
+func (p *Plugin) uncachedTokens(ep fwksched.Endpoint) (int64, bool) {
+	raw, ok := ep.Get(p.uncachedRequestTokensDataKey)
+	if !ok {
+		return 0, false
 	}
-	return 0
+	tokens, ok := raw.(*attrconcurrency.UncachedRequestTokens)
+	if !ok || tokens == nil {
+		return 0, false
+	}
+	return tokens.Tokens, true
 }
 
 // smallestUncached is the uncached token count of the request on the endpoint
 // where it is cheapest, i.e. the least prefill the pool would have to do for it.
-func (p *Plugin) smallestUncached(endpoints []fwksched.Endpoint) int64 {
-	smallest := int64(math.MaxInt64)
+// Endpoints without the attribute are skipped; if none has it the count is
+// unknown and the caller must not exempt the request on the strength of it.
+func (p *Plugin) smallestUncached(endpoints []fwksched.Endpoint) (smallest int64, known bool) {
+	smallest = math.MaxInt64
 	for _, ep := range endpoints {
-		if ep != nil {
-			smallest = min(smallest, p.uncachedTokens(ep))
+		if ep == nil {
+			continue
+		}
+		if tokens, ok := p.uncachedTokens(ep); ok {
+			smallest = min(smallest, tokens)
+			known = true
 		}
 	}
-	return smallest
+	return smallest, known
 }
 
 // poolEndpoint adapts a scheduling endpoint to the datalayer endpoint the
