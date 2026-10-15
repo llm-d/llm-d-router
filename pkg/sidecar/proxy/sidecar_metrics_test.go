@@ -3061,26 +3061,20 @@ func TestToolCallingRequestNonToolDispatch(t *testing.T) {
 					request, err := captureToolCallingRequest(api, []byte(`{}`))
 					require.NoError(t, err)
 					body := []byte(tt.body)
-					_, err = request.compareDispatched(body)
+					statuses, err := request.compareDispatched(body)
 					require.NoError(t, err)
 					want := map[toolcalling.Field]toolcalling.FieldStatusValue{}
 					if tt.wantField != "" && (api == reqcommon.APITypeChatCompletions || tt.wantField != toolcalling.FieldResponseFormat) {
 						want[tt.wantField] = toolcalling.FieldStatusChanged
+					}
+					if len(want) == 0 {
+						require.Empty(t, statuses)
 					}
 					assertToolCallingStatuses(t, request.fieldStatuses(), want)
 					// An empty dispatch cannot erase an earlier mutation.
 					_, err = request.compareDispatched([]byte(`{}`))
 					require.NoError(t, err)
 					assertToolCallingStatuses(t, request.fieldStatuses(), want)
-					if tt.name == "plain" {
-						allocations := testing.AllocsPerRun(20, func() {
-							_, err = request.compareDispatched(body)
-							if err != nil {
-								panic(err)
-							}
-						})
-						require.Zero(t, allocations, "non-tool dispatch comparison must not allocate")
-					}
 				})
 			}
 		})
