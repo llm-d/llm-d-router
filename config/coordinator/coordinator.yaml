@@ -129,6 +129,8 @@ pipeline:
   #   kv-nixl           - NIXL P2P RDMA
   #   kv-shared-storage - shared filesystem / object store (default)
   #   kv-sglang         - SGLang-style KV bootstrap
+  #   kv-offloading     - vLLM OffloadingConnector P2P tier; the prefill EPP must
+  #                       run p2p-source-producer and request-header-copy-handler
   kv_connector: kv-shared-storage
 
   # ec_connector picks the protocol used to ship encoded multimodal embedding

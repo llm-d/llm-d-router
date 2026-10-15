@@ -22,9 +22,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -38,6 +40,8 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 	cases := []struct {
 		connector  string
 		wantFields map[string]any
+		// wantKeys are fields that must be present, whatever their value.
+		wantKeys   []string
 		denyFields []string
 	}{
 		{
@@ -56,6 +60,11 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 			wantFields: map[string]any{"do_remote_decode": true, "do_remote_prefill": false},
 			denyFields: []string{"remote_engine_id", "remote_host", "remote_block_ids", "remote_port"},
 		},
+		{
+			connector:  kv.Offloading,
+			wantKeys:   []string{reqcommon.FieldRemoteDecoder},
+			denyFields: []string{"do_remote_decode", "do_remote_prefill", reqcommon.FieldRemotePrefiller, reqcommon.FieldRemoteKVSource},
+		},
 	}
 
 	for _, tc := range cases {
@@ -67,6 +76,8 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 				_ = json.Unmarshal(body, &parsed)
 				// In generate format, kv_transfer_params is a top-level field.
 				captured, _ = parsed["kv_transfer_params"].(map[string]any)
+				// kv-offloading reads the prefill pod from the response header.
+				w.Header().Set(routing.KVCachePrefillHeader, "10.0.0.7:7777")
 				_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
 			}))
 			defer srv.Close()
@@ -99,8 +110,13 @@ func TestPrefillStep_ConnectorShapesPrefillBody(t *testing.T) {
 					t.Errorf("missing field %q; got %v", f, captured)
 					continue
 				}
-				if got != want {
+				if !reflect.DeepEqual(got, want) {
 					t.Errorf("field %q = %v, want %v", f, got, want)
+				}
+			}
+			for _, f := range tc.wantKeys {
+				if _, ok := captured[f]; !ok {
+					t.Errorf("missing field %q; got %v", f, captured)
 				}
 			}
 			for _, f := range tc.denyFields {
@@ -155,6 +171,20 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 			wantFields:      map[string]any{"do_remote_decode": false, "do_remote_prefill": true},
 			denyFields:      []string{"remote_engine_id", "remote_host", "remote_block_ids", "remote_port", "ignored"},
 		},
+		{
+			// kv-offloading ignores the prefill response's kv_transfer_params and
+			// names the prefill pod captured from the response headers.
+			connector:       kv.Offloading,
+			prefillResponse: map[string]any{"ignored": "field"},
+			wantFields: map[string]any{
+				reqcommon.FieldRemotePrefiller: map[string]any{
+					reqcommon.FieldKVRequestID: "K",
+					reqcommon.FieldRemoteHost:  "10.0.0.7",
+					reqcommon.FieldRemotePort:  float64(7779),
+				},
+			},
+			denyFields: []string{"do_remote_decode", "do_remote_prefill", "ignored", reqcommon.FieldRemoteDecoder, reqcommon.FieldRemoteKVSource},
+		},
 	}
 
 	for _, tc := range cases {
@@ -183,6 +213,9 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 				OriginalPath:     reqcommon.PathChatCompletions,
 				Model:            "m",
 				KVTransferParams: tc.prefillResponse,
+				KVRequestID:      "K",
+				PrefillHost:      "10.0.0.7",
+				PrefillP2PPort:   7779,
 				Body:             map[string]any{"model": "m"},
 				ResponseWriter:   recorder,
 			}
@@ -194,7 +227,7 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 				t.Fatal("kv_transfer_params not sent to gateway")
 			}
 			for k, want := range tc.wantFields {
-				if got := captured[k]; got != want {
+				if got := captured[k]; !reflect.DeepEqual(got, want) {
 					t.Errorf("field %q = %v, want %v", k, got, want)
 				}
 			}
