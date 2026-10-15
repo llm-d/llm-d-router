@@ -106,7 +106,9 @@ revision header, the plugin then:
 1. Removes every revision that has no Ready Pod for any required role, because
    a revision missing one role cannot serve the request.
 2. Computes a weight for each remaining revision.
-3. Randomly chooses one candidate revision using those weights.
+3. Chooses one candidate revision using those weights. The draw is random, or
+   keyed on the request when [revision affinity](#revision-affinity) is
+   enabled.
 4. When Pods from multiple revisions are observed and `disableCoordination` is
    false, atomically stores or reads the revision decision through the
    configured `CrossReplicaSyncer`, keyed by `x-llm-d-revision-decision-id` or
@@ -328,6 +330,8 @@ request. Do not add it to a scheduling profile.
 | `revisionGating.disableCoordination` | boolean | No | `false` | Disables coordination of rollout revisions across parallel requests. Set only for known sequential P/D deployments; E/P/D requires coordination. |
 | `revisionGating.overflow.guardPluginName` | string | No | | Enables overflow: when this filter admits no endpoint of `overflow.role` in the drawn revision, the request goes to a revision where it admits one; see [Revision Overflow](#revision-overflow). A fail-closed scheduling filter. |
 | `revisionGating.overflow.role` | string | No | `prefill` | The role whose endpoints must have room; one of `requiredRoles`. |
+| `revisionGating.affinity.mode` | string | No | `none` | `none` draws each request's revision at random. `prefix` keys weighted rendezvous selection on a session identifier from `affinity.sources` or the text conversation prefix; see [Revision Affinity](#revision-affinity). |
+| `revisionGating.affinity.sources` | array | No | | With `prefix`, sources that resolve a session identifier in priority order, ahead of the conversation prefix. Each entry sets exactly one of `header` (a request header) or `attribute` (a request attribute such as `agent-identity`), with an optional `producer`. |
 
 ## Revision Overflow
 
@@ -379,6 +383,51 @@ filter then rejects the request with HTTP 429 although capacity exists.
   even if it is full, so every part of the request stays on one revision.
 - `llm_d_router_endpoint_picker_disaggregatedset_revision_overflow_total`
   counts overflows by source and target revision, once per decision.
+
+## Revision Affinity
+
+With the default random draw, consecutive turns of one session land on the old
+and new revisions roughly in proportion to their shares. Each switch lands on a
+revision that does not hold the session's KV cache, so the prefix is
+recomputed, and under load the revisions keep evicting each other's working
+sets for the whole rollout.
+
+`affinity.mode: prefix` selects revisions with weighted rendezvous hashing
+(`-ln(u) / share` per covered revision, lowest score wins):
+
+```yaml
+    revisionGating:
+      mode: max-role
+      requiredRoles: [prefill, decode]
+      affinity:
+        mode: prefix
+        sources:                      # optional
+        - header: x-session-id
+        - attribute: agent-identity
+```
+
+- Key order is the first non-empty session identifier from `sources`, in
+  order, then the text conversation up to and including its first user message
+  (plus `cache_salt`) for OpenAI chat completions and Anthropic messages. An
+  `attribute: agent-identity` source reads the identifier resolved by the
+  [`agent-identity`](../../requestheader/agentidentity/README.md) plugin, which
+  keeps an agent session on one revision across context compaction. Later turns
+  repeat that prefix or session identifier, so turns of a session select one
+  revision while sessions sharing only a system prompt still spread out.
+- Requests with nothing to key on fall back to the weighted random draw:
+  completions, Responses, bodies without a user message, and prefixes containing
+  non-text blocks (such as images, audio, video, or E/P/D encode priming
+  requests without a session identifier).
+- Shares hold in aggregate across keys for any number of revisions. Changing
+  one revision's share or coverage moves keys only to or from that revision;
+  sessions on the remaining covered revisions stay put regardless of revision
+  names.
+- Strict revision headers, revision overflow, and coordination for parallel
+  requests are unchanged.
+
+Shares apply across distinct keys. A key carrying a large fraction of traffic,
+such as a session identifier shared by many clients, sends all of that traffic
+to one revision. Leave affinity off when a few keys dominate traffic.
 
 ## DisaggregatedSet Slice Affinity
 

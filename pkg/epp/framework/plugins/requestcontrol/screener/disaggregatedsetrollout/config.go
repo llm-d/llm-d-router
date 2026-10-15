@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 // DisaggregatedSet rollout protocol and operator label defaults.
@@ -57,7 +58,8 @@ type Scope struct {
 //  1. Coverage check: drop candidates whose revision has zero Ready pods
 //     for any role listed in RequiredRoles.
 //  2. Load shaping: when no revision header is present, weighted-random-pick
-//     one surviving revision and keep only its pods.
+//     one surviving revision and keep only its pods. Affinity can key that
+//     draw so related requests pick the same revision.
 //
 // A request carrying RevisionHeaderName always selects that revision strictly.
 // The selected endpoint's revision is stamped into the same response header.
@@ -69,6 +71,7 @@ type RevisionGating struct {
 	Mode                GatingMode        `json:"mode"`
 	RequiredRoles       []string          `json:"requiredRoles,omitempty"`
 	Overflow            *RevisionOverflow `json:"overflow,omitempty"`
+	Affinity            *RevisionAffinity `json:"affinity,omitempty"`
 }
 
 // RevisionOverflow sends a request to another revision when the guard admits
@@ -83,6 +86,34 @@ type RevisionOverflow struct {
 
 // DefaultOverflowRole is the role checked for room by default.
 const DefaultOverflowRole = "prefill"
+
+// RevisionAffinity controls how the weighted revision choice is keyed; see the
+// README's Revision Affinity.
+type RevisionAffinity struct {
+	Mode AffinityMode `json:"mode,omitempty"`
+	// Sources optionally resolve a session identifier, in priority order,
+	// that keys the revision choice ahead of the conversation prefix.
+	Sources []sessionaffinity.SessionIDSource `json:"sources,omitempty"`
+}
+
+// AffinityMode selects how the revision choice is keyed.
+type AffinityMode string
+
+const (
+	// AffinityModeNone draws every request independently at random.
+	AffinityModeNone AffinityMode = "none"
+	// AffinityModePrefix keys weighted rendezvous selection on the first
+	// session identifier resolved from Sources, else the text conversation
+	// prefix, falling back to a random draw when neither applies.
+	AffinityModePrefix AffinityMode = "prefix"
+)
+
+func (g *RevisionGating) affinityMode() AffinityMode {
+	if g == nil || g.Affinity == nil || g.Affinity.Mode == "" {
+		return AffinityModeNone
+	}
+	return g.Affinity.Mode
+}
 
 // UnmarshalJSON normalizes RevisionHeaderName to lowercase because request
 // headers are lowercase in the scheduling request.
@@ -198,6 +229,21 @@ func (c *Config) Validate() error {
 		}
 		if !slices.Contains(c.RevisionGating.RequiredRoles, overflow.Role) {
 			return fmt.Errorf("revisionGating.overflow.role %q must be one of revisionGating.requiredRoles", overflow.Role)
+		}
+	}
+
+	if affinity := c.RevisionGating.Affinity; affinity != nil {
+		switch affinity.Mode {
+		case "", AffinityModeNone:
+			if len(affinity.Sources) > 0 {
+				return fmt.Errorf("revisionGating.affinity.sources requires revisionGating.affinity.mode=%s", AffinityModePrefix)
+			}
+		case AffinityModePrefix:
+			if err := sessionaffinity.ValidateSources(affinity.Sources); err != nil {
+				return fmt.Errorf("revisionGating.affinity.%w", err)
+			}
+		default:
+			return fmt.Errorf("revisionGating.affinity.mode %q must be one of none|prefix", affinity.Mode)
 		}
 	}
 

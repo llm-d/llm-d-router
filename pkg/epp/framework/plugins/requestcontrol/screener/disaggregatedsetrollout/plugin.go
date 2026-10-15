@@ -34,6 +34,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
@@ -79,6 +80,7 @@ type revisionDistribution struct {
 
 var (
 	_ fwkplugin.Plugin              = (*Screener)(nil)
+	_ fwkplugin.ConsumerPlugin      = (*Screener)(nil)
 	_ fwkrc.Screener                = (*Screener)(nil)
 	_ fwkrc.ResponseHeaderProcessor = (*Screener)(nil)
 	_ fwkdl.Registrant              = (*Screener)(nil)
@@ -151,6 +153,15 @@ func newScreener(name string, config Config, scope labels.Selector, handle fwkpl
 }
 
 func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
+
+// Consumes declares the request attributes named by affinity sources when
+// prefix affinity is enabled.
+func (c *Screener) Consumes() fwkplugin.DataDependencies {
+	if c.config.RevisionGating.affinityMode() != AffinityModePrefix {
+		return fwkplugin.DataDependencies{}
+	}
+	return sessionaffinity.SourcesConsumes(c.config.RevisionGating.Affinity.Sources)
+}
 
 // RegisterDependencies requests the framework-owned core/v1 Pod notification
 // source. No controller-runtime Manager or Kubernetes client enters the plugin.

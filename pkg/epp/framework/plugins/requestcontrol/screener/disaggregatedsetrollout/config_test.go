@@ -18,8 +18,11 @@ package disaggregatedsetrollout
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 func validConfig() Config {
@@ -202,6 +205,54 @@ func TestValidate_LeavesHeaderNameAloneOnInCodeConstruction(t *testing.T) {
 	if cfg.RevisionGating.RevisionHeaderName != "X-LLM-D-Disagg-Revision" {
 		t.Fatalf("Validate mutated RevisionHeaderName: got %q", cfg.RevisionGating.RevisionHeaderName)
 	}
+}
+
+func TestRevisionGating_UnmarshalJSON_Affinity(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix","sources":[{"header":"X-Session-ID"},{"attribute":"agent-identity"}]}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.affinityMode() != AffinityModePrefix {
+		t.Fatalf("affinity mode = %q, want %q", gating.affinityMode(), AffinityModePrefix)
+	}
+	want := []sessionaffinity.SessionIDSource{{Header: "X-Session-ID"}, {Attribute: "agent-identity"}}
+	if !slices.Equal(gating.Affinity.Sources, want) {
+		t.Fatalf("sources = %+v, want %+v", gating.Affinity.Sources, want)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","sessionHeader":"x"}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_Affinity(t *testing.T) {
+	cfg := validConfig()
+	if cfg.RevisionGating.affinityMode() != AffinityModeNone {
+		t.Fatalf("affinity should default to %q", AffinityModeNone)
+	}
+	for _, affinity := range []RevisionAffinity{
+		{},
+		{Mode: AffinityModeNone},
+		{Mode: AffinityModePrefix},
+		{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}, {Attribute: "agent-identity"}}},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Affinity = &affinity
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("affinity %+v rejected: %v", affinity, err)
+		}
+	}
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: "sticky"}
+	assertValidateError(t, cfg, "revisionGating.affinity.mode")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources requires")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x", Attribute: "y"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources[0]")
 }
 
 func assertValidateError(t *testing.T, cfg Config, wantSubstring string) {
