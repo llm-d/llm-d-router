@@ -15,6 +15,8 @@ A denial looks to the client exactly like flow control's own saturation backpres
 
 The decision is stateless: it depends only on `S` and the request's hit ratios at that moment. There is no hysteresis; the threshold is a plain comparison, so the plugin never rejects while `S` is below `T`, and nothing is lost on an EPP restart.
 
+`S` is computed over the candidate endpoints the admitter receives, which is after screeners. Flow control computes its `S` over the pool before screeners run. With screeners configured, the two can differ, and `T` should be read against this plugin's `..._saturation` gauge rather than flow control's.
+
 ## Placement
 
 Admitters run after the data producers and before scheduling, so the admitter sees the full candidate pool and the request's prefix match on every endpoint. It does not change the candidate set. An admitted request is routed by the scheduling profile as usual; pair it with `prefix-cache-affinity-filter` so that admitted hot requests land on their warm endpoint. Whether that endpoint currently has room is the profile's decision (for example `concurrency-detector` as a filter), the same as for any admitted request.
@@ -28,7 +30,7 @@ Below `T` the admitter changes nothing.
 | `saturationDetectorRef` | required | Name of a saturation detector instance (any plugin implementing `flowcontrol.SaturationDetector`, typically the `concurrency-detector` flow control already uses). It supplies `S`. |
 | `shedThreshold` | `0.85` | `T`, in `(0, 1]`. |
 | `minHitRatio` | `0.6` | `H`, in `[0, 1]`. |
-| `minUncachedTokens` | `0` | A request that adds fewer uncached tokens than this on its cheapest endpoint is never shed. `0` disables. Also works as a kill switch. |
+| `minUncachedTokens` | `0` | A request that adds fewer uncached tokens than this on its cheapest endpoint is never shed. `0` disables. When set, `UncachedRequestTokens` becomes a required attribute; an endpoint without it is ignored, and a request with the count unknown on every endpoint is not exempted. A value larger than any prompt (for example `1000000000`) exempts everything and so acts as a kill switch without removing the plugin. |
 | `shedStatusCode` | `429` | `429` or `503`. |
 | `prefixMatchInfoProducerName` | approx producer | Producer of `PrefixCacheMatchInfo`. |
 | `inFlightLoadProducerName` | in-flight load producer | Producer of `InFlightLoad` and `UncachedRequestTokens`. Must match the detector's producer. |
@@ -73,7 +75,7 @@ Admitters are not listed in a scheduling profile; declaring the plugin is enough
 
 | Metric | Labels | Description |
 | --- | --- | --- |
-| `llm_d_epp_prefix_cache_aware_admitter_decisions_total` | `plugin_name`, `outcome` | One per `Admit` call. Outcomes: `admitted_below_threshold`, `admitted_hot`, `shed_cold`, `admitted_small_request`, `not_applicable`. |
+| `llm_d_epp_prefix_cache_aware_admitter_decisions_total` | `plugin_name`, `outcome` | One per `Admit` call. Outcomes: `admitted_below_threshold`, `admitted_hot`, `shed_cold`, `admitted_small_request`, `not_applicable`. The last one is the empty-pool branch; the Director rejects an empty pool before admitters run, so it should stay at zero. |
 | `llm_d_epp_prefix_cache_aware_admitter_saturation` | `plugin_name` | `S` read on the last decision. |
 
 ## Relation to `failOpen: false` and to flow control
@@ -82,5 +84,4 @@ Admitters are not listed in a scheduling profile; declaring the plugin is enough
 
 ## Notes
 
-- `S` is computed over the candidate endpoints after screeners. Flow control computes its `S` over the same pool before screeners run. With screeners configured, the two can differ.
 - With more than one EPP replica, each replica sees only the in-flight load it dispatched. Share the detector limits across replicas as you do for flow control.

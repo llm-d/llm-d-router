@@ -49,7 +49,6 @@ func TestConfigParser(t *testing.T) {
 		{name: "negative min uncached", json: `{"saturationDetectorRef":"det","minUncachedTokens":-1}`, wantErr: "minUncachedTokens"},
 		{name: "bad status code", json: `{"saturationDetectorRef":"det","shedStatusCode":500}`, wantErr: "shedStatusCode"},
 		{name: "unknown field", json: `{"saturationDetectorRef":"det","nope":1}`, wantErr: "unknown field"},
-		{name: "removed hysteresis field is rejected", json: `{"saturationDetectorRef":"det","hysteresis":0.05}`, wantErr: "unknown field"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -50,7 +51,8 @@ func (f *fakeDetector) Saturation(_ context.Context, endpoints []fwkdl.Endpoint)
 }
 
 // makeEndpoint creates an endpoint with hit blocks out of 100 and the given
-// uncached token projection. hit < 0 leaves the prefix attribute absent.
+// uncached token projection. hit < 0 leaves the prefix attribute absent;
+// uncached < 0 leaves the uncached token attribute absent.
 func makeEndpoint(name string, hit int, uncached int64) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: name, Namespace: "default"}}
 	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
@@ -58,8 +60,23 @@ func makeEndpoint(name string, hit int, uncached int64) fwksched.Endpoint {
 		ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(hit, 100, 16))
 	}
 	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{})
-	ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: uncached})
+	if uncached >= 0 {
+		ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: uncached})
+	}
 	return ep
+}
+
+// mustNew builds a plugin from a config the test expects to be valid.
+func mustNew(t *testing.T, config Config, det *fakeDetector) *Plugin {
+	t.Helper()
+	p, err := New("test", config, det)
+	require.NoError(t, err)
+	return p
+}
+
+// decisionCount reads the decisions counter for one outcome of the "test" plugin.
+func decisionCount(outcome string) float64 {
+	return testutil.ToFloat64(decisions.WithLabelValues("test", outcome))
 }
 
 func validConfig() Config {
@@ -87,75 +104,102 @@ func TestAdmitDecisions(t *testing.T) {
 	all := []fwksched.Endpoint{hot, warm, cold}
 
 	tests := []struct {
-		name       string
-		config     func(Config) Config
-		saturation float64
-		endpoints  []fwksched.Endpoint
-		wantCode   string // empty: admitted
+		name        string
+		config      func(Config) Config
+		saturation  float64
+		endpoints   []fwksched.Endpoint
+		wantCode    string // empty: admitted
+		wantOutcome string
 	}{
 		{
-			name:       "below threshold admits a cold request",
-			saturation: 0.84,
-			endpoints:  []fwksched.Endpoint{cold},
+			name:        "below threshold admits a cold request",
+			saturation:  0.84,
+			endpoints:   []fwksched.Endpoint{cold},
+			wantOutcome: outcomeAdmittedBelowThreshold,
 		},
 		{
-			name:       "at threshold a hot request is admitted",
-			saturation: 0.85,
-			endpoints:  all,
+			name:        "at threshold a hot request is admitted",
+			saturation:  0.85,
+			endpoints:   all,
+			wantOutcome: outcomeAdmittedHot,
 		},
 		{
-			name:       "one warm endpoint among cold ones is enough",
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{cold, warm},
+			name:        "one warm endpoint among cold ones is enough",
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{cold, warm},
+			wantOutcome: outcomeAdmittedHot,
 		},
 		{
-			name:       "no hit anywhere is a cold shed",
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{cold, makeEndpoint("colder", 0, 9000)},
-			wantCode:   errcommon.ResourceExhausted,
+			name:        "no hit anywhere is a cold shed",
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{cold, makeEndpoint("colder", 0, 9000)},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "missing prefix attribute counts as cold",
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{makeEndpoint("unknown", -1, 9000)},
-			wantCode:   errcommon.ResourceExhausted,
+			name:        "missing prefix attribute counts as cold",
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeEndpoint("unknown", -1, 9000)},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "503 mode selects ServiceUnavailable",
-			config:     func(c Config) Config { c.ShedStatusCode = http.StatusServiceUnavailable; return c },
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{cold},
-			wantCode:   errcommon.ServiceUnavailable,
+			name:        "503 mode selects ServiceUnavailable",
+			config:      func(c Config) Config { c.ShedStatusCode = http.StatusServiceUnavailable; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{cold},
+			wantCode:    errcommon.ServiceUnavailable,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "higher minHitRatio turns warm into cold",
-			config:     func(c Config) Config { c.MinHitRatio = 0.8; return c },
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{warm, cold},
-			wantCode:   errcommon.ResourceExhausted,
+			name:        "higher minHitRatio turns warm into cold",
+			config:      func(c Config) Config { c.MinHitRatio = 0.8; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{warm, cold},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "small cold request is exempt",
-			config:     func(c Config) Config { c.MinUncachedTokens = 500; return c },
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{makeEndpoint("c1", 0, 400), makeEndpoint("c2", 0, 9000)},
+			name:        "small cold request is exempt",
+			config:      func(c Config) Config { c.MinUncachedTokens = 500; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeEndpoint("c1", 0, 400), makeEndpoint("c2", 0, 9000)},
+			wantOutcome: outcomeAdmittedSmallRequest,
 		},
 		{
-			name:       "exemption uses the cheapest endpoint",
-			config:     func(c Config) Config { c.MinUncachedTokens = 500; return c },
-			saturation: 0.9,
-			endpoints:  []fwksched.Endpoint{makeEndpoint("c1", 0, 600), makeEndpoint("c2", 0, 9000)},
-			wantCode:   errcommon.ResourceExhausted,
+			name:        "exemption uses the cheapest endpoint",
+			config:      func(c Config) Config { c.MinUncachedTokens = 500; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeEndpoint("c1", 0, 600), makeEndpoint("c2", 0, 9000)},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "single hot endpoint is admitted at full saturation",
-			saturation: 1.0,
-			endpoints:  []fwksched.Endpoint{hot},
+			name:        "exemption needs the uncached token attribute",
+			config:      func(c Config) Config { c.MinUncachedTokens = 500; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeEndpoint("c1", 0, -1), makeEndpoint("c2", 0, -1)},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
 		},
 		{
-			name:       "empty input is admitted",
-			saturation: 1.0,
-			endpoints:  []fwksched.Endpoint{},
+			name:        "exemption ignores endpoints without the attribute",
+			config:      func(c Config) Config { c.MinUncachedTokens = 500; return c },
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeEndpoint("c1", 0, -1), makeEndpoint("c2", 0, 400)},
+			wantOutcome: outcomeAdmittedSmallRequest,
+		},
+		{
+			name:        "single hot endpoint is admitted at full saturation",
+			saturation:  1.0,
+			endpoints:   []fwksched.Endpoint{hot},
+			wantOutcome: outcomeAdmittedHot,
+		},
+		{
+			name:        "empty input is admitted",
+			saturation:  1.0,
+			endpoints:   []fwksched.Endpoint{},
+			wantOutcome: outcomeNotApplicable,
 		},
 	}
 
@@ -168,7 +212,7 @@ func TestAdmitDecisions(t *testing.T) {
 			}
 			require.NoError(t, config.validate())
 			det := &fakeDetector{saturation: tc.saturation}
-			p := New("test", config, det)
+			p := mustNew(t, config, det)
 			request := &fwksched.InferenceRequest{RequestID: "r1"}
 
 			d := denial(t, p.Admit(context.Background(), request, tc.endpoints))
@@ -184,7 +228,10 @@ func TestAdmitDecisions(t *testing.T) {
 			}
 			if len(tc.endpoints) > 0 {
 				assert.Equal(t, []int{len(tc.endpoints)}, det.poolSizes, "saturation is read over the full pool")
+				assert.Equal(t, tc.saturation, testutil.ToFloat64(observedSaturation.WithLabelValues("test")))
 			}
+			assert.Equal(t, 1.0, decisionCount(tc.wantOutcome), "exactly one decision, with outcome %q", tc.wantOutcome)
+			assert.Equal(t, 1, testutil.CollectAndCount(decisions), "no other outcome was recorded")
 		})
 	}
 }
@@ -194,7 +241,7 @@ func TestAdmitDecisions(t *testing.T) {
 func TestAdmitThresholdIsStateless(t *testing.T) {
 	resetMetrics()
 	det := &fakeDetector{}
-	p := New("test", validConfig(), det) // T = 0.85
+	p := mustNew(t, validConfig(), det) // T = 0.85
 	cold := []fwksched.Endpoint{makeEndpoint("cold", 0, 9000)}
 
 	admitted := func(saturation float64) bool {
@@ -209,22 +256,45 @@ func TestAdmitThresholdIsStateless(t *testing.T) {
 	assert.True(t, admitted(0.10), "idle: admit")
 }
 
-func TestAdmitNilRequest(t *testing.T) {
+// TestAdmitIgnoresRequest pins down that the decision reads only the endpoint
+// attributes: a nil request gets the same answer as a populated one.
+func TestAdmitIgnoresRequest(t *testing.T) {
 	resetMetrics()
-	p := New("test", validConfig(), &fakeDetector{saturation: 1.0})
-	assert.Error(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{makeEndpoint("cold", 0, 1)}))
+	p := mustNew(t, validConfig(), &fakeDetector{saturation: 1.0})
+	cold := []fwksched.Endpoint{makeEndpoint("cold", 0, 1)}
+	hot := []fwksched.Endpoint{makeEndpoint("hot", 90, 1)}
+
+	assert.Error(t, p.Admit(context.Background(), nil, cold))
+	assert.Error(t, p.Admit(context.Background(), &fwksched.InferenceRequest{RequestID: "r1"}, cold))
+	assert.NoError(t, p.Admit(context.Background(), nil, hot))
+}
+
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	bad := validConfig()
+	bad.ShedStatusCode = http.StatusInternalServerError
+	_, err := New("test", bad, &fakeDetector{})
+	require.ErrorContains(t, err, "shedStatusCode")
+
+	_, err = New("test", validConfig(), nil)
+	require.ErrorContains(t, err, "detector")
 }
 
 func TestDataDependencies(t *testing.T) {
 	config := validConfig()
 	config.PrefixMatchInfoProducerName = "precise"
 	config.InFlightLoadProducerName = "loads"
-	p := New("test", config, &fakeDetector{})
+	uncachedKey := attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName("loads")
 
-	deps := p.Consumes()
+	deps := mustNew(t, config, &fakeDetector{}).Consumes()
 	assert.Contains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("precise"))
 	assert.Contains(t, deps.Required, attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName("loads"))
-	assert.Contains(t, deps.Optional, attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName("loads"))
+	assert.Contains(t, deps.Optional, uncachedKey, "exemption off: the token count is optional")
+	assert.NotContains(t, deps.Required, uncachedKey)
+
+	config.MinUncachedTokens = 100
+	deps = mustNew(t, config, &fakeDetector{}).Consumes()
+	assert.Contains(t, deps.Required, uncachedKey, "exemption on: the token count is required")
+	assert.NotContains(t, deps.Optional, uncachedKey)
 }
 
 func TestFactory(t *testing.T) {
