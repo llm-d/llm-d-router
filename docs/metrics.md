@@ -807,6 +807,15 @@ with `present=false` and no choice/count attributes. Valid client summaries can 
 when a failure prevents dispatch. Tool-field telemetry omits tool names, schemas, arguments, prompt
 content, and content-derived hashes. Response-field integrity is outside these checks.
 
+To compare request-field outcome rates across EPP and sidecar metrics scraped by the same
+Prometheus instance:
+
+```promql
+sum by (component, field, status) (
+  rate({__name__=~"llm_d_(epp|disagg_sidecar)_tool_calling_field_status_total", direction="request"}[5m])
+)
+```
+
 ### MoRI-IO DNS re-resolution
 
 Emitted by the sidecar proxy when MoRI-IO peer host specs are DNS names that are re-resolved on the
