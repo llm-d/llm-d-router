@@ -270,10 +270,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 		return nil, nil, false
 	}
-	// createRoutes registers exact POST routes with and without a trailing slash
-	// for each inference path and derives apiType from DetectAPIType. The decoder
-	// catch-all handles extra segments and unrelated paths without reading their
-	// bodies, so those requests bypass this guard.
+	// createRoutes registers one route per path in DetectAPIType's mapping and
+	// derives each route's apiType from the same call, so a path added to that
+	// list is guarded here without a second edit. CanonicalizeAPIPath maps other
+	// forms of those paths onto them. A request on any other path, including
+	// PathResponses with an extra segment, reaches the decoder proxy through the
+	// catch-all and its body is never read. Guarding those would put a body read
+	// on the catch-all, which serves every unrouted path for every API.
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
