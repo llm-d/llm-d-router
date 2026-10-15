@@ -334,7 +334,8 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// body. On JSON-marshal failure, runPDPipeline writes the error
+// body. p2p is the dispatcher's routing; only its prefill P2P port reaches the
+// P/D connector. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
@@ -342,6 +343,7 @@ func (s *Server) runPDPipeline(
 	body map[string]any,
 	prefillEndPoint string,
 	requestID string,
+	prefill *p2pPeer,
 	apiType reqcommon.APIType,
 ) {
 	// Skip decode-first; the encoder has run and prefill must execute.
@@ -380,10 +382,7 @@ func (s *Server) runPDPipeline(
 
 	if len(prefillEndPoint) > 0 {
 		s.logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
-		// The encoder path does not carry a KV cache source: the P2P prefix pull
-		// is not wired through encoder disaggregation. The empty source skips the
-		// p2p injection regardless of --enable-p2p-pull.
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", apiType)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, p2pRouting{prefill: prefill}, apiType)
 		return
 	}
 

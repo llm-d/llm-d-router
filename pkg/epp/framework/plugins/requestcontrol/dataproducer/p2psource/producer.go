@@ -16,7 +16,9 @@ limitations under the License.
 
 // Package p2psource selects a peer within one block of the most cached prompt
 // prefix, publishes a request-wide reusable-prefix floor for scheduling, and
-// emits the selected peer in the KV cache source header after scheduling.
+// after scheduling writes the selected peer into the request body as
+// kv_transfer_params.remote_kv_source and the prefill endpoint's address and
+// OffloadingConnector P2P tier port on the routing headers.
 package p2psource
 
 import (
@@ -27,11 +29,15 @@ import (
 	"hash/fnv"
 	"math"
 	"net"
+	"strconv"
 
+	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -50,6 +56,10 @@ const (
 	defaultPrefillProfile = "prefill"
 
 	defaultMinCachedTokenDelta = 1
+
+	// defaultP2PConnectorPort is the port of the vLLM OffloadingConnector P2P
+	// tier on data parallel rank 0; rank r listens on defaultP2PConnectorPort+r.
+	defaultP2PConnectorPort = 7777
 )
 
 // Config configures the p2p-source-producer.
@@ -65,6 +75,10 @@ type Config struct {
 	// the disagg-profile-handler's profiles.prefill. Empty defaults to
 	// "prefill".
 	PrefillProfileName string `json:"prefillProfileName,omitempty"`
+	// P2PConnectorPort is the OffloadingConnector P2P tier port of data
+	// parallel rank 0 on every endpoint; rank r listens on P2PConnectorPort+r.
+	// Must be a valid TCP port; defaults to defaultP2PConnectorPort.
+	P2PConnectorPort int `json:"p2pConnectorPort,omitempty"`
 	// CostModel, when set, decides the pull by comparing the prefill time the
 	// pull saves against the transfer and the waits a pull pays on busy pods,
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
@@ -176,16 +190,18 @@ var (
 
 // Producer stashes a pull-source candidate holding within one block of the
 // most cached prefix tokens and publishes a reusable-prefix floor during
-// Produce. In PreRequest it sets routing.KVCacheSourceHeader to that peer when
-// it out-caches the pod computing the prefix (the prefill endpoint under P/D
-// disaggregation, the primary endpoint otherwise) by at least
-// minCachedTokenDelta tokens.
+// Produce. In PreRequest it writes that peer into the request body as
+// kv_transfer_params.remote_kv_source when it out-caches the pod computing
+// the prefix (the prefill endpoint under P/D disaggregation, the primary
+// endpoint otherwise) by at least minCachedTokenDelta tokens, and sets the
+// prefill endpoint's address and P2P tier port on the routing headers.
 type Producer struct {
 	typedName                   plugin.TypedName
 	prefixMatchDataKey          plugin.DataKey
 	reusablePrefixTokensDataKey plugin.DataKey
 	minCachedTokenDelta         int
 	prefillProfile              string
+	p2pConnectorPort            int
 	attrKeyValue                plugin.DataKey
 	costModel                   *CostModelConfig
 }
@@ -193,7 +209,7 @@ type Producer struct {
 // PluginFactory parses the raw plugin configuration and returns a configured
 // Producer.
 func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
-	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta}
+	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta, P2PConnectorPort: defaultP2PConnectorPort}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
@@ -201,6 +217,9 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	}
 	if cfg.MinCachedTokenDelta < 1 {
 		return nil, fmt.Errorf("%s: minCachedTokenDelta must be >= 1, got %d", PluginType, cfg.MinCachedTokenDelta)
+	}
+	if !routing.IsTCPPort(cfg.P2PConnectorPort) {
+		return nil, fmt.Errorf("%s: p2pConnectorPort must be between 1 and 65535, got %d", PluginType, cfg.P2PConnectorPort)
 	}
 	if cfg.CostModel != nil {
 		if err := cfg.CostModel.validate(); err != nil {
@@ -221,6 +240,10 @@ func New(name string, cfg Config) *Producer {
 	if minCachedTokenDelta < 1 {
 		minCachedTokenDelta = defaultMinCachedTokenDelta
 	}
+	p2pConnectorPort := cfg.P2PConnectorPort
+	if p2pConnectorPort == 0 {
+		p2pConnectorPort = defaultP2PConnectorPort
+	}
 	costModel := cfg.CostModel
 	if costModel != nil && costModel.BusyQueueThreshold < 1 {
 		defaulted := *costModel
@@ -233,6 +256,7 @@ func New(name string, cfg Config) *Producer {
 		reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(name),
 		minCachedTokenDelta:         minCachedTokenDelta,
 		prefillProfile:              prefillProfile,
+		p2pConnectorPort:            p2pConnectorPort,
 		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 		costModel:                   costModel,
 	}
@@ -262,10 +286,13 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 
 // bestMatchPeer is the pull-source candidate chosen during Produce, stashed
 // as a request attribute so PreRequest can compare it against the scheduled
-// endpoint. cachedTokens is the chosen peer's own count, which may be one
-// block below the pool maximum.
+// endpoint. hostPort is the serving endpoint, compared against the computing
+// endpoint; address and p2pPort are what a pull dials. cachedTokens is the
+// chosen peer's own count, which may be one block below the pool maximum.
 type bestMatchPeer struct {
 	hostPort     string
+	address      string
+	p2pPort      int
 	cachedTokens int
 	hasTierData  bool
 	// waitingQueue is the source's waiting-queue depth at Produce time, read
@@ -306,6 +333,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	// maximum would exclude every real endpoint below.
 	type sourceMatch struct {
 		ep          scheduling.Endpoint
+		p2pPort     int
 		cached      int
 		blockSize   int
 		hasTierData bool
@@ -313,14 +341,22 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 	maxCached := 0
 	matches := make([]sourceMatch, 0, len(endpoints))
 	for _, ep := range endpoints {
-		if ep.GetMetadata() == nil {
+		md := ep.GetMetadata()
+		if md == nil {
 			continue
 		}
 		cached, blockSize, hasTierData := p.sourceCachedTokens(ep)
 		if cached == 0 {
 			continue
 		}
-		matches = append(matches, sourceMatch{ep: ep, cached: cached, blockSize: blockSize, hasTierData: hasTierData})
+		p2pPort, ok := p.p2pPort(md)
+		if !ok {
+			log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEBUG).Info(
+				"endpoint cannot serve as a P2P source: P2P tier port is outside 1-65535",
+				"requestID", request.RequestID, "endpoint", md.ID, "p2pConnectorPort", p.p2pConnectorPort, "rank", md.GetRankIndex())
+			continue
+		}
+		matches = append(matches, sourceMatch{ep: ep, p2pPort: p2pPort, cached: cached, blockSize: blockSize, hasTierData: hasTierData})
 		if cached > maxCached {
 			maxCached = cached
 		}
@@ -374,6 +410,8 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			md := candidates[chosen].ep.GetMetadata()
 			best = bestMatchPeer{
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
+				address:      md.Address,
+				p2pPort:      candidates[chosen].p2pPort,
 				cachedTokens: candidates[chosen].cached,
 				hasTierData:  candidates[chosen].hasTierData,
 				waitingQueue: waitingQueueSize(candidates[chosen].ep),
@@ -428,12 +466,21 @@ func requestSpreadFraction(requestID string) float64 {
 	return float64(h.Sum32()) / float64(1<<32)
 }
 
-// PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed
-// by Produce when it out-caches the pod computing the prefix by at least
-// minCachedTokenDelta tokens and, with a cost model configured, when the
-// pull's gain exceeds its cost. Any inbound value of the header is removed.
+// PreRequest writes the P2P routing outputs of the scheduled request. When
+// the prefill profile has a target, it sets routing.KVCachePrefillHeader to that
+// endpoint's address and P2P tier port; the serving address stays with the
+// profile handler.
+// When the best-match peer stashed by Produce out-caches the pod computing the
+// prefix by at least minCachedTokenDelta tokens and, with a cost model
+// configured, when the pull's gain exceeds its cost, it writes the peer into
+// the request body as kv_transfer_params.remote_kv_source, unless the body
+// already carries remote_prefiller: such a body is a decode request that
+// pulls the prompt from a prefill pod, so a source next to it would be
+// pointless. The same peer goes on routing.KVCacheSourceHeader.
 func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
-	routing.DeleteRoutingHeader(request.Headers, routing.KVCacheSourceHeader)
+	if request.Headers == nil {
+		request.Headers = map[string]string{}
+	}
 
 	// One line per request with the decision and its inputs, so pull behavior
 	// can be joined to request latency without TRACE-level log volume. The
@@ -447,15 +494,24 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		defer func() { dlog.Info("p2p decision", append(kv, "outcome", outcome)...) }()
 	}
 
+	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if pr, exists := schedulingResult.ProfileResults[p.prefillProfile]; exists && pr != nil && len(pr.TargetEndpoints) > 0 {
+		computing = pr
+		if md := pr.TargetEndpoints[0].GetMetadata(); md != nil {
+			p2pPort, ok := p.p2pPort(md)
+			if !ok {
+				outcome = "prefill-port-invalid"
+				return fmt.Errorf("endpoint %s: p2pConnectorPort %d plus rank %d is outside 1-65535", md.ID, p.p2pConnectorPort, md.GetRankIndex())
+			}
+			routing.SetRoutingHeader(request.Headers, routing.KVCachePrefillHeader, net.JoinHostPort(md.Address, strconv.Itoa(p2pPort)))
+		}
+	}
+
 	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
 	if !ok {
 		return nil
 	}
 
-	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	if pr, exists := schedulingResult.ProfileResults[p.prefillProfile]; exists && pr != nil && len(pr.TargetEndpoints) > 0 {
-		computing = pr
-	}
 	if computing == nil || len(computing.TargetEndpoints) == 0 {
 		outcome = "no-endpoint"
 		return nil
@@ -473,9 +529,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			"computing", computingHostPort, "computingCachedTokens", computingCached, "computingWaiting", waitingQueueSize(endpoint),
 			"computingRunning", runningRequests(endpoint), "deltaTokens", best.cachedTokens-computingCached)
 	}
-	// Never emit the header pointing at the computing pod itself. Redundant
-	// with the delta check below while minCachedTokenDelta >= 1 (a self-match
-	// is delta 0), but explicit against a future lower floor.
+	// Never point the computing pod at itself. Redundant with the delta check
+	// below while minCachedTokenDelta >= 1 (a self-match is delta 0), but
+	// explicit against a future lower floor.
 	if best.hostPort == computingHostPort {
 		outcome = "self"
 		return nil
@@ -483,6 +539,11 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	delta := best.cachedTokens - computingCached
 	if delta < p.minCachedTokenDelta {
 		outcome = "below-floor"
+		return nil
+	}
+	params := kvTransferParams(request.Body)
+	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
+		outcome = "decode-request"
 		return nil
 	}
 	if p.costModel != nil {
@@ -497,11 +558,25 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	}
 	outcome = "pulled"
 
-	if request.Headers == nil {
-		request.Headers = map[string]string{}
+	if params == nil {
+		params = map[string]any{}
 	}
-	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, best.hostPort)
+	params[reqcommon.FieldRemoteKVSource] = reqcommon.P2PPeerParams(uuid.NewString(), best.address, best.p2pPort)
+	setKVTransferParams(request.Body, params)
+	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, net.JoinHostPort(best.address, strconv.Itoa(best.p2pPort)))
+	if logDecision {
+		kv = append(kv, "p2pPort", best.p2pPort)
+	}
 	return nil
+}
+
+// p2pPort returns the endpoint's OffloadingConnector P2P tier port, the rank-0
+// port plus the endpoint's data parallel rank, and false when the sum is not a
+// TCP port, which the bound on p2pConnectorPort alone does not rule out.
+func (p *Producer) p2pPort(md *fwkdl.EndpointMetadata) (int, bool) {
+	rank := md.GetRankIndex()
+	port := p.p2pConnectorPort + rank
+	return port, rank >= 0 && routing.IsTCPPort(port)
 }
 
 // cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers

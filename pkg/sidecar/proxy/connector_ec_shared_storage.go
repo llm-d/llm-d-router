@@ -44,7 +44,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
-func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
+func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, prefill *p2pPeer, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
@@ -79,5 +79,5 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, prefill, apiType)
 }

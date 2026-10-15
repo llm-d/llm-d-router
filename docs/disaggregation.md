@@ -47,12 +47,20 @@ All topologies are driven by the unified `disagg-profile-handler` plugin, which 
 
 ### Routing headers
 
-EPP passes its stage decisions to the sidecar in three headers:
-`x-llm-d-prefiller-host-port`, `x-llm-d-encoder-hosts-ports` and
-`x-llm-d-kv-cache-source-host-port`. EPP also sends each under its
-pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
-`x-kv-cache-source-host-port`), so a sidecar that predates the rename still
-routes. The old names are deprecated and will be removed.
+EPP passes its stage decisions to the sidecar in four headers:
+`x-llm-d-prefiller-host-port` and `x-llm-d-encoder-hosts-ports` carry the serving
+addresses the sidecar connects to; `x-llm-d-kv-cache-prefill-p2p-host-port` and
+`x-llm-d-kv-cache-source-p2p-host-port` carry the `OffloadingConnector` P2P tier
+addresses of the prefill pod and of a cached-prefix source pod, which vLLM dials.
+EPP also sends the first two under their pre-convention names
+(`x-prefiller-host-port`, `x-encoder-hosts-ports`), so a sidecar that predates the
+rename still routes. The old names are deprecated and will be removed. The source
+header's earlier names, `x-llm-d-kv-cache-source-host-port` and
+`x-kv-cache-source-host-port`, carried the source pod's serving address; no component
+sets or reads them. The source also travels
+in the request body as `kv_transfer_params.remote_kv_source`, the form vLLM reads;
+its header is the signal that the body carries it, so the sidecar reads the body
+only then.
 
 The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
@@ -622,22 +630,28 @@ injects role-keyed `kv_transfer_params`, each key named for the remote party it
 describes: the prefiller receives `{"remote_decoder": {"kv_request_id": <id>}}`
 (no peer address), and the decoder receives `{"remote_prefiller":
 {"kv_request_id": <id>, "remote_host": <prefiller host>, "remote_port":
-<p2p-connector-port>}}` so it can pull KV from the prefiller. The prefiller host
-comes from the `x-llm-d-prefiller-host-port` header; the port is
-`--p2p-connector-port`.
+<prefiller P2P port>}}` so it can pull KV from the prefiller. The host and port
+come from the `x-llm-d-kv-cache-prefill-p2p-host-port` header, which the EPP
+`p2p-source-producer` sets to the prefiller's address and the P2P tier port it
+computes from the prefiller's data parallel rank. The sidecar connects to the
+prefiller at `x-llm-d-prefiller-host-port` as for every connector. A prefill
+request without the P2P address header, or with a value that is not a `host:port`
+with a TCP port, fails with 500 before any pod request is sent: the EPP must run
+`p2p-source-producer`.
 
-When the request also carries the `x-llm-d-kv-cache-source-host-port` header (set by
-the EPP `p2p-source-producer` to a peer holding more cached prefix than the pod
-computing the prefix), the sidecar injects an additional `remote_kv_source` key
-so vLLM pulls that cached prefix over the P2P tier instead of recomputing it.
-Under disaggregation the prefill request carries `{"remote_decoder": {...},
-"remote_kv_source": {"kv_request_id": <own id>, "remote_host": <source host>,
-"remote_port": <p2p-connector-port>}}` (the only supported multi-key
-combination); without a prefiller the decoder-only request carries
-`{"remote_kv_source": {...}}` alone. A malformed or disallowed source header is
-ignored and the request proceeds unchanged, as is any source header on a
-connector that cannot pull over the P2P tier: only `offloading`, or NIXLv2 with
-`--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source
+When the request carries the `x-llm-d-kv-cache-source-p2p-host-port` header and its body
+`kv_transfer_params.remote_kv_source` (both written by the EPP `p2p-source-producer`
+in one step, naming a peer holding more cached prefix than the pod computing the
+prefix, with its P2P tier port), the sidecar reads the body, validates the block and
+carries it into the request it builds so vLLM pulls the cached prefix over the P2P
+tier instead of recomputing it. Without the header the body is forwarded unread. Under disaggregation the prefill request carries
+`{"remote_decoder": {...}, "remote_kv_source": {"kv_request_id": <own id>,
+"remote_host": <source host>, "remote_port": <source P2P port>}}` (the only
+supported multi-key combination); without a prefiller the decoder-only request
+carries `{"remote_kv_source": {...}}` alone. A malformed or disallowed source is
+removed from the body and the request proceeds without a pull. A connector that
+cannot pull over the P2P tier does not read the field: only `offloading`, or
+NIXLv2 with `--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source
 pod must offload its generated (decode-phase) KV: set `offload_prompt_only:
 false` in its `kv_connector_extra_config` (the default `true` offloads only
 prefill blocks).
@@ -651,28 +665,28 @@ Both prefill and decode pods require the following `--kv-transfer-config`:
   "kv_connector_extra_config": {
     "spec_name": "TieringOffloadingSpec",
     "cpu_bytes_to_use": <bytes>,
-    "secondary_tiers": [{"type": "p2p", "host": "<POD_IP>", "port": <p2p-connector-port>}]
+    "secondary_tiers": [{"type": "p2p", "host": "<POD_IP>", "port": <p2pConnectorPort>}]
   }
 }
 ```
 
-`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match `--p2p-connector-port` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
+`host` must be the pod's own IP at runtime (use the Kubernetes downward API env var `status.podIP`). `port` must match the `p2p-source-producer`'s `p2pConnectorPort` (default `7777`) when each pod is a complete DP group; wide-EP worker pods instead set the compensated `P2P_BASE` (see the wide-EP paragraph below). `cpu_bytes_to_use` controls the CPU KV offload buffer size; size it to hold the KV for the expected concurrent in-flight transfers. `OffloadingConnector` is available in vLLM nightly builds from 2026-06-30 onward (commit `bec232a`, [PR #42285](https://github.com/vllm-project/vllm/pull/42285)).
 
 **Data parallelism:** the P2P tier supports `--data-parallel-size` N > 1 when
 each pod is a complete DP group (the per-pod DP deployment), or a multi-pod
 (wide-EP) group with compensated socket bases (below).
 
 - vLLM gives each DP replica its own P2P listener and offload region:
-  replica `i` serves on `<p2p-connector-port>+i`, where `i` is the
+  replica `i` serves on `<p2pConnectorPort>+i`, where `i` is the
   **global** `data_parallel_index`
   ([PR #47636](https://github.com/vllm-project/vllm/pull/47636),
   [PR #47987](https://github.com/vllm-project/vllm/pull/47987)). Engines
   without those changes bind every replica to the same
-  `POD_IP:<p2p-connector-port>`, and DP > 1 fails at engine startup.
-- The sidecar serves rank `r` on its own port + `r`, so the routed
-  endpoint's port names the target rank. The sidecar injects
-  `remote_port` = `--p2p-connector-port` + `r`; a port outside the rank
-  range falls back to rank 0.
+  `POD_IP:<p2pConnectorPort>`, and DP > 1 fails at engine startup.
+- EPP sets the port of `x-llm-d-kv-cache-prefill-p2p-host-port` and the source's
+  `remote_port` to the `p2p-source-producer`'s `p2pConnectorPort` + `r`, where
+  `r` is the endpoint's position in the pool's target ports. The sidecar copies
+  both ports and derives none.
 - The endpoint port encodes the pod-local rank, which matches the global
   index only when the pod is a whole DP group. Multi-pod DP groups (for
   example LWS wide-EP, where pod `k`'s replicas hold global indices
@@ -747,17 +761,21 @@ The exporter is configured with the standard OpenTelemetry environment variables
 
 The sidecar connects to the addresses in the `x-llm-d-prefiller-host-port` and
 `x-llm-d-encoder-hosts-ports` request headers, and tells vLLM to pull cached KV blocks
-from the address in `x-llm-d-kv-cache-source-host-port`. With
-`--enable-ssrf-protection=false` the sidecar does not check these addresses and
-logs a warning at startup. A client that can set the headers chooses the target.
-That includes any client that reaches the sidecar port without going through
-the EPP.
+from the `x-llm-d-kv-cache-prefill-p2p-host-port` request header and from the
+`remote_host` in the request body's `kv_transfer_params.remote_kv_source`.
+With `--enable-ssrf-protection=false` the sidecar does not check these addresses and
+logs a warning at startup. A client that can set the headers or the body field
+chooses the target. That includes any client that reaches the sidecar port without
+going through the EPP. Behind the EPP, client values of the headers are dropped on
+ingress. A client-supplied `remote_kv_source` is not: `p2p-source-producer` overwrites
+it when it writes a source, and otherwise it reaches vLLM on the decode-only path.
 
 Set `--enable-ssrf-protection=true` in deployments reachable by untrusted
 clients. The sidecar then accepts a target only when its host is the IP or name
 of a pod selected by the InferencePool. The port is not checked. A request with
-a disallowed prefill target is rejected with `403`, and disallowed encoder
-targets are dropped from the request.
+a disallowed prefill target or prefill P2P address is rejected with `403`,
+disallowed encoder targets are dropped from the request, and a disallowed KV
+cache source is dropped and the request proceeds without a pull.
 
 Enabling the flag requires:
 
@@ -793,8 +811,7 @@ Enabling the flag requires:
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
-| `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
-| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
+| `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by the request body's `kv_transfer_params.remote_kv_source`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 
 ---
 

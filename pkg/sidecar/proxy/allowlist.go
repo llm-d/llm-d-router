@@ -74,8 +74,11 @@ type AllowlistValidator struct {
 
 	gvr schema.GroupVersionResource // detected GVR
 
-	// allowedTargets maps hostport -> bool for allowed prefill targets
+	// allowedTargets holds the allowed host:port targets, allowedHosts their
+	// hosts for a P2P tier source that dials a port outside the pool target
+	// ports. Both are guarded by allowedTargetsMu.
 	allowedTargets   set.Set[string]
+	allowedHosts     set.Set[string]
 	allowedTargetsMu sync.RWMutex
 
 	// watchers for cleanup
@@ -127,6 +130,7 @@ func NewAllowlistValidator(enabled bool, poolGroup, namespace, poolName string) 
 		poolName:       poolName,
 		gvr:            gvr,
 		allowedTargets: set.New[string](),
+		allowedHosts:   set.New[string](),
 		podInformers:   make(map[string]cache.SharedInformer),
 		podStopChans:   make(map[string]chan struct{}),
 		poolPorts:      make(map[string][]string),
@@ -240,6 +244,22 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 
 	allowed := av.allowedTargets.Has(hostPort)
 	av.logger.V(logging.DEBUG).Info("allowlist check", "hostPort", hostPort, "allowed", allowed)
+	return allowed
+}
+
+// IsAllowedHost reports whether host is the IP or name of a pod selected by an
+// InferencePool. A pull over the OffloadingConnector P2P tier dials a tier
+// port that is not a pool target port, so the source is checked by host alone.
+func (av *AllowlistValidator) IsAllowedHost(host string) bool {
+	if !av.enabled {
+		return true
+	}
+
+	av.allowedTargetsMu.RLock()
+	allowed := av.allowedHosts.Has(host)
+	av.allowedTargetsMu.RUnlock()
+
+	av.logger.V(logging.DEBUG).Info("allowlist host check", "host", host, "allowed", allowed)
 	return allowed
 }
 
@@ -439,6 +459,7 @@ func (av *AllowlistValidator) rebuildAllowlist() {
 
 	// Clear existing allowlist
 	av.allowedTargets = set.New[string]()
+	av.allowedHosts = set.New[string]()
 
 	av.podInformersMu.RLock()
 	defer av.podInformersMu.RUnlock()
@@ -466,12 +487,13 @@ func (av *AllowlistValidator) rebuildAllowlist() {
 func (av *AllowlistValidator) addPodToAllowlist(pod *unstructured.Unstructured, poolName string, ports []string) {
 	podIP, _, _ := unstructured.NestedString(pod.Object, "status", "podIP")
 	podName := pod.GetName()
-	for _, port := range ports {
-		if podIP != "" {
-			av.allowedTargets.Insert(net.JoinHostPort(podIP, port))
+	for _, host := range []string{podIP, podName} {
+		if host == "" {
+			continue
 		}
-		if podName != "" {
-			av.allowedTargets.Insert(net.JoinHostPort(podName, port))
+		av.allowedHosts.Insert(host)
+		for _, port := range ports {
+			av.allowedTargets.Insert(net.JoinHostPort(host, port))
 		}
 	}
 

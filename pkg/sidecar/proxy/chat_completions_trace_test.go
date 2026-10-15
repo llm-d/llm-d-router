@@ -59,7 +59,7 @@ func runPrefillHandler(t *testing.T, logged *[]string) (downstream logr.Logger) 
 	s.logger = capture
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
-	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
+	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ p2pRouting, _ reqcommon.APIType) {
 		downstream = log.FromContext(r.Context())
 	}
 

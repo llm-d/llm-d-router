@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -454,6 +455,15 @@ func extractChoiceText(choice map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// toWholeInt is toInt for whole numbers: a float64 with a fraction is
+// rejected instead of truncated.
+func toWholeInt(v any) (int, bool) {
+	if f, ok := v.(float64); ok && f != math.Trunc(f) {
+		return 0, false
+	}
+	return toInt(v)
 }
 
 // toInt converts a JSON number value (float64, int, or json.Number) to int.

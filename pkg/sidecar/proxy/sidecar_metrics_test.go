@@ -154,8 +154,8 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 					allowedTargets: set.New(tt.allowed...),
 				}
 			}
-			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {}
-			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {}
+			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, *p2pPeer, reqcommon.APIType) {}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, p2pRouting, reqcommon.APIType) {}
 			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				if tt.want != "" {
 					t.Error("decoder passthrough must not be reached for a disaggregated request")
@@ -184,12 +184,12 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 func TestHandleECEncodeMetrics(t *testing.T) {
 	connectors := []struct {
 		name   string
-		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+		handle func(s *Server) ecConnectorHandler
 	}{
-		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-nixl", handle: func(s *Server) ecConnectorHandler {
 			return s.handleECNIXL
 		}},
-		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-shared-storage", handle: func(s *Server) ecConnectorHandler {
 			return s.handleECSharedStorage
 		}},
 	}
@@ -263,7 +263,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				rw := httptest.NewRecorder()
 				req := chatRequest(t, o.body())
 				// Empty prefill endpoint routes straight to decoderProxy after encode.
-				c.handle(s)(rw, req, "", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+				c.handle(s)(rw, req, "", []string{encoderURL.Host}, nil, reqcommon.APITypeChatCompletions)
 
 				assert.Equal(t, o.wantCode, rw.Code)
 				assert.Equal(t, o.wantDecoder, decoderCalled)
@@ -408,7 +408,7 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
@@ -468,7 +468,7 @@ func TestHandleP2PMetrics(t *testing.T) {
 			s.decoderProxy = tt.decoder
 
 			before := snapshotStageMetrics(t)
-			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
@@ -492,7 +492,7 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.handleP2P(httptest.NewRecorder(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+		s.handleP2P(httptest.NewRecorder(), chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
@@ -671,7 +671,7 @@ func TestHandleNIXLV2ParallelWriteMetrics(t *testing.T) {
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
@@ -696,7 +696,7 @@ func TestHandleNIXLV2SerialFinalizeFailureMetrics(t *testing.T) {
 	s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[`)
 
 	before := snapshotStageMetrics(t)
-	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
 }
@@ -784,7 +784,7 @@ func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
 			serve := func() {
-				s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+				s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}
 			if tt.wantPanic {
 				assert.PanicsWithValue(t, http.ErrAbortHandler, serve)

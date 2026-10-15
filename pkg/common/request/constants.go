@@ -51,22 +51,31 @@ const (
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
 	ContentTypeOptionsNoSniff = "nosniff"
 
-	FieldKVTransferParams     = "kv_transfer_params"
-	FieldECTransferParams     = "ec_transfer_params"
-	FieldMaxTokens            = "max_tokens"
-	FieldMaxCompletionTokens  = "max_completion_tokens"
-	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
-	FieldMinTokens            = "min_tokens"
-	FieldStream               = "stream"
-	FieldStreamOptions        = "stream_options"
-	FieldEcho                 = "echo"
-	FieldSamplingParams       = "sampling_params"
-	FieldDoRemotePrefill      = "do_remote_prefill"
-	FieldDoRemoteDecode       = "do_remote_decode"
-	FieldRemoteBlockIDs       = "remote_block_ids"
-	FieldRemoteEngineID       = "remote_engine_id"
-	FieldRemoteHost           = "remote_host"
-	FieldRemotePort           = "remote_port"
+	FieldKVTransferParams    = "kv_transfer_params"
+	FieldECTransferParams    = "ec_transfer_params"
+	FieldMaxTokens           = "max_tokens"
+	FieldMaxCompletionTokens = "max_completion_tokens"
+	FieldMaxOutputTokens     = "max_output_tokens" // Used by Responses API
+	FieldMinTokens           = "min_tokens"
+	FieldStream              = "stream"
+	FieldStreamOptions       = "stream_options"
+	FieldEcho                = "echo"
+	FieldSamplingParams      = "sampling_params"
+	FieldDoRemotePrefill     = "do_remote_prefill"
+	FieldDoRemoteDecode      = "do_remote_decode"
+	FieldRemoteBlockIDs      = "remote_block_ids"
+	FieldRemoteEngineID      = "remote_engine_id"
+	FieldRemoteHost          = "remote_host"
+	FieldRemotePort          = "remote_port"
+	// OffloadingConnector P2P tier roles, carried inside kv_transfer_params. The
+	// role is encoded by the nesting key, named for the remote party it
+	// describes: remote_decoder on the prefill request, remote_prefiller on the
+	// decode request, remote_kv_source for a cached-prefix pull. Each block
+	// carries its own kv_request_id.
+	FieldRemoteDecoder        = "remote_decoder"
+	FieldRemotePrefiller      = "remote_prefiller"
+	FieldRemoteKVSource       = "remote_kv_source"
+	FieldKVRequestID          = "kv_request_id"
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"

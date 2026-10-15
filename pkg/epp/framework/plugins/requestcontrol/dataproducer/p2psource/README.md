@@ -2,19 +2,41 @@
 
 **Type:** `p2p-source-producer`
 
-Selects a peer that can supply the most cached prompt prefix and sets the
-`x-llm-d-kv-cache-source-host-port` header so the routing sidecar can pull that
-prefix instead of recomputing it. Source selection runs in the `DataProducer`
-phase before scheduling; the header is emitted in `PreRequest` after the
-computing endpoint is known.
+Selects a peer that can supply the most cached prompt prefix and writes it into the
+request body as `kv_transfer_params.remote_kv_source`, so the pod computing the prefix
+pulls it over the vLLM `OffloadingConnector` P2P tier instead of recomputing it. The same
+peer goes on the `x-llm-d-kv-cache-source-p2p-host-port` request header, and the prefill
+pod's P2P tier address on `x-llm-d-kv-cache-prefill-p2p-host-port`. Source selection runs in
+the `DataProducer` phase before scheduling; the body field and the headers are written
+in `PreRequest`, after the computing endpoint is known.
 
 The plugin consumes per-endpoint `PrefixCacheMatchInfo` from an approximate or
 precise prefix-cache producer. It samples among endpoints within one block of
 the largest eligible prefix, weighted by `1/(1+waiting queue)` and a
 request-ID hash. This spreads pulls across replicas that hold nearly identical
-prefixes. After scheduling, the header is set only when the sampled source
-out-caches the computing endpoint by at least `minCachedTokenDelta` tokens.
-Any inbound value of the header is removed.
+prefixes. After scheduling, the source is written only when the sampled source
+out-caches the computing endpoint by at least `minCachedTokenDelta` tokens. The
+computing endpoint is the prefill profile's target when that profile has one, and the
+primary profile's target otherwise.
+
+## Outputs
+
+- `kv_transfer_params.remote_kv_source` in the request body, when the source is kept:
+  a fresh `kv_request_id`, the source's `remote_host` and its P2P tier `remote_port`.
+  The field is the form vLLM reads. It is not written when the body already carries
+  `kv_transfer_params.remote_prefiller`: such a body is a decode request that already
+  pulls the prompt from a prefill pod, so a source next to it would be pointless.
+- `x-llm-d-kv-cache-source-p2p-host-port` on the request headers, in the same step as the
+  body field, as the source's `host:P2P port`.
+- `x-llm-d-kv-cache-prefill-p2p-host-port` on the request headers, whenever the prefill
+  profile has a target, as the prefill pod's `host:P2P port`. The sidecar builds the
+  decode request's `remote_prefiller` from it. The prefill pod's serving address,
+  `x-llm-d-prefiller-host-port`, is the `disagg-profile-handler`'s output and is not
+  written here.
+
+A P2P tier port is `p2pConnectorPort` plus the endpoint's data parallel rank, the
+position of its port in the pool's target ports. See
+[the sidecar KV connector flag](../../../../../../../docs/disaggregation.md#kv-connector---kv-connector) for the vLLM side.
 
 ## Reusable Prefix Floor
 
@@ -33,7 +55,7 @@ The attribute is omitted when `G` is zero.
 The [`ReusablePrefixTokens` type](../../../datalayer/attribute/prefix/data_types.go)
 defines the local-or-pull invariant that scheduling consumers rely on.
 
-Tierless approximate match data remains eligible for header selection because
+Tierless approximate match data remains eligible for source selection because
 it can still identify a likely source. It does not confirm a CPU-tier prefix,
 so it does not publish `ReusablePrefixTokens` for scheduling. A
 [`context-length-aware`](../../../scheduling/scorer/contextlengthaware/README.md)
@@ -43,13 +65,14 @@ available.
 ## Parameters
 
 - `prefixMatchInfoProducerName` (string, optional): Name of the prefix-cache producer instance that supplies `PrefixCacheMatchInfo`. Empty selects the default unnamed producer.
-- `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to emit the source header. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
+- `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to write the source. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
 - `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used.
-- `costModel` (object, optional): When set, the header is emitted only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
+- `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
+- `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
 
 ## Cost model
 
-A pull saves the computing pod the prefill of `delta` tokens (the source's cached-token advantage) and costs the transfer of those tokens, a fixed setup cost, and a re-queue delay when the computing pod has a waiting queue: the pulled request is re-admitted through that queue after its blocks arrive. On a loaded pod a recompute also delays every running request's decode steps, while a pull delays only the pulled request; `fleetWeight` credits the pull with that freed prefill. The header is emitted when
+A pull saves the computing pod the prefill of `delta` tokens (the source's cached-token advantage) and costs the transfer of those tokens, a fixed setup cost, and a re-queue delay when the computing pod has a waiting queue: the pulled request is re-admitted through that queue after its blocks arrive. On a loaded pod a recompute also delays every running request's decode steps, while a pull delays only the pulled request; `fleetWeight` credits the pull with that freed prefill. The source is written when
 
 ```text
 delta * (prefill - transfer) + fleetWeight * running(d) * delta * prefill
@@ -138,10 +161,10 @@ dataLayer:
 
 ## Deployment Requirements
 
-The source header results in a transfer only when the serving deployment can
+The source results in a transfer only when the serving deployment can
 serve and pull the named blocks:
 
-- vLLM includes `OffloadingConnector` with a `p2p` secondary tier, and the routing sidecar is configured to consume the source header.
+- vLLM includes `OffloadingConnector` with a `p2p` secondary tier, and the routing sidecar runs the `offloading` connector (or `nixlv2` with `--enable-p2p-pull`).
 - Every potential source uses `offload_prompt_only: false`. The default `true` omits decode-phase blocks from its offload tier.
 - Peers use identical `--block-size` values. vLLM rejects a mismatch with `block_len mismatch`.
 - Peers use the same `PYTHONHASHSEED`, so their block hashes agree.

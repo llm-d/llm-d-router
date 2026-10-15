@@ -38,19 +38,24 @@ const (
 	// pre-convention name rather than gaining a second one to remove.
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
 
-	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port> holding
-	// the most cached prefix KV blocks for the request, to pull from over the P2P connector
-	// instead of recomputing them
-	KVCacheSourceHeader = "x-llm-d-kv-cache-source-host-port"
+	// KVCachePrefillHeader is the header name used to indicate the prefill worker's
+	// OffloadingConnector P2P tier <ip:port>, the peer a decoder pulls the prompt
+	// KV from. EPP computes the port from the worker's data parallel rank. The
+	// serving address the sidecar connects to stays on PrefillEndpointHeader. It
+	// has no pre-convention alias.
+	KVCachePrefillHeader = "x-llm-d-kv-cache-prefill-p2p-host-port"
+
+	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port>
+	// holding the most cached prefix KV blocks for the request, with its
+	// OffloadingConnector P2P tier port. The same peer travels in the body as
+	// kv_transfer_params.remote_kv_source. It has no pre-convention alias.
+	KVCacheSourceHeader = "x-llm-d-kv-cache-source-p2p-host-port"
 
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 
 	// LegacyEncoderEndpointsHeader is the pre-convention name of EncoderEndpointsHeader.
 	LegacyEncoderEndpointsHeader = "x-encoder-hosts-ports"
-
-	// LegacyKVCacheSourceHeader is the pre-convention name of KVCacheSourceHeader.
-	LegacyKVCacheSourceHeader = "x-kv-cache-source-host-port"
 
 	// InferencePoolAPIGroup is the InferencePool API group
 	InferencePoolAPIGroup = "inference.networking.k8s.io"
@@ -69,6 +74,11 @@ const (
 	// on. The endpoint-pin-screener keeps only that endpoint.
 	EndpointPinHeader = "x-llm-d-pin-host-port"
 )
+
+// IsTCPPort reports whether port is in 1-65535.
+func IsTCPPort(port int) bool {
+	return port >= 1 && port <= 65535
+}
 
 // StripScheme removes the scheme from an endpoint URL, returning host:port.
 // This is useful for gRPC clients that expect host:port format only.
@@ -113,23 +123,49 @@ func IsConditionalDecode(headers map[string]string) bool {
 	return HasPreference(headers, PreferIfAvailable)
 }
 
+// LegacyKVCacheSourceHeaders are the retired names of KVCacheSourceHeader, from
+// when it carried the source worker's serving <ip:port>. No component sets or
+// reads them.
+var LegacyKVCacheSourceHeaders = []string{"x-llm-d-kv-cache-source-host-port", "x-kv-cache-source-host-port"}
+
 // headerAliases maps each disaggregation header to its pre-convention name. EPP
 // writes both spellings with the same value, so a sidecar that predates the
-// rename still routes. Removing an entry here retires its old name: EPP stops
-// writing it and the sidecar starts reading the canonical name (see
-// TakeRoutingHeaderValues). Do that once no supported EPP emits the old names.
+// rename still routes. Moving an entry from here to retiredNames retires its
+// old name: EPP stops writing it and the sidecar stops reading it, while both
+// keep stripping it. Do that once no supported EPP emits the old name.
 var headerAliases = map[string]string{
 	PrefillEndpointHeader:  LegacyPrefillEndpointHeader,
 	EncoderEndpointsHeader: LegacyEncoderEndpointsHeader,
-	KVCacheSourceHeader:    LegacyKVCacheSourceHeader,
 }
 
-// HeaderNames returns name followed by its deprecated alias, if it has one.
-func HeaderNames(name string) []string {
-	if alias, ok := headerAliases[name]; ok {
-		return []string{name, alias}
+// retiredNames maps a disaggregation header to names it no longer travels
+// under. They are stripped wherever the header is stripped, so a client value
+// cannot reach a sidecar that still reads them, and are never written or read.
+var retiredNames = map[string][]string{
+	KVCacheSourceHeader: LegacyKVCacheSourceHeaders,
+}
+
+// HeaderNames returns each name followed by its deprecated alias, if it has
+// one: the spellings EPP writes and the sidecar reads.
+func HeaderNames(names ...string) []string {
+	headers := make([]string, 0, 2*len(names))
+	for _, name := range names {
+		headers = append(headers, name)
+		if alias, ok := headerAliases[name]; ok {
+			headers = append(headers, alias)
+		}
 	}
-	return []string{name}
+	return headers
+}
+
+// AllHeaderNames returns HeaderNames plus each name's retired names: every
+// spelling a strip covers.
+func AllHeaderNames(names ...string) []string {
+	headers := HeaderNames(names...)
+	for _, name := range names {
+		headers = append(headers, retiredNames[name]...)
+	}
+	return headers
 }
 
 // SetRoutingHeader records value under name and its deprecated alias.
@@ -139,10 +175,10 @@ func SetRoutingHeader(headers map[string]string, name, value string) {
 	}
 }
 
-// DeleteRoutingHeader drops name and its deprecated alias, so a client-supplied
-// value cannot survive under either spelling.
+// DeleteRoutingHeader drops every spelling of name, so a client-supplied value
+// cannot survive under any of them.
 func DeleteRoutingHeader(headers map[string]string, name string) {
-	for _, n := range HeaderNames(name) {
+	for _, n := range AllHeaderNames(name) {
 		delete(headers, n)
 	}
 }
@@ -174,7 +210,7 @@ func TakeRoutingHeaderValues(h http.Header, name string) []string {
 		}
 	}
 
-	for _, n := range HeaderNames(name) {
+	for _, n := range AllHeaderNames(name) {
 		h.Del(n)
 	}
 	return values

@@ -41,7 +41,7 @@ import (
 func TestHandleEC_Multimedia(t *testing.T) {
 	tests := []struct {
 		name         string
-		handler      func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+		handler      func(*Server, http.ResponseWriter, *http.Request, string, []string, *p2pPeer, reqcommon.APIType)
 		items        []map[string]any
 		wantECParams bool
 		wantECLen    int
@@ -139,7 +139,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			srv.logger = log.Log
 
 			var capturedBody []byte
-			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
+			srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ p2pRouting, _ reqcommon.APIType) {
 				buf, err := io.ReadAll(r.Body)
 				assert.NoError(t, err)
 				capturedBody = buf
@@ -149,7 +149,7 @@ func TestHandleEC_Multimedia(t *testing.T) {
 			httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
 			rw := httptest.NewRecorder()
 
-			tt.handler(srv, rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+			tt.handler(srv, rw, httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, nil, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantEncCalls, encoderCalls.Load(), "unexpected encoder call count")
 			if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {

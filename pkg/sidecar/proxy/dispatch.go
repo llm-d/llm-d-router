@@ -18,10 +18,12 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -111,40 +113,55 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 
 		if len(prefillHostPort) > 0 {
 			if !s.allowlistValidator.IsAllowed(prefillHostPort) {
-				logger.Error(nil, "SSRF protection: prefill target not in allowlist",
-					"target", prefillHostPort,
-					"clientIP", r.RemoteAddr,
-					"userAgent", r.Header.Get("User-Agent"),
-					"requestPath", r.URL.Path)
-				span.SetAttributes(
-					semconv.LLMDPDProxyError("ssrf_protection_denied"),
-					semconv.LLMDPDProxyDeniedTarget(prefillHostPort),
-				)
-				span.SetStatus(codes.Error, "SSRF protection: prefill target not in allowlist")
-				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
+				denySSRF(w, r, logger, span, "prefill target", prefillHostPort)
 				return
 			}
 			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
-		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))
-		if kvCacheSource != "" {
-			switch {
-			case !s.p2pPullAvailable():
-				logger.V(logging.DEBUG).Info("ignoring KV cache source header: connector does not support P2P pulls",
-					"connector", s.config.KVConnector)
-				kvCacheSource = ""
-			case !isHostPort(kvCacheSource):
-				logger.Info("ignoring malformed KV cache source header", "value", kvCacheSource)
-				kvCacheSource = ""
-			case !s.allowlistValidator.IsAllowed(kvCacheSource):
-				logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
-					"target", kvCacheSource, "clientIP", r.RemoteAddr)
-				kvCacheSource = ""
-			}
+		p2p := p2pRouting{prefill: parsePrefillP2P(logger, strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCachePrefillHeader)))}
+		// The decode pod dials this address. EPP sets it from the prefill
+		// endpoint it chose, so the host is the prefill target's unless the
+		// header was forged, which gets the prefill target's answer.
+		if p2p.prefill != nil && p2p.prefill.host != extractHost(prefillHostPort) && !s.allowlistValidator.IsAllowedHost(p2p.prefill.host) {
+			denySSRF(w, r, logger, span, "prefill P2P address", p2p.prefill.String())
+			return
 		}
-		if kvCacheSource != "" {
-			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(kvCacheSource))
+		// The source header is the signal to read the body: reading every body
+		// to learn that most carry no source would buffer every request. The
+		// P/D connectors and decodeWithP2PSource take the source from p2p. The
+		// other paths forward r, rebuilt over the body without the source when
+		// one was present, so a rejected source never reaches vLLM. The header
+		// value duplicates the body block, which is what is validated.
+		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))
+		switch {
+		case kvCacheSource == "":
+		case !s.p2pPullAvailable():
+			// Once per request that carries a source: the plugin is enabled on a
+			// pool whose sidecar cannot pull, so the feature is off here.
+			logger.Info("warning: ignoring KV cache source: connector does not support P2P pulls",
+				"connector", s.config.KVConnector, "source", kvCacheSource)
+		default:
+			raw, parsed, ok := s.readJSONBody(r, w)
+			if !ok {
+				return
+			}
+			p2p.body = parsed
+			source, present := s.kvSourceFromBody(logger, r.RemoteAddr, parsed)
+			if present {
+				var err error
+				if raw, err = json.Marshal(parsed); err != nil {
+					if err := errorJSONInvalid(err, w); err != nil {
+						logger.Error(err, "failed to send error response to client")
+					}
+					return
+				}
+			}
+			p2p.source = source
+			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
+		if p2p.source != nil {
+			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(p2p.source.String()))
 		}
 
 		encoderHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.EncoderEndpointsHeader)
@@ -185,7 +202,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			} else {
 				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
 			}
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p.prefill, apiType)
 			return
 		}
 
@@ -201,16 +218,15 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		if len(prefillHostPort) > 0 {
 			logger.V(logging.DEBUG).Info("using P/D protocol")
 			metrics.RecordDisagg(metricsutil.DisaggPathPrefillDecode)
-			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
+			s.handlePDConnector(w, r, prefillHostPort, p2p, apiType)
 			return
 		}
 
 		logger.V(logging.DEBUG).Info("no prefiller or encoder, using decoder only")
 		// dataParallelHandler and the decoder passthrough forward r unread, so
 		// the guard in readJSONBody would never run on those branches.
-		// decodeWithP2PSource reads the body itself and re-runs it.
 		// readJSONBody consumes r.Body, so r is rebuilt over the same bytes.
-		if apiType == reqcommon.APITypeResponses {
+		if apiType == reqcommon.APITypeResponses && p2p.body == nil {
 			raw, _, ok := s.readJSONBody(r, w)
 			if !ok {
 				return
@@ -218,8 +234,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
-			if kvCacheSource != "" {
-				s.decodeWithP2PSource(w, r, kvCacheSource)
+			if p2p.source != nil {
+				s.decodeWithP2PSource(w, r, p2p.body, p2p.source)
 				return
 			}
 			if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
@@ -229,4 +245,19 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}
+}
+
+// denySSRF refuses the request: the client named a target outside the pool.
+func denySSRF(w http.ResponseWriter, r *http.Request, logger logr.Logger, span trace.Span, what, target string) {
+	logger.Error(nil, "SSRF protection: "+what+" not in allowlist",
+		"target", target,
+		"clientIP", r.RemoteAddr,
+		"userAgent", r.Header.Get("User-Agent"),
+		"requestPath", r.URL.Path)
+	span.SetAttributes(
+		semconv.LLMDPDProxyError("ssrf_protection_denied"),
+		semconv.LLMDPDProxyDeniedTarget(target),
+	)
+	span.SetStatus(codes.Error, "SSRF protection: "+what+" not in allowlist")
+	http.Error(w, "Forbidden: "+what+" not allowed by SSRF protection", http.StatusForbidden)
 }

@@ -58,16 +58,18 @@ var (
 		errcommon.RequestDroppedReasonHeaderKey,
 	)
 
-	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.
-	// Only EPP plugins may set them: client values are dropped on ingress and
-	// removed from the forwarded request when no plugin sets them. Deprecated
-	// aliases are included, so neither spelling can be supplied by a client.
-	InternalRoutingHeaders = routingHeaderNames(
+	// InternalRoutingHeaders carry worker addresses and ports that the P/D
+	// sidecar connects to or forwards to the model server. Only EPP plugins may
+	// set them: client values are dropped on ingress and removed from the
+	// forwarded request when no plugin sets them. Deprecated aliases and retired
+	// names are included, so no spelling can be supplied by a client.
+	InternalRoutingHeaders = sets.New(routing.AllHeaderNames(
 		routing.PrefillEndpointHeader,
+		routing.KVCachePrefillHeader,
+		routing.KVCacheSourceHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
-		routing.KVCacheSourceHeader,
-	)
+	)...)
 
 	// ScreeningHeaders are client headers that screener plugins read. They stay
 	// on the request on ingress, unlike InternalRoutingHeaders. EPP does not
@@ -91,14 +93,6 @@ var (
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
 	return InputControlHeaders.Has(k) || ScreeningHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
-}
-
-func routingHeaderNames(keys ...string) sets.Set[string] {
-	headers := sets.New[string]()
-	for _, key := range keys {
-		headers.Insert(routing.HeaderNames(key)...)
-	}
-	return headers
 }
 
 func lowerHeaderNames(keys ...string) sets.Set[string] {

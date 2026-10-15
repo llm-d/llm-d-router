@@ -17,83 +17,97 @@ limitations under the License.
 package proxy
 
 import (
-	"bytes"
-	"io"
-	"net/http"
+	"encoding/json"
+	"maps"
+	"net"
+	"strconv"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+	"k8s.io/utils/set"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
-var _ = Describe("P2P KV cache source header", func() {
+// sourceBody returns a chat completions body carrying source as the
+// remote_kv_source block EPP's p2p-source-producer writes, next to any other
+// kv_transfer_params keys in extra.
+func sourceBody(source any, extra map[string]any) string {
+	kvParams := map[string]any{}
+	maps.Copy(kvParams, extra)
+	if source != nil {
+		kvParams[reqcommon.FieldRemoteKVSource] = source
+	}
+	body := map[string]any{
+		"model":                         "Qwen/Qwen2-0.5B",
+		"messages":                      []map[string]any{{"role": "user", "content": "Hello"}},
+		reqcommon.FieldMaxTokens:        50,
+		reqcommon.FieldKVTransferParams: kvParams,
+	}
+	raw, err := json.Marshal(body)
+	Expect(err).ToNot(HaveOccurred())
+	return string(raw)
+}
+
+var _ = Describe("P2P KV cache source in the request body", func() {
 
 	var testInfo *sidecarTestInfo
 
-	const p2pConnectorPort = 7777
-	// A private pod-range peer address (the kind an InferencePool would allow).
-	const kvCacheSource = "10.9.9.9:8000"
+	// A private pod-range peer (the kind an InferencePool would allow), on
+	// the P2P tier port of its data parallel rank 1.
+	const sourceHost = "10.9.9.9"
+	const sourcePort = 7778
+	const sourceKVRequestID = "k2-from-epp"
 
-	// A client that supplies its own kv_transfer_params must not have those
-	// keys reach vLLM: the sidecar owns the field and rebuilds it.
-	const bodyWithClientKVParams = `{
-					"model": "Qwen/Qwen2-0.5B",
-					"messages": [{"role": "user", "content": "Hello"}],
-					"max_tokens": 50,
-					"kv_transfer_params": {"do_remote_prefill": true, "remote_host": "evil.example.com"}
-				}`
+	validSource := map[string]any{
+		reqcommon.FieldKVRequestID: sourceKVRequestID,
+		reqcommon.FieldRemoteHost:  sourceHost,
+		reqcommon.FieldRemotePort:  sourcePort,
+	}
+	// sourceHeaders returns the source header EPP sets next to the body
+	// block, plus extra.
+	sourceHeaders := func(extra map[string]string) map[string]string {
+		headers := map[string]string{routing.KVCacheSourceHeader: net.JoinHostPort(sourceHost, strconv.Itoa(sourcePort))}
+		maps.Copy(headers, extra)
+		return headers
+	}
 
 	BeforeEach(func() {
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
-		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 		// SSRF allowlist disabled in-test (an enabled one requires a live
-		// InferencePool), so a well-formed source passes; the malformed and
-		// empty-host cases below exercise the header validation.
+		// InferencePool), so a well-formed source passes; the allowlist cases
+		// exercise kvSourceFromBody with a validator built by hand.
 		testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
 	})
 
-	sendBody := func(proxyBaseAddr, body string, headers map[string]string) *http.Response {
-		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
-			bytes.NewReader([]byte(body)))
-		Expect(err).ToNot(HaveOccurred())
-		for k, v := range headers {
-			req.Header.Add(k, v)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		Expect(err).ToNot(HaveOccurred())
-		if resp.StatusCode != 200 {
-			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
-			Fail(string(bp))
-		}
-		return resp
-	}
-
-	sendRequest := func(proxyBaseAddr string, headers map[string]string) *http.Response {
-		return sendBody(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionCap, headers)
-	}
-
-	It("should inject remote_kv_source params on the local request without disaggregation", func() {
-		proxyBaseAddr := testInfo.startProxy()
-
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
-
+	decodeKVParams := func() (map[string]any, map[string]any) {
 		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
 		Expect(decodeReqs).To(HaveLen(1))
-		dreq := decodeReqs[0]
+		kvParams, _ := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		return decodeReqs[0], kvParams
+	}
 
-		kvParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
+	expectSource := func(kvParams map[string]any) {
+		p2p, ok := kvParams[reqcommon.FieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(kvParams).ToNot(HaveKey(requestFieldRemoteDecoder))
-		Expect(kvParams).ToNot(HaveKey(requestFieldRemotePrefiller))
-		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(p2p[reqcommon.FieldKVRequestID]).To(Equal(sourceKVRequestID))
+		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal(sourceHost))
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", sourcePort))
+	}
 
+	It("should forward remote_kv_source on the local request without disaggregation", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		postChatCompletions(proxyBaseAddr, sourceBody(validSource, nil), sourceHeaders(nil))
+
+		dreq, kvParams := decodeKVParams()
+		Expect(kvParams).To(HaveLen(1))
+		expectSource(kvParams)
 		// The caller's token limits are untouched.
 		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
 
@@ -101,184 +115,201 @@ var _ = Describe("P2P KV cache source header", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should add remote_kv_source params to the prefill request under disaggregation", func() {
+	// Without the header the body is not read: the request streams to the
+	// decoder as the client sent it, a client-supplied source included.
+	It("should forward the body unread without the source header", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		body := sourceBody(validSource, map[string]any{"other": true})
+		postChatCompletions(proxyBaseAddr, body, nil)
+
+		Expect(testInfo.decodeHandler.GetCompletionRawBodies()).To(HaveLen(1))
+		Expect(string(testInfo.decodeHandler.GetCompletionRawBodies()[0])).To(Equal(body))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should carry remote_kv_source into the prefill request under disaggregation", func() {
+		// Start takes the proxy logger from the context.
+		var logged []string
+		testInfo.ctx = log.IntoContext(testInfo.ctx, funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
 		proxyBaseAddr := testInfo.startProxy()
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		sendRequest(proxyBaseAddr, map[string]string{
+		postChatCompletions(proxyBaseAddr, sourceBody(validSource, nil), sourceHeaders(map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   kvCacheSource,
-		})
+			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
+		}))
 
 		Eventually(func() int {
 			return len(testInfo.prefillHandler.GetCompletionRequests())
 		}).Should(Equal(1))
 
-		// Prefill request: remote_decoder + remote_kv_source, each with its own
-		// kv_request_id.
+		// Prefill request: remote_decoder with the sidecar's kv_request_id, and
+		// remote_kv_source copied from EPP with its own.
 		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
 		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		decodeParams, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
+		decodeParams, ok := prefillKVParams[reqcommon.FieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
-		p2p, ok := prefillKVParams[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[requestFieldKVRequestID]).ToNot(BeEmpty())
-		Expect(p2p[requestFieldKVRequestID]).ToNot(Equal(decodeParams[requestFieldKVRequestID]))
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
-		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+		Expect(decodeParams[reqcommon.FieldKVRequestID]).ToNot(BeEmpty())
+		Expect(decodeParams[reqcommon.FieldKVRequestID]).ToNot(Equal(sourceKVRequestID))
+		expectSource(prefillKVParams)
 
 		// Decode request: remote_prefiller only, never remote_kv_source.
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams).To(HaveKey(requestFieldRemotePrefiller))
-		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteKVSource))
+		_, decodeKV := decodeKVParams()
+		Expect(decodeKV).To(HaveKey(reqcommon.FieldRemotePrefiller))
+		Expect(decodeKV).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
+
+		// The pull is visible at the default level, with the source peer.
+		Expect(logged).To(ContainElement(And(
+			ContainSubstring("running P2P protocol"),
+			ContainSubstring(net.JoinHostPort(sourceHost, strconv.Itoa(sourcePort))),
+		)))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
 
-	It("should not add remote_kv_source params to the prefill request when the source is the prefiller itself", func() {
+	It("should not inject remote_kv_source without the body field", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		// The source resolves to the selected prefiller - there is nothing to
-		// pull from itself, so the prefill request carries remote_decoder only.
-		sendRequest(proxyBaseAddr, map[string]string{
-			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   prefillHostPort,
-		})
+		postChatCompletions(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionCap, sourceHeaders(nil))
 
-		Eventually(func() int {
-			return len(testInfo.prefillHandler.GetCompletionRequests())
-		}).Should(Equal(1))
-
-		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
-		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(prefillKVParams).To(HaveKey(requestFieldRemoteDecoder))
-		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemoteKVSource))
+		dreq, _ := decodeKVParams()
+		Expect(dreq).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
 
-	It("should not inject remote_kv_source params without the header", func() {
+	DescribeTable("should drop a malformed remote_kv_source and forward the rest of kv_transfer_params",
+		func(source any) {
+			proxyBaseAddr := testInfo.startProxy()
+
+			postChatCompletions(proxyBaseAddr, sourceBody(source, map[string]any{"other": true}), sourceHeaders(nil))
+
+			_, kvParams := decodeKVParams()
+			Expect(kvParams).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
+			Expect(kvParams).To(HaveKeyWithValue("other", true))
+
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		},
+		Entry("not an object", "10.9.9.9:7777"),
+		Entry("missing kv_request_id", map[string]any{reqcommon.FieldRemoteHost: sourceHost, reqcommon.FieldRemotePort: sourcePort}),
+		Entry("empty host", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: "", reqcommon.FieldRemotePort: sourcePort}),
+		Entry("host not a string", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: 10, reqcommon.FieldRemotePort: sourcePort}),
+		Entry("missing port", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: sourceHost}),
+		Entry("port zero", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: sourceHost, reqcommon.FieldRemotePort: 0}),
+		Entry("port above the TCP range", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: sourceHost, reqcommon.FieldRemotePort: 70000}),
+		Entry("port not an integer", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: sourceHost, reqcommon.FieldRemotePort: 7777.5}),
+		Entry("port a string", map[string]any{reqcommon.FieldKVRequestID: "k", reqcommon.FieldRemoteHost: sourceHost, reqcommon.FieldRemotePort: "7777"}),
+	)
+
+	It("should drop client-supplied kv_transfer_params keys next to the source", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		sendRequest(proxyBaseAddr, nil)
+		postChatCompletions(proxyBaseAddr, sourceBody(validSource, map[string]any{
+			reqcommon.FieldDoRemotePrefill: true,
+			reqcommon.FieldRemoteHost:      "evil.example.com",
+		}), sourceHeaders(nil))
 
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should ignore a malformed header value", func() {
-		proxyBaseAddr := testInfo.startProxy()
-
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: "not-a-host-port"})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should replace client-supplied kv_transfer_params", func() {
-		proxyBaseAddr := testInfo.startProxy()
-
-		sendBody(proxyBaseAddr, bodyWithClientKVParams,
-			map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		kvParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
-		Expect(ok).To(BeTrue())
+		_, kvParams := decodeKVParams()
 		// Only the sidecar-owned remote_kv_source key survives; the client's keys are gone.
 		Expect(kvParams).To(HaveLen(1))
-		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
+		expectSource(kvParams)
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
 
-	It("should ignore a header with an empty host", func() {
+	It("should copy extra keys out of the source block", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: ":8000"})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should not inject remote_kv_source params when the source is this rank's endpoint", func() {
-		GinkgoT().Setenv("POD_IP", "10.9.9.9")
-		proxyBaseAddr := testInfo.startProxy()
-
-		// Self is POD_IP:<config.Port>; the harness config uses port "0", so
-		// a source of POD_IP:0 is this rank's own serving endpoint.
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: "10.9.9.9:0"})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		Expect(decodeReqs[0]).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should inject remote_kv_source params when the source is another rank on the local pod", func() {
-		GinkgoT().Setenv("POD_IP", "10.9.9.9")
-		proxyBaseAddr := testInfo.startProxy()
-
-		// Same pod IP, different serving port: a peer rank's cache is a valid
-		// pull source, so the guard must not collapse identity to the pod.
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(1))
-		kvParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
-		Expect(ok).To(BeTrue())
-		p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
-
-		testInfo.cancelFn()
-		<-testInfo.stoppedCh
-	})
-
-	It("should generate a distinct kv_request_id per request", func() {
-		proxyBaseAddr := testInfo.startProxy()
-
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
-		sendRequest(proxyBaseAddr, map[string]string{routing.KVCacheSourceHeader: kvCacheSource})
-
-		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
-		Expect(decodeReqs).To(HaveLen(2))
-		ids := make([]any, 0, 2)
-		for _, dreq := range decodeReqs {
-			kvParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
-			Expect(ok).To(BeTrue())
-			p2p, ok := kvParams[requestFieldRemoteKVSource].(map[string]any)
-			Expect(ok).To(BeTrue())
-			ids = append(ids, p2p[requestFieldKVRequestID])
+		source := map[string]any{
+			reqcommon.FieldKVRequestID: sourceKVRequestID,
+			reqcommon.FieldRemoteHost:  sourceHost,
+			reqcommon.FieldRemotePort:  sourcePort,
+			"extra":                    "dropped",
 		}
-		Expect(ids[0]).ToNot(Equal(ids[1]))
+		postChatCompletions(proxyBaseAddr, sourceBody(source, nil), sourceHeaders(nil))
+
+		_, kvParams := decodeKVParams()
+		expectSource(kvParams)
+		Expect(kvParams[reqcommon.FieldRemoteKVSource]).To(HaveLen(3))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
+	})
+})
+
+var _ = Describe("kvSourceFromBody", func() {
+	const sourceHost = "10.9.9.9"
+
+	// parsedBody returns a body carrying source next to one other
+	// kv_transfer_params key, through the sidecar's own body decoder so the
+	// numbers have the types a request has.
+	parsedBody := func(source map[string]any) map[string]any {
+		parsed, err := decodeRequestBody([]byte(sourceBody(source, map[string]any{"other": true})))
+		Expect(err).ToNot(HaveOccurred())
+		return parsed
+	}
+
+	validSource := map[string]any{
+		reqcommon.FieldKVRequestID: "k2",
+		reqcommon.FieldRemoteHost:  sourceHost,
+		reqcommon.FieldRemotePort:  7778,
+	}
+
+	const clientIP = "10.1.1.1:5555"
+
+	It("returns a copy of an allowed source and removes it from the body", func() {
+		s := &Server{allowlistValidator: &AllowlistValidator{enabled: true, allowedHosts: set.New(sourceHost)}}
+		body := parsedBody(validSource)
+
+		source, present := s.kvSourceFromBody(logr.Discard(), clientIP, body)
+
+		Expect(present).To(BeTrue())
+		Expect(source).To(Equal(&kvSource{kvRequestID: "k2", p2pPeer: p2pPeer{host: sourceHost, port: 7778}}))
+		Expect(body[reqcommon.FieldKVTransferParams]).To(Equal(map[string]any{"other": true}))
+	})
+
+	It("drops a source whose host is not in the allowlist", func() {
+		s := &Server{allowlistValidator: &AllowlistValidator{enabled: true, allowedHosts: set.New("10.0.0.1")}}
+		body := parsedBody(validSource)
+
+		source, present := s.kvSourceFromBody(logr.Discard(), clientIP, body)
+
+		Expect(present).To(BeTrue())
+		Expect(source).To(BeNil())
+		Expect(body[reqcommon.FieldKVTransferParams]).To(Equal(map[string]any{"other": true}))
+	})
+
+	It("removes kv_transfer_params when the source was its only key", func() {
+		s := &Server{allowlistValidator: &AllowlistValidator{enabled: true, allowedHosts: set.New(sourceHost)}}
+		body := map[string]any{reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldRemoteKVSource: validSource}}
+
+		source, present := s.kvSourceFromBody(logr.Discard(), clientIP, body)
+
+		Expect(present).To(BeTrue())
+		Expect(source).ToNot(BeNil())
+		Expect(body).ToNot(HaveKey(reqcommon.FieldKVTransferParams))
+	})
+
+	// The header and the block come from one EPP step, so a header alone is
+	// worth a line to the operator; the request proceeds without a pull.
+	It("reports no source, with a warning, when the body carries none", func() {
+		s := &Server{allowlistValidator: &AllowlistValidator{enabled: true}}
+		logged := captureLogs(s, 0)
+
+		source, present := s.kvSourceFromBody(s.logger, clientIP, map[string]any{})
+
+		Expect(present).To(BeFalse())
+		Expect(source).To(BeNil())
+		Expect(*logged).To(HaveLen(1))
+		Expect((*logged)[0]).To(ContainSubstring("without a remote_kv_source block"))
+		Expect((*logged)[0]).To(ContainSubstring(clientIP))
 	})
 })
