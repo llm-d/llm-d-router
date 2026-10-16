@@ -370,6 +370,9 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 			KVCacheUsagePercent: p.kvCacheUsage,
 			ActiveModels:        activeModelsMap,
 			WaitingModels:       make(map[string]int),
+			// A pod that lists adapters has reported max_lora. Model it at
+			// capacity, so a pod without the requested adapter scores as full.
+			MaxActiveModels: len(activeModelsMap),
 		}
 	}
 	h.metricsBackend.SetPodMetrics(metricsMap)
