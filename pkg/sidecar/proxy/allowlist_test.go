@@ -33,6 +33,8 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -47,6 +49,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clientfeatures "k8s.io/client-go/features"
 	clientfeaturestesting "k8s.io/client-go/features/testing"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/set"
 )
@@ -118,6 +121,46 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.podStopChans).To(BeEmpty())
 		})
 	})
+
+	DescribeTable("should interrupt cache synchronization", func(stopValidator bool) {
+		validator := newTestAllowlistValidator()
+		client := validator.dynamicClient.(*dynamicfake.FakeDynamicClient)
+		listStarted := make(chan struct{}, 1)
+		client.PrependReactor("list", inferencePoolResource, func(clienttesting.Action) (bool, runtime.Object, error) {
+			select {
+			case listStarted <- struct{}{}:
+			default:
+			}
+			return true, nil, errors.New("pool list failed")
+		})
+		ctx, cancel := context.WithCancel(newTestContext())
+		done := make(chan struct{})
+		var startErr error
+		go func() {
+			defer close(done)
+			startErr = validator.Start(ctx)
+		}()
+		DeferCleanup(func() {
+			cancel()
+			validator.Stop()
+			Eventually(done, time.Second).Should(BeClosed())
+		})
+		Eventually(listStarted, 3*time.Second).Should(Receive())
+		if stopValidator {
+			validator.Stop()
+		} else {
+			cancel()
+		}
+		Eventually(done, time.Second).Should(BeClosed())
+		Expect(startErr).To(HaveOccurred())
+		Expect(validator.stopCh).To(BeClosed())
+		if !stopValidator {
+			Expect(startErr).To(MatchError(context.Canceled))
+		}
+	},
+		Entry("when the context is canceled", false),
+		Entry("when the validator is stopped", true),
+	)
 
 	Context("when SSRF protection is disabled", func() {
 		var validator *AllowlistValidator
