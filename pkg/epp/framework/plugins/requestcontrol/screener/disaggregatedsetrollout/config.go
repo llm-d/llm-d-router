@@ -56,21 +56,56 @@ type Scope struct {
 //  1. Coverage check: drop candidates whose revision has zero Ready pods
 //     for any role listed in RequiredRoles.
 //  2. Load shaping: when no revision header is present, weighted-random-pick
-//     one surviving revision and keep only its pods.
+//     one surviving revision and keep only its pods. Affinity can key that
+//     draw so related requests pick the same revision.
 //
 // A request carrying RevisionHeaderName always selects that revision strictly.
 // The selected endpoint's revision is stamped into the same response header.
 type RevisionGating struct {
-	RevisionHeaderName  string     `json:"revisionHeaderName,omitempty"`
-	RevisionLabelKey    string     `json:"revisionLabelKey,omitempty"`
-	RoleLabelKey        string     `json:"roleLabelKey,omitempty"`
-	DisableCoordination bool       `json:"disableCoordination,omitempty"`
-	Mode                GatingMode `json:"mode"`
-	RequiredRoles       []string   `json:"requiredRoles,omitempty"`
+	RevisionHeaderName  string            `json:"revisionHeaderName,omitempty"`
+	RevisionLabelKey    string            `json:"revisionLabelKey,omitempty"`
+	RoleLabelKey        string            `json:"roleLabelKey,omitempty"`
+	DisableCoordination bool              `json:"disableCoordination,omitempty"`
+	Mode                GatingMode        `json:"mode"`
+	RequiredRoles       []string          `json:"requiredRoles,omitempty"`
+	Affinity            *RevisionAffinity `json:"affinity,omitempty"`
 }
 
-// UnmarshalJSON normalizes RevisionHeaderName to lowercase because request
-// headers are lowercase in the scheduling request.
+// RevisionAffinity controls how the weighted revision choice is drawn.
+//
+// With AffinityModePrefix, the draw is a hash of the request's conversation
+// prefix instead of a random number, so requests that share that prefix (for
+// example, consecutive turns of one session) select the same revision and keep
+// hitting the KV cache that revision holds. Keys are spread over the revision
+// shares, so the shares still hold in aggregate across many keys.
+type RevisionAffinity struct {
+	Mode AffinityMode `json:"mode,omitempty"`
+	// SessionHeader optionally names a request header whose value, when
+	// present, keys the draw in place of the conversation prefix.
+	SessionHeader string `json:"sessionHeader,omitempty"`
+}
+
+// AffinityMode selects how the revision draw is keyed.
+type AffinityMode string
+
+const (
+	// AffinityModeNone draws every request independently at random.
+	AffinityModeNone AffinityMode = "none"
+	// AffinityModePrefix keys the draw on the session header or the
+	// conversation prefix, falling back to a random draw when the request
+	// carries neither.
+	AffinityModePrefix AffinityMode = "prefix"
+)
+
+func (g *RevisionGating) affinityMode() AffinityMode {
+	if g == nil || g.Affinity == nil || g.Affinity.Mode == "" {
+		return AffinityModeNone
+	}
+	return g.Affinity.Mode
+}
+
+// UnmarshalJSON normalizes RevisionHeaderName and Affinity.SessionHeader to
+// lowercase because request headers are lowercase in the scheduling request.
 func (g *RevisionGating) UnmarshalJSON(data []byte) error {
 	type raw RevisionGating
 	var parsed raw
@@ -80,6 +115,9 @@ func (g *RevisionGating) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	parsed.RevisionHeaderName = strings.ToLower(parsed.RevisionHeaderName)
+	if parsed.Affinity != nil {
+		parsed.Affinity.SessionHeader = strings.ToLower(parsed.Affinity.SessionHeader)
+	}
 	*g = RevisionGating(parsed)
 	return nil
 }
@@ -169,6 +207,18 @@ func (c *Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("revisionGating.mode %q must be one of sum|max-role|disabled", c.RevisionGating.Mode)
+	}
+
+	if affinity := c.RevisionGating.Affinity; affinity != nil {
+		switch affinity.Mode {
+		case "", AffinityModeNone:
+			if affinity.SessionHeader != "" {
+				return fmt.Errorf("revisionGating.affinity.sessionHeader requires revisionGating.affinity.mode=%s", AffinityModePrefix)
+			}
+		case AffinityModePrefix:
+		default:
+			return fmt.Errorf("revisionGating.affinity.mode %q must be one of none|prefix", affinity.Mode)
+		}
 	}
 
 	return nil

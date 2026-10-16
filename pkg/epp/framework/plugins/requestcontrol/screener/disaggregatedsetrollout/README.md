@@ -106,7 +106,9 @@ revision header, the plugin then:
 1. Removes every revision that has no Ready Pod for any required role, because
    a revision missing one role cannot serve the request.
 2. Computes a weight for each remaining revision.
-3. Randomly chooses one candidate revision using those weights.
+3. Chooses one candidate revision using those weights. The draw is random, or
+   keyed on the request when [revision affinity](#revision-affinity) is
+   enabled.
 4. When Pods from multiple revisions are observed and `disableCoordination` is
    false, atomically stores or reads the revision decision through the
    configured `CrossReplicaSyncer`, keyed by `x-llm-d-revision-decision-id` or
@@ -326,6 +328,47 @@ request. Do not add it to a scheduling profile.
 | `revisionGating.revisionLabelKey` | string | No | `disaggregatedset.x-k8s.io/revision` | Label identifying a rollout revision. |
 | `revisionGating.roleLabelKey` | string | No | `disaggregatedset.x-k8s.io/role` | Label identifying a Pod role. |
 | `revisionGating.disableCoordination` | boolean | No | `false` | Disables coordination of rollout revisions across parallel requests. Set only for known sequential P/D deployments; E/P/D requires coordination. |
+| `revisionGating.affinity.mode` | string | No | `none` | `none` draws each request's revision at random. `prefix` keys the draw on the session header or conversation prefix; see [Revision Affinity](#revision-affinity). |
+| `revisionGating.affinity.sessionHeader` | string | No | | With `prefix`, a request header whose value keys the draw when present, ahead of the conversation prefix. |
+
+## Revision Affinity
+
+With the default random draw, consecutive turns of one session land on the old
+and new revisions roughly in proportion to their shares. Each switch lands on a
+revision that does not hold the session's KV cache, so the prefix is
+recomputed, and under load the two revisions keep evicting each other's working
+sets for the whole rollout.
+
+`affinity.mode: prefix` replaces the random number with a hash of the request,
+mapped onto the same weighted ranges:
+
+```yaml
+    revisionGating:
+      mode: max-role
+      requiredRoles: [prefill, decode]
+      affinity:
+        mode: prefix
+        sessionHeader: x-session-id   # optional
+```
+
+- The key is the `sessionHeader` value when it is configured and present.
+  Otherwise it is the conversation up to and including its first user message
+  (plus `cache_salt`), for OpenAI chat completions and Anthropic messages.
+  Later turns repeat that prefix, so all turns of a session select the same
+  revision, while sessions that share only a system prompt still spread out.
+- Requests with nothing to key on fall back to the random draw: completions,
+  Responses, and other bodies without a message list, and chat requests with no
+  messages.
+- Shares still hold in aggregate across many keys. With two revisions, a share
+  change moves only the keys between the old and new boundary, and always toward
+  the revision that gained share, so every other session keeps its revision and
+  its cache for the rest of the rollout.
+- A strict revision header still takes precedence, and coordination for
+  parallel requests is unchanged.
+
+The split is per key, not per request. A key that carries a large fraction of
+the traffic, such as a session header shared by many clients, sends all of that
+traffic to one revision. Leave affinity off when a few keys dominate traffic.
 
 ## DisaggregatedSet Slice Affinity
 

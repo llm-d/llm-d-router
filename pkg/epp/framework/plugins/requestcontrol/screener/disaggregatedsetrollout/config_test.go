@@ -204,6 +204,50 @@ func TestValidate_LeavesHeaderNameAloneOnInCodeConstruction(t *testing.T) {
 	}
 }
 
+func TestRevisionGating_UnmarshalJSON_Affinity(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix","sessionHeader":"X-Session-ID"}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.affinityMode() != AffinityModePrefix {
+		t.Fatalf("affinity mode = %q, want %q", gating.affinityMode(), AffinityModePrefix)
+	}
+	if gating.Affinity.SessionHeader != "x-session-id" {
+		t.Fatalf("session header not lowered on unmarshal: got %q", gating.Affinity.SessionHeader)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","key":"x"}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_Affinity(t *testing.T) {
+	cfg := validConfig()
+	if cfg.RevisionGating.affinityMode() != AffinityModeNone {
+		t.Fatalf("affinity should default to %q", AffinityModeNone)
+	}
+	for _, affinity := range []RevisionAffinity{
+		{},
+		{Mode: AffinityModeNone},
+		{Mode: AffinityModePrefix},
+		{Mode: AffinityModePrefix, SessionHeader: "x-session-id"},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Affinity = &affinity
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("affinity %+v rejected: %v", affinity, err)
+		}
+	}
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: "sticky"}
+	assertValidateError(t, cfg, "revisionGating.affinity.mode")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{SessionHeader: "x-session-id"}
+	assertValidateError(t, cfg, "revisionGating.affinity.sessionHeader")
+}
+
 func assertValidateError(t *testing.T, cfg Config, wantSubstring string) {
 	t.Helper()
 	err := cfg.Validate()
