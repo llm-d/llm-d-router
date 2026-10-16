@@ -49,6 +49,9 @@ func standaloneConfig() standalone.Config {
 	}
 }
 
+// strictArg turns on the simulator's request validation.
+const strictArg = "--strict"
+
 func createModelServersFromKustomize(kustomizeDir string, extra map[string]string, edits ...func(*unstructured.Unstructured)) []string {
 	nsName := getNamespace()
 	subs := map[string]string{
@@ -63,9 +66,11 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${EPP_NAME}":                eppName,
 		"${NAMESPACE}":               nsName,
 		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
-		"${VLLM_EXTRA_ARGS_E}":       "",
-		"${VLLM_EXTRA_ARGS_P}":       "",
-		"${VLLM_EXTRA_ARGS_D}":       "",
+		// --strict validates every body the router emits against the
+		// simulator's bundled vLLM request schema and its semantic checks.
+		"${VLLM_EXTRA_ARGS_E}": testutils.VLLMExtraArgs(strictArg),
+		"${VLLM_EXTRA_ARGS_P}": testutils.VLLMExtraArgs(strictArg),
+		"${VLLM_EXTRA_ARGS_D}": testutils.VLLMExtraArgs(strictArg),
 		// keep empty to force dummy tokenizer
 		"${VLLM_RENDER_URL}":  "",
 		"${VLLM_RENDER_PORT}": vllmRenderPort,
@@ -136,7 +141,7 @@ func createModelServersDecodeDP(replicas int) []string {
 		"${VLLM_REPLICA_COUNT_D}":    strconv.Itoa(replicas),
 		"${VLLM_DATA_PARALLEL_SIZE}": "2",
 		"${DECODE_ROLE}":             "decode",
-		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs("--mode=echo"),
+		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs("--mode=echo", strictArg),
 	})
 }
 

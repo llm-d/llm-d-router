@@ -77,9 +77,10 @@ export SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-${IMAGE_REGISTRY}/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
 export SIDECAR_IMAGE
 
-# Set a default VLLM_RENDER_IMAGE if not provided (CPU-only vLLM image that
-# runs `vllm launch render` for the token-producer plugin's HTTP backend).
-export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
+# Renderer for the token-producer plugin's HTTP backend. The simulator serves
+# every /render route the plugin calls. Override with a real vLLM image to
+# tokenize with the model's own tokenizer rather than a simulated one.
+export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-${VLLM_IMAGE}}"
 export VLLM_RENDER_PORT="${VLLM_RENDER_PORT:-8082}"
 export VLLM_RENDER_URL="${VLLM_RENDER_URL:-http://vllm-render:${VLLM_RENDER_PORT}}"
 export VLLM_RENDER_MAX_MODEL_LEN="${VLLM_RENDER_MAX_MODEL_LEN:-131072}"
