@@ -103,7 +103,6 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 		mu.Unlock()
 		return next(ctx, cmds)
 	}})
-	before := time.Now()
 	require.Empty(t, batch.SetBatch(context.Background(), spec, ids, time.Second))
 	require.ElementsMatch(t, []int{100, 100, 5}, sizes)
 	require.Equal(t, original, ids)
@@ -118,7 +117,6 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 		}
 		require.Equal(t, []any{cloneableInt(7), cloneableInt(9)}, got.(*aggregateCacheEntry).value)
 		require.Equal(t, want.(*aggregateCacheEntry).value, got.(*aggregateCacheEntry).value)
-		require.False(t, got.(*aggregateCacheEntry).expiresAt.Before(before.Add(testStateTTL)))
 	}
 	require.Empty(t, batch.SetBatch(context.Background(), spec, nil, time.Second))
 	require.Len(t, sizes, 3)
@@ -136,7 +134,7 @@ func TestSetBatchEndpointFailures(t *testing.T) {
 		return cloneableInt(4)
 	}
 	require.NoError(t, server.Set(syncer.hashKey(spec.StateKey, ids[1]), "wrong-type"))
-	old := &aggregateCacheEntry{value: cloneableInt(99), expiresAt: time.Now().Add(testStateTTL)}
+	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {
 		syncer.cache.Store(syncer.hashKey(spec.StateKey, id), old)
 	}
@@ -161,7 +159,7 @@ func TestSetBatchChunkFailuresKeepCaches(t *testing.T) {
 			server := miniredis.RunT(t)
 			syncer, _ := newTestSyncer(t, server, testReplicaID)
 			ids := batchEndpointIDs(3)
-			old := &aggregateCacheEntry{value: cloneableInt(99), expiresAt: time.Now().Add(testStateTTL)}
+			old := &aggregateCacheEntry{value: cloneableInt(99)}
 			for _, id := range ids {
 				syncer.cache.Store(syncer.hashKey(testStateKey, id), old)
 			}
@@ -250,7 +248,7 @@ func TestSetBatchRetriedWriteKeepsCaches(t *testing.T) {
 	require.NoError(t, client.Ping(context.Background()).Err())
 	syncer := &RedisSyncer{replicaID: testReplicaID, client: client, stateTTL: testStateTTL}
 	ids := batchEndpointIDs(3)
-	old := &aggregateCacheEntry{value: cloneableInt(99), expiresAt: time.Now().Add(testStateTTL)}
+	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {
 		syncer.cache.Store(syncer.hashKey(testStateKey, id), old)
 	}
@@ -404,7 +402,7 @@ func TestSetBatchConcurrentChunksPreserveEndpointResults(t *testing.T) {
 	}
 	peer, err := encodeValue(cloneableInt(7))
 	require.NoError(t, err)
-	old := &aggregateCacheEntry{value: cloneableInt(99), expiresAt: time.Now().Add(testStateTTL)}
+	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {
 		key := syncer.hashKey(spec.StateKey, id)
 		server.HSet(key, "peer", string(peer))
@@ -445,7 +443,7 @@ func TestSetBatchConcurrentChunksBoundWorkAfterCancellation(t *testing.T) {
 	spec := batchIntSpec()
 	spec.Read = func(string) fwkdl.Cloneable { reads.Add(1); return cloneableInt(4) }
 	ids := batchEndpointIDs(batchConcurrency*batchSize + 5)
-	old := &aggregateCacheEntry{value: cloneableInt(99), expiresAt: time.Now().Add(testStateTTL)}
+	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {
 		syncer.cache.Store(syncer.hashKey(spec.StateKey, id), old)
 	}
