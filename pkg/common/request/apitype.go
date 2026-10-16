@@ -21,11 +21,13 @@ import (
 	"strings"
 )
 
-// Inference API paths served by the sidecar and the coordinator.
+// API paths shared by routing components.
 const (
 	PathChatCompletions = "/v1/chat/completions"
 	PathCompletions     = "/v1/completions"
 	PathResponses       = "/v1/responses"
+	PathModels          = "/v1/models"
+	PathEmbeddings      = "/v1/embeddings"
 	PathMessages        = "/v1/messages"
 	PathVLLMGenerate    = "/inference/v1/generate"
 	PathSGLangGenerate  = "/generate"
