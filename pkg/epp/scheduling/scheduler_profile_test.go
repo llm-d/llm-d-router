@@ -19,6 +19,7 @@ package scheduling
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -33,6 +34,7 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -571,6 +573,96 @@ func TestFilterExecutionOrder(t *testing.T) {
 	if diff := cmp.Diff(wantOrder, executionOrder); diff != "" {
 		t.Errorf("Filter execution order mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// TestRunReturnsFilterRequestDrop verifies that a filter which drains the
+// candidate set and records a RequestDrop selects the status code and reason
+// header of the error, while a plain drain keeps the generic no-endpoints error.
+func TestRunReturnsFilterRequestDrop(t *testing.T) {
+	pickerPlugin := &testPlugin{TypeRes: "picker", PickRes: k8stypes.NamespacedName{Name: "pod1"}}
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil),
+	}
+
+	tests := []struct {
+		name       string
+		filter     fwksched.Filter
+		wantCode   string
+		wantReason string
+		wantMsg    string
+	}{
+		{
+			name:       "drain without drop keeps generic error",
+			filter:     &drainingFilter{},
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+			wantMsg:    "no endpoints available for the given request",
+		},
+		{
+			name: "drain with drop returns typed error",
+			filter: &drainingFilter{drop: &fwksched.RequestDrop{
+				Code:   errcommon.ResourceExhausted,
+				Reason: string(errcommon.RequestDroppedReasonShedCold),
+				Msg:    "cold request shed",
+			}},
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonShedCold),
+			wantMsg:    "cold request shed",
+		},
+		{
+			name:       "drop with empty code is ignored",
+			filter:     &drainingFilter{drop: &fwksched.RequestDrop{Reason: "x"}},
+			wantCode:   errcommon.ServiceUnavailable,
+			wantReason: string(errcommon.RequestDroppedReasonNoEndpoints),
+			wantMsg:    "no endpoints available for the given request",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := NewSchedulerProfile().WithFilters(tc.filter).WithPicker(pickerPlugin)
+			request := &fwksched.InferenceRequest{TargetModel: "test-model", RequestID: uuid.NewString()}
+
+			result, err := profile.Run(context.Background(), request, input)
+			assert.Nil(t, result)
+			var e errcommon.Error
+			if !errors.As(err, &e) {
+				t.Fatalf("expected errcommon.Error, got %v", err)
+			}
+			assert.Equal(t, tc.wantCode, e.Code)
+			assert.Equal(t, tc.wantMsg, e.Msg)
+			assert.Equal(t, tc.wantReason, e.Headers[errcommon.RequestDroppedReasonHeaderKey])
+		})
+	}
+
+	t.Run("nil request", func(t *testing.T) {
+		profile := NewSchedulerProfile().WithFilters(&drainingFilter{}).WithPicker(pickerPlugin)
+		_, err := profile.Run(context.Background(), nil, input)
+		var e errcommon.Error
+		if !errors.As(err, &e) {
+			t.Fatalf("expected errcommon.Error, got %v", err)
+		}
+		assert.Equal(t, errcommon.ServiceUnavailable, e.Code)
+	})
+}
+
+// drainingFilter removes every endpoint and optionally records a RequestDrop.
+type drainingFilter struct {
+	drop *fwksched.RequestDrop
+}
+
+func (f *drainingFilter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "draining", Type: "draining-filter"}
+}
+
+func (f *drainingFilter) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{fwksched.RequestDropDataKey: &fwksched.RequestDrop{}}
+}
+
+func (f *drainingFilter) Filter(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) []fwksched.Endpoint {
+	if f.drop != nil && request != nil {
+		request.PutAttribute(fwksched.RequestDropDataKey, f.drop)
+	}
+	return nil
 }
 
 // TestFilterExecutionOrderViaAddPlugins verifies that filters added via

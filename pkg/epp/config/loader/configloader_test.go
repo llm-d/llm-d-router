@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -54,6 +55,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheshed"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
@@ -518,6 +520,15 @@ func TestPluginsWithDependencies(t *testing.T) {
 		{
 			name:       "maxSaturationDetectorStageScoped",
 			configText: maxSaturationDetectorStageScopedText,
+		},
+		{
+			name:       "shedFilterListedBeforeItsDetector",
+			configText: shedFilterBeforeDetectorText,
+		},
+		{
+			name:       "shedFilterRefsMissingDetector",
+			configText: shedFilterMissingDetectorText,
+			wantErr:    true,
 		},
 		{
 			name:       "pluginsRefedByPointer",
@@ -1325,6 +1336,10 @@ func registerTestPlugins(t *testing.T) {
 
 	fwkplugin.RegisterWithPluginDependencies(composite.MaxSaturationDetectorType, fwkplugin.StabilityStable,
 		composite.MaxSaturationDetectorFactory, composite.MaxSaturationDetectorConfigParser)
+
+	fwkplugin.Register(concurrency.ConcurrencyDetectorType, fwkplugin.StabilityStable, concurrency.ConcurrencyDetectorFactory)
+	fwkplugin.RegisterWithPluginDependencies(prefixcacheshed.PluginType, fwkplugin.StabilityStable,
+		prefixcacheshed.Factory, prefixcacheshed.ConfigParser)
 
 	fwkplugin.RegisterWithPluginDependencies(testWithDependencies, fwkplugin.StabilityStable,
 		func(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {

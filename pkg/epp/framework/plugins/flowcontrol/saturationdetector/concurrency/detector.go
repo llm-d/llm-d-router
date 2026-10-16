@@ -254,21 +254,11 @@ func (d *detector) Filter(
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
-	reqLimit := int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
-	tokLimit := int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
-	countIncoming := d.config.mode == modeTokens || d.config.mode == modeHybrid
-
 	for _, e := range endpoints {
 		if e == nil {
 			continue
 		}
-		load := d.getLoad(e)
-		var incomingTokens int64
-		if countIncoming {
-			incomingTokens = d.getIncomingTokens(e)
-		}
-
-		if d.admits(load, incomingTokens, reqLimit, tokLimit) {
+		if d.HasCapacity(e) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -280,6 +270,22 @@ func (d *detector) Filter(
 		}
 	}
 	return filtered
+}
+
+// HasCapacity reports whether a single endpoint can take the current request within its safety
+// limit. It is the per-endpoint decision Filter makes, without the fail-open fallback, so other
+// plugins can ask "does this pod have room" and get an unambiguous answer.
+func (d *detector) HasCapacity(endpoint fwksched.Endpoint) bool {
+	if endpoint == nil {
+		return false
+	}
+	reqLimit := int64(float64(d.config.maxConcurrency) * (1.0 + d.config.headroom))
+	tokLimit := int64(float64(d.config.maxTokenConcurrency) * (1.0 + d.config.headroom))
+	var incomingTokens int64
+	if d.config.mode == modeTokens || d.config.mode == modeHybrid {
+		incomingTokens = d.getIncomingTokens(endpoint)
+	}
+	return d.admits(d.getLoad(endpoint), incomingTokens, reqLimit, tokLimit)
 }
 
 // admits reports whether an endpoint can take the request within its safety limit for the active mode.

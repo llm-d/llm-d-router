@@ -134,6 +134,13 @@ func (p *SchedulerProfile) String() string {
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	endpoints := p.runFilterPlugins(ctx, request, candidateEndpoints)
 	if len(endpoints) == 0 {
+		if drop, ok := requestDrop(request); ok {
+			return nil, errcommon.Error{
+				Code:    drop.Code,
+				Msg:     drop.Msg,
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: drop.Reason},
+			}
+		}
 		return nil, errcommon.Error{
 			Code:    errcommon.ServiceUnavailable,
 			Msg:     "no endpoints available for the given request",
@@ -146,6 +153,20 @@ func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceR
 	result := p.runPickerPlugin(ctx, request, weightedScorePerEndpoint)
 
 	return result, nil
+}
+
+// requestDrop returns the drop a filter recorded on the request, if any. A drop
+// with an empty code is ignored so a half-written attribute cannot select the
+// "Unknown" wire code.
+func requestDrop(request *fwksched.InferenceRequest) (*fwksched.RequestDrop, bool) {
+	if request == nil {
+		return nil, false
+	}
+	drop, ok := fwksched.ReadRequestAttribute[*fwksched.RequestDrop](request, fwksched.RequestDropDataKey)
+	if !ok || drop == nil || drop.Code == "" {
+		return nil, false
+	}
+	return drop, true
 }
 
 func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {

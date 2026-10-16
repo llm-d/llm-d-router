@@ -638,6 +638,40 @@ func TestDetector_FilterFailClosed(t *testing.T) {
 	require.Empty(t, kept, "no endpoint is returned when every candidate is over its limit")
 }
 
+// TestDetector_HasCapacity verifies the per-endpoint capacity check is the same decision Filter
+// makes, but without the fail-open fallback.
+func TestDetector_HasCapacity(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	reg := newLocalRegistry()
+	detector := newDetector("test-detector", config{mode: modeHybrid, maxConcurrency: 10, maxTokenConcurrency: 100}, logr.Discard())
+	busy := "busy-endpoint"
+	reg.update(fullEndpointName(busy), func(load *attrconcurrency.InFlightLoad) {
+		load.Requests = 10
+	})
+	busyEndpoint := newStubSchedulingEndpoint(reg, busy)
+	cleanEndpoint := newStubSchedulingEndpoint(reg, cleanEndpoint)
+
+	require.False(t, detector.HasCapacity(nil), "nil endpoint has no capacity")
+	require.False(t, detector.HasCapacity(busyEndpoint), "request limit reached")
+	require.True(t, detector.HasCapacity(cleanEndpoint), "idle endpoint has capacity")
+
+	// Filter fails open and keeps the busy endpoint; HasCapacity still says no.
+	require.Len(t, detector.Filter(ctx, nil, []fwksched.Endpoint{busyEndpoint}), 1)
+	require.False(t, detector.HasCapacity(busyEndpoint))
+
+	// Token dimension: the request's own uncached tokens count against the limit.
+	reg.update(fullEndpointName(busy), func(load *attrconcurrency.InFlightLoad) {
+		load.Requests = 1
+		load.Tokens = 60
+	})
+	busyEndpoint.incomingTokens = 40
+	require.True(t, detector.HasCapacity(busyEndpoint), "tokens fill the limit exactly")
+	busyEndpoint.incomingTokens = 41
+	require.False(t, detector.HasCapacity(busyEndpoint), "tokens exceed the limit")
+}
+
 // TestDetector_TokenLifecycle verifies token accounting.
 func TestDetector_TokenLifecycle(t *testing.T) {
 	t.Parallel()

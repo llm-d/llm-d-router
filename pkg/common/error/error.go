@@ -47,6 +47,11 @@ const (
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
 	RequestDroppedReasonInternal         RequestDroppedReason = "rejected-internal"
+	// Shed — a policy filter rejected the request while the pool was near saturation.
+	// Cold: the request had no usable prefix cache hit on a pod with room.
+	// Displaced hot: the request had a hit, but only on pods without room.
+	RequestDroppedReasonShedCold         RequestDroppedReason = "rejected-shed-cold"
+	RequestDroppedReasonShedDisplacedHot RequestDroppedReason = "rejected-shed-displaced-hot"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().

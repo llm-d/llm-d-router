@@ -131,6 +131,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheshed"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
 	topologyaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/topologyaffinity"
@@ -768,6 +769,9 @@ func (r *Runner) registerInTreePlugins() {
 	// Latency scoring and filtering plugins
 	// Beta
 	fwkplugin.Register(prefixcacheaffinity.PluginType, fwkplugin.StabilityBeta, prefixcacheaffinity.Factory)
+	// Alpha
+	fwkplugin.RegisterWithPluginDependencies(prefixcacheshed.PluginType, fwkplugin.StabilityAlpha,
+		prefixcacheshed.Factory, prefixcacheshed.ConfigParser)
 	fwkplugin.Register(sloheadroomtier.PluginType, fwkplugin.StabilityBeta, sloheadroomtier.Factory)
 	fwkplugin.Register(latencyscorer.LatencyScorerType, fwkplugin.StabilityBeta, latencyscorer.Factory)
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
