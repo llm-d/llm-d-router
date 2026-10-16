@@ -305,7 +305,7 @@ func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
 }
 
 func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
-	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
+	want := &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 5, NonText: 2}, Requests: 2}
 	data, err := encodeValue(want)
 	require.NoError(t, err)
 

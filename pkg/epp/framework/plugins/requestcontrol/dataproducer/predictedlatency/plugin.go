@@ -223,7 +223,7 @@ type inFlightLoadSnapshot struct {
 // the captured value is reused for the rest of the request.
 func (pl *PredictedLatency) readInFlightLoad(endpoint fwksched.Endpoint) inFlightLoadSnapshot {
 	if load, ok := pl.endpointInFlightLoad(endpoint); ok {
-		return inFlightLoadSnapshot{tokens: load.Tokens, requests: int(load.Requests)}
+		return inFlightLoadSnapshot{tokens: load.Tokens.Total(), requests: int(load.Requests)}
 	}
 	return inFlightLoadSnapshot{tokens: 0, requests: endpoint.GetMetrics().RunningRequestsSize}
 }

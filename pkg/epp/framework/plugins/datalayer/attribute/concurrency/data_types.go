@@ -35,14 +35,31 @@ var InFlightLoadDataKey = plugin.NewDataKey("InFlightLoadDataKey", inflightloadc
 // on a specific endpoint. Populated statically during scheduling.
 var UncachedRequestTokensDataKey = plugin.NewDataKey("UncachedRequestTokensDataKey", inflightloadconstants.InFlightLoadProducerType)
 
+// TokenLoad is a token count split into its text and non-text parts. The parts
+// don't overlap, so Total is their sum.
+type TokenLoad struct {
+	// Text is the text-token part of the count.
+	Text int64
+
+	// NonText is the multimodal placeholder (image, audio, video) part of the
+	// count.
+	NonText int64
+}
+
+// Total is the whole token count, text and non-text together.
+func (t TokenLoad) Total() int64 {
+	return t.Text + t.NonText
+}
+
 // InFlightLoad captures the current real-time load of an endpoint as tracked
 // by the EPP.
 type InFlightLoad struct {
-	// Tokens is the in-flight token count this endpoint has committed to,
-	// accumulated from past scheduling decisions. Updated by PreRequest (when
-	// an endpoint is chosen) and OnEvicted (when its request stream ends);
-	// snapshotted into this struct each cycle by InFlightLoadProducer.Produce.
-	Tokens int64
+	// Tokens is the in-flight token count this endpoint has committed to, split
+	// by modality, accumulated from past scheduling decisions. Updated by
+	// PreRequest (when an endpoint is chosen) and OnEvicted (when its request
+	// stream ends); snapshotted into this struct each cycle by
+	// InFlightLoadProducer.Produce.
+	Tokens TokenLoad
 
 	// Requests is the in-flight request count this endpoint has committed to,
 	// maintained with the same lifecycle as Tokens.
@@ -64,15 +81,15 @@ func (l *InFlightLoad) Clone() fwkdl.Cloneable {
 // UncachedRequestTokens represents the projected impact of the current request
 // on a specific endpoint, populated statically during scheduling.
 type UncachedRequestTokens struct {
-	// Tokens is a speculative projection: the work the request currently being
-	// scheduled would add to this endpoint if it landed here. Includes the
-	// uncached input portion (accounting for prefix-cache hits) plus the
-	// estimated output when the producer is configured with
+	// Tokens is a speculative projection, split by modality: the work the
+	// request currently being scheduled would add to this endpoint if it landed
+	// here. Includes the uncached input portion (accounting for prefix-cache
+	// hits) plus the estimated output when the producer is configured with
 	// AddEstimatedOutputTokens=true. Computed fresh by Produce on every cycle
 	// from the request being scored and this endpoint's prefix-cache state;
 	// never committed to endpoint state and not decremented on stream end.
 	// Zero when no request is in scope (e.g., background snapshots).
-	Tokens int64
+	Tokens TokenLoad
 }
 
 // Clone returns an independent copy of the UncachedRequestTokens.

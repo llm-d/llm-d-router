@@ -324,7 +324,7 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
-			return load.Tokens, true
+			return load.Tokens.Total(), true
 		}
 	}
 	return 0, false

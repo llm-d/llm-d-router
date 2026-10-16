@@ -19,10 +19,13 @@ package tokenload
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -54,9 +57,9 @@ func TestTokenLoadScorer(t *testing.T) {
 
 		// pod1: 0 in-flight, no current-request impact. Score = 1 - 0/1000 = 1.0
 		// pod2: 500 in-flight, no current-request impact. Score = 1 - 500/1000 = 0.5
-		endpoints[1].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 500})
+		endpoints[1].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 500}})
 		// pod3: 1000 in-flight, no current-request impact. Score = 1 - 1000/1000 = 0.0
-		endpoints[2].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 1000})
+		endpoints[2].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 1000}})
 
 		scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)
 
@@ -77,16 +80,16 @@ func TestTokenLoadScorer(t *testing.T) {
 		}
 
 		// pod1: 0 in-flight + 250 current = 250. Score = 1 - 250/1000 = 0.75
-		endpoints[0].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 0})
-		endpoints[0].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: 250})
+		endpoints[0].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 0}})
+		endpoints[0].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: 250}})
 
 		// pod2: 250 in-flight + 250 current = 500. Score = 1 - 500/1000 = 0.5
-		endpoints[1].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 250})
-		endpoints[1].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: 250})
+		endpoints[1].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 250}})
+		endpoints[1].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: 250}})
 
 		// pod3: 750 in-flight + 250 current = 1000. Score = 1 - 1000/1000 = 0.0
-		endpoints[2].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: 750})
-		endpoints[2].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: 250})
+		endpoints[2].Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 750}})
+		endpoints[2].Put(scorer.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: 250}})
 
 		scores := scorer.Score(context.Background(), &fwksched.InferenceRequest{}, endpoints)
 
@@ -137,7 +140,7 @@ func BenchmarkTokenLoadScorer_Score(b *testing.B) {
 		ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 			ID: types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod%d", i)},
 		}, &fwkdl.Metrics{}, nil)
-		ep.Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: int64(i * 100)})
+		ep.Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: int64(i * 100)}})
 		endpoints[i] = ep
 	}
 
@@ -149,4 +152,67 @@ func BenchmarkTokenLoadScorer_Score(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = scorer.Score(ctx, req, endpoints)
 	}
+}
+
+// TestTokenLoadScorer_NonTextTokenWeight covers the case the weight exists for:
+// 3000 image tokens plus 3000 text tokens is more work than 6000 text tokens.
+func TestTokenLoadScorer_NonTextTokenWeight(t *testing.T) {
+	newScorer := func(t *testing.T, params string) *TokenLoadScorer {
+		t.Helper()
+		plugin, err := TokenLoadScorerFactory(TokenLoadScorerType, json.NewDecoder(strings.NewReader(params)), nil)
+		require.NoError(t, err)
+		return plugin.(*TokenLoadScorer)
+	}
+	newEndpoint := func(name string) fwksched.Endpoint {
+		return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: name}}, &fwkdl.Metrics{}, nil)
+	}
+	score := func(s *TokenLoadScorer, mixed, text fwksched.Endpoint) (float64, float64) {
+		scores := s.Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{mixed, text})
+		return scores[mixed], scores[text]
+	}
+
+	t.Run("default weight scores every token alike", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000}`)
+		mixed, text := newEndpoint("mixed"), newEndpoint("text")
+		mixed.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 3000, NonText: 3000}})
+		text.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 6000}})
+
+		mixedScore, textScore := score(s, mixed, text)
+		assert.InDelta(t, 0.5, mixedScore, 1e-9)
+		assert.InDelta(t, 0.5, textScore, 1e-9)
+	})
+
+	t.Run("non-text weight makes the multimodal load heavier", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 2}`)
+		mixed, text := newEndpoint("mixed"), newEndpoint("text")
+		mixed.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 3000, NonText: 3000}})
+		text.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 6000}})
+
+		// mixed: 3000 text + 2*3000 image = 9000 -> 1 - 9000/12000; text: 1 - 6000/12000.
+		mixedScore, textScore := score(s, mixed, text)
+		assert.InDelta(t, 0.25, mixedScore, 1e-9)
+		assert.InDelta(t, 0.5, textScore, 1e-9)
+	})
+
+	t.Run("weight applies to the request being scheduled too", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 3}`)
+		ep := newEndpoint("ep")
+		ep.Put(s.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: 1000, NonText: 1000}})
+		ep.Put(s.uncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: 1000, NonText: 1000}})
+
+		// (1000 + 3*1000) in flight + (1000 + 3*1000) for this request = 8000.
+		scores := s.Score(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{ep})
+		assert.InDelta(t, 1-8000.0/12000, scores[ep], 1e-9)
+	})
+
+	t.Run("non-positive weight falls back to 1.0", func(t *testing.T) {
+		assert.InDelta(t, nonTextTokenWeightDefault, newScorer(t, `{"nonTextTokenWeight": 0}`).nonTextTokenWeight, 0)
+		assert.InDelta(t, nonTextTokenWeightDefault, newScorer(t, `{"nonTextTokenWeight": -2}`).nonTextTokenWeight, 0)
+	})
+
+	t.Run("each half is priced on its own", func(t *testing.T) {
+		s := newScorer(t, `{"queueThresholdTokens": 12000, "nonTextTokenWeight": 2}`)
+		assert.InDelta(t, 11000, s.weightedTokens(attrconcurrency.TokenLoad{Text: 1000, NonText: 5000}), 0)
+		assert.InDelta(t, 1000, s.weightedTokens(attrconcurrency.TokenLoad{Text: 1000}), 0, "text is never weighted")
+	})
 }

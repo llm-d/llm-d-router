@@ -162,8 +162,8 @@ func (d *detector) ReleaseDispatch(requestID string) bool {
 // getIncomingTokens returns the uncached tokens the current request would add to the endpoint.
 func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 	if val, ok := m.Get(d.uncachedRequestTokensDataKey); ok {
-		if tokens, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && tokens.Tokens > 0 {
-			return tokens.Tokens
+		if tokens, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && tokens.Tokens.Total() > 0 {
+			return tokens.Tokens.Total()
 		}
 	}
 	return 0
@@ -206,10 +206,10 @@ func (d *detector) Saturation(_ context.Context, endpoints []datalayer.Endpoint)
 
 		load := d.getLoad(e.GetAttributes())
 		reqInflight += load.Requests
-		tokInflight += load.Tokens
+		tokInflight += load.Tokens.Total()
 		hybridSatSum += max(
 			ratio(load.Requests, d.config.maxConcurrency),
-			ratio(load.Tokens, d.config.maxTokenConcurrency),
+			ratio(load.Tokens.Total(), d.config.maxTokenConcurrency),
 		)
 	}
 	pendingDispatches := d.pendingDispatches.Load()
@@ -286,7 +286,8 @@ func (d *detector) Filter(
 // An endpoint must be below each limit, and its token load plus the request's tokens must fit within
 // the token limit unless the endpoint has no in-flight tokens.
 func (d *detector) admits(load *attrconcurrency.InFlightLoad, incomingTokens, reqLimit, tokLimit int64) bool {
-	tokensFit := load.Tokens < tokLimit && (load.Tokens == 0 || load.Tokens+incomingTokens <= tokLimit)
+	tokens := load.Tokens.Total()
+	tokensFit := tokens < tokLimit && (tokens == 0 || tokens+incomingTokens <= tokLimit)
 	switch d.config.mode {
 	case modeTokens:
 		return tokensFit

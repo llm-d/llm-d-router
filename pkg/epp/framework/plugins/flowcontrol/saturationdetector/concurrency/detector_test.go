@@ -532,7 +532,7 @@ func TestDetector_TokenFilterIncomingTokens(t *testing.T) {
 	// Burst limit = 100 * 1.2 = 120 tokens.
 	detector := newDetector("test-detector", config{mode: modeTokens, maxTokenConcurrency: 100, headroom: 0.2}, logr.Discard())
 	endpointName := "incoming-endpoint"
-	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) { load.Tokens = 110 })
+	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) { load.Tokens.Text = 110 })
 	endpoint := newStubSchedulingEndpoint(reg, endpointName)
 	candidates := []fwksched.Endpoint{endpoint, newStubSchedulingEndpoint(reg, cleanEndpoint)}
 
@@ -565,7 +565,7 @@ func TestDetector_TokenFilterOversizedRequest(t *testing.T) {
 		loadedName := "loaded-endpoint"
 		reg.update(fullEndpointName(loadedName), func(load *attrconcurrency.InFlightLoad) {
 			load.Requests = 1
-			load.Tokens = 1
+			load.Tokens.Text = 1
 		})
 		loaded := newStubSchedulingEndpoint(reg, loadedName)
 		loaded.incomingTokens = 120
@@ -592,7 +592,7 @@ func TestDetector_HybridFilterIncomingTokens(t *testing.T) {
 	endpointName := "hybrid-incoming-endpoint"
 	reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) {
 		load.Requests = 5
-		load.Tokens = 50
+		load.Tokens.Text = 50
 	})
 	endpoint := newStubSchedulingEndpoint(reg, endpointName)
 	candidates := []fwksched.Endpoint{endpoint, newStubSchedulingEndpoint(reg, cleanEndpoint)}
@@ -731,7 +731,7 @@ func TestDetector_HybridSaturation(t *testing.T) {
 			for name, l := range tc.endpoints {
 				reg.update(fullEndpointName(name), func(load *attrconcurrency.InFlightLoad) {
 					load.Requests = l.requests
-					load.Tokens = l.tokens
+					load.Tokens.Text = l.tokens
 				})
 				candidates = append(candidates, newFakeEndpoint(reg, name))
 			}
@@ -775,7 +775,7 @@ func TestDetector_HybridFilter(t *testing.T) {
 			endpointName := "endpoint-a"
 			reg.update(fullEndpointName(endpointName), func(load *attrconcurrency.InFlightLoad) {
 				load.Requests = tc.requests
-				load.Tokens = tc.tokens
+				load.Tokens.Text = tc.tokens
 			})
 
 			kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
@@ -794,11 +794,11 @@ func TestDetector_HybridFilter(t *testing.T) {
 		endpointB := "endpoint-b"
 		reg.update(fullEndpointName(endpointA), func(load *attrconcurrency.InFlightLoad) {
 			load.Requests = 10
-			load.Tokens = 50
+			load.Tokens.Text = 50
 		})
 		reg.update(fullEndpointName(endpointB), func(load *attrconcurrency.InFlightLoad) {
 			load.Requests = 5
-			load.Tokens = 100
+			load.Tokens.Text = 100
 		})
 
 		kept := detector.Filter(ctx, nil, []fwksched.Endpoint{
@@ -889,7 +889,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests++
 		if req != nil {
-			load.Tokens += simulatedTokenLoad(req)
+			load.Tokens.Text += simulatedTokenLoad(req)
 		}
 	})
 }
@@ -902,7 +902,7 @@ func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.I
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
 		load.Requests--
 		if req != nil {
-			load.Tokens -= simulatedTokenLoad(req)
+			load.Tokens.Text -= simulatedTokenLoad(req)
 		}
 	})
 }
@@ -925,7 +925,7 @@ func driveTokenLoad(_ context.Context, reg *localRegistry, _ *detector, endpoint
 		total += simulatedTokenLoad(r)
 	}
 	reg.update(id, func(load *attrconcurrency.InFlightLoad) {
-		load.Tokens += total
+		load.Tokens.Text += total
 		load.Requests += int64(len(requests))
 	})
 }
@@ -1005,7 +1005,7 @@ func (f *liveSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable
 	case attrconcurrency.InFlightLoadDataKey:
 		return f.reg.get(f.id), true
 	case attrconcurrency.UncachedRequestTokensDataKey:
-		return &attrconcurrency.UncachedRequestTokens{Tokens: f.incomingTokens}, true
+		return &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: f.incomingTokens}}, true
 	}
 	return nil, false
 }

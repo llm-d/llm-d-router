@@ -46,7 +46,7 @@ func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwks
 		ep.Put(attrlatency.LatencyPredictionInfoDataKey, attrlatency.NewLatencyPredictionInfo(true, true, 0, 0, ttft, 0, 0))
 	}
 	if tokens >= 0 {
-		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens})
+		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: attrconcurrency.TokenLoad{Text: tokens}})
 	}
 	return ep
 }

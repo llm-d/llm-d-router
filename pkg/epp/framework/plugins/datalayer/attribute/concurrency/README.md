@@ -8,8 +8,16 @@ Captures the current real-time load of an endpoint as tracked by the EPP.
 
 - **Key**: `InFlightLoadDataKey`
 - **Fields**:
-  - `Tokens`: Number of tokens currently in-flight.
+  - `Tokens`: The tokens currently in-flight, as a `TokenLoad`.
   - `Requests`: Number of requests currently in-flight.
+
+### `TokenLoad`
+
+A token count split into its two disjoint halves, so a consumer can price modalities differently instead of treating every token alike.
+
+- `Text`: The text-token part of the count.
+- `NonText`: The multimodal placeholder (image, audio, video) part of the count.
+- `Total()`: Both halves together.
 
 ## Producers
 
