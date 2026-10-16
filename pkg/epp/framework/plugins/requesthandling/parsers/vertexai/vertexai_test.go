@@ -297,8 +297,13 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 			chatCompletionsMethod,
 			streamRawPredictServiceMethod,
 			rawPredictServiceMethod,
+			predictPathSuffix,
+			rawPredictPathSuffix,
+			streamRawPredictPathSuffix,
+			chatCompletionsPathSuffix,
+			invokePathClaim,
 		},
-		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
