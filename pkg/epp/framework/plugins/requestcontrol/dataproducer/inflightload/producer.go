@@ -39,6 +39,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/outlensketch"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
@@ -72,10 +73,74 @@ type Config struct {
 	// synchronized across EPP replicas when a cross-replica syncer is configured.
 	// Unset defaults to true; set false to keep the load local to this replica.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
+	// OutputEstimator selects how estimated output tokens are computed when
+	// AddEstimatedOutputTokens is true: "static" (default) maps the outlen-bucket
+	// signal rules to a flat estimate; "sketch" uses the learned output-length
+	// sketch, a more precise, self-adapting alternative. The two are mutually
+	// exclusive -- an operator chooses one.
+	OutputEstimator string `json:"outputEstimator,omitempty"`
+	// Sketch configures the learned estimator and is required when OutputEstimator
+	// is "sketch".
+	Sketch *SketchParams `json:"sketch,omitempty"`
 }
+
+// SketchParams configures the learned output-length sketch. Only ModelDir is
+// required; the zero value of any tunable selects the sketch's default.
+type SketchParams struct {
+	// ModelDir is the mounted directory holding the static-embedding model
+	// (vocab.txt + model.safetensors).
+	ModelDir string `json:"modelDir"`
+	// Quantile is the over-provision quantile read from each key's histogram.
+	Quantile float64 `json:"quantile,omitempty"`
+	// DecayHalfLifeRequests is the per-key count-decay half-life.
+	DecayHalfLifeRequests int `json:"decayHalfLifeRequests,omitempty"`
+	// Centroids is the number of AdaptiveKey k-means centroids.
+	Centroids int `json:"centroids,omitempty"`
+	// MaxKeys bounds the histogram store's LRU safety cap.
+	MaxKeys int `json:"maxKeys,omitempty"`
+}
+
+const (
+	outputEstimatorStatic = "static"
+	outputEstimatorSketch = "sketch"
+)
 
 func defaultConfig() Config {
 	return Config{AddEstimatedOutputTokens: false}
+}
+
+// buildTokenEstimator constructs the output-token estimator selected by cfg:
+// the static signal-rule estimator (default) or the learned sketch.
+func buildTokenEstimator(cfg Config) (TokenEstimator, error) {
+	switch cfg.OutputEstimator {
+	case "", outputEstimatorStatic:
+		return NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens), nil
+	case outputEstimatorSketch:
+		if cfg.Sketch == nil {
+			return nil, fmt.Errorf("outputEstimator %q requires a sketch configuration with modelDir", outputEstimatorSketch)
+		}
+		sc := outlensketch.DefaultConfig()
+		sc.ModelDir = cfg.Sketch.ModelDir
+		if cfg.Sketch.Quantile != 0 {
+			sc.Quantile = cfg.Sketch.Quantile
+		}
+		if cfg.Sketch.DecayHalfLifeRequests != 0 {
+			sc.DecayHalfLifeRequests = cfg.Sketch.DecayHalfLifeRequests
+		}
+		if cfg.Sketch.Centroids != 0 {
+			sc.Centroids = cfg.Sketch.Centroids
+		}
+		if cfg.Sketch.MaxKeys != 0 {
+			sc.MaxKeys = cfg.Sketch.MaxKeys
+		}
+		sketch, err := outlensketch.New(sc)
+		if err != nil {
+			return nil, fmt.Errorf("build output-length sketch: %w", err)
+		}
+		return NewSketchTokenEstimator(sketch, cfg.MaxEstimatedOutputTokens)
+	default:
+		return nil, fmt.Errorf("unknown outputEstimator %q (want %q or %q)", cfg.OutputEstimator, outputEstimatorStatic, outputEstimatorSketch)
+	}
 }
 
 func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -98,6 +163,11 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
+	tokenEstimator, err := buildTokenEstimator(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	syncCrossReplicaState := true
 	if cfg.SyncCrossReplicaState != nil {
 		syncCrossReplicaState = *cfg.SyncCrossReplicaState
@@ -111,7 +181,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
-		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
+		tokenEstimator:            tokenEstimator,
 		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
 		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
 		prefixMatchInfoDK:         attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
@@ -624,6 +694,15 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
+			// Feed the observed output length to a learning estimator (e.g. the
+			// output-length sketch); the static estimator does not implement this.
+			// Gated on addEstimatedOutputTokens: when output estimates are not
+			// consumed, there is no reason to pay the per-completion learning cost.
+			if p.addEstimatedOutputTokens {
+				if observer, ok := p.tokenEstimator.(OutputObserver); ok {
+					observer.Observe(request, int64(resp.Usage.CompletionTokens))
+				}
+			}
 			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
 				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
 					"requestID", request.RequestID,

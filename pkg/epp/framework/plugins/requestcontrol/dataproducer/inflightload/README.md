@@ -27,9 +27,26 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the output-length bucket published by the `outlen-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate comes from the configured output estimator (see `outputEstimator`). |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 | `prefixMatchInfoProducerName` | `string` | No | _(none)_ | Optional `prefix-cache producer` name to read to find cached prefix discount. Unset defaults to approximate-prefix producer. |
+| `outputEstimator` | `string` | No | `static` | Selects how output tokens are estimated: `static` maps the `outlen-bucket` signal rules to a flat estimate; `sketch` uses the learned output-length sketch (more compute, more precise, self-adapting). The two are mutually exclusive. |
+| `sketch` | `object` | When `outputEstimator: sketch` | _(none)_ | Learned-estimator configuration (see below). |
+
+### `outputEstimator: static` vs `sketch`
+
+The output-token estimate feeds the in-flight token load. Two estimators are available; an operator chooses one:
+
+- **`static`** (default) maps the three-way `outlen-bucket` signal (LONG/SHORT/UNKNOWN) to a flat token estimate (4096 / 100 / 1000). Negligible compute; abstains (UNKNOWN) whenever the request carries no explicit length signal. Enable the `outlen-bucket` plugin for it to classify.
+- **`sketch`** predicts a per-request output-token magnitude from the prompt itself with the learned [output-length sketch](outlensketch/README.md): window the prompt, embed it with a static table-lookup embedding (CPU-only, no model server), assign it to an online k-means centroid, fold that with the request signals into a key, and read the key's count-decaying output-length histogram. It needs no training and keeps adapting to the live workload. A key that has not yet seen enough traffic abstains and falls back to the static estimate, so it self-heals from a cold start.
+
+| `sketch` field | Type | Required | Default | Description |
+|----------------|------|----------|---------|-------------|
+| `modelDir` | `string` | Yes | _(none)_ | Mounted directory holding the static-embedding model (`vocab.txt` + `model.safetensors`). |
+| `quantile` | `float` | No | `0.85` | Over-provision quantile read from each key's histogram. Higher is more conservative about long requests. |
+| `decayHalfLifeRequests` | `int` | No | `200` | Per-key count-decay half-life, in observations of that key. |
+| `centroids` | `int` | No | `64` | Number of AdaptiveKey k-means centroids. |
+| `maxKeys` | `int` | No | `100000` | LRU safety cap on the histogram store. |
 
 When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
 value determined by the output-length bucket published by the `outlen-bucket` plugin:
