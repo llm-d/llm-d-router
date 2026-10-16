@@ -155,9 +155,9 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
-			body["features"] = features
-		}
+		// No features here: the Completions API is text-in and vLLM ignores
+		// multimodal feature fields on this route, so attaching them (as this
+		// branch historically did) only padded the wire.
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
 		}
@@ -171,7 +171,11 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
+		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
+		// see buildPrefillMMFeatures. Built inside this branch rather than
+		// above the switch so chat-completions requests never build-and-drop
+		// a features map they do not ship.
+		if features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams); features != nil {
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {
