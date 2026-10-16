@@ -377,7 +377,8 @@ A request whose render call fails is routed without a tokenized prompt, so prefi
 skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
 render budget, while a render endpoint that is down shows `connection` failures with short
 durations. The plugin also logs render failures at error level with the elapsed time and the
-configured timeout, at most once every 10 seconds per plugin instance.
+configured timeout, at most once every 10 seconds per plugin instance. Each line carries
+`suppressed`, the number of failures since the previous line that were not logged.
 
 ### Multimodal encoder cache
 

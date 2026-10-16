@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -159,6 +160,9 @@ type vllmHTTPRenderer struct {
 	// pluginName is the plugin_name label on the render metrics.
 	pluginName string
 	failureLog rate.Sometimes
+	// failuresSinceLog counts failures since the last failure log line,
+	// including the one being logged.
+	failuresSinceLog atomic.Int64
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
