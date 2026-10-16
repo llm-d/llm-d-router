@@ -1096,9 +1096,8 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 
 // initAdmissionControl builds the request admission controller, gated by the
 // FlowControl feature gate. With FC on it constructs the FlowRegistry and
-// FlowController and wraps endpointCandidates in a short-lived cache; with FC
-// off it returns the legacy saturation-only controller. Shared by the K8s and
-// file-discovery startup paths so the two cannot drift.
+// FlowController; with FC off it returns the legacy saturation-only controller.
+// Shared by the K8s and file-discovery startup paths so the two cannot drift.
 func (r *Runner) initAdmissionControl(
 	ctx context.Context,
 	opts *runserver.Options,
@@ -1112,7 +1111,6 @@ func (r *Runner) initAdmissionControl(
 			nil,
 			nil
 	}
-	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 
