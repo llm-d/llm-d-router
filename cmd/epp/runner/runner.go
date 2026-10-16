@@ -90,6 +90,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	programaware "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/program-aware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/weightedfairshare"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
@@ -745,6 +746,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(evictfiltering.SheddableFilterType, fwkplugin.StabilityAlpha, evictfiltering.SheddableFilterFactory)
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
+	fwkplugin.Register(weightedfairshare.WeightedFairShareFairnessPolicyType, fwkplugin.StabilityAlpha, weightedfairshare.WeightedFairShareFairnessPolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
