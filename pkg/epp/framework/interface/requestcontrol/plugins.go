@@ -27,14 +27,15 @@ import (
 )
 
 const (
-	RequestHeaderExtensionPoint     = "RequestHeader"
-	ScreenerExtensionPoint          = "Screener"
-	AdmissionExtensionPoint         = "Admission"
-	DataProducerExtensionPoint      = "DataProducer"
-	PreRequestExtensionPoint        = "PreRequest"
-	ResponseReceivedExtensionPoint  = "ResponseReceived"
-	ResponseStreamingExtensionPoint = "ResponseStreaming"
-	ResponseCompleteExtensionPoint  = "ResponseComplete"
+	RequestHeaderExtensionPoint         = "RequestHeader"
+	ScreenerExtensionPoint              = "Screener"
+	AdmissionExtensionPoint             = "Admission"
+	DataProducerExtensionPoint          = "DataProducer"
+	AdmissionDataProducerExtensionPoint = "AdmissionDataProducer"
+	PreRequestExtensionPoint            = "PreRequest"
+	ResponseReceivedExtensionPoint      = "ResponseReceived"
+	ResponseStreamingExtensionPoint     = "ResponseStreaming"
+	ResponseCompleteExtensionPoint      = "ResponseComplete"
 )
 
 // ConditionalDecodeHandledAttributeKey is the request-attribute key a
@@ -105,6 +106,22 @@ type ResponseBodyProcessor interface {
 type DataProducer interface {
 	plugin.ProducerPlugin
 	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// AdmissionDataProducer prepares request costs while a request remains queued.
+// Calls may repeat on independent snapshots. Implementations may only write
+// those snapshots; they must not register requests, change PluginState, or
+// account for in-flight work. Produce still runs once before scheduling.
+type AdmissionDataProducer interface {
+	DataProducer
+	PrepareForAdmission(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error
+}
+
+// AdmissionCostProducer can compute a conservative cost without cached-prefix
+// discounts when a prefix snapshot is unavailable or expired.
+type AdmissionCostProducer interface {
+	AdmissionDataProducer
+	PrepareWithoutPrefix(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error
 }
 
 // TimeoutAwareProducer is an optional interface a DataProducer may implement to

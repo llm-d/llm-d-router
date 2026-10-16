@@ -66,6 +66,10 @@ type flowController interface {
 	EnqueueAndWait(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, error)
 }
 
+type preparingFlowController interface {
+	EnqueueAndWaitPrepared(context.Context, flowcontrol.FlowControlRequest, contracts.PrepareRequest) (*contracts.PreparedRequest, types.QueueOutcome, error)
+}
+
 type dispatchReservationReleaser interface {
 	ReleaseDispatchReservation(requestID string)
 }
@@ -167,6 +171,12 @@ func (fcac *FlowControlAdmissionController) Admit(
 	reqCtx *handlers.RequestContext,
 	priority int,
 ) error {
+	_, err := fcac.admitPrepared(ctx, reqCtx, priority, nil)
+	return err
+}
+
+func (fcac *FlowControlAdmissionController) admitPrepared(ctx context.Context,
+	reqCtx *handlers.RequestContext, priority int, prepare contracts.PrepareRequest) (*contracts.PreparedRequest, error) {
 	logger := log.FromContext(ctx)
 	logger.V(logutil.TRACE).Info("Executing FlowControlAdmissionController",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "priority", priority, "fairnessID", reqCtx.SchedulingRequest.FairnessID)
@@ -200,7 +210,14 @@ func (fcac *FlowControlAdmissionController) Admit(
 	// and their durations carry no signal (a capacity rejection is ~0, a TTL eviction is the configured
 	// TTL, a cancellation is the client's disconnect time).
 	start := time.Now()
-	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
+	var prepared *contracts.PreparedRequest
+	var outcome types.QueueOutcome
+	var err error
+	if fc, ok := fcac.flowController.(preparingFlowController); ok && prepare != nil {
+		prepared, outcome, err = fc.EnqueueAndWaitPrepared(ctx, fcReq, prepare)
+	} else {
+		outcome, err = fcac.flowController.EnqueueAndWait(ctx, fcReq)
+	}
 	if outcome == types.QueueOutcomeDispatched {
 		reqCtx.FlowControlQueueDuration = time.Since(start)
 		reqCtx.FlowControlAdmitted = true
@@ -210,7 +227,7 @@ func (fcac *FlowControlAdmissionController) Admit(
 	// Pool emptiness (nil metadata = whole pool) is a live probe, so it is passed lazily and runs only when the
 	// mapping consults it: a TTL expiry whose regime is not already established by ErrNoEndpoints.
 	poolEmpty := func() bool { return len(fcac.endpointCandidates.Locate(ctx, nil)) == 0 }
-	return translateFlowControlError(err, poolEmpty)
+	return prepared, translateFlowControlError(err, poolEmpty)
 }
 
 // ReleaseDispatchReservation forwards completion of the post-admission accounting window when

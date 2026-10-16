@@ -60,6 +60,20 @@ type Scheduler struct {
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
 func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
+	return s.schedule(ctx, request, candidateEndpoints, nil)
+}
+
+// ScheduleWithAdmission applies per-profile capacity candidates while other
+// profiles retain the complete candidate set.
+func (s *Scheduler) ScheduleWithAdmission(ctx context.Context, request *fwksched.InferenceRequest,
+	candidateEndpoints []fwksched.Endpoint, admitted map[string][]fwksched.Endpoint,
+) (*fwksched.SchedulingResult, error) {
+	return s.schedule(ctx, request, candidateEndpoints, admitted)
+}
+
+func (s *Scheduler) schedule(ctx context.Context, request *fwksched.InferenceRequest,
+	candidateEndpoints []fwksched.Endpoint, admitted map[string][]fwksched.Endpoint,
+) (result *fwksched.SchedulingResult, err error) {
 	logger := log.FromContext(ctx)
 	loggerVerbose := logger.V(logutil.VERBOSE)
 	verboseEnabled := loggerVerbose.Enabled()
@@ -102,7 +116,11 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 				loggerVerbose.Info("Running scheduler profile", "profile", name)
 			}
 			// run the selected profiles and collect results (current code runs all profiles)
-			profileRunResult, err := runSchedulerProfile(ctx, name, profile, request, candidateEndpoints)
+			profileEndpoints := candidateEndpoints
+			if candidates, exists := admitted[name]; exists {
+				profileEndpoints = candidates
+			}
+			profileRunResult, err := runSchedulerProfile(ctx, name, profile, request, profileEndpoints)
 			if err != nil {
 				if verboseEnabled {
 					loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())

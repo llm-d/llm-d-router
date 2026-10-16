@@ -36,7 +36,11 @@ This approach allows the Flow Controller to manage average pool load, while the 
 
 **Fail-Open Fallback:** To prevent complete routing failure, if *all* candidate endpoints are filtered out (i.e., the entire cluster is over the safety limits), the filter softens and returns the original list of endpoints, allowing the scheduler's scorers to pick the least-bad option. With `failOpen: false` the filter returns no endpoints instead, so the profile finds no endpoint and the request fails rather than overloading one.
 
-`failOpen: false` sheds requests, it does not queue them. With flow control enabled, the two gates use different inputs: flow control releases a request when pool saturation, computed from current load, is below 1, while the filter checks current load plus the incoming request. A request that flow control has released can therefore still be rejected by the filter when it fits on no endpoint.
+With flow control enabled, `failOpen: false` in tokens or hybrid mode also checks the queued request's projected cost before release. The built-in monolithic and P/D profile handlers keep the request queued when the required profiles have no capacity. The normal producer hooks and in-flight accounting run once after release. Without flow control, the filter still rejects a request when no endpoint fits.
+
+Tokenization and repeatable prefix queries prepare admission data separately from ordinary producer hooks. An expired prefix estimate falls back to the undiscounted input/output cost; capacity sufficient for that cost does not wait for another prefix lookup. Approximate and precise prefix producers support repeatable queries. Other producers, including burst-prefix batching, run once on the ordinary path and do not provide a cache discount for admission.
+
+Custom profile handlers and custom P/D role selection retain the aggregate saturation check and final scheduling filters. The projected check does not reserve capacity: load may change before scheduling, and the final filter remains authoritative. Request-only and fail-open configurations retain their existing admission path.
 
 ## Inputs consumed
 

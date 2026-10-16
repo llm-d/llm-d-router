@@ -35,6 +35,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -376,6 +378,9 @@ func (p *Processor) enqueue(item *FlowItem) {
 	}
 	p.logger.V(logutil.TRACE).Info("Item enqueued.",
 		"flowKey", key, "requestID", req.ID())
+	if item.prepare != nil {
+		p.startPreparation(item)
+	}
 }
 
 // hasCapacity checks if the global limits and the specific priority band have enough capacity.
@@ -553,6 +558,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		if item == nil {
 			continue
 		}
+		if fi, ok := item.(*FlowItem); ok && !p.requestFits(ctx, fi) {
+			continue
+		}
 
 		// --- Dispatch ---
 		req := item.OriginalRequest()
@@ -611,8 +619,14 @@ func (p *Processor) orderBuffer(n int) []int {
 // monolithic deployment safety. Encode-only pods and unrecognized role values are excluded
 // from all buckets because they are rejected by every role filter and receive no traffic.
 func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleaved []fwkdl.Endpoint) {
+	return partitionByRole(endpoints)
+}
+
+func partitionByRole[T interface {
+	GetMetadata() *fwkdl.EndpointMetadata
+}](endpoints []T) (prefill, decode, interleaved []T) {
 	for _, ep := range endpoints {
-		if ep == nil {
+		if any(ep) == nil {
 			continue
 		}
 		meta := ep.GetMetadata()
@@ -637,6 +651,143 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 		}
 	}
 	return
+}
+
+// requestFits keeps preparation off the single-writer loop. Dynamic load
+// attributes remain live between refreshes; refreshes update topology and
+// request-specific estimates without issuing remote producer calls each tick.
+func (p *Processor) requestFits(ctx context.Context, item *FlowItem) bool {
+	const preparationRefreshInterval = 50 * time.Millisecond
+	if item.FinalState() != nil {
+		return false
+	}
+	if item.prepare == nil {
+		return true
+	}
+	if item.preparationDone != nil {
+		select {
+		case result := <-item.preparationDone:
+			item.prepared = result.request
+			if result.complete {
+				item.preparationDone = nil
+			}
+			item.refreshAfter = result.completedAt.Add(preparationRefreshInterval)
+		default:
+			// An in-progress cache lookup must not delay a request whose
+			// undiscounted cost already fits the live capacity.
+		}
+	}
+	if item.prepared != nil {
+		// Locate applies request metadata before comparing the current topology.
+		current := p.endpointCandidates.Locate(ctx, item.OriginalRequest().GetMetadata())
+		if item.prepared.Locate != nil {
+			current = item.prepared.Locate(ctx)
+		}
+		valid := len(current) == len(item.prepared.Candidates)
+		for _, ep := range current {
+			if ep == nil || ep.GetMetadata() == nil ||
+				!item.prepared.Candidates[ep.GetMetadata().ID].Equal(ep.GetMetadata()) {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			candidate := item.prepared
+			if !p.clock.Now().Before(item.refreshAfter) && candidate.WithoutPrefix != nil {
+				candidate = candidate.WithoutPrefix
+			}
+			if ready := p.readyRequest(ctx, refreshPreparedEndpoints(candidate, current)); ready != nil {
+				item.dispatchReady = ready
+				return true
+			}
+			if p.clock.Now().Before(item.refreshAfter) {
+				return false
+			}
+		}
+	}
+	if item.preparationDone == nil {
+		p.startPreparation(item)
+	}
+	return false
+}
+
+func (p *Processor) startPreparation(item *FlowItem) {
+	result := make(chan preparationResult, 2)
+	item.preparationDone = result
+	go func() {
+		defer utilruntime.HandleCrashWithLogger(p.logger)
+		prepared := item.prepare(item.prepareCtx, func(prepared *contracts.PreparedRequest) bool {
+			return p.readyRequest(item.prepareCtx, prepared) != nil
+		}, func(prepared *contracts.PreparedRequest) {
+			result <- preparationResult{request: prepared, completedAt: p.clock.Now()}
+		})
+		result <- preparationResult{request: prepared, completedAt: p.clock.Now(), complete: true}
+	}()
+}
+
+func (p *Processor) readyRequest(ctx context.Context, prepared *contracts.PreparedRequest) *contracts.PreparedRequest {
+	if prepared.Err != nil {
+		return prepared
+	}
+	if prepared.Filter != nil {
+		ready, profiles := prepared.Filter(ctx, prepared.Request, prepared.Endpoints,
+			func(stage string, candidates []scheduling.Endpoint) []scheduling.Endpoint {
+				return composite.FilterForDispatch(flowcontrol.WithSaturationStage(ctx, stage),
+					p.saturationDetector, prepared.Request, candidates)
+			})
+		if !ready {
+			return nil
+		}
+		result := *prepared
+		result.ProfileEndpoints = profiles
+		return &result
+	}
+	prefill, decode, interleaved := partitionByRole(prepared.Endpoints)
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+	// The profile handler decides which stages a request needs, including
+	// whether to skip prefill. Role presence alone cannot establish that.
+	for _, stage := range []struct {
+		name      string
+		endpoints []scheduling.Endpoint
+	}{
+		{flowcontrol.SaturationStagePrefill, prefill},
+		{flowcontrol.SaturationStageDecode, decode},
+	} {
+		if len(stage.endpoints) > 0 && len(composite.FilterForDispatch(
+			flowcontrol.WithSaturationStage(ctx, stage.name), p.saturationDetector, prepared.Request, stage.endpoints)) > 0 {
+			return prepared
+		}
+	}
+	return nil
+}
+
+// Keep live telemetry and data-layer attributes while retaining request-specific
+// admission values. Ordinary producers need the full set, including KV donors.
+func refreshPreparedEndpoints(prepared *contracts.PreparedRequest, current []fwkdl.Endpoint) *contracts.PreparedRequest {
+	if prepared.Locate == nil {
+		return prepared
+	}
+	byID := make(map[fwkdl.ID]fwkdl.Endpoint, len(current))
+	for _, endpoint := range current {
+		byID[endpoint.GetMetadata().ID] = endpoint
+	}
+	result := *prepared
+	result.Endpoints = make([]scheduling.Endpoint, 0, len(prepared.Endpoints))
+	for _, old := range prepared.Endpoints {
+		endpoint := byID[old.GetMetadata().ID]
+		if endpoint == nil {
+			continue
+		}
+		fresh := scheduling.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		for _, key := range prepared.DataKeys {
+			if value, ok := old.Get(key); ok {
+				fresh.Put(key, value)
+			}
+		}
+		result.Endpoints = append(result.Endpoints, fresh)
+	}
+	return &result
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
