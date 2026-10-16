@@ -30,6 +30,33 @@ import (
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
 
+// PrefixHashSetDataKey carries the cross-replica recent-window of prefix block
+// hashes this EPP believes an endpoint holds. Used by approx-prefix-cache-producer
+// when a CrossReplicaSyncer is configured.
+var PrefixHashSetDataKey = plugin.NewDataKey("PrefixHashSetDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// PrefixHashSet is a capped recent window of prompt hash sequences for one
+// endpoint, published across EPP replicas and union-aggregated before matching.
+// Each inner slice is one prompt's block hashes starting at block 0; prompts
+// are ordered oldest to newest.
+type PrefixHashSet struct {
+	Prompts [][]uint64
+}
+
+// Clone returns an independent copy of the hash set.
+func (s *PrefixHashSet) Clone() fwkdl.Cloneable {
+	if s == nil {
+		return nil
+	}
+	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts))}
+	for i, p := range s.Prompts {
+		cp := make([]uint64, len(p))
+		copy(cp, p)
+		out.Prompts[i] = cp
+	}
+	return out
+}
+
 // ReusablePrefixTokensDataKey identifies the request-wide reusable prefix
 // token floor published by a p2p-source-producer instance.
 var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey", p2psourceconstants.P2PSourcePluginType)
