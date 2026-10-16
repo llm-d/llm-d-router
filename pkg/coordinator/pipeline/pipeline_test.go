@@ -360,6 +360,23 @@ func TestExecute_Upstream4xxAnd5xxClassified(t *testing.T) {
 	}
 }
 
+func TestUpstreamError_Error(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"status", http.StatusServiceUnavailable, "async-broker: upstream returned HTTP 503"},
+		{"transport", 0, "async-broker: upstream transport error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &UpstreamError{Step: "async-broker", StatusCode: tc.status}
+			require.Equal(t, tc.want, err.Error())
+		})
+	}
+}
+
 func TestExecute_ErrPipelineDoneIsNotAnError(t *testing.T) {
 	reg := newMetricsRegistry(t)
 	steps := []Step{

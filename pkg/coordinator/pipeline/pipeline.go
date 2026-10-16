@@ -57,6 +57,9 @@ type UpstreamError struct {
 }
 
 func (e *UpstreamError) Error() string {
+	if e.StatusCode == 0 {
+		return e.Step + ": upstream transport error"
+	}
 	return fmt.Sprintf("%s: upstream returned HTTP %d", e.Step, e.StatusCode)
 }
 
