@@ -57,6 +57,7 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldThinking             = "thinking" // Anthropic Messages extended thinking configuration
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
@@ -147,6 +148,10 @@ const (
 	BlockTypeImage      = "image"
 	BlockTypeToolResult = "tool_result"
 )
+
+// ThinkingTypeEnabled is the Messages thinking.type that carries a budget_tokens
+// the Anthropic API requires to stay below max_tokens.
+const ThinkingTypeEnabled = "enabled"
 
 // DefaultImageMediaType is vLLM's fallback when an Anthropic base64 image
 // source omits media_type.

@@ -504,9 +504,11 @@ func TestPrefillStep_MessagesFormat(t *testing.T) {
 	if _, ok := prefillBody["max_completion_tokens"]; ok {
 		t.Fatalf("messages request carries max_completion_tokens=%v", prefillBody["max_completion_tokens"])
 	}
-	// vLLM rejects thinking.budget_tokens >= max_tokens unless the request is a
-	// remote-decode prefill, so the prefill keeps the client's thinking only
-	// alongside do_remote_decode.
+	// An enabled thinking is dropped from the one-token leg (see CapSingleToken);
+	// kv_transfer_params still marks the leg as a remote-decode prefill.
+	if thinking, ok := prefillBody["thinking"]; ok {
+		t.Fatalf("messages prefill carries thinking=%v", thinking)
+	}
 	kvParams, ok := prefillBody["kv_transfer_params"].(map[string]any)
 	if !ok || kvParams["do_remote_decode"] != true {
 		t.Fatalf("expected kv_transfer_params with do_remote_decode=true, got %v", prefillBody["kv_transfer_params"])
