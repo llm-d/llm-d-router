@@ -66,6 +66,7 @@ test_cases_llm_d_router_gateway["active-active-redis"]="--set router.modelServer
 test_cases_llm_d_router_gateway["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_gateway["basic-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["http-route"]="--set httpRoute.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -101,6 +102,14 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ $? -ne 0 ]; then
     echo "Kubectl validation failed for test: ${key}"
     exit 1
+  fi
+
+  if [ "${key}" == "http-route" ]; then
+    httproute_file="${output_dir}/llm-d-router-gateway/templates/httproute.yaml"
+    if ! grep -q -- '^kind: HTTPRoute$' "${httproute_file}"; then
+      echo "Validation failed: HTTPRoute was not rendered for test: ${key}"
+      exit 1
+    fi
   fi
 
   if [ "${key}" == "triton" ]; then
