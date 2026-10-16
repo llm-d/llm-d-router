@@ -18,7 +18,7 @@ limitations under the License.
 // subpackages provide reusable test helpers layered by what they are
 // allowed to import:
 //
-//   - R1: test/framework/{net,context,k8s} import only the standard
+//   - R1: test/framework/{net,k8s} import only the standard
 //     library, Kubernetes API/machinery packages, and logr. They never
 //     import pkg/.
 //   - R2: test/framework/gaie additionally imports GAIE/apix API types
