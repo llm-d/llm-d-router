@@ -362,6 +362,12 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
 	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
 		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
+		// block, which minBlockSizeTokens can make larger. Size the LRU to the
+		// engine's token capacity so it does not outlive the engine's cache.
+		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
+			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
+		}
 	} else if p.config.LRUCapacityPerServer > 0 {
 		gpuBlocks = p.config.LRUCapacityPerServer
 	}

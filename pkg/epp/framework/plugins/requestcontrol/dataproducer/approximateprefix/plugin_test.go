@@ -396,6 +396,40 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	assert.Contains(t, p.indexer().Pods(), ServerID(endpoint.GetMetadata().ID))
 }
 
+// TestMakeserver_AutotuneCapacityInRouterBlocks verifies that the autotuned LRU
+// holds as many tokens as the model server's KV cache.
+func TestMakeserver_AutotuneCapacityInRouterBlocks(t *testing.T) {
+	tests := []struct {
+		name    string
+		metrics *fwkdl.Metrics
+		want    int
+	}{
+		{name: "engine block below the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 31250}, want: 7812},
+		{name: "engine block at the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000}, want: 1000},
+		{name: "engine block above the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 128, CacheNumBlocks: 1000}, want: 1000},
+		{name: "cache smaller than one router block", metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 2}, want: 1},
+		{name: "engine block size not reported", metrics: &fwkdl.Metrics{CacheNumBlocks: 1000}, want: 1000},
+		{name: "prefix match unit below the engine block", metrics: &fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 32, CacheNumBlocks: 1000}, want: 64000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{
+				AutoTune:             true,
+				BlockSizeTokens:      defaultBlockSizeTokens,
+				LRUCapacityPerServer: defaultLRUCapacityPerServer,
+			}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			assert.NoError(t, err)
+
+			endpoint := fwksched.NewEndpoint(
+				&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+				tc.metrics, fwkdl.NewAttributes(),
+			)
+			assert.Equal(t, tc.want, p.makeserver(endpoint).NumOfGPUBlocks)
+		})
+	}
+}
+
 func TestMaxPrefixTokensToMatch(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1, MaxPrefixTokensToMatch=2 -> maxBlocks = 2/1 = 2.
