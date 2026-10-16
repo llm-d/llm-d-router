@@ -71,6 +71,37 @@ func TestDetectAPIType(t *testing.T) {
 	}
 }
 
+func TestDetectAPISurface(t *testing.T) {
+	tests := []struct {
+		name, path, want string
+	}{
+		{"chat completions", PathChatCompletions, "chat_completions"},
+		{"completions", PathCompletions, "completions"},
+		{"responses", PathResponses, "responses"},
+		{"messages", PathMessages, "messages"},
+		{"vllm generate", PathVLLMGenerate, "vllm_generate"},
+		{"sglang generate", PathSGLangGenerate, "sglang_generate"},
+		{"provider prefix", "/provider/model" + PathMessages, "messages"},
+		{"unversioned provider route", "/provider/messages", "messages"},
+		{"trailing slash and query", PathMessages + "/?beta=true", "messages"},
+		{"unknown", "/v1/embeddings", "unknown"},
+		{"missing", "", "unknown"},
+		{"token counting", PathMessages + "/count_tokens", "unknown"},
+		{"render", PathMessages + "/render", "unknown"},
+		{"extra path segment", PathChatCompletions + "/extra", "unknown"},
+		{"substring", "/v1/messages-extra", "unknown"},
+		{"missing segment boundary", "/provider/notmessages", "unknown"},
+		{"query is not path", "/health?target=" + PathMessages, "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DetectAPISurface(tt.path); got != tt.want {
+				t.Errorf("DetectAPISurface(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAPIType_tokenLimitFields(t *testing.T) {
 	cases := map[APIType][]string{
 		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},

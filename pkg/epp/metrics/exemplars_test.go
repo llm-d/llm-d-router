@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // newHistogram returns a bare histogram to observe into, so these tests assert
@@ -170,41 +172,42 @@ func latencyRecorders() []latencyRecorder {
 		{
 			name: "ttft",
 			record: func(ctx context.Context) {
-				RecordRequestTTFT(ctx, "m", "t", "f", "1", true, received, firstToken)
+				RecordRequestTTFT(ctx, "m", "t", reqcommon.APITypeMessages.String(), "f", "1", true, received, firstToken)
 			},
 			vec:    llmdRequestTTFT,
-			labels: []string{"m", "t", "f", "1", "true"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String(), "true"},
 		},
 		{
 			name: "tpot",
 			record: func(ctx context.Context) {
-				RecordRequestTPOT(ctx, "m", "t", "f", "1", true, received, firstToken, complete, 5)
+				RecordRequestTPOT(ctx, "m", "t", reqcommon.APITypeMessages.String(), "f", "1", true, received, firstToken, complete, 5)
 			},
 			vec:    llmdRequestTPOT,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "itl",
 			record: func(ctx context.Context) {
-				RecordInterTokenLatency(ctx, "m", "t", "f", "1", 0.02)
+				RecordInterTokenLatency(ctx, "m", "t", reqcommon.APITypeMessages.String(), "f", "1", 0.02)
 			},
 			vec:    llmdInterTokenLatency,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "ntpot",
 			record: func(ctx context.Context) {
-				RecordNormalizedTimePerOutputToken(ctx, "m", "t", "f", "1", received, complete, 5)
+				RecordNormalizedTimePerOutputToken(ctx, "m", "t", reqcommon.APITypeMessages.String(), "f", "1", received, complete, 5)
 			},
 			vec:    llmdNormalizedTimePerOutputToken,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "scheduler",
 			record: func(ctx context.Context) {
-				RecordSchedulerE2ELatency(ctx, 3*time.Millisecond)
+				RecordSchedulerE2ELatency(ctx, reqcommon.APITypeMessages.String(), 3*time.Millisecond)
 			},
-			vec: llmdSchedulerE2ELatency,
+			vec:    llmdSchedulerE2ELatency,
+			labels: []string{reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "flow_control_queue",
@@ -280,7 +283,7 @@ func BenchmarkRecordInterTokenLatency(b *testing.B) {
 			Reset()
 			b.ReportAllocs()
 			for b.Loop() {
-				RecordInterTokenLatency(bc.ctx, "m", "t", "f", "1", 0.02)
+				RecordInterTokenLatency(bc.ctx, "m", "t", reqcommon.APITypeMessages.String(), "f", "1", 0.02)
 			}
 		})
 	}

@@ -134,7 +134,7 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 
 	received := time.Now()
 	require.True(t, eppmetrics.RecordRequestLatencies(
-		ctx, wireTestModel, "target-model", "fairness", "priority",
+		ctx, wireTestModel, "target-model", "messages", "fairness", "priority",
 		received, received.Add(420*time.Millisecond),
 	))
 

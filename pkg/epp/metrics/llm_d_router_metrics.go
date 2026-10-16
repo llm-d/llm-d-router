@@ -31,9 +31,10 @@ const (
 
 var (
 	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels                       = []string{"endpoint_name", "namespace", "port"}
-	modelLabelsWithFairnessPriority          = append(append([]string{}, modelLabels...), "fairness_id", "priority")
-	modelLabelsWithFairnessPriorityStreaming = append(append([]string{}, modelLabelsWithFairnessPriority...), "streaming")
+	llmdEndpointLabels                   = []string{"endpoint_name", "namespace", "port"}
+	modelLabelsWithFairnessPriority      = append(append([]string{}, modelLabels...), "fairness_id", "priority")
+	requestLabelsWithAPISurface          = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
+	requestLabelsWithAPISurfaceStreaming = append(append([]string{}, requestLabelsWithAPISurface...), "streaming")
 )
 
 // --- llm-d Inference Objective Metrics ---
@@ -44,7 +45,7 @@ var (
 			Name:      "request_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of processed requests.", compbasemetrics.ALPHA),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestErrCounter = prometheus.NewCounterVec(
@@ -53,7 +54,7 @@ var (
 			Name:      "request_error_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of request errors.", compbasemetrics.ALPHA),
 		},
-		append(modelLabelsWithFairnessPriority, "error_code"),
+		append(append([]string{}, requestLabelsWithAPISurface...), "error_code"),
 	)
 
 	llmdRequestLatencies = prometheus.NewHistogramVec(
@@ -63,7 +64,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("End-to-end request latency distribution in seconds.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestSizes = prometheus.NewHistogramVec(
@@ -73,7 +74,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Incoming request body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.RequestSizeBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdResponseSizes = prometheus.NewHistogramVec(
@@ -83,7 +84,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Outgoing response body size distribution in bytes.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdInputTokens = prometheus.NewHistogramVec(
@@ -93,7 +94,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Input token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.TokenCountBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdOutputTokens = prometheus.NewHistogramVec(
@@ -103,7 +104,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Output token count distribution per request.", compbasemetrics.ALPHA),
 			Buckets:   []float64{1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdPromptCachedTokens = prometheus.NewHistogramVec(
@@ -113,7 +114,7 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Distribution of prompt tokens read from cache per request, as reported by the model server in the response.", compbasemetrics.ALPHA),
 			Buckets:   metricsutil.TokenCountBuckets,
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRunningRequests = prometheus.NewGaugeVec(
@@ -122,7 +123,7 @@ var (
 			Name:      "request_running",
 			Help:      metricsutil.HelpMsgWithStability("Current number of active running requests.", compbasemetrics.ALPHA),
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdNormalizedTimePerOutputToken = prometheus.NewHistogramVec(
@@ -134,7 +135,7 @@ var (
 				0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
 			},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdRequestTTFT = prometheus.NewHistogramVec(
@@ -147,7 +148,7 @@ var (
 				8, 10, 15, 20, 30, 45, 60, 120,
 			},
 		},
-		modelLabelsWithFairnessPriorityStreaming,
+		requestLabelsWithAPISurfaceStreaming,
 	)
 
 	llmdRequestTPOT = prometheus.NewHistogramVec(
@@ -160,7 +161,7 @@ var (
 				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
 			},
 		},
-		modelLabelsWithFairnessPriority,
+		requestLabelsWithAPISurface,
 	)
 
 	llmdInterTokenLatency = prometheus.NewHistogramVec(
@@ -172,7 +173,7 @@ var (
 				0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2,
 			},
 		},
-		append(append([]string{}, modelLabels...), "fairness_id", "priority"),
+		requestLabelsWithAPISurface,
 	)
 )
 
@@ -253,7 +254,7 @@ var (
 				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 
 	llmdSchedulerAttemptsTotal = prometheus.NewCounterVec(
@@ -262,7 +263,7 @@ var (
 			Name:      "scheduler_attempts_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of scheduling attempts.", compbasemetrics.ALPHA),
 		},
-		append([]string{"status", "target_model_name"}, llmdEndpointLabels...),
+		append(append([]string{"status", "target_model_name"}, llmdEndpointLabels...), "api_surface"),
 	)
 
 	llmdPluginProcessingLatencies = prometheus.NewHistogramVec(
@@ -299,7 +300,7 @@ var (
 				0.0005, 0.001, 0.002, 0.005, 0.01, 0.015, 0.025, 0.04, 0.06, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 
 	llmdResponseProcessingLatency = prometheus.NewHistogramVec(
@@ -311,7 +312,7 @@ var (
 				0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 			},
 		},
-		[]string{},
+		[]string{"api_surface"},
 	)
 )
 
