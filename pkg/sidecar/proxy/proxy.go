@@ -78,6 +78,13 @@ type Config struct {
 	// of provided prefill hosts instead of always using the first one.
 	EnablePrefillerSampling bool
 
+	// EnableSpeculativePrefill turns on speculative prefill: after a chat
+	// completion response finishes, the sidecar builds the predicted next-turn
+	// prefix (prior messages + the assistant answer) and issues a max_tokens=1
+	// request to warm its KV cache ahead of the real next turn. Only requests
+	// carrying the x-speculative-prefill header are eligible.
+	EnableSpeculativePrefill bool
+
 	// PrefillMaxRetries is the number of additional attempts when a prefill
 	// request fails with a 5xx error (e.g. connection reset → 502).
 	// 0 means no retries (original behavior).
@@ -568,6 +575,11 @@ func (s *Server) createRoutes() *http.ServeMux {
 	// served routes from drifting away from it.
 	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
 		handler := s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path))
+		// Speculative prefill only applies to chat completions (it appends an
+		// assistant message and re-renders the multi-turn prefix).
+		if path == reqcommon.PathChatCompletions {
+			handler = s.speculativePrefillMiddleware(handler)
+		}
 		mux.HandleFunc("POST "+path, handler)
 		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
 			r = r.Clone(r.Context())
