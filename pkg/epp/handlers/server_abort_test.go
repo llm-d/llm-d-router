@@ -86,7 +86,7 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 				requestDroppedReason: tt.requestDroppedReason,
 			}
 
-			err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+			err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 			require.NoError(t, err)
 
 			require.Len(t, srv.sentResponses, 1, "Should send exactly one response")
@@ -119,7 +119,7 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 		requestState: requestReceived,
 	}
 
-	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+	err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 	require.NoError(t, err)
 	assert.Empty(t, srv.sentResponses, "Should not send any response for normal state without queued responses")
 }
