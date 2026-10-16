@@ -68,6 +68,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(llmdSchedulerE2ELatency)
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFilterEliminatedTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFailuresTotal)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
@@ -128,6 +130,8 @@ func Reset() {
 	llmdInferencePoolReadyEndpoints.Reset()
 	llmdSchedulerE2ELatency.Reset()
 	llmdSchedulerAttemptsTotal.Reset()
+	llmdSchedulerFilterEliminatedTotal.Reset()
+	llmdSchedulerFailuresTotal.Reset()
 	llmdPluginProcessingLatencies.Reset()
 	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
@@ -447,6 +451,24 @@ const (
 	SchedulerStatusSuccess = "success"
 	SchedulerStatusFailure = "failure"
 )
+
+// RecordSchedulerFilterEliminated records the number of candidate endpoints a
+// filter removed in a scheduler profile run.
+func RecordSchedulerFilterEliminated(profile, pluginType, pluginName string, count int) {
+	llmdSchedulerFilterEliminatedTotal.WithLabelValues(profile, pluginType, pluginName).Add(float64(count))
+}
+
+// Reasons for RecordSchedulerFailure.
+const (
+	SchedulerFailureReasonAllFiltered         = "all_filtered"
+	SchedulerFailureReasonNoProfileSelected   = "no_profile_selected"
+	SchedulerFailureReasonProfileHandlerError = "profile_handler_error"
+)
+
+// RecordSchedulerFailure records a failed scheduling attempt with its reason.
+func RecordSchedulerFailure(reason string) {
+	llmdSchedulerFailuresTotal.WithLabelValues(reason).Inc()
+}
 
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {

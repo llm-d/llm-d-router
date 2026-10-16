@@ -216,6 +216,19 @@ These metrics are owned by EPP scheduler instrumentation.
 |---|---|---|---|
 | `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+
+`reason` is one of:
+
+| Reason | Meaning |
+|---|---|
+| `all_filtered` | The filters of at least one scheduler profile removed every candidate, and the profile handler failed the attempt. `llm_d_epp_scheduler_filter_eliminated_total` shows which filter removed them. |
+| `no_profile_selected` | The profile handler selected no scheduler profile to run, for example a `header-profile-handler` request whose header names no configured profile. |
+| `profile_handler_error` | The profile handler failed the attempt with every profile run succeeding, or wrote a request attribute it does not declare. |
+
+Requests rejected before scheduling, when no endpoint matches the request or screeners remove every
+candidate, are not scheduling attempts and are not counted by these metrics.
 
 ### EPP processing overhead
 
