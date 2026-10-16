@@ -69,7 +69,8 @@ The `error_code` label on `request_error_total` and `step_errors_total` uses fiv
 
 **Key behaviors:**
 - The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
-- An error response that a pipeline step writes to the client itself counts in `request_error_total` and `step_errors_total`. The `async-broker` step does this for its validation 400s (`bad_request`), a failed enqueue (503, `upstream_transport`), the hold deadline (504, `upstream_5xx`), and every error status it relays from a stored result (`upstream_4xx` / `upstream_5xx` by band, including the 499 it writes for a cancelled result). A client that disconnects while the coordinator still holds the request is not counted, on either the enqueue or the hold path.
+- A client that disconnects while its request is in flight is not counted in `request_error_total` or `step_errors_total`. The request counts in `request_total`.
+- An error response that a pipeline step writes to the client itself counts in `request_error_total` and `step_errors_total`. The `async-broker` step does this for its validation 400s (`bad_request`), a failed enqueue (503, `upstream_transport`), the hold deadline (504, `upstream_5xx`), and every error status it relays from a stored result (`upstream_4xx` / `upstream_5xx` by band, including the 499 it writes when the stored result records a job cancelled before dispatch).
 - `upstream_4xx`, `upstream_5xx` and `upstream_transport` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. A transport failure carries no status code, so it classifies as `upstream_transport` instead of by status band. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
 
 ## Metrics catalog
@@ -129,7 +130,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 #### `execution_path_total` (Counter)
 *   **Labels:** `model_name`, `path` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
-*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator.
+*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator. A request whose client disconnected records no path.
 
 #### `conditional_decode_probes_total` (Counter)
 *   **Labels:** `result` (`served`, `deferred`, `error`, or `transport_error`)
@@ -138,6 +139,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
     *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
     *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
     *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
+    *   A probe cut short by the client disconnecting records no result.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
 
 ## Relationship to EPP metrics

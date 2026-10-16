@@ -806,6 +806,33 @@ func TestHandleInference_StepWrittenErrorClassifiedAndNotOverwritten(t *testing.
 	)
 }
 
+func TestHandleInference_ClientCancelRecordsNoError(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	// The client leaves mid-pipeline. The handler must neither count the
+	// resulting step error nor write a response; the request still counts.
+	ctx, cancel := context.WithCancel(context.Background())
+	step := stubStep{name: "prefill", fn: func(ctx context.Context, _ *pipeline.RequestContext) error {
+		cancel()
+		return ctx.Err()
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	require.Empty(t, rec.Body.String(), "no error body must be written to a departed client")
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+}
+
 func TestHandleInference_PipelineDoneRecordsNoError(t *testing.T) {
 	reg := newMetricsRegistry(t)
 

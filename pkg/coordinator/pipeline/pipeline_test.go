@@ -249,6 +249,26 @@ func TestPipeline_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestExecute_ClientCancelRecordsNoStepErrorOrPath(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	steps := []Step{
+		&mockStep{name: "conditional-decode", fn: func(ctx context.Context, _ *RequestContext) error {
+			cancel()
+			return ctx.Err()
+		}},
+	}
+
+	err := New(steps).Execute(ctx, &RequestContext{Model: "m"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.InDelta(t, 0.0,
+		stepErrorCount(t, reg, "conditional-decode", coordmetrics.ErrorCodeInternal),
+		1e-9, "a step failing after the client left must not count as a step error",
+	)
+	require.InDelta(t, 0.0, pathCount(t, reg, metricsutil.DisaggPathDecodeOnly), 1e-9,
+		"a probe cut short by the client must not record a path")
+}
+
 // newMetricsRegistry wires the coordinator's package-level metric vectors
 // onto a fresh registry so the pipeline's step recording is observable in
 // isolation, and clears their state so concurrent tests do not see each

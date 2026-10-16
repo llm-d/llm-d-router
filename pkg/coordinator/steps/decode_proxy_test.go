@@ -245,7 +245,9 @@ func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
 	// Classification is driven by the request context's state, not by the
 	// error argument: a request whose context is done is a client-side
 	// lifecycle event (disconnect or client deadline), anything else is a
-	// backend fault. A transport-level timeout whose Is method matches
+	// backend fault. A done context writes nothing (the recorder keeps its
+	// default 200) and records the context error on the outcome. A
+	// transport-level timeout whose Is method matches
 	// context.DeadlineExceeded (net/http's errTimeout, fired by
 	// ResponseHeaderTimeout) must stay in the error log. errCacheMiss stays
 	// swallowed (no log, no response) so the miss can fall through to the
@@ -267,7 +269,7 @@ func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
 				return ctx, func() {}
 			},
 			err:           errors.New("connection reset by peer"),
-			wantStatus:    http.StatusBadGateway,
+			wantStatus:    http.StatusOK,
 			wantErrorLogs: 0,
 		},
 		{
@@ -276,7 +278,7 @@ func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
 				return context.WithDeadline(context.Background(), pastDeadline)
 			},
 			err:           errors.New("connection reset by peer"),
-			wantStatus:    http.StatusBadGateway,
+			wantStatus:    http.StatusOK,
 			wantErrorLogs: 0,
 		},
 		{

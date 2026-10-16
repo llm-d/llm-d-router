@@ -188,10 +188,11 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 
 		// Classify path from steps that ran, success or failure, so a
 		// request that reached decode and failed there still contributes
-		// to path totals. This defer is registered after the one that ends
-		// the span, so it runs first and the attribute lands while the span
-		// is still open.
-		if path, ok := classifyExecutionPath(started); ok {
+		// to path totals. A request whose context ended records no path:
+		// the client left before the phases it would have taken are known.
+		// This defer is registered after the one that ends the span, so it
+		// runs first and the attribute lands while the span is still open.
+		if path, ok := classifyExecutionPath(started); ok && ctx.Err() == nil {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
 			span.SetAttributes(semconv.LLMDCoordinatorPipelineExecutionPath(path))
 		}
@@ -219,7 +220,10 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 				executed[name] = true
 				return nil
 			}
-			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
+			if ctx.Err() == nil {
+				// Once the request context has ended, the failure is the client's departure.
+				coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
+			}
 			failed := fmt.Errorf("step %q failed: %w", name, err)
 			// UpstreamError.Error omits the response body, so the status
 			// message carries no prompt or user data.

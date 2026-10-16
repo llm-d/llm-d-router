@@ -98,11 +98,14 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 // Status is the upstream HTTP status observed via ModifyResponse (0 if the
 // round trip failed before headers). TransportErr carries a round-trip failure
 // (connection refused, timeout, TCP reset) after the ErrorHandler has already
-// answered 502. Both fields let the caller emit error metrics without another
-// write to the client, which is already committed by the proxy.
+// answered 502. Cancelled carries the request context's error when the round
+// trip failed because the client's request ended. The fields let the caller
+// emit error metrics without another write to the client, which is already
+// committed by the proxy.
 type decodeOutcome struct {
 	Status       int
 	TransportErr error
+	Cancelled    error
 }
 
 // newDecodeProxy builds the streaming reverse proxy for a decode-phase request
@@ -110,7 +113,8 @@ type decodeOutcome struct {
 // when non-nil, inspects each upstream response (the conditional cache probe
 // uses it to detect a 412) and runs after the outcome captures the status.
 // Transport errors are logged and answered 502, except errCacheMiss, which is
-// swallowed so the miss falls through.
+// swallowed so the miss falls through, and a round trip ended by the client's
+// request context, which is recorded on the outcome and answered with nothing.
 //
 // A failure after the upstream response has started streaming cannot become a
 // 502: the 200 status and partial body are already on the wire, so the proxy
@@ -148,11 +152,12 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 			// errors.Is(err, context.DeadlineExceeded) by stdlib design and
 			// would otherwise misclassify a hung backend as a client cancellation.
 			if ctxErr := req.Context().Err(); ctxErr != nil {
+				out.Cancelled = ctxErr
 				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", ctxErr)
-			} else {
-				out.TransportErr = proxyErr
-				logger.Error(proxyErr, "proxy error")
+				return
 			}
+			out.TransportErr = proxyErr
+			logger.Error(proxyErr, "proxy error")
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
@@ -170,8 +175,13 @@ func serveDecode(logger logr.Logger, transport http.RoundTripper, w http.Respons
 }
 
 // streamedError converts a decode outcome to the error its step returns. A
-// TransportErr takes precedence over a recorded Status.
+// Cancelled round trip returns the context error, so the caller ends the
+// request as a cancellation. A TransportErr takes precedence over a recorded
+// Status.
 func (o *decodeOutcome) streamedError(step string) error {
+	if o.Cancelled != nil {
+		return fmt.Errorf("%s: %w", step, o.Cancelled)
+	}
 	if o.TransportErr != nil {
 		return &pipeline.UpstreamStreamedError{Step: step, Cause: o.TransportErr}
 	}
