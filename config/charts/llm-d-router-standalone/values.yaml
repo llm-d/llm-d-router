@@ -57,6 +57,18 @@ router:
     healthCheckUnhealthyThreshold: 3
     healthCheckHealthyThreshold: 2
 
+    # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
+    # span per request and propagates the trace context on the ext_proc gRPC
+    # stream, so EPP spans join the request trace. Envoy only.
+    tracing:
+      enabled: false
+      # OTLP gRPC collector endpoint (host:port, scheme optional). Defaults to
+      # router.tracing.otelExporterEndpoint when empty.
+      collectorEndpoint: ""
+      serviceName: envoy-proxy
+      # Percentage of requests without an incoming sampling decision to trace.
+      samplingPercentage: 10
+
     resources:
       requests:
         cpu: "4"
@@ -76,6 +88,7 @@ router:
             envoy.yaml: |
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
               {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
+              {{- $tracing := .Values.router.proxy.tracing | default dict -}}
               admin:
                 address:
                   socket_address:
@@ -155,6 +168,22 @@ router:
                             typed_config:
                               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                               stat_prefix: http-8081
+                              {{- if $tracing.enabled }}
+                              # Envoy propagates trace context on the ext_proc gRPC stream only when the
+                              # connection manager has a tracer.
+                              tracing:
+                                random_sampling:
+                                  value: {{ $tracing.samplingPercentage }}
+                                provider:
+                                  name: envoy.tracers.opentelemetry
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                                    grpc_service:
+                                      envoy_grpc:
+                                        cluster_name: otel_collector
+                                      timeout: 1s
+                                    service_name: {{ $tracing.serviceName | default "envoy-proxy" | quote }}
+                              {{- end }}
                               # Only EPP may set the destination header. Removing any client-supplied value
                               # before route selection keeps clients from picking the backend themselves.
                               early_header_mutation_extensions:
@@ -309,6 +338,26 @@ router:
                                   socket_address:
                                     address: {{ printf "%s.%s.svc.%s" (include "llm-d-router.proxy.fallbackServiceName" .) .Release.Namespace (.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: {{ include "llm-d-router.proxy.fallbackPort" . }}
+                  {{- end }}
+                  {{- if $tracing.enabled }}
+                  {{- $collector := include "llm-d-router.proxy.tracing.collector" . | fromYaml }}
+                  - name: otel_collector
+                    type: STRICT_DNS
+                    connect_timeout: 1s
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    load_assignment:
+                      cluster_name: otel_collector
+                      endpoints:
+                        - lb_endpoints:
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ $collector.host | quote }}
+                                    port_value: {{ $collector.port }}
                   {{- end }}
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}

@@ -207,6 +207,24 @@ entry of router.modelServers.targetPorts.
 {{- end -}}
 
 {{/*
+OTLP gRPC collector host and port for the Envoy tracer, from
+router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint.
+The port defaults to 4317.
+*/}}
+{{- define "llm-d-router.proxy.tracing.collector" -}}
+{{- $tracing := .Values.router.proxy.tracing | default dict -}}
+{{- $endpoint := $tracing.collectorEndpoint | default (dig "tracing" "otelExporterEndpoint" "" .Values.router) -}}
+{{- $hostPort := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $endpoint "" | trimSuffix "/" -}}
+{{- $port := regexFind ":[0-9]+$" $hostPort -}}
+{{- $host := trimSuffix $port $hostPort | trimPrefix "[" | trimSuffix "]" -}}
+{{- if not $host -}}
+{{- fail "router.proxy.tracing.enabled requires router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint" -}}
+{{- end -}}
+host: {{ $host | quote }}
+port: {{ trimPrefix ":" $port | default "4317" }}
+{{- end -}}
+
+{{/*
 Return "true" if EPP is configured with secure (TLS) serving, "false" if
 router.epp.flags.secure-serving is explicitly set to false. Defaults to true
 so that the Envoy ext_proc cluster uses TLS by default.

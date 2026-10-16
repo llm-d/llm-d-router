@@ -817,6 +817,42 @@ if ! grep -q -- 'agentgateway-config-template' "${agentgateway_service_mode_outp
   exit 1
 fi
 
+echo "Verifying llm-d-router-standalone Envoy tracing follows router.proxy.tracing..."
+for proxy_mode in sidecar service; do
+  envoy_tracing_off_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-off-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} > "${envoy_tracing_off_output}"
+  if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_off_output}"; then
+    echo "Envoy tracing rendered in ${proxy_mode} mode without router.proxy.tracing.enabled"
+    exit 1
+  fi
+  envoy_tracing_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint=http://otel-collector.obs.svc:4317 > "${envoy_tracing_output}"
+  for expected in 'name: envoy.tracers.opentelemetry' 'cluster_name: otel_collector' '- name: otel_collector' 'address: "otel-collector.obs.svc"' 'value: 10$' 'service_name: "envoy-proxy"'; do
+    if ! grep -q -- "${expected}" "${envoy_tracing_output}"; then
+      echo "Envoy tracing in ${proxy_mode} mode did not render '${expected}'"
+      exit 1
+    fi
+  done
+done
+envoy_tracing_override_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-override-render.yaml"
+${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.proxy.tracing.collectorEndpoint=collector.example:4318 --set router.proxy.tracing.serviceName=edge --set router.proxy.tracing.samplingPercentage=50 > "${envoy_tracing_override_output}"
+for expected in 'address: "collector.example"' 'port_value: 4318' 'service_name: "edge"' 'value: 50$'; do
+  if ! grep -q -- "${expected}" "${envoy_tracing_override_output}"; then
+    echo "Envoy tracing overrides did not render '${expected}'"
+    exit 1
+  fi
+done
+if ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint= >/dev/null 2>&1; then
+  echo "Helm template unexpectedly succeeded for Envoy tracing without a collector endpoint"
+  exit 1
+fi
+envoy_tracing_agentgateway_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-agentgateway-render.yaml"
+${HELM} template ag-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true > "${envoy_tracing_agentgateway_output}"
+if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_agentgateway_output}"; then
+  echo "Envoy tracing unexpectedly rendered for agentgateway"
+  exit 1
+fi
+
 echo "Verifying standalone proxy autoscaling (HPA) rendering and validations..."
 proxy_hpa_out="${TEMP_DIR}/proxy-hpa-render.yaml"
 proxy_hpa_deploy="${TEMP_DIR}/proxy-hpa-deployment.yaml"

@@ -736,6 +736,10 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
 | `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.tracing.enabled` | Enable OpenTelemetry tracing in Envoy. Envoy creates a span per request on the main listener and propagates the trace context on the ext_proc gRPC stream to EPP, so EPP spans (`router.tracing.enabled`) join the request trace. Applies to `proxyType=envoy` only. | `false` |
+| `router.proxy.tracing.collectorEndpoint` | OTLP gRPC collector endpoint (`host:port`, scheme optional, port defaults to `4317`) for Envoy spans. Falls back to `router.tracing.otelExporterEndpoint` when empty. | `""` |
+| `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |
+| `router.proxy.tracing.samplingPercentage` | Percentage of requests without an incoming sampling decision that Envoy traces (`random_sampling`). | `10` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
 | `router.proxy.image` | Sidecar container image. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |
