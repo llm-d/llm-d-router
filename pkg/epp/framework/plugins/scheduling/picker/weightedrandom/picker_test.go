@@ -139,3 +139,22 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 		})
 	}
 }
+
+func TestPickWeightedRandomPickerExcludesNonPositiveScores(t *testing.T) {
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
+	endpoint3 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod3"}}, nil, nil)
+
+	result := NewWeightedRandomPicker(3).Pick(context.Background(), []*fwksched.ScoredEndpoint{
+		{Endpoint: endpoint1, Score: 1},
+		{Endpoint: endpoint2, Score: 0},
+		{Endpoint: endpoint3, Score: -1},
+	})
+
+	if len(result.TargetEndpoints) != 1 {
+		t.Fatalf("expected only the positive-score endpoint, got %d endpoints", len(result.TargetEndpoints))
+	}
+	if result.TargetEndpoints[0].GetMetadata().ID.Name != "pod1" {
+		t.Fatalf("expected pod1, got %s", result.TargetEndpoints[0].GetMetadata().ID.Name)
+	}
+}
