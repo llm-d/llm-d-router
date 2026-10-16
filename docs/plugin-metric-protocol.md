@@ -93,7 +93,7 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 
 ## LoRA Adapter Serving
 
-**Required by:** `lora-affinity-scorer`
+**Required by:** `lora-affinity-scorer`, `lora-residency-scorer`
 
 Model servers that support dynamic LoRA serving can benefit from the LoRA affinity algorithm. Note
 the current LoRA affinity algorithm in this EPP is highly biased towards vLLM's current
