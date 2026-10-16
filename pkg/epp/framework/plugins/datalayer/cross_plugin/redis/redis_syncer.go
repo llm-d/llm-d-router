@@ -62,7 +62,8 @@ type redisConfig struct {
 
 // RedisSyncer is a CrossReplicaSyncer backed by Redis for cross-replica
 // state sharing. Set prepares each endpoint's peer aggregate, and Get combines
-// it with the live local value.
+// it with the live local value. Only a successful Set replaces the aggregate, so
+// while Redis is unreachable the last known peer state keeps counting.
 type RedisSyncer struct {
 	typedName       fwkplugin.TypedName
 	replicaID       string
@@ -73,8 +74,7 @@ type RedisSyncer struct {
 }
 
 type aggregateCacheEntry struct {
-	value     any
-	expiresAt time.Time
+	value any
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -208,7 +208,6 @@ func gobDecode(data []byte, prototype any) (any, error) {
 // by get.
 func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
-	now := time.Now()
 
 	data, err := encodeValue(value)
 	if err != nil {
@@ -248,10 +247,7 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	if len(remoteValues) == 0 {
 		s.cache.Delete(hashKey)
 	} else {
-		s.cache.Store(hashKey, &aggregateCacheEntry{
-			value:     aggregate(remoteValues),
-			expiresAt: now.Add(s.stateTTL),
-		})
+		s.cache.Store(hashKey, &aggregateCacheEntry{value: aggregate(remoteValues)})
 	}
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
@@ -271,12 +267,7 @@ func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID stri
 	if !ok {
 		return local
 	}
-	entry := cached.(*aggregateCacheEntry)
-	if !entry.expiresAt.After(time.Now()) {
-		s.cache.CompareAndDelete(hashKey, cached)
-		return local
-	}
-	return aggregate([]any{local, entry.value})
+	return aggregate([]any{local, cached.(*aggregateCacheEntry).value})
 }
 
 func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
