@@ -246,8 +246,9 @@ type CrossReplicaConfig struct {
 	// the datalayer polling interval. If omitted, a default is used.
 	SyncInterval *metav1.Duration `json:"syncInterval,omitempty"`
 	// +optional
-	// PublishTimeout bounds one endpoint publish, including all concurrent
-	// contributor writes. If omitted, a default is used.
+	// PublishTimeout bounds one endpoint publish (shared by its concurrent
+	// contributor writes), or one batch chunk per contributor when the syncer
+	// supports batching. If omitted, a default is used.
 	PublishTimeout *metav1.Duration `json:"publishTimeout,omitempty"`
 }
 
