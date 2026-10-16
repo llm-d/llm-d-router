@@ -799,8 +799,8 @@ func TestJSONErrorForLog(t *testing.T) {
 }
 
 func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
-	const numberSecret = "987654321098765432109876543210e999"
-	const textSecret = "private_diagnostic_schema_fixture"
+	const numberSecret = "987654321098765432109876543210e999" // notsecret
+	const textSecret = "private_diagnostic_schema_fixture"    // notsecret
 	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "threshold string", "threshold object"} {
 		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
 			t.Run(fmt.Sprintf("%s/verbosity=%d", stage, verbosity), func(t *testing.T) {
