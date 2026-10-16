@@ -892,6 +892,9 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	r.schedulerConfig = cfg.SchedulerConfig
 
+	pollStatus := datalayer.NewPollStatusProducer(cfg.DataConfig)
+	handle.AddPlugin(pollStatus.TypedName().Name, pollStatus)
+
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
 	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
