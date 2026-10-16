@@ -520,6 +520,15 @@ func TestDecodeRequestBody(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestBody_PreservesLargeIntegers(t *testing.T) {
+	body := `{"model":"m","response_format":{"json_schema":{"schema":{"enum":[9007199254740993]}}},"seed":9007199254740993}`
+	parsed, err := decodeRequestBody([]byte(body))
+	require.NoError(t, err)
+	out, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	require.Equal(t, body, string(out))
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
