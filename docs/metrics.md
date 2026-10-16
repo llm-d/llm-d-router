@@ -246,6 +246,19 @@ These metrics are owned by the EPP data-layer runtime.
 | `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
 
+### Endpoint health
+
+These metrics belong to `endpoint-health-filter`. They are registered when the filter is configured
+and updated when the filter observes a change in an endpoint's health. The `reason` label is
+`poll` for failing metric polls and `response` for consecutive failed responses.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_endpoint_health_excluded_endpoints` | Gauge | `plugin_name` | Endpoints currently excluded from scheduling. |
+| `llm_d_epp_endpoint_health_ejections_total` | Counter | `plugin_name`, `reason` | Endpoints marked unhealthy. |
+| `llm_d_epp_endpoint_health_readmissions_total` | Counter | `plugin_name`, `reason` | Unhealthy marks cleared. An endpoint is readmitted once no reason marks it. |
+| `llm_d_epp_endpoint_health_fail_open_total` | Counter | `plugin_name` | Scheduling cycles in which every candidate was unhealthy and all were kept. Alert on a non-zero rate. |
+
 ### Prefix cache indexer (approximate)
 
 These metrics belong to the `approx-prefix-cache-producer`. They describe its approximate prefix

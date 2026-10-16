@@ -50,6 +50,10 @@ const (
 	HeaderContentTypeOptions = "x-content-type-options"
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
 	ContentTypeOptionsNoSniff = "nosniff"
+	// PseudoHeaderStatus names the pseudo-header Envoy reports a response's
+	// status in. HeaderStatus is the bare name, which the EPP also accepts.
+	PseudoHeaderStatus = ":status"
+	HeaderStatus       = "status"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
