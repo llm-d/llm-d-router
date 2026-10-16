@@ -72,6 +72,19 @@ func createHundredTokenRequest() *scheduling.InferenceRequest {
 	}
 }
 
+func createPromptsRequest(promptLengths ...int) *scheduling.InferenceRequest {
+	arrays := make([][]uint32, len(promptLengths))
+	for i, n := range promptLengths {
+		arrays[i] = make([]uint32, n)
+	}
+	return &scheduling.InferenceRequest{
+		RequestID: "test-request",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: fwkrh.NewTokenizedRequest(arrays),
+		},
+	}
+}
+
 func TestFactory(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -223,7 +236,7 @@ func TestReusableTokensFilter(t *testing.T) {
 			"10.0.0.2", map[string]string{testPrefillWorkRangeLabel: "51-100"}),
 	}
 
-	t.Run("disabled configuration keeps total length", func(t *testing.T) {
+	t.Run("disabled configuration ignores reusable tokens", func(t *testing.T) {
 		plugin := NewContextLengthAware("default", &contextLengthAwareParameters{
 			Label:           testPrefillWorkRangeLabel,
 			EnableFiltering: true,
@@ -303,6 +316,24 @@ func TestReusableTokensFilter(t *testing.T) {
 		filtered := plugin.Filter(ctx, request, endpoints)
 		require.Len(t, filtered, 1)
 		assert.Equal(t, "short", filtered[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("multi-prompt subtracts reusable tokens from the total", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      testPrefillWorkRangeLabel,
+			EnableFiltering:            true,
+			ReusableTokensProducerName: producerName,
+		})
+		request := createPromptsRequest(50, 50)
+		request.PutAttribute(
+			attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			attrprefix.ReusablePrefixTokens(10),
+		)
+
+		filtered := plugin.Filter(ctx, request, endpoints)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
 	})
 
 	t.Run("unknown token count remains zero", func(t *testing.T) {
@@ -556,6 +587,51 @@ func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().ID.Name)
+}
+
+func TestContextLengthAwareMultiPromptUsesLongestPrompt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-1024"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "1025-8192"}),
+	}
+	plugin := NewContextLengthAware("multi-prompt", &contextLengthAwareParameters{
+		Label:           DefaultContextLengthLabel,
+		EnableFiltering: true,
+	})
+
+	tests := []struct {
+		name          string
+		promptLengths []int
+		want          string
+	}{
+		{name: "prompts that each fit the short range", promptLengths: []int{300, 300, 300, 300}, want: "short"},
+		{name: "one prompt beyond the short range", promptLengths: []int{10, 1100}, want: "long"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := createPromptsRequest(tt.promptLengths...)
+
+			filtered := plugin.Filter(ctx, request, endpoints)
+			require.Len(t, filtered, 1)
+			assert.Equal(t, tt.want, filtered[0].GetMetadata().ID.Name)
+
+			scores := plugin.Score(ctx, request, endpoints)
+			assert.Equal(t, tt.want, highestScored(scores).GetMetadata().ID.Name)
+		})
+	}
+}
+
+func highestScored(scores map[scheduling.Endpoint]float64) scheduling.Endpoint {
+	var best scheduling.Endpoint
+	for endpoint, score := range scores {
+		if best == nil || score > scores[best] {
+			best = endpoint
+		}
+	}
+	return best
 }
 
 func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
