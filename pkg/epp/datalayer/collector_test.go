@@ -315,6 +315,64 @@ func TestCollectorErrorMetrics(t *testing.T) {
 	}
 }
 
+func TestCollectorDispatchMetrics(t *testing.T) {
+	tests := []struct {
+		name           string
+		metricsEnabled bool
+		sourceErr      error
+		ticks          int
+		wantSuccess    float64
+		wantError      float64
+	}{
+		{
+			name:        "disabled",
+			ticks:       2,
+			wantSuccess: 0,
+			wantError:   0,
+		},
+		{
+			name:           "successes",
+			metricsEnabled: true,
+			ticks:          2,
+			wantSuccess:    2,
+		},
+		{
+			name:           "errors",
+			metricsEnabled: true,
+			sourceErr:      errors.New("dispatch failed"),
+			ticks:          3,
+			wantError:      3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sourceType := "dispatch-metrics-" + tt.name
+			source := &errSource{kind: sourceType, err: tt.sourceErr}
+			successBefore := testutil.ToFloat64(metrics.LlmdDataLayerCollectorDispatchesTotal.WithLabelValues(sourceType, "success"))
+			errorBefore := testutil.ToFloat64(metrics.LlmdDataLayerCollectorDispatchesTotal.WithLabelValues(sourceType, "error"))
+
+			collector := newCollector(tt.metricsEnabled)
+			ticker := mocks.NewTicker()
+			require.NoError(t, collector.Start(context.Background(), ticker, endpoint, []fwkdl.PollingDispatcher{source}))
+			defer collector.Stop()
+
+			for i := 0; i < tt.ticks; i++ {
+				ticker.Tick()
+			}
+
+			require.Eventually(t, func() bool {
+				if atomic.LoadInt64(&source.CallCount) != int64(tt.ticks) {
+					return false
+				}
+				success := testutil.ToFloat64(metrics.LlmdDataLayerCollectorDispatchesTotal.WithLabelValues(sourceType, "success")) - successBefore
+				errorCount := testutil.ToFloat64(metrics.LlmdDataLayerCollectorDispatchesTotal.WithLabelValues(sourceType, "error")) - errorBefore
+				return success == tt.wantSuccess && errorCount == tt.wantError
+			}, time.Second, 5*time.Millisecond, "expected collector dispatch metric deltas")
+		})
+	}
+}
+
 // TestCollectorRapidStartStopRaceFree simulates the Runtime's pattern of
 // ReleaseEndpoint immediately followed by NewEndpoint for the same key.
 // Stop returns asynchronously, so a fresh Collector's goroutine may briefly

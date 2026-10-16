@@ -137,17 +137,17 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("scheduler config build failed: %w", err)
 	}
 
-	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle)
+	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load feature gates: %w", err)
+	}
+
+	dataConfig, err := buildDataLayerConfig(rawConfig.DataLayer, handle, featureGates[datalayer.CollectorMetricsFeatureGate])
 	if err != nil {
 		return nil, fmt.Errorf("data layer config build failed: %w", err)
 	}
 	if len(dataConfig.Sources) == 0 {
 		logger.Info("No data sources configured; metrics collection is disabled")
-	}
-
-	featureGates, err := loadFeatureConfig(rawConfig.FeatureGates)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load feature gates: %w", err)
 	}
 
 	var flowControlConfig *flowcontrol.Config
@@ -423,9 +423,10 @@ func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwk
 	return handlers.NewParserRegistry(parsers, logger), nil
 }
 
-func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {
+func buildDataLayerConfig(rawDataConfig *configapiv1.DataLayerConfig, handle fwkplugin.Handle, collectorMetricsEnabled bool) (*datalayer.Config, error) {
 	cfg := datalayer.Config{
-		Sources: []datalayer.DataSourceConfig{},
+		Sources:                 []datalayer.DataSourceConfig{},
+		CollectorMetricsEnabled: collectorMetricsEnabled,
 	}
 
 	if rawDataConfig == nil { // metrics data collection not enabled and no additional configuration

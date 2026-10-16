@@ -51,7 +51,8 @@ const (
 
 // Runtime manages data sources, extractors, their mapping, and endpoint lifecycle.
 type Runtime struct {
-	pollingInterval time.Duration
+	pollingInterval         time.Duration
+	collectorMetricsEnabled bool
 
 	dispatchers  *pollingDispatchers
 	notification *notificationManager
@@ -102,6 +103,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 	}
 
 	r.logger = logger
+	r.collectorMetricsEnabled = cfg != nil && cfg.CollectorMetricsEnabled
 	numSources := 0
 	if cfg != nil {
 		numSources = len(cfg.Sources)
@@ -480,7 +482,7 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 		return endpoint
 	}
 
-	collector := NewCollector()
+	collector := newCollector(r.collectorMetricsEnabled)
 	if !r.collectors.Register(key, collector) {
 		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
 		return nil

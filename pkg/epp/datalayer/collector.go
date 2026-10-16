@@ -66,14 +66,22 @@ func (t *TimeTicker) Channel() <-chan time.Time {
 // mutate or release endpoint state immediately after Stop returns without
 // racing the collection goroutine.
 type Collector struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu             sync.Mutex
+	cancel         context.CancelFunc
+	done           chan struct{}
+	metricsEnabled bool
 }
 
 // NewCollector returns a new collector.
 func NewCollector() *Collector {
-	return &Collector{done: make(chan struct{})}
+	return newCollector(false)
+}
+
+func newCollector(metricsEnabled bool) *Collector {
+	return &Collector{
+		done:           make(chan struct{}),
+		metricsEnabled: metricsEnabled,
+	}
 }
 
 // Start launches the collection goroutine.
@@ -130,7 +138,11 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 					return
 				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-				if err := disp.Dispatch(dispCtx, ep); err != nil {
+				err := disp.Dispatch(dispCtx, ep)
+				if c.metricsEnabled {
+					metrics.RecordDataLayerCollectorDispatch(disp.TypedName().Type, err == nil)
+				}
+				if err != nil {
 					tn := disp.TypedName()
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)

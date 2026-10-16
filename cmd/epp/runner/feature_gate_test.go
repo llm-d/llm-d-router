@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -54,6 +55,53 @@ featureGates:
 		require.NoError(t, err)
 		require.False(t, r.featureGates[runserver.HAPopulateNonLeaderDatastoreFeatureGate])
 	})
+}
+
+func TestCollectorMetricsFeatureGate(t *testing.T) {
+	testCases := []struct {
+		name        string
+		configText  string
+		wantEnabled bool
+	}{
+		{
+			name: "disabled by default",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+`,
+		},
+		{
+			name: "enabled via config",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- collectorMetrics
+`,
+			wantEnabled: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			opts := runserver.NewOptions()
+			opts.ConfigText = tc.configText
+			opts.PoolName = testPoolName
+
+			r := NewRunner()
+			r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
+			t.Cleanup(r.stopServing)
+			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEnabled, r.featureGates[datalayer.CollectorMetricsFeatureGate])
+
+			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
+			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantEnabled, eppConfig.DataConfig.CollectorMetricsEnabled)
+		})
+	}
 }
 
 // TestFlowControlFeatureGateAdmissionControlWiring exercises the flowControl feature gate through

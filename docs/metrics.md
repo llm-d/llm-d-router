@@ -237,12 +237,13 @@ decisions.
 | `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
 | `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
 
-### Data layer errors
+### Data layer collector
 
 These metrics are owned by the EPP data-layer runtime.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
+| `llm_d_epp_datalayer_collector_dispatches_total` | Counter | `source_type`, `outcome` | Collector dispatches when the `collectorMetrics` feature gate is enabled. |
 | `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
 

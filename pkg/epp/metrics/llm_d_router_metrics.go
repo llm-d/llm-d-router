@@ -552,6 +552,16 @@ var llmdInferenceModelRewriteDecisionsTotal = prometheus.NewCounterVec(
 
 // --- llm-d Data-layer Metrics ---
 var (
+	// LlmdDataLayerCollectorDispatchesTotal records collector dispatch outcomes per source type.
+	LlmdDataLayerCollectorDispatchesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_collector_dispatches_total",
+			Help:      metricsutil.HelpMsgWithStability("Data-layer collector dispatches per source type and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "outcome"},
+	)
+
 	// LlmdDataLayerPollErrorsTotal records data-source poll errors per source type.
 	LlmdDataLayerPollErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

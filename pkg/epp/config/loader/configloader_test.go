@@ -104,10 +104,16 @@ func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
 		CrossReplica: &configapiv1.CrossReplicaConfig{
 			SyncerPluginRef: "syncer",
 		},
-	}, handle)
+	}, handle, false)
 	require.NoError(t, err)
 	require.Same(t, syncer, cfg.Syncer)
 	require.Same(t, syncer, handle.CrossReplicaSyncer())
+}
+
+func TestBuildDataLayerConfigEnablesCollectorMetrics(t *testing.T) {
+	cfg, err := buildDataLayerConfig(nil, testutils.NewTestHandle(context.Background()), true)
+	require.NoError(t, err)
+	require.True(t, cfg.CollectorMetricsEnabled)
 }
 
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
@@ -1108,6 +1114,7 @@ func TestBuildDataLayerConfigEmptySourcesWarning(t *testing.T) {
 	cfg, err := buildDataLayerConfig(
 		&configapiv1.DataLayerConfig{Sources: []configapiv1.DataLayerSource{}},
 		handle,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
@@ -1123,6 +1130,7 @@ func TestBuildDataLayerConfigCrossReplicaPublishTimeout(t *testing.T) {
 			CrossReplica: &configapiv1.CrossReplicaConfig{PublishTimeout: &metav1.Duration{Duration: timeout}},
 		},
 		handle,
+		false,
 	)
 	require.NoError(t, err)
 	require.Equal(t, timeout, cfg.PublishTimeout)
@@ -1137,6 +1145,7 @@ func TestBuildDataLayerConfigRejectsNonPositiveCrossReplicaPublishTimeout(t *tes
 				CrossReplica: &configapiv1.CrossReplicaConfig{PublishTimeout: &metav1.Duration{Duration: timeout}},
 			},
 			handle,
+			false,
 		)
 		require.ErrorContains(t, err, "crossReplica.publishTimeout must be positive")
 	}

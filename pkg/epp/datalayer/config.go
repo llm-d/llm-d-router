@@ -25,13 +25,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
+// CollectorMetricsFeatureGate enables data-layer collector dispatch metrics.
+const CollectorMetricsFeatureGate = "collectorMetrics"
+
 // Config defines the configuration of EPP data layer, as the set of DataSources
 // and Extractors defined on them. Both poll-based and event-driven (notification)
 // sources are stored in Sources. Differentiation by type of source is handled during
 // the set-up phase.
 type Config struct {
-	Sources []DataSourceConfig // the data sources configured in the data layer
-	Syncer  fwkdl.CrossReplicaSyncer
+	Sources                 []DataSourceConfig // the data sources configured in the data layer
+	CollectorMetricsEnabled bool
+	Syncer                  fwkdl.CrossReplicaSyncer
 	// SyncInterval is the cadence for publishing local state to Syncer.
 	// A SyncInterval of zero (i.e. left unset) causes the publisher to fall
 	// back to its own default cadence.

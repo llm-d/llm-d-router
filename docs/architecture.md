@@ -271,6 +271,8 @@ DataLayer:
 - `metrics-data-source` and `core-metrics-extractor` are injected and wired together. Skipped when
   `dataLayer.injectDefaults` is `false`, or when the config's own `dataLayer.sources` already lists a
   `metrics-data-source` entry.
+- Collector dispatch metrics are disabled by default. Enable them with
+  `featureGates: ["collectorMetrics"]` or `--feature-gates=collectorMetrics=true`.
 
 DataProducer:
 - When a plugin needs data from a producer but none is configured, the default producer for that data
