@@ -62,11 +62,18 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels).
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// TieredOffloadingSpecs lists metric specifications for kv_offload_tiering_* metrics.
+		// vLLM exposes them when it runs the OffloadingConnector with spec_name TieringOffloadingSpec.
+		// Each entry sums the matching series of all engine ranks, skips the primary tier's
+		// series (tier="0:primary"), and is optional whatever its Optional field says.
+		TieredOffloadingSpecs []attributeMetricConfigParams `json:"tieredOffloadingSpecs,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
 	}
 
-	customMetricConfigParams struct {
+	// attributeMetricConfigParams holds a metric spec paired with the
+	// endpoint attribute key where its extracted value is stored.
+	attributeMetricConfigParams struct {
 		// AttributeKey is the endpoint attribute key where the scalar value is stored.
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
@@ -75,6 +82,9 @@ type (
 		// where the endpoint does not report it.
 		Optional bool `json:"optional,omitempty"`
 	}
+
+	// customMetricConfigParams is an alias for attributeMetricConfigParams.
+	customMetricConfigParams = attributeMetricConfigParams
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
 	modelServerExtractorParams struct {
@@ -99,6 +109,17 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// Unfiltered tier selectors sum all secondary tiers. To read tiers separately, override
+		// via engineConfigs with one tier-pinned selector and attribute key per tier
+		// (e.g. "tiering_chunk_hits_fs", "tiering_chunk_hits_p2p").
+		TieredOffloadingSpecs: []attributeMetricConfigParams{
+			{AttributeKey: "tiering_chunk_hits", MetricSpec: "vllm:kv_offload_tiering_chunk_hits_total"},
+			{AttributeKey: "tiering_chunk_queries", MetricSpec: "vllm:kv_offload_tiering_chunk_queries_total"},
+			{AttributeKey: "tiering_read_bytes", MetricSpec: "vllm:kv_offload_tiering_read_bytes_total"},
+			{AttributeKey: "tiering_read_time", MetricSpec: "vllm:kv_offload_tiering_read_time_total"},
+			{AttributeKey: "tiering_promotion_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_job_failures_total"},
+			{AttributeKey: "tiering_allocation_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_allocation_failures_total"},
+		},
 		// vLLM reports these only when it runs with the NixlConnector.
 		CustomMetrics: []customMetricConfigParams{
 			{AttributeKey: attrmetrics.NixlFailedTransfersKey, MetricSpec: "vllm:nixl_num_failed_transfers_total", Optional: true},
@@ -239,7 +260,11 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
-		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		tieredOffloading, tieredErrs := parseAttributeMetricConfigs("tiered offloading spec", engineConfig.TieredOffloadingSpecs)
+		if len(tieredErrs) != 0 {
+			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(tieredErrs...))
+		}
+		customMetrics, customMetricErrs := parseAttributeMetricConfigs("custom metric", engineConfig.CustomMetrics)
 		if len(customMetricErrs) != 0 {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
 		}
@@ -254,6 +279,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
+			TieredOffloading:    tieredOffloading,
 			CustomMetrics:       customMetrics,
 		})
 		if err != nil {
@@ -289,22 +315,22 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	return extractor, nil
 }
 
-func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
-	custom := make([]CustomMetric, 0, len(configs))
+func parseAttributeMetricConfigs(kind string, configs []attributeMetricConfigParams) ([]AttributeMetric, []error) {
+	metrics := make([]AttributeMetric, 0, len(configs))
 	var errs []error
 	for _, cfg := range configs {
 		spec, err := parseStringToSpec(cfg.MetricSpec)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			errs = append(errs, fmt.Errorf("%s %q: %w", kind, cfg.AttributeKey, err))
 			continue
 		}
-		custom = append(custom, CustomMetric{
+		metrics = append(metrics, AttributeMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
 			Optional:     cfg.Optional,
 		})
 	}
-	return custom, errs
+	return metrics, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {

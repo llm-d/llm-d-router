@@ -145,6 +145,16 @@ const (
 // exposing one series per engine reports all of its engines. A non-finite
 // value on any matching series fails the whole family.
 func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, agg aggregation) (float64, error) {
+	return spec.aggregateSeries(families, agg, false)
+}
+
+// aggregateSecondaryTierMetric sums the series of every secondary tier and
+// engine rank that match Spec. Series of the primary tier are left out.
+func (spec *Spec) aggregateSecondaryTierMetric(families sourcemetrics.PrometheusMetricMap) (float64, error) {
+	return spec.aggregateSeries(families, aggregateSum, true)
+}
+
+func (spec *Spec) aggregateSeries(families sourcemetrics.PrometheusMetricMap, agg aggregation, skipPrimaryTier bool) (float64, error) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
 		return 0, err
@@ -154,7 +164,8 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 	matched := 0
 
 	for _, metric := range family.GetMetric() {
-		if !spec.labelsMatch(metric.GetLabel()) {
+		labels := metric.GetLabel()
+		if !spec.labelsMatch(labels) || (skipPrimaryTier && isPrimaryTier(labels)) {
 			continue
 		}
 		value := extractValue(metric)
@@ -176,6 +187,17 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 		return 0, fmt.Errorf("no matching metric found for %q with labels %v", spec.Name, spec.Labels)
 	}
 	return result, nil
+}
+
+// isPrimaryTier reports whether the series belongs to vLLM's primary (CPU) tier,
+// labeled tier="0:primary" (PRIMARY_TIER_LABEL in vllm/v1/kv_offload/tiering/metrics.py).
+func isPrimaryTier(labels []*dto.LabelPair) bool {
+	for _, label := range labels {
+		if label.GetName() == "tier" && label.GetValue() == "0:primary" {
+			return true
+		}
+	}
+	return false
 }
 
 // labelsMatch checks if metric labels match the specification labels.

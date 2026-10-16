@@ -104,6 +104,9 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
 	}
 	for _, mapping := range ext.registry.Mappings() {
+		for _, tiered := range mapping.TieredOffloading {
+			produced[attrmetrics.ScalarMetricDataKey(tiered.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+		}
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
 		}
@@ -214,6 +217,22 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	// vLLM creates a tier counter series on its first event, so a series can be missing on an
+	// endpoint that offloads. A missing series is not an error: its attribute stays unset, or
+	// keeps its last value if the series was reported before.
+	trace := log.FromContext(ctx).V(logutil.TRACE)
+	for _, tiered := range mapping.TieredOffloading {
+		value, err := tiered.Spec.aggregateSecondaryTierMetric(families)
+		if err != nil {
+			if trace.Enabled() {
+				trace.Info("Skipped tiered offloading metric", "attributeKey", tiered.AttributeKey, "reason", err.Error())
+			}
+			continue
+		}
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(tiered.AttributeKey), attrmetrics.ScalarMetricValue(value))
+		updated = true
+	}
+
 	for _, custom := range mapping.CustomMetrics {
 		metric, err := custom.Spec.getLatestMetric(families)
 		if err != nil {
@@ -231,7 +250,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		// Guarded: this runs per endpoint per scrape tick, and the logger
 		// construction, MetricNames slice, and boxed args all allocate even
 		// when TRACE is off.
-		if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+		if trace.Enabled() {
 			trace.Info("Refreshed metrics",
 				"endpoint", ep.GetMetadata().ID,
 				"metrics", mapping.MetricNames(),
