@@ -611,6 +611,83 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 	}
 }
 
+func TestIsWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name:    "canonical upgrade",
+			headers: map[string]string{"connection": "Upgrade", "upgrade": "websocket"},
+			want:    true,
+		},
+		{
+			name:    "case-insensitive values and token list",
+			headers: map[string]string{"connection": "keep-alive, UPGRADE", "upgrade": "WebSocket"},
+			want:    true,
+		},
+		{
+			name:    "missing connection header",
+			headers: map[string]string{"upgrade": "websocket"},
+			want:    false,
+		},
+		{
+			name:    "missing upgrade header",
+			headers: map[string]string{"connection": "Upgrade"},
+			want:    false,
+		},
+		{
+			name:    "non-websocket upgrade",
+			headers: map[string]string{"connection": "Upgrade", "upgrade": "h2c"},
+			want:    false,
+		},
+		{
+			name:    "no headers",
+			headers: map[string]string{},
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isWebSocketUpgrade(tc.headers))
+		})
+	}
+}
+
+func TestHandleRequestHeaders_WebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	upgradeHeaders := []*configPb.HeaderValue{
+		{Key: "Connection", Value: "Upgrade"},
+		{Key: "Upgrade", Value: "websocket"},
+		{Key: ":path", Value: "/v1/realtime"},
+	}
+
+	server := &StreamingServer{director: &mockDirectorRequest{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+	req := &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{
+			// EndOfStream is false: an upgrade keeps its request stream open.
+			Headers: &configPb.HeaderMap{Headers: upgradeHeaders},
+		},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint, "upgrade must be routed to an endpoint at header time")
+	assert.Equal(t, requestResponseProcessingSkipped, reqCtx.requestState,
+		"upgrade must skip body and response processing")
+	assert.NotNil(t, reqCtx.reqHeaderResp, "header response must carry the routing decision")
+}
+
 type mockDirectorRequest struct {
 	Director
 	endpoint *datalayer.EndpointMetadata

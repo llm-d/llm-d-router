@@ -399,6 +399,37 @@ func NewRequestBufferedResponse(
 	return []*extProcPb.ProcessingResponse{headerResponse, bodyResponse}
 }
 
+// NewRequestHeaderResponse creates the single Header response the EPP sends when it routes a request
+// without a body response, such as a WebSocket upgrade.
+func NewRequestHeaderResponse(
+	destinationEndpoint string,
+	otherHeaders ...*envoyCorev3.HeaderValueOption,
+) []*extProcPb.ProcessingResponse {
+	setHeaders := make([]*envoyCorev3.HeaderValueOption, 0, 1+len(otherHeaders))
+	setHeaders = append(setHeaders, &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      metadata.DestinationEndpointKey,
+			RawValue: []byte(destinationEndpoint),
+		},
+	})
+	setHeaders = append(setHeaders, otherHeaders...)
+
+	return []*extProcPb.ProcessingResponse{{
+		Response: &extProcPb.ProcessingResponse_RequestHeaders{
+			RequestHeaders: &extProcPb.HeadersResponse{
+				Response: &extProcPb.CommonResponse{
+					ClearRouteCache: true,
+					HeaderMutation: &extProcPb.HeaderMutation{
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaders,
+					},
+				},
+			},
+		},
+		DynamicMetadata: makeDestinationMetadata(destinationEndpoint),
+	}}
+}
+
 // NewResponseBufferedResponse creates a complete set of responses for the Response phase.
 // It simulates the EPP modifying the upstream response before sending it to the client.
 // It returns a Header mutation message followed by a Body replacement message.
