@@ -73,12 +73,12 @@ func TestDetectAPIType(t *testing.T) {
 
 func TestAPIType_tokenLimitFields(t *testing.T) {
 	cases := map[APIType][]string{
-		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},
+		APITypeChatCompletions: {FieldMaxCompletionTokens, FieldMaxTokens},
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeVLLMGenerate:    {FieldMaxTokens},
 		APITypeMessages:        {FieldMaxTokens},
-		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
+		APIType(7):             {FieldMaxCompletionTokens, FieldMaxTokens},
 	}
 	for apiType, want := range cases {
 		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {

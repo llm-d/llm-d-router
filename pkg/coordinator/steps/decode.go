@@ -40,8 +40,10 @@ func init() {
 }
 
 type DecodeStep struct {
-	gwClient *gateway.Client
-	kv       kv.Connector
+	gwClient    *gateway.Client
+	kv          kv.Connector
+	forceStream bool
+	budget      *forceStreamBudget
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -55,7 +57,19 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
+	forceStream, _, err := paramBool(params, ParamForceStream)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, forceStream: forceStream}
+	if forceStream {
+		budget, err := parseForceStreamBudget(params)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		step.budget = budget
+	}
+	return step, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -67,6 +81,40 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
+	// Force-streaming applies only to a non-streaming request. A chat or text
+	// request whose reply may carry fields the reassembler drops (tool calls,
+	// logprobs) takes the pass-through to keep them. A chat or text single-choice
+	// reply is written incrementally, with no reservation. The buffered shapes
+	// (responses, generate, n>1) reserve budget and reassemble the whole reply;
+	// one with no output token limit to reserve, or one that finds the budget
+	// full, falls through to the pass-through below, which buffers nothing.
+	if s.forceStream && !reqCtx.Stream {
+		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
+			switch {
+			case forceStreamLossy(shape, reqCtx.Body):
+				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
+			case canStreamIncrementally(shape, reqCtx):
+				if err := s.executeForceStreamIncremental(ctx, logger, reqCtx, shape); !recordForceStreamFallback(reqCtx.Model, err) {
+					return err
+				}
+				// Fell back with nothing written; continue to the pass-through below.
+			default:
+				reserved, ok := s.estimateReservation(reqCtx)
+				switch {
+				case !ok:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
+				case s.budget.tryReserve(reserved):
+					if err := s.executeForceStream(ctx, logger, reqCtx, shape, reserved); !recordForceStreamFallback(reqCtx.Model, err) {
+						return err
+					}
+					// Fell back with nothing written; continue to the pass-through below.
+				default:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackBudget)
+				}
+			}
+		}
+	}
+
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
 	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
@@ -76,6 +124,23 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	out := serveDecode(logger, s.gwClient.Transport(), reqCtx.ResponseWriter, proxyReq, coordmetrics.UpstreamDecode, nil)
 	return out.streamedError(DecodeStepName)
+}
+
+// recordForceStreamFallback reports whether a force-stream attempt fell back to
+// the pass-through, recording the matching outcome when it did. A fallback leaves
+// the client uncommitted, so the caller continues to the pass-through; nil (a
+// forced success) and every other error are not fallbacks, so the caller returns
+// them directly.
+func recordForceStreamFallback(modelName string, err error) bool {
+	switch {
+	case errors.Is(err, errForceStreamOversize):
+		coordmetrics.IncForceStreamTotal(modelName, coordmetrics.ForceStreamResultFallbackOversize)
+	case errors.Is(err, errForceStreamUnreadable):
+		coordmetrics.IncForceStreamTotal(modelName, coordmetrics.ForceStreamResultFallbackUnreadable)
+	default:
+		return false
+	}
+	return true
 }
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike

@@ -57,6 +57,7 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldN                    = "n"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
@@ -86,6 +87,12 @@ const (
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+	FieldTools                = "tools"
+	FieldFunctions            = "functions"
+	FieldLogprobs             = "logprobs"
+	FieldReasoningEffort      = "reasoning_effort"
+	FieldChatTemplateKwargs   = "chat_template_kwargs"
+	FieldEnableThinking       = "enable_thinking"
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap
@@ -93,6 +100,11 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Role values, the strings a message's FieldRole takes.
+const (
+	RoleAssistant = "assistant"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report
