@@ -292,18 +292,6 @@ func TestBuiltinAtomEngine(t *testing.T) {
 		"atom:requests_waiting":     gauge(7),
 		"atom:requests_running":     gauge(3),
 		"atom:kv_cache_usage_ratio": gauge(0.25),
-		"atom:cache_config_info": {
-			Type: dto.MetricType_GAUGE.Enum(),
-			Metric: []*dto.Metric{
-				{
-					Label: []*dto.LabelPair{
-						{Name: proto.String("block_size"), Value: proto.String("16")},
-						{Name: proto.String("num_gpu_blocks"), Value: proto.String("138302")},
-					},
-					Gauge: &dto.Gauge{Value: ptr.To(1.0)},
-				},
-			},
-		},
 	}
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
@@ -326,12 +314,6 @@ func TestBuiltinAtomEngine(t *testing.T) {
 	}
 	if metrics.KVCacheUsagePercent != 0.25 {
 		t.Errorf("KVCacheUsagePercent = %v, want 0.25", metrics.KVCacheUsagePercent)
-	}
-	if metrics.CacheBlockSize != 16 {
-		t.Errorf("CacheBlockSize = %v, want 16", metrics.CacheBlockSize)
-	}
-	if metrics.CacheNumBlocks != 138302 {
-		t.Errorf("CacheNumBlocks = %v, want 138302", metrics.CacheNumBlocks)
 	}
 }
 

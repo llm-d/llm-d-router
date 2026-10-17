@@ -122,7 +122,8 @@ var defaultEngineConfigs = []engineConfigParams{
 		RunningRequestsSpec: "atom:requests_running",
 		KVUsageSpec:         "atom:kv_cache_usage_ratio",
 		LoRASpec:            "",
-		CacheInfoSpec:       "atom:cache_config_info",
+		// ATOM exports no cache_config_info family and no block-size gauge.
+		CacheInfoSpec: "",
 	},
 	{
 		Name:                "trtllm-serve",
