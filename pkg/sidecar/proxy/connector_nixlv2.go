@@ -38,6 +38,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
@@ -273,17 +274,29 @@ retryLoop:
 	if !ok {
 		s.logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
 	}
-	pCachedTokens, hasPCachedTokens := extractCachedTokens(prefillerResponse)
-	if !hasPCachedTokens {
-		// vLLM returns prompt_tokens_details as null when cached_tokens is 0,
-		// so treat a missing prefiller cached_tokens value as zero.
-		pCachedTokens = 0
-	}
+	// The prefill count corrects the one decode reports only when prefill
+	// measured the prompt cache and decode reuses the blocks it transferred.
+	// Without transfer params nothing moved, so decode recomputes the prompt and
+	// the count it reports is its own measurement. A usage block whose details
+	// are absent or null still measured the cache: vLLM reports zero hits that
+	// way.
+	pUsage := prefillerResponse[reqcommon.FieldUsage]
+	pKVParams, _ := pKVTransferParams.(map[string]any)
+	rewriteCachedTokens := pUsage != nil && len(pKVParams) > 0
+	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
 
-	s.logger.V(logging.TRACE).Info("received prefiller response",
-		reqcommon.FieldKVTransferParams, pKVTransferParams,
-		"cachedTokens", pCachedTokens,
-		"hasCachedTokens", hasPCachedTokens)
+	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+		// The count is logged only when it was measured, so a logged zero is a
+		// measured zero rather than an absent measurement.
+		fields := []any{
+			reqcommon.FieldKVTransferParams, pKVTransferParams,
+			"rewriteCachedTokens", rewriteCachedTokens,
+		}
+		if hasPCachedTokens {
+			fields = append(fields, "cachedTokens", pCachedTokens)
+		}
+		trace.Info("received prefiller response", fields...)
+	}
 
 	// Decode Stage
 
@@ -406,7 +419,7 @@ retryLoop:
 		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
+	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
@@ -458,6 +471,16 @@ retryLoop:
 			semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
 		)
 	}
+}
+
+// decodeResponseWriter returns the writer the decode response is streamed
+// through, and the function that flushes whatever it buffered. Without a prefill
+// count to apply the client gets the decode worker's bytes untouched.
+func decodeResponseWriter(w http.ResponseWriter, cachedTokens int, rewrite, streaming bool) (http.ResponseWriter, func() error) {
+	if !rewrite {
+		return w, func() error { return nil }
+	}
+	return usage.NewCachedTokensResponseWriter(w, cachedTokens, streaming)
 }
 
 // runNIXLProtocolV2WriteParallel is the MoRI-IO WRITE-mode concurrent-dispatch

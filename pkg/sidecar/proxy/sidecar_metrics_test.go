@@ -38,6 +38,7 @@ import (
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
@@ -594,7 +595,7 @@ func TestCaptureResponseStatus(t *testing.T) {
 	})
 	t.Run("optional interfaces survive the cached-tokens wrapper", func(t *testing.T) {
 		inner, _ := captureResponseStatus(readerFromHijacker{httptest.NewRecorder()})
-		w, _ := newCachedTokensResponseWriterWithFinalize(inner, 1, false)
+		w, _ := usage.NewCachedTokensResponseWriter(inner, 1, false)
 		_, isReaderFrom := w.(io.ReaderFrom)
 		assert.True(t, isReaderFrom)
 		_, _, err := http.NewResponseController(w).Hijack()

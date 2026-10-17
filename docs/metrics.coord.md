@@ -154,7 +154,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 ### Output and cached token counts
 
-The coordinator emits no output or cached token-count metrics. Those values live in the vLLM `usage` block, and reading them means parsing the streamed SSE response, which the decode step does not do: it proxies bytes straight to the client. Input tokens are recorded (see [`request_input_tokens`](#request-family)): the renderer returns the token IDs, so the count is in hand after render, with no response parsing and no dependency on EPP.
+The coordinator emits no output or cached token-count metrics. Those values live in the vLLM `usage` block, and reading them means parsing the streamed SSE response. The decode step parses the usage frame only on a disaggregated request, and only to rewrite the cached-token count, in the schema the route documents, to the prefill worker's; every other frame is proxied straight to the client and no count is extracted. Input tokens are recorded (see [`request_input_tokens`](#request-family)): the renderer returns the token IDs, so the count is in hand after render, with no response parsing and no dependency on EPP.
 
 ### Time to first token
 

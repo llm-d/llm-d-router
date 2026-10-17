@@ -272,6 +272,7 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| `PrefillCachedTokens` | `prefill` (from the prefill response `usage` block) | `decode` |
 | Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
@@ -444,7 +445,18 @@ State produced by one phase and consumed by a later one is carried on the
 | :---- | :---- | :---- |
 | `render` | `TokenIDs`, multimodal hashes/placeholders | encode, prefill, decode (EPP uses token IDs for prefix matching) |
 | `encode` | `ECTransferParams` (merged per `mm_hash`) | prefill |
-| `prefill` | `KVTransferParams` (from the prefill response body) | decode |
+| `prefill` | `KVTransferParams` (from the response body), `PrefillCachedTokens` (from its `usage` block) | decode |
+
+A decode worker counts the KV blocks transferred from prefill as prompt-cache hits
+of its own, so the cached-token count it reports describes the handoff rather than
+the prompt cache. The `decode` step substitutes the prefill worker's count into the
+usage block it streams to the client, in the single JSON document or in the SSE usage
+frame, so a disaggregated request reports the cache hits a single-worker request
+would. The count is written to the field the route documents:
+`prompt_tokens_details`, or `input_tokens_details` on the Responses routes. Where no
+prefill measurement applies, the decode worker's own count reaches the client
+unchanged; `PrefillCachedTokens` documents those cases. The rewriting lives in
+[pkg/common/usage](../pkg/common/usage) and is shared with the routing sidecar.
 
 ## Coordinator vs. the llm-d-router sidecar model
 
