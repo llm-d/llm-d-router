@@ -36,6 +36,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/version"
@@ -71,6 +72,8 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	if err != nil {
 		loggerWrap.Handle(fmt.Errorf("trace exporter configuration degraded: %w", err))
 	}
+
+	enabledScopes = scopesFromEnv(os.Getenv(enabledScopesEnv))
 
 	sampler, err := newSampler()
 	if err != nil {
@@ -377,6 +380,51 @@ func localHTTPCollectorOptions() []otlptracehttp.Option {
 
 const instrumentationName = "llm-d-router"
 
+// The instrumentation scopes that record spans. Unset or empty records every
+// scope. Recording is independent of propagation: a disabled scope still
+// installs and forwards the W3C propagator and returns the active span context
+// unchanged, so trace ID and parent span ID cross the hop and enabled
+// descendants attach to the nearest enabled ancestor.
+const enabledScopesEnv = "OTEL_TRACES_ENABLED_SCOPES"
+
+// enabledScopes is the allowlist parsed from enabledScopesEnv by InitTracing. A
+// nil set records every scope.
+var enabledScopes map[string]struct{}
+
+// noopTracerProvider backs tracers for disabled scopes.
+var noopTracerProvider = noop.NewTracerProvider()
+
+// scopesFromEnv parses a comma-separated allowlist of instrumentation scope
+// names. Entries are trimmed and blank entries are ignored. An empty or
+// all-blank list yields nil, which scopeEnabled reads as "every scope records".
+func scopesFromEnv(raw string) map[string]struct{} {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	scopes := make(map[string]struct{})
+	for _, entry := range strings.Split(raw, ",") {
+		if name := strings.TrimSpace(entry); name != "" {
+			scopes[name] = struct{}{}
+		}
+	}
+	if len(scopes) == 0 {
+		return nil
+	}
+
+	return scopes
+}
+
+// scopeEnabled reports whether the named instrumentation scope records spans. A
+// nil allowlist enables every scope.
+func scopeEnabled(name string) bool {
+	if enabledScopes == nil {
+		return true
+	}
+	_, ok := enabledScopes[name]
+	return ok
+}
+
 // Tracer returns a tracer for the given instrumentation scope, defaulting to
 // "llm-d-router". Build version and commit SHA are attached so every span in a
 // trace carries consistent scope metadata.
@@ -384,10 +432,17 @@ const instrumentationName = "llm-d-router"
 // Spans started from a context carrying request attribution are enriched with the
 // attribution pair by the span processor InitTracing installs. See
 // BeginRequestAttribution.
+//
+// A scope excluded by OTEL_TRACES_ENABLED_SCOPES gets a no-op tracer, which
+// creates no span ID while leaving the incoming span context in place for
+// downstream enabled scopes.
 func Tracer(scope ...string) trace.Tracer {
 	name := instrumentationName
 	if len(scope) > 0 && scope[0] != "" {
 		name = scope[0]
+	}
+	if !scopeEnabled(name) {
+		return noopTracerProvider.Tracer(name)
 	}
 	return otel.Tracer(
 		name,
