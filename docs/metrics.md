@@ -690,6 +690,9 @@ These metrics are owned by the EPP ext_proc server.
 These metrics belong to `inflight-load-producer`. They are registered only when the producer is
 configured. The producer updates the per-endpoint gauges when requests are admitted and released.
 
+Endpoint removal prunes its series. Late releases do not recreate deleted series or change the
+load reported for a replacement endpoint with the same labels.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_inflight_requests` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `fairness_id`, `priority` | Current requests in flight on each endpoint. |
