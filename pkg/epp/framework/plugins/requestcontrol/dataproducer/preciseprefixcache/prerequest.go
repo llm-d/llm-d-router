@@ -343,3 +343,9 @@ func (p *Producer) PreRequest(ctx context.Context,
 		"ttl", p.speculativeTTL)
 	return nil
 }
+
+// RequestAbandoned releases the per-request state when the request is abandoned
+// before reaching PreRequest.
+func (p *Producer) RequestAbandoned(_ context.Context, request *scheduling.InferenceRequest) {
+	p.pluginState.Delete(request.RequestID)
+}
