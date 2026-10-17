@@ -42,6 +42,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
+const logBodyBytesKey = "bodyBytes"
+
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
 	ln := s.HTTPListener
@@ -264,7 +266,7 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}

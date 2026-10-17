@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 )
 
 // sampleCount returns the histogram's observation count. Plain histograms have
@@ -88,6 +90,40 @@ func TestRecordError(t *testing.T) {
 	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageEncode)))
 }
 
+func TestRecordToolCallingFieldStatuses(t *testing.T) {
+	toolCallingFieldStatusTotal.Reset()
+	t.Cleanup(toolCallingFieldStatusTotal.Reset)
+	statuses := []toolcalling.FieldStatus{
+		{Field: toolcalling.FieldTools, Status: toolcalling.FieldStatusPreserved, Observed: true},
+		{Field: toolcalling.FieldToolChoice, Status: toolcalling.FieldStatusChanged, Observed: true},
+		{Field: toolcalling.FieldParallelToolCalls, Status: toolcalling.FieldStatusDropped, Observed: true},
+		{Field: toolcalling.FieldResponseFormat, Status: toolcalling.FieldStatusRejected, Observed: true},
+	}
+	RecordToolCallingFieldStatuses(statuses)
+	RecordToolCallingFieldStatuses(statuses[:1])
+
+	require.NoError(t, promtestutil.CollectAndCompare(toolCallingFieldStatusTotal, strings.NewReader(`
+# HELP llm_d_disagg_sidecar_tool_calling_field_status_total [ALPHA] Tool-calling request field outcomes by component, direction, field, and status.
+# TYPE llm_d_disagg_sidecar_tool_calling_field_status_total counter
+llm_d_disagg_sidecar_tool_calling_field_status_total{component="routing_sidecar",direction="request",field="tools",status="preserved"} 2
+llm_d_disagg_sidecar_tool_calling_field_status_total{component="routing_sidecar",direction="request",field="tool_choice",status="changed"} 1
+llm_d_disagg_sidecar_tool_calling_field_status_total{component="routing_sidecar",direction="request",field="parallel_tool_calls",status="dropped"} 1
+llm_d_disagg_sidecar_tool_calling_field_status_total{component="routing_sidecar",direction="request",field="response_format",status="rejected"} 1
+`)))
+}
+
+func TestRecordToolCallingFieldStatusesSkipsUnobservedAndInvalidValues(t *testing.T) {
+	toolCallingFieldStatusTotal.Reset()
+	t.Cleanup(toolCallingFieldStatusTotal.Reset)
+	RecordToolCallingFieldStatuses(nil)
+	RecordToolCallingFieldStatuses([]toolcalling.FieldStatus{
+		{Field: toolcalling.FieldTools, Status: toolcalling.FieldStatusPreserved},
+		{Field: "private_field_name", Status: toolcalling.FieldStatusChanged, Observed: true},
+		{Field: toolcalling.FieldTools, Status: "private_status_value", Observed: true},
+	})
+	require.Zero(t, promtestutil.CollectAndCount(toolCallingFieldStatusTotal))
+}
+
 // Register must be idempotent so repeated calls do not panic on duplicate
 // registration with controller-runtime's registry.
 func TestRegisterIdempotent(t *testing.T) {
@@ -102,11 +138,13 @@ func TestRegisterIdempotent(t *testing.T) {
 // breaking every scrape config/dashboard built on the doc comments' promises.
 func TestMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal)
+	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal, toolCallingFieldStatusTotal)
 	// Gather omits a CounterVec with no children, so create one in each.
 	requestsTotal.WithLabelValues("x")
 	disaggRequestsTotal.WithLabelValues("x")
 	errorsTotal.WithLabelValues("x")
+	toolCallingFieldStatusTotal.WithLabelValues("routing_sidecar", toolcalling.DirectionRequest, string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved))
+	t.Cleanup(toolCallingFieldStatusTotal.Reset)
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -123,5 +161,6 @@ func TestMetricNames(t *testing.T) {
 		"llm_d_disagg_sidecar_prefill_duration_seconds",
 		"llm_d_disagg_sidecar_decode_duration_seconds",
 		"llm_d_disagg_sidecar_request_errors_total",
+		"llm_d_disagg_sidecar_tool_calling_field_status_total",
 	}, names)
 }

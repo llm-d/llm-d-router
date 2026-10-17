@@ -15,7 +15,7 @@ The router deployment has three metric sources:
 |---|---|---|
 | EPP / router pod | EPP metrics, plugin metrics, and KV-cache metrics | EPP `/metrics`, default port `9090` |
 | Model server / engine pods | vLLM or other engine metrics | Each model server's `/metrics` |
-| P/D sidecar | Disaggregation request, stage latency, and stage error metrics; MoRI-IO metrics | Sidecar `/metrics` on `--metrics-port`, disabled by default |
+| P/D sidecar | Disaggregation request, stage latency/error, tool-field outcome, and MoRI-IO DNS metrics | Sidecar `/metrics` on `--metrics-port`, disabled by default |
 
 The EPP sends HTTP or HTTPS requests directly to each model server endpoint, per the
 `metrics-data-source` plugin's `scheme` parameter (default `http`).
@@ -28,7 +28,7 @@ The tables in this document show complete metric names.
 |---|---|---|
 | EPP / router pod | `llm_d_epp_` | EPP request and latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, fairness, predicted latency, model rewrite, and KV-cache metrics. |
 | Model server / engine | Engine-specific | Metrics exposed by the model server implementation. |
-| P/D sidecar | `llm_d_disagg_sidecar_`, `moriio_dns_` | Disaggregation request, stage latency, and stage error metrics; MoRI-IO peer DNS re-resolution metrics. |
+| P/D sidecar | `llm_d_disagg_sidecar_`, `moriio_dns_` | Disaggregation request, stage latency/error, tool-calling request-field outcome, and MoRI-IO peer DNS re-resolution metrics. |
 
 The model server and sidecar metrics use separate registries and prefixes. See [Deprecated series](#deprecated-series)
 for the legacy EPP names that remain available.
@@ -75,7 +75,8 @@ metrics, not EPP metrics. The raw engine metrics remain available at the model s
 The sidecar serves its controller-runtime registry at `/metrics` on a dedicated port, separate from
 the data-plane proxy port, so the model server's own `/metrics` stays reachable through the proxy.
 This registry is separate from the router pod's EPP registry and contains the
-[P/D sidecar request and stage](#pd-sidecar-request-and-stage-metrics) and
+[P/D sidecar request and stage](#pd-sidecar-request-and-stage-metrics),
+[tool-calling request-field](#sidecar-tool-calling-request-fields), and
 [MoRI-IO DNS re-resolution](#mori-io-dns-re-resolution) metrics.
 
 The endpoint is disabled by default. Pass `--metrics-port` (e.g. `--metrics-port=9090`) to the
@@ -86,6 +87,9 @@ The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a dire
 `tls.crt` and `tls.key` to serve it over TLS instead. Missing or invalid files stop the sidecar; the
 metrics listener does not fall back to HTTP. The metrics TLS setting is independent of
 `--secure-serving` and `--cert-path`, which apply to the sidecar data-plane listener.
+
+Configuring the metrics listener controls scraping; field checks and trace attributes do not
+require that listener.
 
 ## Metrics catalog
 
@@ -764,6 +768,53 @@ enablement and TLS.
 | `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. |
 | `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. |
 | `llm_d_disagg_sidecar_request_errors_total` | Counter | `stage` | Stage errors. `stage` is `encode`, `prefill`, or `decode`. |
+| `llm_d_disagg_sidecar_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field outcomes, once per field and client request. |
+
+#### Sidecar tool-calling request fields
+
+Checks cover Chat Completions (`tools`, `tool_choice`, `parallel_tool_calls`, `response_format`)
+and Messages (`tools`, `tool_choice`). Responses, Completions, and native Generate APIs are excluded.
+Supported paths include direct/data-parallel forwarding, sequential and parallel NIXL, P2P
+prefill/decode and peer/self-source forwarding, Mooncake, SGLang, shared-storage, encoder-to-inference
+handoffs, and chunked decode. Per-image encoder priming is outside the full inference-field checks.
+
+| Label | Values |
+|---|---|
+| `component` | `routing_sidecar` |
+| `direction` | `request` |
+| `field` | `tools`, `tool_choice`, `parallel_tool_calls`, `response_format`, subject to API support |
+| `status` | `preserved`, `changed`, `dropped`; `rejected` is reserved for explicit field-specific rejection |
+
+Comparisons use the client snapshot and the serialized body at each actual inference dispatch.
+JSON object key order and equivalent numeric representations do not count as changes; array order
+and absent versus null values do. Each observed field contributes one worst outcome across dispatched
+stages, retries, and decode chunks: `preserved` < `changed` < `dropped` < `rejected`.
+Prepared but unsent requests produce no field outcomes. Generic HTTP errors, network failures, and
+cancellation do not establish field rejection; the sidecar has no field-specific rejection signal.
+Failed captures produce no guessed outcomes. Direct passthrough checks require complete, valid body
+consumption and preserve the forwarded bytes.
+
+Existing `forward_request` spans carry the combined request outcomes. Existing `prefill`, `decode`,
+and `chunked_decode` spans carry their own dispatch outcomes. Asynchronous prefill does not delay
+request reporting. Tool-field attributes use the shared `llm_d.tool_calling.*` convention:
+`api_surface`, `present`, `tool_choice`, `tool_count`, and `field.<field>.status`.
+Choice values are `auto`, `none`, `required`, `named`, or `unknown`; nonempty tool arrays use count
+buckets `1`, `2-5`, `6-10`, or `11+`. Named choices omit the tool name.
+
+Requests without supported tool fields or observed field outcomes receive no tool attributes or
+counters. A Chat Completions request containing only `response_format` retains its field outcome
+with `present=false` and no choice/count attributes. Valid client summaries can remain on a trace
+when a failure prevents dispatch. Tool-field telemetry omits tool names, schemas, arguments, prompt
+content, and content-derived hashes. Response-field integrity is outside these checks.
+
+To compare request-field outcome rates across EPP and sidecar metrics scraped by the same
+Prometheus instance:
+
+```promql
+sum by (component, field, status) (
+  rate({__name__=~"llm_d_(epp|disagg_sidecar)_tool_calling_field_status_total", direction="request"}[5m])
+)
+```
 
 ### MoRI-IO DNS re-resolution
 

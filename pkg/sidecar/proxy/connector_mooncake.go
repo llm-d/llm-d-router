@@ -41,7 +41,7 @@ const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the oth
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
-	_, requestData, ok := s.readJSONBody(r, w)
+	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
@@ -50,7 +50,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {
-		s.logger.Error(err, "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
+		s.logger.Error(jsonErrorForLog(err), "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
 		if err := errorBadGateway(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
@@ -61,6 +61,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	for dpRank, engineID = range engineMap {
 		break
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
 	transferID := "xfer-" + newUUID()
 	s.logger.V(logging.TRACE).Info("mooncake protocol info",
@@ -90,7 +91,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", logging.HTTPBodyKey, string(prefillBody))
+		trace.Info("Prefill request", logBodyBytesKey, len(prefillBody))
 	}
 
 	// Build decode request body
@@ -112,14 +113,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	}
 
 	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Decode request", logging.HTTPBodyKey, string(decodeBody))
+		trace.Info("Decode request", logBodyBytesKey, len(decodeBody))
 	}
 
 	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
-	})
+	}, toolFields)
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.

@@ -33,13 +33,17 @@ import (
 
 // dataParallelHandler checks if Data Parallel handling is needed.
 // Returns true if Data Parallel processing was needed
-func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request, beforeDispatch func()) bool {
 	dataParallelPodHostPort := r.Header.Get(routing.DataParallelEndpointHeader)
 	if dataParallelPodHostPort != "" {
 		s.logger.Info("The use of the x-data-parallel-host-port is deprecated. Use Istio >= 1.28.1.")
 		handler := s.dataParallelProxies[dataParallelPodHostPort]
 		if handler != nil {
 			s.logger.V(logging.DEBUG).Info("Data parallel routing", "to", dataParallelPodHostPort)
+			// Missing replicas must not supply evidence of a dispatched request.
+			if beforeDispatch != nil {
+				beforeDispatch()
+			}
 			handler.ServeHTTP(w, r)
 		} else {
 			// Shouldn't happen, send to default server

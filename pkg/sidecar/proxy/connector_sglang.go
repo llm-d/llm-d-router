@@ -52,10 +52,11 @@ func init() {
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
 	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
-	_, requestData, ok := s.readJSONBody(r, w)
+	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, reqcommon.DetectAPIType(r.URL.Path), original)
 
 	roomID := s.generateSGLangRoomID()
 	// SGLang keys its P/D transfer state and log lines by the bootstrap room.
@@ -73,7 +74,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil)
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
 func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
