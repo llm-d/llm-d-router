@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -159,8 +160,16 @@ func (s *toolCallingJSONStream) feed(data []byte) {
 		if s.mode == 's' && (s.key == nil || s.keyTooBig) {
 			if !s.escaped && s.unicode == 0 {
 				i := 0
-				for i < len(data) && data[i] >= 0x20 && data[i] != '"' && data[i] != '\\' {
-					i++
+				if len(data) >= 2048 {
+					i = bytes.IndexAny(data, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"+
+						"\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\"\\")
+					if i < 0 {
+						i = len(data)
+					}
+				} else {
+					for i < len(data) && data[i] >= 0x20 && data[i] != '"' && data[i] != '\\' {
+						i++
+					}
 				}
 				if s.capture != nil {
 					s.capture = append(s.capture, data[:i]...)

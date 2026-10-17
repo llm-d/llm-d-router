@@ -2860,6 +2860,8 @@ func toolCallingBenchmarkBody(b *testing.B, api reqcommon.APIType, size int, too
 
 func TestToolCallingJSONStream(t *testing.T) {
 	bodies := []string{
+		`{"unused":"` + strings.Repeat("x", 1<<13) + `\"ok","tools":[]}`,
+		`{"unused":"` + strings.Repeat("x", 1<<13) + string(byte(0x1f)) + `","tools":[]}`,
 		`{}`, ` { "tools" : null } `,
 		`{"tools":[{"a":9007199254740993,"b":-1.20e+3}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{}}`,
 		`{"messages":[{"tools":[],"content":"tools \\\" \\u1234"}],"to\u006fls":[]}`,
