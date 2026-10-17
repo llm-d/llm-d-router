@@ -312,20 +312,31 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 		}
 		return math.MaxFloat64, false
 	}
-	tokens, ok := p.inFlightTokens(ep)
+	load, ok := p.inFlightLoad(ep)
 	if !ok {
 		return 0, false
 	}
-	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
+	return float64(load.Tokens)/p.config.PeakPrefillThroughput*1000 + queueWaitMs(ep, load), true
 }
 
-// inFlightTokens returns an endpoint's in-flight token count. If the attribute is
-// absent, it returns ok=false so the caller can treat the signal as missing.
-func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
+// queueWaitMs estimates how long a new request waits in the model server's
+// queue: waiting requests / completions per second. It is 0 when nothing is
+// waiting or no completion was seen in the window.
+func queueWaitMs(ep fwksched.Endpoint, load *attrconcurrency.InFlightLoad) float64 {
+	metrics := ep.GetMetrics()
+	if metrics == nil || metrics.WaitingQueueSize <= 0 || load.CompletionsPerSecond <= 0 {
+		return 0
+	}
+	return float64(metrics.WaitingQueueSize) / load.CompletionsPerSecond * 1000
+}
+
+// inFlightLoad returns an endpoint's in-flight load. If the attribute is absent,
+// it returns ok=false so the caller can treat the signal as missing.
+func (p *Plugin) inFlightLoad(ep fwksched.Endpoint) (*attrconcurrency.InFlightLoad, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
-			return load.Tokens, true
+			return load, true
 		}
 	}
-	return 0, false
+	return nil, false
 }

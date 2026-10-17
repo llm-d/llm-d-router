@@ -1558,3 +1558,144 @@ func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 
 	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
 }
+
+func TestInFlightLoadProducer_CompletionRate(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpoint := newStubSchedulingEndpoint("rate-endpoint")
+	endpointID := fullEndpointName("rate-endpoint")
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+
+	completionsPerSecond := func() float64 {
+		val, ok := endpoint.Get(producer.dk)
+		require.True(t, ok)
+		return val.(*attrconcurrency.InFlightLoad).CompletionsPerSecond
+	}
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+	req := makeTokenRequest("rate-req", 4)
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Zero(t, completionsPerSecond(), "a request that has not ended is not a completion")
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionWindowSeconds, completionsPerSecond(), 1e-9)
+
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
+	require.Zero(t, producer.completionTracker.rate(endpointID, time.Now()), "deleting an endpoint clears its rate")
+}
+
+// TestInFlightLoadProducer_CompletionRate_PD verifies that a prefill endpoint completes
+// its part of a request at the first chunk and a decode endpoint at end of stream.
+func TestInFlightLoadProducer_CompletionRate_PD(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	prefillID := fullEndpointName("prefill-endpoint")
+	decodeID := fullEndpointName("decode-endpoint")
+
+	req := makeTokenRequest("rate-req-pd", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.Zero(t, producer.completionTracker.rate(decodeID, time.Now()))
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.InDelta(t, 1.0/completionWindowSeconds, producer.completionTracker.rate(decodeID, time.Now()), 1e-9)
+}
+
+// TestInFlightLoadProducer_CompletionRate_ProfilesSameEndpoint verifies that a request
+// whose profiles target the same endpoint counts as one completion there.
+func TestInFlightLoadProducer_CompletionRate_ProfilesSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointID := fullEndpointName("shared-endpoint")
+
+	req := makeTokenRequest("rate-req-shared", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "a",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"a": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+			"b": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true, EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+}
+
+// TestInFlightLoadProducer_CompletionRate_PDSameEndpoint verifies that a request
+// whose prefill and decode profiles target the same endpoint counts once there,
+// at end of stream.
+func TestInFlightLoadProducer_CompletionRate_PDSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointID := fullEndpointName("shared-endpoint")
+
+	req := makeTokenRequest("rate-req-pd-shared", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Zero(t, producer.completionTracker.rate(endpointID, time.Now()))
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+}
+
+func TestInFlightLoadProducer_CrossReplicaState(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	spec := producer.CrossReplicaState()
+	endpointID := fullEndpointName("sync-endpoint")
+
+	producer.requestTracker.add(endpointID, 2)
+	producer.tokenTracker.add(endpointID, 200)
+	producer.completionTracker.record(endpointID, time.Now())
+	supplied := spec.Read(endpointID).(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(2), supplied.Requests)
+	require.Equal(t, int64(200), supplied.Tokens)
+	require.InDelta(t, 1.0/completionWindowSeconds, supplied.CompletionsPerSecond, 1e-9)
+
+	total := spec.Aggregate([]any{
+		&attrconcurrency.InFlightLoad{Requests: 1, Tokens: 100, CompletionsPerSecond: 0.5},
+		&attrconcurrency.InFlightLoad{Requests: 2, Tokens: 200, CompletionsPerSecond: 0.25},
+	}).(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(3), total.Requests)
+	require.Equal(t, int64(300), total.Tokens)
+	require.InDelta(t, 0.75, total.CompletionsPerSecond, 1e-9)
+}
