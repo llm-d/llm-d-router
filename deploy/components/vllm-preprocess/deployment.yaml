@@ -117,8 +117,6 @@ spec:
             - name: io-transfer-volume
               mountPath: /tmp/io_transfer
               readOnly: false
-            - name: datasets
-              mountPath: /tmp/datasets
           resources:
             requests:
               cpu: ${PRE_CPU_RESOURCES}
@@ -133,6 +131,3 @@ spec:
           persistentVolumeClaim:
             claimName: disagg-data-pvc
             readOnly: false
-        - name: datasets
-          persistentVolumeClaim:
-            claimName: datasets
