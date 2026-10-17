@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -40,7 +41,7 @@ const (
 )
 
 // disaggregatedIOProcessorHandler routes IO Processor requests
-func (s *Server) disaggregatedIOProcessorHandler(apiType APIType) http.HandlerFunc {
+func (s *Server) disaggregatedIOProcessorHandler(apiType reqcommon.APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
 		tracer := tracing.Tracer(tracerScope)

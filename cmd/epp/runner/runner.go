@@ -786,9 +786,9 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(prefix.MultiClusterScorerType, fwkplugin.StabilityAlpha, prefix.MultiClusterScorerFactory)
 	fwkplugin.Register(reqdataprodprefix.MultiClusterPluginType, fwkplugin.StabilityAlpha, reqdataprodprefix.MultiClusterFactory)
 	// IO disaggregation
-	fwkplugin.RegisterWithPluginDependencies(iodisagg.IODisaggProfileHandlerType, iodisagg.HandlerFactory, iodisagg.IODisaggProfileHandlerConfigParser)
-	fwkplugin.Register(iodisagg.AlwaysDisaggPreprocessDeciderPluginType, iodisagg.AlwaysDisaggPreprocessDeciderPluginFactory)
-	fwkplugin.Register(iodisagg.AlwaysDisaggInferenceDeciderPluginType, iodisagg.AlwaysDisaggInferenceDeciderPluginFactory)
+	fwkplugin.RegisterWithPluginDependencies(iodisagg.IODisaggProfileHandlerType, fwkplugin.StabilityBeta, iodisagg.HandlerFactory, iodisagg.IODisaggProfileHandlerConfigParser)
+	fwkplugin.Register(iodisagg.AlwaysDisaggPreprocessDeciderPluginType, fwkplugin.StabilityBeta, iodisagg.AlwaysDisaggPreprocessDeciderPluginFactory)
+	fwkplugin.Register(iodisagg.AlwaysDisaggInferenceDeciderPluginType, fwkplugin.StabilityBeta, iodisagg.AlwaysDisaggInferenceDeciderPluginFactory)
 
 	// Flow Control plugins
 	// Stable

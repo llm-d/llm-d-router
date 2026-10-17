@@ -383,8 +383,8 @@ func NewProxy(config Config) *Server {
 	prefillerCache, _ := lru.New[string, http.Handler](1024)
 	encoderCache, _ := lru.New[string, http.Handler](1024)
 	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024)
-	preprocessCache, _ := lru.New[string, http.Handler](1024)        // nolint:errcheck
-	inferenceCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
+	preprocessCache, _ := lru.New[string, http.Handler](1024) // nolint:errcheck
+	inferenceCache, _ := lru.New[string, http.Handler](1024)  // nolint:errcheck
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
