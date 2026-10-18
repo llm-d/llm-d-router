@@ -64,6 +64,14 @@ const (
 	// "header" is never evidence that the producer was authenticated.
 	LLMDEPPFairnessSourceKey = attribute.Key("llm_d.epp.fairness.source")
 
+	// EPP admission attributes, recorded on the request_orchestration span.
+	// LLMDEPPAdmissionDecisionKey is "admitted" or "rejected", absent if the request failed before admission.
+	LLMDEPPAdmissionDecisionKey = attribute.Key("llm_d.epp.admission.decision")
+	// LLMDEPPAdmissionReasonKey is the rejection's dropped-reason header value, else its error code.
+	LLMDEPPAdmissionReasonKey = attribute.Key("llm_d.epp.admission.reason")
+	// LLMDEPPAdmissionQueueDurationMsKey is the Flow Control queue time in milliseconds of a dispatched request.
+	LLMDEPPAdmissionQueueDurationMsKey = attribute.Key("llm_d.epp.admission.queue_duration_ms")
+
 	// EPP Scorer attributes
 	LLMDEPPScorerTypeKey               = attribute.Key("llm_d.epp.scorer.type")
 	LLMDEPPScorerNameKey               = attribute.Key("llm_d.epp.scorer.name")
@@ -200,6 +208,23 @@ func LLMDEPPFairnessID(id string) attribute.KeyValue {
 // LLMDEPPFairnessSource returns an attribute for how the fairness identity was resolved.
 func LLMDEPPFairnessSource(source string) attribute.KeyValue {
 	return LLMDEPPFairnessSourceKey.String(source)
+}
+
+// EPP Admission helpers
+
+// LLMDEPPAdmissionDecision returns an attribute for the admission decision.
+func LLMDEPPAdmissionDecision(decision string) attribute.KeyValue {
+	return LLMDEPPAdmissionDecisionKey.String(decision)
+}
+
+// LLMDEPPAdmissionReason returns an attribute for the admission rejection reason.
+func LLMDEPPAdmissionReason(reason string) attribute.KeyValue {
+	return LLMDEPPAdmissionReasonKey.String(reason)
+}
+
+// LLMDEPPAdmissionQueueDurationMs returns an attribute for the Flow Control queue time in milliseconds.
+func LLMDEPPAdmissionQueueDurationMs(ms float64) attribute.KeyValue {
+	return LLMDEPPAdmissionQueueDurationMsKey.Float64(ms)
 }
 
 // EPP Scheduling helpers

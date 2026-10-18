@@ -40,6 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -199,10 +200,19 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
+	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
+	// is the admission rejection. Later failures leave the decision as admitted.
+	admitting := false
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
+			if admitting && span.IsRecording() {
+				span.SetAttributes(
+					semconv.LLMDEPPAdmissionDecision("rejected"),
+					semconv.LLMDEPPAdmissionReason(admissionReason(err)),
+				)
+			}
 		}
 		span.End()
 	}()
@@ -260,9 +270,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
 
+	admitting = true
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
+	}
+	// IsRecording guards keep the tracing-disabled path allocation-free.
+	if reqCtx.FlowControlAdmitted && span.IsRecording() {
+		// Fractional milliseconds: queue waits are often below 1ms.
+		span.SetAttributes(semconv.LLMDEPPAdmissionQueueDurationMs(float64(reqCtx.FlowControlQueueDuration) / float64(time.Millisecond)))
 	}
 	reservationPending := false
 	reservationReleaser, hasReservationReleaser := d.admissionController.(dispatchReservationReleaser)
@@ -311,6 +327,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 			return reqCtx, e
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
+	}
+	admitting = false
+	if span.IsRecording() {
+		span.SetAttributes(semconv.LLMDEPPAdmissionDecision("admitted"))
 	}
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
@@ -818,6 +838,19 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 		}
 	}
 	return nil
+}
+
+// admissionReason returns the reason for an admission rejection: the dropped-reason header
+// when the rejecting component set one, otherwise the EPP error code.
+func admissionReason(err error) string {
+	var e errcommon.Error
+	if !errors.As(err, &e) {
+		return errcommon.Internal
+	}
+	if reason := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; reason != "" {
+		return reason
+	}
+	return e.Code
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {

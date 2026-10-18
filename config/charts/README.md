@@ -505,6 +505,15 @@ metric-label cardinality cap. On sampled traces the EPP also hands the pair to t
 sidecar, so sidecar spans carry it too; see
 [Sidecar Tracing](../../docs/disaggregation.md#sidecar-tracing).
 
+The `request_orchestration` span also records the admission decision. Admission runs from the
+admission controller (Flow Control when enabled) through endpoint candidate lookup, screening
+and the Admitter plugins. `llm_d.epp.admission.decision` is `admitted` or `rejected`, absent when
+the request failed before admission, and not changed by a later scheduling failure or eviction.
+A rejection adds `llm_d.epp.admission.reason`: the `x-llm-d-request-dropped-reason` value, such
+as `rejected-ttl-expired`, or the EPP error code when none is set. When Flow Control dispatched
+the request, `llm_d.epp.admission.queue_duration_ms` holds the time behind the
+`x-llm-d-flow-queue-duration-ms` response header, in fractional milliseconds.
+
 #### Complete Monitoring & Tracing Example
 
 ```yaml
