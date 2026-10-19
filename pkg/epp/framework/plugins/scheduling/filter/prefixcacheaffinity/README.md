@@ -61,8 +61,9 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `maxTTFTPenaltyMs`, break stickiness and keep all endpoints (0 = always stick). The
   per-endpoint TTFT is estimated from in-flight tokens as
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
-  `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
-  is `latencyPredictor`
+  `prefillThroughput` (default); when `useUncachedTokens` is enabled the numerator
+  becomes `inFlightTokens + uncachedRequestTokens`. The TTFT comes
+  from the latency predictor when `ttftSource` is `latencyPredictor`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
@@ -119,6 +120,7 @@ documents the strategy and its calibration.
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 | `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
+| `useUncachedTokens` | `bool` | No | `false` | Use the number of uncached tokens for the TTFT prediction with the `prefillThroughput` source |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
