@@ -178,6 +178,8 @@ type RequestContext struct {
 	responseComplete           bool
 	responseStatusCode         string
 	requestRunning             bool
+	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
+	bodyReceived bool
 
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
@@ -368,6 +370,47 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 	return ""
 }
 
+// Values of the outcome label on llm_d_epp_request_outcome_total.
+const (
+	outcomeCompleted = "completed"
+	outcomeRejected  = "rejected"
+	outcomeEvicted   = "evicted"
+	outcomeCancelled = "cancelled"
+	outcomeFailed    = "failed"
+)
+
+// requestOutcome reports how a request ended. ok is false when the EPP did not
+// see the ending: no body was received, or the route skipped response processing.
+// A request dropped before dispatch carries a rejected-* reason header, so its
+// reason label matches what the client received.
+func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason string, ok bool) {
+	if !reqCtx.bodyReceived || reqCtx.requestState == requestResponseProcessingSkipped {
+		return "", "", false
+	}
+	switch {
+	case reqCtx.requestState == requestEvicted:
+		return outcomeEvicted, string(reqCtx.requestDroppedReason), true
+	case err != nil:
+		if e, isErr := err.(errcommon.Error); isErr {
+			if dropped := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; dropped != "" {
+				return outcomeRejected, dropped, true
+			}
+		}
+		return outcomeFailed, errcommon.CanonicalCode(err), true
+	case reqCtx.responseStatusCode != "":
+		return outcomeFailed, reqCtx.responseStatusCode, true
+	case reqCtx.responseComplete:
+		if reqCtx.TerminationCause == fwkrc.TerminationCauseError {
+			return outcomeFailed, errcommon.ModelServerError, true
+		}
+		return outcomeCompleted, "", true
+	case ctxErr != nil:
+		return outcomeCancelled, "", true
+	default:
+		return outcomeFailed, errcommon.Unknown, true
+	}
+}
+
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	if reqCtx == nil {
 		return reqcommon.DefaultFairnessID, "0"
@@ -496,6 +539,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		} else if err != nil {
 			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
+		if outcome, reason, ok := requestOutcome(reqCtx, err, ctx.Err()); ok {
+			metrics.RecordRequestOutcome(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, outcome, reason)
+		}
 		if span != nil {
 			if err != nil {
 				span.RecordError(err)
@@ -611,6 +657,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				// Body stream complete. Capture raw size for flow control.
 				reqCtx.RequestSize = buf.Len()
+				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
 				if resolveErr != nil {

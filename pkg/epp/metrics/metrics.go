@@ -82,6 +82,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDOverflowCounter)
+		metrics.Registry.MustRegister(llmdRequestOutcomeCounter)
 		metrics.Registry.MustRegister(llmdRequestLatencies)
 		metrics.Registry.MustRegister(llmdRequestSizes)
 		metrics.Registry.MustRegister(llmdResponseSizes)
@@ -146,6 +147,7 @@ func Reset() {
 	llmdRequestErrCounter.Reset()
 	llmdFairnessIDResolvedCounter.Reset()
 	llmdFairnessIDOverflowCounter.Reset()
+	llmdRequestOutcomeCounter.Reset()
 	llmdRequestLatencies.Reset()
 	llmdRequestSizes.Reset()
 	llmdResponseSizes.Reset()
@@ -234,6 +236,13 @@ func RecordFairnessIDResolution(inferencePool, fairnessID, source string) {
 	if overflow {
 		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool).Inc()
 	}
+}
+
+// RecordRequestOutcome records how a request ended.
+func RecordRequestOutcome(modelName, targetModelName, fairnessID, priority, outcome, reason string) {
+	modelName, targetModelName = boundModels(modelName, targetModelName)
+	fairnessID = boundFairnessID(fairnessID)
+	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, outcome, reason).Inc()
 }
 
 // RecordRequestSizes records the request sizes.
