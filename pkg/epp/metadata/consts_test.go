@@ -82,3 +82,24 @@ func TestIsFiniteFloat(t *testing.T) {
 		})
 	}
 }
+
+// The fairness ID is read from the current header name when present, even if empty, and from
+// the deprecated name otherwise.
+func TestGetLowerCaseHeaderValueFairnessID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{name: "deprecated name only", headers: map[string]string{OldFlowFairnessIDKey: "team-a"}, want: "team-a"},
+		{name: "both names", headers: map[string]string{FlowFairnessIDKey: "team-b", OldFlowFairnessIDKey: "team-a"}, want: "team-b"},
+		{name: "current name empty", headers: map[string]string{FlowFairnessIDKey: "", OldFlowFairnessIDKey: "team-a"}, want: ""},
+	}
+	for _, test := range tests {
+		got, ok := GetLowerCaseHeaderValue(test.headers, FlowFairnessIDKey)
+		assert.True(t, ok, test.name)
+		assert.Equal(t, test.want, got, test.name)
+	}
+}

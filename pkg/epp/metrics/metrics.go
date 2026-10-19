@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -79,6 +80,8 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		// Register other metrics
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
+		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
+		metrics.Registry.MustRegister(llmdFairnessIDOverflowCounter)
 		metrics.Registry.MustRegister(llmdRequestLatencies)
 		metrics.Registry.MustRegister(llmdRequestSizes)
 		metrics.Registry.MustRegister(llmdResponseSizes)
@@ -141,6 +144,8 @@ func Reset() {
 	// Reset other metrics
 	llmdRequestCounter.Reset()
 	llmdRequestErrCounter.Reset()
+	llmdFairnessIDResolvedCounter.Reset()
+	llmdFairnessIDOverflowCounter.Reset()
 	llmdRequestLatencies.Reset()
 	llmdRequestSizes.Reset()
 	llmdResponseSizes.Reset()
@@ -206,6 +211,24 @@ func RecordRequestErrCounter(modelName, targetModelName string, apiSurface reqco
 	fairnessID = boundFairnessID(fairnessID)
 	if code != "" {
 		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code).Inc()
+	}
+}
+
+// InitFairnessIDResolutionMetrics creates the overflow series at 0 for every source, so a
+// rate or increase over the first overflow is not lost.
+func InitFairnessIDResolutionMetrics(inferencePool string) {
+	for _, source := range []string{tracing.AttributionSourceHeader, tracing.AttributionSourceAgentIdentity, tracing.AttributionSourceDefault} {
+		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool)
+	}
+}
+
+// RecordFairnessIDResolution counts a request under its bounded fairness ID and source, and
+// counts an overflow when the label cap folded the ID.
+func RecordFairnessIDResolution(inferencePool, fairnessID, source string) {
+	fairnessID, overflow := metricsutil.BoundFairnessIDWithOverflow(fairnessID)
+	llmdFairnessIDResolvedCounter.WithLabelValues(fairnessID, source, inferencePool).Inc()
+	if overflow {
+		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool).Inc()
 	}
 }
 

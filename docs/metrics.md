@@ -104,6 +104,7 @@ The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` head
 identity, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+`default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
 
@@ -549,6 +550,67 @@ cache lookups.
 | `llm_d_epp_encoder_cache_queries_total` | Counter | `plugin_type`, `plugin_name`, `modality` | Encoder-cache lookups. |
 | `llm_d_epp_encoder_cache_hits_total` | Counter | `plugin_type`, `plugin_name`, `pod`, `modality` | Encoder-cache hits. |
 | `llm_d_epp_encoder_cache_hit_ratio` | Histogram | `plugin_type`, `plugin_name` | Hit ratio. |
+
+### Fairness ID resolution
+
+These counters record the fairness ID the EPP resolved for each request and where it came from.
+They count when the ID is resolved, before admission, so requests that admission rejects are
+included. Requests that fail earlier, such as a body that cannot be parsed, are not.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_fairness_id_resolved_total` | Counter | `fairness_id`, `source`, `inference_pool` | Requests by resolved fairness ID and its source. |
+| `llm_d_epp_fairness_id_overflow_total` | Counter | `source`, `inference_pool` | Requests whose `fairness_id` label was folded to `other` by the cap. Created at 0 for every source on startup. |
+
+`source` is one of:
+
+- `header`: the `x-llm-d-inference-fairness-id` header, or its deprecated name
+  `x-gateway-inference-fairness-id`.
+- `agent_identity`: no header, and the agent identity plugin supplied an ID.
+- `default`: neither, so the request uses `default-flow`.
+
+`inference_pool` is the pool the EPP serves, the same value as the `name` label on the inference
+pool metrics. Flow Control metrics leave `inference_pool` empty when the EPP runs without
+`--pool-name`, so the two do not join in that case.
+
+The current header name is read first. If it is present, even with an empty value, the deprecated
+name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
+front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
+both header names.
+
+The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
+Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
+
+- `fairness_id` takes at most cap + 2 values (`default-flow` and `other` on top of the cap).
+  `llm_d_epp_fairness_id_resolved_total` has about cap + 3 series, and at most 2 × cap + 5 when
+  the same IDs arrive from both the header and agent identity.
+- Cap slots are not freed until the EPP restarts. Short-lived agent session IDs can fill the cap,
+  after which new header IDs are folded too.
+- A client that sends `default-flow` or `other` as its ID is counted with `source="header"`. A
+  literal `other` takes a cap slot like any new ID, and counts as overflow once the cap is full.
+
+```promql
+# Share of requests per source. A high default share means callers are not sending an ID.
+sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_resolved_total[5m]))
+  / ignoring(source) group_left sum by (inference_pool) (rate(llm_d_epp_fairness_id_resolved_total[5m]))
+
+# Requests whose ID was folded by the cap.
+sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_overflow_total[5m]))
+```
+
+[`rules/fairness-id-rules.yaml`](rules/fairness-id-rules.yaml) has recording rules that count
+distinct fairness IDs per pool, deduplicated across EPP replicas:
+
+| Rule | Value |
+|---|---|
+| `llm_d:epp_named_fairness_ids:count5m` | Header IDs that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
+| `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. |
+
+The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
+label. Change `5m` for a different window. An ID is missed when all of its requests went to a
+replica that was removed before Prometheus scraped it. To check the rules after editing them, run
+`promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
 ### Program-aware fairness
 

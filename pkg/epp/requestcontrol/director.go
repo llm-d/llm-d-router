@@ -259,6 +259,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
+	poolName := ""
+	if pool, err := d.datastore.PoolGet(); err == nil {
+		poolName = pool.Name
+	}
+	metrics.RecordFairnessIDResolution(poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
