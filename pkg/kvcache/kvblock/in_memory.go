@@ -79,7 +79,14 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
 	}
 
-	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
+	// Residency is discarded when its engine mapping expires, because subsequent
+	// engine-key removals cannot resolve it.
+	engineToRequestKeys, err := lru.NewWithEvict[BlockHash, []BlockHash](cfg.Size,
+		func(_ BlockHash, requestKeys []BlockHash) {
+			for _, requestKey := range requestKeys {
+				cache.Remove(requestKey)
+			}
+		})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
 	}
@@ -349,6 +356,12 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return err
 	}
 
+	// Serialize mapping invalidation with residency insertion.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var unmappedRequestKeys map[BlockHash]struct{}
+
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
 	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
@@ -356,18 +369,31 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
 		mappings := engineToRequestMapping(engineKeys, requestKeys)
+		evicted := false
 		for ek, rks := range mappings {
-			m.engineToRequestKeys.Add(ek, rks)
+			evicted = m.engineToRequestKeys.Add(ek, rks) || evicted
+		}
+		// Do not reinsert residency whose mapping expired while admitting the batch.
+		if evicted {
+			for ek, rks := range mappings {
+				if m.engineToRequestKeys.Contains(ek) {
+					continue
+				}
+				if unmappedRequestKeys == nil {
+					unmappedRequestKeys = make(map[BlockHash]struct{})
+				}
+				for _, rk := range rks {
+					unmappedRequestKeys[rk] = struct{}{}
+				}
+			}
 		}
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, requestKey := range requestKeys {
+		if _, unmapped := unmappedRequestKeys[requestKey]; unmapped {
+			continue
+		}
 		podCache, found := m.data.Get(requestKey)
 		if !found {
 			newPodCache := &PodCache{capacity: m.podCacheSize}

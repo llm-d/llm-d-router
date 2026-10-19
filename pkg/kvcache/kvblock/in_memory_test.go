@@ -425,3 +425,56 @@ func TestInMemoryIndexRecencyPromotion(t *testing.T) {
 		})
 	}
 }
+
+func TestInMemoryIndexMappingCapacityInvalidatesResidency(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		engineKeys  []BlockHash
+		requestKeys []BlockHash
+		walk        bool
+	}{
+		{name: "lookup", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201}},
+		{name: "walk", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201}, walk: true},
+		{name: "one-to-many", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201, 202}},
+		{name: "oversized-many-to-one", engineKeys: []BlockHash{101, 102, 103}, requestKeys: []BlockHash{201}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2, PodCacheSize: 4})
+			require.NoError(t, err)
+			entries := []PodEntry{
+				{PodIdentifier: "pod1", DeviceTier: "gpu"},
+				{PodIdentifier: "pod2", DeviceTier: "cpu"},
+			}
+			require.NoError(t, index.Add(ctx, tc.engineKeys, tc.requestKeys, entries))
+			if len(tc.engineKeys) == 1 {
+				require.NoError(t, index.Add(ctx, []BlockHash{104}, []BlockHash{203}, entries))
+				hotKey := tc.requestKeys[len(tc.requestKeys)-1]
+				if tc.walk {
+					require.NoError(t, index.WalkKeys(ctx, []BlockHash{hotKey}, func(_ int, found bool, records []EntryRef) bool {
+						require.True(t, found)
+						require.Len(t, records, len(entries))
+						return true
+					}))
+				} else {
+					hits, lookupErr := index.Lookup(ctx, []BlockHash{hotKey}, nil)
+					require.NoError(t, lookupErr)
+					require.Len(t, hits[hotKey], len(entries))
+				}
+				require.NoError(t, index.Add(ctx, []BlockHash{105}, []BlockHash{204}, entries))
+			}
+			// A missing engine mapping cannot support residency that later removes must resolve.
+			for _, key := range tc.requestKeys {
+				hits, lookupErr := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, lookupErr)
+				require.Empty(t, hits)
+			}
+			require.NoError(t, index.Evict(ctx, EngineKey, tc.engineKeys, entries))
+			for _, key := range tc.requestKeys {
+				hits, lookupErr := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, lookupErr)
+				require.Empty(t, hits)
+			}
+		})
+	}
+}
