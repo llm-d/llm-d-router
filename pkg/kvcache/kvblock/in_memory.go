@@ -346,8 +346,6 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
 
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
-
 	// Intern once per call, before anything is written: a rejected batch
 	// leaves no mapping and no ordinal behind. The same records apply to
 	// every request key.
@@ -359,7 +357,45 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	// Serialize mapping invalidation with residency insertion.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.addLocked(ctx, engineKeys, requestKeys, records)
+}
 
+// AddByEngineKeys holds the invalidation lock through mapping resolution and insertion.
+func (m *InMemoryIndex) AddByEngineKeys(ctx context.Context, engineKeys []BlockHash, entries []PodEntry) (int, error) {
+	if len(engineKeys) == 0 || len(entries) == 0 {
+		return 0, nil
+	}
+	records, err := m.internRecords(entries)
+	if err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := sets.New[BlockHash]()
+	var requestKeys []BlockHash
+	for _, key := range engineKeys {
+		mappedKeys, found := m.engineToRequestKeys.Get(key)
+		if !found {
+			continue
+		}
+		for _, requestKey := range mappedKeys {
+			if !seen.Has(requestKey) {
+				seen.Insert(requestKey)
+				requestKeys = append(requestKeys, requestKey)
+			}
+		}
+	}
+	if len(requestKeys) == 0 {
+		return 0, nil
+	}
+	if err := m.addLocked(ctx, nil, requestKeys, records); err != nil {
+		return 0, err
+	}
+	return len(requestKeys), nil
+}
+
+func (m *InMemoryIndex) addLocked(ctx context.Context, engineKeys, requestKeys []BlockHash, records []EntryRef) error {
+	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
 	var unmappedRequestKeys map[BlockHash]struct{}
 
 	// Build engine->request mappings when engine keys are provided.
@@ -417,7 +453,7 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		podCache.addAll(records)
 
 		if traceLogger.Enabled() {
-			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
+			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", records)
 		}
 	}
 

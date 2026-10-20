@@ -478,3 +478,38 @@ func TestInMemoryIndexMappingCapacityInvalidatesResidency(t *testing.T) {
 		})
 	}
 }
+
+func TestInMemoryIndexAddByEngineKeys(t *testing.T) {
+	for _, wrap := range []struct {
+		name  string
+		apply func(Index) Index
+	}{
+		{"direct", func(i Index) Index { return i }},
+		{"instrumented", NewInstrumentedIndex},
+		{"traced", NewTracedIndex},
+		{"both", func(i Index) Index { return NewTracedIndex(NewInstrumentedIndex(i)) }},
+	} {
+		t.Run(wrap.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 4, PodCacheSize: 4})
+			require.NoError(t, err)
+			gpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+			cpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "cpu"}}
+			require.NoError(t, index.Add(ctx, []BlockHash{101, 102}, []BlockHash{201}, gpu))
+			wrapped := wrap.apply(index)
+			count, err := AddByEngineKeys(ctx, wrapped, []BlockHash{101, 102, 999}, cpu)
+			require.NoError(t, err)
+			assert.Equal(t, 1, count)
+			hits, err := index.Lookup(ctx, []BlockHash{201}, nil)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, append(gpu, cpu...), hits[201])
+			require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{101, 102}, cpu))
+			hits, err = index.Lookup(ctx, []BlockHash{201}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, gpu, hits[201])
+			count, err = AddByEngineKeys(ctx, wrapped, []BlockHash{999}, cpu)
+			require.NoError(t, err)
+			assert.Zero(t, count)
+		})
+	}
+}
