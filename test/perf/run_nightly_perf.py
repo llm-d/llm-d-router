@@ -335,6 +335,29 @@ def find_free_port():
         s.bind(('localhost', 0))
         return s.getsockname()[1]
 
+def parse_scheduler_metrics(content):
+    metrics = {'buckets': {}, 'sum': 0.0, 'count': 0}
+    pattern = re.compile(
+        r'(?:llm_d_epp|llm_d_router_epp)_scheduler_e2e_duration_seconds_'
+        r'(bucket|sum|count)(?:\{([^}]*)\})? ([\d.eE+-]+)$'
+    )
+    for line in content.splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        kind, labels, value = match.groups()
+        if kind == 'bucket':
+            bound = re.search(r'(?:^|,)le="([^"]+)"(?:,|$)', labels or '')
+            if bound:
+                le = bound.group(1)
+                metrics['buckets'][le] = metrics['buckets'].get(le, 0.0) + float(value)
+        elif kind == 'sum':
+            metrics['sum'] += float(value)
+        else:
+            metrics['count'] += int(float(value))
+    return metrics
+
+
 def scrape_scheduler_metrics(ns, pod_name):
     pf_port = find_free_port()
     # We port-forward 9090 from the pod locally in the background, curl, and kill it.
@@ -348,46 +371,11 @@ def scrape_scheduler_metrics(ns, pod_name):
     # Wait for port-forward to establish
     time.sleep(3)
     
-    metrics = {
-        'buckets': {},
-        'sum': 0.0,
-        'count': 0
-    }
-    
     try:
         import urllib.request
         with urllib.request.urlopen(f"http://localhost:{pf_port}/metrics", timeout=5) as response:
             content = response.read().decode('utf-8')
-            
-        for line in content.split('\n'):
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
-            # Check primary name
-            match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
-
-            if match:
-                le = match.group(1)
-                val = float(match.group(2))
-                metrics['buckets'][le] = val
-                continue
-
-            match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_sum ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_sum ([\d.e+-]+)', line)
-            if match:
-                metrics['sum'] = float(match.group(1))
-                continue
-
-            match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_count ([\d.e+-]+)', line)
-            if not match:
-                match = re.match(r'llm_d_router_epp_scheduler_e2e_duration_seconds_count ([\d.e+-]+)', line)
-            if match:
-                metrics['count'] = int(float(match.group(1)))
-                continue
+        metrics = parse_scheduler_metrics(content)
     except Exception as e:
         print(f"Error scraping metrics over port-forward: {e}")
         metrics = None

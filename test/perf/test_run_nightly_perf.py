@@ -442,6 +442,38 @@ class PercentileTests(unittest.TestCase):
         self.assertEqual(perf.calculate_percentiles(before, after), (0.625, 10.0, 10.0))
 
 
+class SchedulerMetricsParsingTests(unittest.TestCase):
+    def test_sums_api_surface_histogram_series(self):
+        scrape = "\n".join(
+            [
+                'llm_d_epp_scheduler_e2e_duration_seconds_bucket{api_surface="messages",le="0.1"} 3',
+                'llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.1",api_surface="chat_completions"} 5',
+                'llm_d_epp_scheduler_e2e_duration_seconds_bucket{api_surface="messages",le="+Inf"} 3',
+                'llm_d_epp_scheduler_e2e_duration_seconds_bucket{api_surface="chat_completions",le="+Inf"} 5',
+                'llm_d_epp_scheduler_e2e_duration_seconds_sum{api_surface="messages"} 0.3',
+                'llm_d_epp_scheduler_e2e_duration_seconds_sum{api_surface="chat_completions"} 0.5',
+                'llm_d_epp_scheduler_e2e_duration_seconds_count{api_surface="messages"} 3',
+                'llm_d_epp_scheduler_e2e_duration_seconds_count{api_surface="chat_completions"} 5',
+            ]
+        )
+        self.assertEqual(
+            perf.parse_scheduler_metrics(scrape),
+            {"buckets": {"0.1": 8.0, "+Inf": 8.0}, "sum": 0.8, "count": 8},
+        )
+
+    def test_accepts_unlabelled_legacy_histogram(self):
+        scrape = "\n".join(
+            [
+                'llm_d_router_epp_scheduler_e2e_duration_seconds_bucket{le="+Inf"} 2',
+                'llm_d_router_epp_scheduler_e2e_duration_seconds_sum 0.2',
+                'llm_d_router_epp_scheduler_e2e_duration_seconds_count 2',
+            ]
+        )
+        self.assertEqual(
+            perf.parse_scheduler_metrics(scrape),
+            {"buckets": {"+Inf": 2.0}, "sum": 0.2, "count": 2},
+        )
+
 class MarkdownReportTests(OfflineTestCase):
     def write_report(self, **kwargs):
         perf.write_results_to_markdown_folder(
