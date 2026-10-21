@@ -3,13 +3,14 @@
 **Type:** `program-aware-fairness`
 **Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
 
-The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID header (`x-llm-d-inference-fairness-id`) on each request, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level.
+The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID on each request, which the Director derives from the fairness ID header (`x-llm-d-inference-fairness-id`) and the agent-identity attribute resolved from session headers, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level. When a request carries both a tenant fairness ID and a session identity, the Director composes them into a `<tenant>/<session>` ID so each session gets its own queue; see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools).
 
 ## Why choose this policy?
 
 Choose this policy when:
 
 * **Workflow-level fairness matters**: Distinct agentic workflows or tenants share the same pool, and you want allocation decided between them rather than between individual requests.
+* **Per-session scheduling must survive tenant stamping**: A multi-tenant pool whose tenants are stamped with fairness IDs and whose clients carry session headers keeps one queue per session, so `las` and `turn-priority` keep operating on sessions rather than on a merged tenant flow (see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools)).
 
 Under `las`:
 
@@ -19,13 +20,14 @@ Under `las`:
 Under `turn-priority`:
 
 * **Sessions are long and prefix reuse dominates cost**: Multi-turn sessions share a growing prefix, and dispatching the deepest ones keeps that prefix resident instead of re-prefilling it.
-* **Fairness IDs identify sessions**: Traffic carries a session header, so one fairness ID is one session. This strategy is not the right choice for a pool whose requests share a single ID.
+* **Fairness IDs identify sessions**: Traffic carries a session header, so one fairness ID is one session — a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID.
 
 ## What it does
 
-* **Identifies programs** via the fairness ID header carried on each request.
+* **Identifies programs** via the fairness ID the Director derives for each request: the fairness ID header, the agent-identity attribute, or their composition when both are present.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
 * **Selects a queue to dispatch from** using the configured strategy: `las` (Least Attained Service), where programs with the lowest accumulated service score highest, or `turn-priority`, which favors deeper sessions.
+* **Keys one queue per program**: every fairness ID is one queue, so a composed `<tenant>/<session>` ID schedules per session without changing the strategies. A bare ID is one queue, exactly as before.
 * **Decays attained service** in wall-clock time so a long-idle program is not penalized indefinitely. Decay is applied lazily whenever a program's service is read or accumulated, so it does not depend on the program being visited by the dispatch loop. The rate is set by an explicit half-life.
 * **Evicts idle program state** on a periodic sweep so per-program memory and Prometheus label series do not accumulate forever.
 
@@ -63,9 +65,25 @@ The default of `120` leaves a margin over the longest gap observed within an act
 
 Under contention a prefix is evicted by capacity pressure while its program is still active, and ordering by turn depth is what keeps those prefixes resident. A low prefix-cache hit rate is therefore weak evidence for lowering this value.
 
-This strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: the fairness ID header, or the `agent-identity` attribute that the request-header plugin derives from a session header.
+This strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a bare session ID (the `agent-identity` attribute that the request-header plugin derives from a session header), or a composed `<tenant>/<session>` ID when the request also carries a tenant fairness ID.
 
 Requests carrying neither share `default-flow`. Its dispatched count is the sum over unrelated clients, so it is not a session depth, it grows with total unlabeled traffic, and it rarely stays idle long enough for the inactivity reset to fire. Ordering it against real sessions by that count is not meaningful, and a pool that mixes labeled and unlabeled traffic gives `default-flow` a depth no single session can match. Route unlabeled traffic to a priority band on a different fairness policy.
+
+## Composed flow IDs (multi-tenant pools)
+
+A pool that stamps each tenant with a fairness ID header while its clients also send session headers gets one flow per session: the Director composes the two identities into
+
+```
+<tenant-fairness-id>/<agent-session-id>    e.g. acme/1f3b-...
+```
+
+and flow control keys one queue per composed ID. Both strategies then run unchanged on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct — two tenants reusing the same session identifier do not share a flow — and stays visible in the `fairness_id` metric label.
+
+Bare IDs need no migration: a request carrying only one identity keeps it as its fairness ID and is one queue, exactly as before. The separator is `/` (`metadata.FairnessIDTenantSeparator`), and tenant fairness IDs must not contain it.
+
+The unit of scheduling is the session. There is no tenant-aggregate budgeting: a tenant running more concurrent sessions competes with more queues. If tenants must be treated as single competitors regardless of session count, that needs a hierarchical policy, which this plugin does not implement.
+
+Per-program Prometheus series and per-flow queue metrics are labeled by the full composed ID, so a pool that moves from tenant-granular to composed IDs grows label cardinality from one series per tenant to one per session. The eviction sweep, flow garbage collection, and the EPP's fairness-ID label limit bound this growth, but size `evictionTtlSeconds` and the label limit for the session churn rate of the pool.
 
 ## Unit of Fairness
 
@@ -75,7 +93,7 @@ Under `las`, **attained service**, measured as a weighted sum of input and outpu
 
 ## Inputs consumed
 
-* **Program identity**: From the request's `FairnessID` field, which the framework populates from the fairness ID header.
+* **Program identity**: From the request's `FairnessID` field, which the Director populates from the fairness ID header, the agent-identity attribute, or their `<tenant>/<session>` composition.
 * **Queue state**: Reads queue length and the head item's enqueue time from the `FlowQueueAccessor`.
 * **Token usage** (`las`): From the `Response.Usage` field on stream completion.
 * **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the per-program metrics maintained across the request lifecycle.
@@ -134,6 +152,7 @@ mean the scheduler is scoring the program on stale service.
 * **Turn-priority sheds new sessions under contention**: a waiting request accrues at most `turnPriorityTimeWeight * requestTTL` turn-equivalents before the flow controller sheds it, 3 at the defaults, so a session deeper than that is never overtaken by a newcomer. Raising the weight to cover the depth of the workload trades prefix retention for admission latency.
 * **Turn depth is read one dispatch behind**: the dispatched count is incremented after the pick, off the dispatch path, so consecutive picks for one program can score against a count that has not yet caught up.
 * **Decay accrues during generation**: Decay is continuous wall-clock time, including while a program's requests are in flight; the service consumed by an in-flight request is added back, post-decay, when it completes. With half-lives well above typical generation times this effect is negligible.
+* **No tenant-aggregate fairness under composed IDs**: each session is its own queue, so a tenant with more concurrent sessions receives proportionally more dispatch share than a tenant with fewer. Composing IDs keeps sessions and tenants distinct; it does not budget per tenant.
 
 ## Related Documentation
 

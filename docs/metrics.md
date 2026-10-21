@@ -105,13 +105,16 @@ Client-derived label values are cardinality-bounded on EPP metrics that use them
 `target_model_name` from the request body share a cap of 1000 distinct values. Model names configured
 through InferenceModelRewrite rules never fold to `other`.
 
-The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header or an agent
-identity, has a cap that defaults to 1000 distinct values. Configure it with
+The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header, an agent
+identity, or their composition `<tenant>/<session>` when a request carries both, has a cap that
+defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
+Composed IDs make the label session-granular for tenant-stamped traffic, so a pool enabling them
+should size the cap for its session churn rather than its tenant count.
 
 ### Request and latency
 
