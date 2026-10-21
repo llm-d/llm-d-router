@@ -25,14 +25,15 @@ itself.
 - **served**: the route's handler runs. Both components refuse a Responses
   body that `RejectStatefulResponsesFields` in
   [tokens.go](../pkg/common/request/tokens.go) rejects with a 400. The sidecar
-  runs disaggregated prefill when EPP set `x-llm-d-prefiller-host-port`.
-  Without it, the sidecar may forward the body to its decoder unread; it always
-  reads a Responses body for the check. The coordinator parses the body and
-  runs its pipeline.
+  runs disaggregated prefill when EPP set `x-llm-d-prefiller-host-port`, and
+  disaggregated encode when EPP set `x-llm-d-encoder-hosts-ports` and an
+  encoder connector is configured. Without either, the sidecar may forward the
+  body to its decoder unread; it always reads a Responses body for the check.
+  The coordinator parses the body and runs its pipeline.
 - **passthrough**: the request is forwarded with its body unread. The sidecar
   forwards to its decoder. The coordinator forwards to the gateway with
-  `x-llm-d-epp-profile: decode`, so the request reaches a decode pod's sidecar, which
-  applies its own table.
+  `x-llm-d-epp-profile: decode`, so the request reaches a decode pod's sidecar,
+  which applies its own table.
 - **405**: the coordinator answers `405 Method Not Allowed` with an `Allow`
   header naming the route's method and an empty body, from chi's default
   handler.
@@ -45,21 +46,35 @@ OpenAI's for the other paths.
 
 ## Path forms
 
-Both components clean the path of a POST request with Go's `path.Clean` before
-routing. When the result is one of the six inference API paths in the first
-rows below, the request is routed, guarded, and forwarded upstream under that
-path, so a trailing slash, repeated slashes, dot segments, or an encoded slash
-do not change the outcome. Paths are case-sensitive.
+Paths are case-sensitive. The coordinator runs before EPP and the sidecar runs
+after it, so they accept different forms of the inference API paths in the
+first rows below.
 
-Every other request keeps its path. The coordinator forwards it as sent. The
-sidecar's `ServeMux` answers a path with repeated slashes or dot segments with
-a 307 redirect to its cleaned form, for example `/v1/responses/..` to `/v1`,
-and forwards any other path as sent, including one with a trailing slash.
+The coordinator cleans the path of a POST request with Go's `path.Clean`. When
+the result is a POST route it serves, the request is routed, checked and sent
+upstream under that path, so a trailing slash, repeated slashes, dot segments
+or an encoded slash do not change the outcome. Every other request is forwarded
+as sent, so the 405 in the table applies to the exact path only.
 
-The coord-disaggregation guide's `Exact` matches see the path before this
-cleaning. A request such as `POST /v1/completions/` matches the guide's
-catch-all rule and is served by the sidecar without the coordinator pipeline.
-In that topology, clients must send the exact path form.
+EPP picks its request parser by matching the end of the raw path and ignores a
+trailing slash. The sidecar therefore serves a POST to the six paths with or
+without a trailing slash, and no other form of them. Its `ServeMux` answers a
+path with repeated slashes or dot segments with a 307 redirect to its cleaned
+form, for example `//v1/responses` to `/v1/responses`, so the client sends the
+clean path back through EPP. It forwards any other path to the decoder as sent,
+including one with an encoded slash.
+
+Path normalization at the gateway removes repeated slashes, dot segments and
+encoded slashes before the HTTPRoute, EPP and both components see the path. In
+Envoy these are the `merge_slashes`, `normalize_path` and
+`path_with_escaped_slashes_action` settings, which
+[envoy.yaml](../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml) sets
+for the coordinator e2e environment. None of them removes a trailing slash.
+
+The coord-disaggregation guide's `Exact` matches see the path before the
+coordinator cleans it. A request such as `POST /v1/completions/` matches the
+guide's catch-all rule and is served by the sidecar without the coordinator
+pipeline. In that topology, clients must send the exact path form.
 
 ## Routes
 

@@ -568,7 +568,7 @@ func (s *Server) setECConnector() {
 	}
 }
 
-func (s *Server) createRoutes() http.Handler {
+func (s *Server) createRoutes() *http.ServeMux {
 	// Configure handlers
 	mux := http.NewServeMux()
 
@@ -579,14 +579,21 @@ func (s *Server) createRoutes() http.Handler {
 	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
 	// served routes from drifting away from it.
 	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
-		mux.HandleFunc("POST "+path, s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path)))
+		handler := s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path))
+		mux.HandleFunc("POST "+path, handler)
+		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+			r = r.Clone(r.Context())
+			r.URL.Path = path
+			r.URL.RawPath = ""
+			handler(w, r)
+		})
 	}
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
 	mux.Handle("/", s.decoderProxy)
 
-	return reqcommon.CanonicalizeAPIPath(mux)
+	return mux
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

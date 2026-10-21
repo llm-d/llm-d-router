@@ -77,13 +77,11 @@ func TestServerRegistersStepRoutes(t *testing.T) {
 }
 
 // TestServerRouteDispatch asserts where each method and path is dispatched.
-// wantPath is the path the pipeline or the gateway receives, or for a 405 the
-// Allow header.
+// wantPath is the path the pipeline or the gateway receives.
 func TestServerRouteDispatch(t *testing.T) {
 	const (
 		served      = "served"
 		passthrough = "passthrough"
-		notAllowed  = "405"
 		local       = "local"
 	)
 	tests := []struct {
@@ -104,10 +102,13 @@ func TestServerRouteDispatch(t *testing.T) {
 		{http.MethodPost, "/v1/messages/", served, "/v1/messages"},
 		{http.MethodPost, "//v1/chat/completions", served, "/v1/chat/completions"},
 		{http.MethodPost, "/v1/chat//completions", served, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/messages/.", served, "/v1/messages"},
+		{http.MethodPost, "/v1/chat%2Fcompletions", served, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/messages%2F", served, "/v1/messages"},
 
 		{http.MethodPut, "/generate", passthrough, "/generate"},
 		{http.MethodPost, "/generate", passthrough, "/generate"},
-		{http.MethodPost, "/generate/", passthrough, "/generate"},
+		{http.MethodPost, "/generate/", passthrough, "/generate/"},
 		{http.MethodPost, "/v1/chat/completions/render", passthrough, "/v1/chat/completions/render"},
 		{http.MethodPost, "/v1/completions/render", passthrough, "/v1/completions/render"},
 		{http.MethodPost, "/v1/messages/count_tokens", passthrough, "/v1/messages/count_tokens"},
@@ -138,16 +139,6 @@ func TestServerRouteDispatch(t *testing.T) {
 
 		{http.MethodGet, "/v1/chat/completions/", passthrough, "/v1/chat/completions/"},
 
-		{http.MethodGet, "/v1/chat/completions", notAllowed, http.MethodPost},
-		{http.MethodDelete, "/v1/completions", notAllowed, http.MethodPost},
-		{http.MethodHead, "/inference/v1/generate", notAllowed, http.MethodPost},
-		{http.MethodPut, "/inference/v1/generate", notAllowed, http.MethodPost},
-		{http.MethodOptions, "/v1/chat/completions", notAllowed, http.MethodPost},
-		{http.MethodGet, "/v1/responses", notAllowed, http.MethodPost},
-		{http.MethodHead, "/v1/messages", notAllowed, http.MethodPost},
-		{http.MethodPost, "/healthz", notAllowed, http.MethodGet},
-		{http.MethodHead, "/readyz", notAllowed, http.MethodGet},
-
 		{http.MethodGet, "/healthz", local, ""},
 		{http.MethodGet, "/readyz", local, ""},
 	}
@@ -177,13 +168,6 @@ func TestServerRouteDispatch(t *testing.T) {
 				if upstreamPath != tt.wantPath || pipelinePath != "" {
 					t.Fatalf("gateway path %q, pipeline path %q; want gateway path %q only", upstreamPath, pipelinePath, tt.wantPath)
 				}
-			case notAllowed:
-				if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != tt.wantPath {
-					t.Fatalf("got %d with Allow %q, want 405 with Allow %s", rec.Code, rec.Header().Get("Allow"), tt.wantPath)
-				}
-				if pipelinePath != "" || upstreamPath != "" {
-					t.Fatalf("pipeline path %q, gateway path %q; want neither reached", pipelinePath, upstreamPath)
-				}
 			case local:
 				if rec.Code != http.StatusOK || pipelinePath != "" || upstreamPath != "" {
 					t.Fatalf("got %d, pipeline path %q, gateway path %q; want 200 with neither reached", rec.Code, pipelinePath, upstreamPath)
@@ -193,11 +177,96 @@ func TestServerRouteDispatch(t *testing.T) {
 	}
 }
 
+// TestServerRouteMethodNotAllowed asserts the 405 a registered route answers
+// for any other method, before the request reaches the pipeline or the gateway.
+func TestServerRouteMethodNotAllowed(t *testing.T) {
+	tests := []struct {
+		method    string
+		path      string
+		wantAllow string
+	}{
+		{http.MethodGet, "/v1/chat/completions", http.MethodPost},
+		{http.MethodDelete, "/v1/completions", http.MethodPost},
+		{http.MethodHead, "/inference/v1/generate", http.MethodPost},
+		{http.MethodPut, "/inference/v1/generate", http.MethodPost},
+		{http.MethodOptions, "/v1/chat/completions", http.MethodPost},
+		{http.MethodGet, "/v1/responses", http.MethodPost},
+		{http.MethodHead, "/v1/messages", http.MethodPost},
+		{http.MethodPost, "/healthz", http.MethodGet},
+		{http.MethodHead, "/readyz", http.MethodGet},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
+			reached := false
+			step := stubStep{name: "record", fn: func(context.Context, *pipeline.RequestContext) error {
+				reached = true
+				return nil
+			}}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, upstream.URL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			rec := doPassthrough(t, srv, httptest.NewRequest(tt.method, tt.path, nil))
+
+			if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != tt.wantAllow {
+				t.Fatalf("got %d with Allow %q, want 405 with Allow %s", rec.Code, rec.Header().Get("Allow"), tt.wantAllow)
+			}
+			if _, upstreamPath, _, _, _ := cap.get(); reached || upstreamPath != "" {
+				t.Fatalf("pipeline reached %v, gateway path %q; want neither", reached, upstreamPath)
+			}
+		})
+	}
+}
+
+// TestCanonicalizeInferencePath asserts which requests the middleware rewrites
+// and that the caller's request is left as sent.
+func TestCanonicalizeInferencePath(t *testing.T) {
+	routes := chi.NewRouter()
+	routes.Post("/v1/responses", func(http.ResponseWriter, *http.Request) {})
+	tests := []struct {
+		name        string
+		method      string
+		target      string
+		wantPath    string
+		wantRawPath string
+	}{
+		{name: "trailing slash", method: http.MethodPost, target: "/v1/responses/?x=1", wantPath: "/v1/responses"},
+		{name: "encoded slash", method: http.MethodPost, target: "/v1/responses%2F", wantPath: "/v1/responses"},
+		{name: "exact path", method: http.MethodPost, target: "/v1/responses", wantPath: "/v1/responses"},
+		{name: "other method", method: http.MethodGet, target: "/v1/responses/", wantPath: "/v1/responses/"},
+		{name: "unserved path", method: http.MethodPost, target: "/generate/", wantPath: "/generate/"},
+		{name: "sub-resource", method: http.MethodPost, target: "/v1/responses/compact/", wantPath: "/v1/responses/compact/"},
+		{name: "unserved escaped path", method: http.MethodPost, target: "/v1/files/a%2Fb", wantPath: "/v1/files/a/b", wantRawPath: "/v1/files/a%2Fb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got *http.Request
+			h := canonicalizeInferencePath(routes)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r }))
+			req := httptest.NewRequest(tt.method, tt.target, nil)
+			origPath, origRawPath := req.URL.Path, req.URL.RawPath
+
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			if got.URL.Path != tt.wantPath || got.URL.RawPath != tt.wantRawPath {
+				t.Errorf("next saw (Path %q, RawPath %q), want (%q, %q)", got.URL.Path, got.URL.RawPath, tt.wantPath, tt.wantRawPath)
+			}
+			if req.URL.Path != origPath || req.URL.RawPath != origRawPath {
+				t.Errorf("caller's request was modified to (Path %q, RawPath %q)", req.URL.Path, req.URL.RawPath)
+			}
+			if got.URL.RawQuery != req.URL.RawQuery {
+				t.Errorf("query = %q, want %q", got.URL.RawQuery, req.URL.RawQuery)
+			}
+		})
+	}
+}
+
 // TestServerRejectsStatefulResponsesFieldsOnEveryServedForm asserts the
 // stateful-field guard runs on every form of PathResponses that is served.
 func TestServerRejectsStatefulResponsesFieldsOnEveryServedForm(t *testing.T) {
 	const body = `{"model":"m","input":"hi","previous_response_id":"resp-123"}`
-	for _, path := range []string{"/v1/responses", "/v1/responses/", "//v1/responses", "/v1/./responses", "/v1//responses/"} {
+	for _, path := range []string{"/v1/responses", "/v1/responses/", "//v1/responses", "/v1/./responses", "/v1//responses/", "/v1%2Fresponses", "/v1/responses%2F"} {
 		t.Run(path, func(t *testing.T) {
 			upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
 			reached := false

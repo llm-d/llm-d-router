@@ -22,6 +22,8 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
+	"path"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -109,6 +111,34 @@ func otelHandler(next http.Handler) http.Handler {
 	)
 }
 
+// canonicalizeInferencePath rewrites a POST whose path, cleaned by path.Clean,
+// is a POST route of routes, so a trailing slash, repeated slashes, dot
+// segments or an encoded slash reach that route, its request checks, and the
+// pipeline. Any other request reaches next as sent. The request is copied, as
+// http.StripPrefix does, so middleware outside this one keeps the client's path.
+func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				next.ServeHTTP(w, r)
+				return
+			}
+			c := path.Clean(r.URL.Path)
+			if (c == r.URL.Path && r.URL.RawPath == "") || !routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			r2 := new(http.Request)
+			*r2 = *r
+			r2.URL = new(url.URL)
+			*r2.URL = *r.URL
+			r2.URL.Path = c
+			r2.URL.RawPath = ""
+			next.ServeHTTP(w, r2)
+		})
+	}
+}
+
 // routeSpanName names the server span after the matched route template and
 // records it as http.route. otelhttp cannot do this itself: chi sets
 // Request.Pattern on its own copy of the request, and resets the route
@@ -192,7 +222,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
 	// After logRequestResponse, so the log keeps the path the client sent.
-	r.Use(reqcommon.CanonicalizeAPIPath)
+	r.Use(canonicalizeInferencePath(r))
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
