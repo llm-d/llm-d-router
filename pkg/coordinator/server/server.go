@@ -112,10 +112,11 @@ func otelHandler(next http.Handler) http.Handler {
 }
 
 // canonicalizeInferencePath rewrites a POST whose path, cleaned by path.Clean,
-// is a POST route of routes, so a trailing slash, repeated slashes, dot
-// segments or an encoded slash reach that route, its request checks, and the
-// pipeline. Any other request reaches next as sent. The request is copied, as
-// http.StripPrefix does, so middleware outside this one keeps the client's path.
+// is an inference API path and a POST route of routes, so a trailing slash,
+// repeated slashes, dot segments or an encoded slash reach that route, its
+// request checks, and the pipeline. Any other request reaches next as sent. The
+// request is copied, as http.StripPrefix does, so middleware outside this one
+// keeps the client's path.
 func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +125,8 @@ func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handle
 				return
 			}
 			c := path.Clean(r.URL.Path)
-			if (c == r.URL.Path && r.URL.RawPath == "") || !routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
+			if (c == r.URL.Path && r.URL.RawPath == "") || reqcommon.DetectAPIType(c).Path() != c ||
+				!routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
 				next.ServeHTTP(w, r)
 				return
 			}

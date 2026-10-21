@@ -381,8 +381,6 @@ func TestServer_ResponsesDecoderOnlyPassthroughForwardsTheBody(t *testing.T) {
 	}
 }
 
-// dataParallelHandler forwards straight to another rank and never reads the
-// body, so it depends entirely on the caller having refused the request.
 // TestServer_createRoutesDocumentedPaths covers the docs/api-routing.md sidecar
 // rows that TestServer_createRoutes does not: sub-resources, other APIs and
 // methods, path forms the ServeMux redirects, and the sidecar's own route.
@@ -431,11 +429,17 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 		{http.MethodOptions, "/v1/chat/completions", http.StatusAccepted, ""},
 		{http.MethodHead, "/v1/messages", http.StatusAccepted, ""},
 		{http.MethodPut, "/generate", http.StatusAccepted, ""},
-		{http.MethodPost, "/v1/messages%2F", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/files/a%2Fb", http.StatusAccepted, ""},
 		{http.MethodPost, "//v1/responses", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodPost, "/v1/chat//completions", http.StatusTemporaryRedirect, "/v1/chat/completions"},
 		{http.MethodPost, "/v1/./responses", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodPost, "/v1/responses/..", http.StatusTemporaryRedirect, "/v1"},
+		{http.MethodPost, "/v1%2Fresponses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/responses%2F?x=1", http.StatusTemporaryRedirect, "/v1/responses?x=1"},
+		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
+		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodGet, "/v1%2Fresponses", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodGet, "/health", http.StatusOK, ""},
 	} {
 		t.Run(tt.method+" "+tt.target, func(t *testing.T) {
@@ -467,6 +471,8 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 	}
 }
 
+// dataParallelHandler forwards straight to another rank and never reads the
+// body, so it depends entirely on the caller having refused the request.
 func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
 	s := NewProxy(Config{Port: "8000"})
 	s.allowlistValidator = &AllowlistValidator{}

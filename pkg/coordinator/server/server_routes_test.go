@@ -225,6 +225,7 @@ func TestServerRouteMethodNotAllowed(t *testing.T) {
 func TestCanonicalizeInferencePath(t *testing.T) {
 	routes := chi.NewRouter()
 	routes.Post("/v1/responses", func(http.ResponseWriter, *http.Request) {})
+	routes.Post("/v1/requests/{id}/cancel", func(http.ResponseWriter, *http.Request) {})
 	tests := []struct {
 		name        string
 		method      string
@@ -237,6 +238,7 @@ func TestCanonicalizeInferencePath(t *testing.T) {
 		{name: "exact path", method: http.MethodPost, target: "/v1/responses", wantPath: "/v1/responses"},
 		{name: "other method", method: http.MethodGet, target: "/v1/responses/", wantPath: "/v1/responses/"},
 		{name: "unserved path", method: http.MethodPost, target: "/generate/", wantPath: "/generate/"},
+		{name: "step route", method: http.MethodPost, target: "/v1/requests/abc/cancel/", wantPath: "/v1/requests/abc/cancel/"},
 		{name: "sub-resource", method: http.MethodPost, target: "/v1/responses/compact/", wantPath: "/v1/responses/compact/"},
 		{name: "unserved escaped path", method: http.MethodPost, target: "/v1/files/a%2Fb", wantPath: "/v1/files/a/b", wantRawPath: "/v1/files/a%2Fb"},
 	}

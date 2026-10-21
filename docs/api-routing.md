@@ -35,8 +35,9 @@ itself.
   `x-llm-d-epp-profile: decode`, so the request reaches a decode pod's sidecar,
   which applies its own table.
 - **405**: the coordinator answers `405 Method Not Allowed` with an `Allow`
-  header naming the route's method and an empty body, from chi's default
-  handler.
+  header listing the route's methods and an empty body, from chi's default
+  handler. chi answers a method it does not know, such as `PROPFIND`, with a 405
+  and no `Allow` header on every path.
 - **answered**: the component answers the request itself, without a backend.
 
 When the sidecar reads a request body and refuses it, it answers with a
@@ -51,25 +52,27 @@ after it, so they accept different forms of the inference API paths in the
 first rows below.
 
 The coordinator cleans the path of a POST request with Go's `path.Clean`. When
-the result is a POST route it serves, the request is routed, checked and sent
-upstream under that path, so a trailing slash, repeated slashes, dot segments
-or an encoded slash do not change the outcome. Every other request is forwarded
-as sent, so the 405 in the table applies to the exact path only.
+the result is an inference API path it serves, the request is routed, checked
+and sent upstream under that path, so a trailing slash, repeated slashes, dot
+segments or an encoded slash do not change the outcome. Every other request is
+forwarded as sent, so the 405 in the table applies to the exact path only.
 
 EPP picks its request parser by matching the end of the raw path and ignores a
 trailing slash. The sidecar therefore serves a POST to the six paths with or
-without a trailing slash, and no other form of them. Its `ServeMux` answers a
-path with repeated slashes or dot segments with a 307 redirect to its cleaned
-form, for example `//v1/responses` to `/v1/responses`, so the client sends the
-clean path back through EPP. It forwards any other path to the decoder as sent,
-including one with an encoded slash.
+without a trailing slash, and no other form of them. It answers a
+percent-encoded form of the six paths, and its `ServeMux` answers a path with
+repeated slashes or dot segments, with a 307 redirect to the clean path, for
+example `/v1%2Fresponses` and `//v1/responses` to `/v1/responses`, so the
+client sends the clean path back through EPP. It forwards any other path to the
+decoder as sent.
 
-Path normalization at the gateway removes repeated slashes, dot segments and
-encoded slashes before the HTTPRoute, EPP and both components see the path. In
-Envoy these are the `merge_slashes`, `normalize_path` and
-`path_with_escaped_slashes_action` settings, which
-[envoy.yaml](../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml) sets
-for the coordinator e2e environment. None of them removes a trailing slash.
+A gateway can normalize repeated slashes, dot segments and encoded slashes
+before the HTTPRoute, EPP and both components see the path. In Envoy these are
+the `merge_slashes`, `normalize_path` and `path_with_escaped_slashes_action`
+settings. [envoy.yaml](../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml)
+sets all three for the coordinator e2e environment, with `UNESCAPE_AND_REDIRECT`
+answering an encoded slash with a redirect. Whether a gateway applies them
+depends on its configuration, and none of them removes a trailing slash.
 
 The coord-disaggregation guide's `Exact` matches see the path before the
 coordinator cleans it. A request such as `POST /v1/completions/` matches the
