@@ -209,12 +209,15 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// Every attempt uses the same serialized body, so compare it once.
 	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
+	var prefillErr error
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
-		prefillHandler.ServeHTTP(pw, preq)
+		// A response cut off mid-body keeps its status, and the status decides
+		// whether it is retried. A cut-off 2xx is not, because prefill already ran.
+		prefillErr = servePrefill(prefillHandler, pw, preq)
 
 		if !isHTTPError(pw.statusCode) {
 			break
@@ -246,7 +249,15 @@ retryLoop:
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
-	if isHTTPError(pw.statusCode) {
+	// The reverse proxy also aborts the prefill body copy when the client
+	// disconnects, which is not a prefill failure.
+	if prefillErr != nil && preq.Context().Err() != nil {
+		s.logger.Info("client disconnected during prefill", "request_id", uuidStr)
+		prefillSpan.End()
+		return
+	}
+
+	if prefillErr == nil && isHTTPError(pw.statusCode) {
 		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
@@ -265,16 +276,28 @@ retryLoop:
 		}
 		return
 	}
-	prefillSpan.End()
 
 	// Process response - extract p/d fields
 	var prefillerResponse map[string]any
-	if err := json.Unmarshal(pw.bodyBytes(), &prefillerResponse); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+	if prefillErr == nil {
+		if err := json.Unmarshal(pw.bodyBytes(), &prefillerResponse); err != nil {
+			prefillErr = fmt.Errorf("invalid prefill response: %w", err)
+		}
+	}
+	if prefillErr != nil {
+		metrics.RecordError(metrics.StagePrefill)
+		s.logger.Error(jsonErrorForLog(prefillErr), "prefill request failed",
+			"request_id", uuidStr,
+			"status", pw.statusCode,
+			logBodyBytesKey, pw.buffer.Len())
+		prefillSpan.SetStatus(codes.Error, "prefill request failed")
+		prefillSpan.End()
+		if err := errorBadGateway(prefillErr, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
+	prefillSpan.End()
 
 	// 3. Verify response
 
@@ -482,6 +505,23 @@ retryLoop:
 			semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
 		)
 	}
+}
+
+// servePrefill buffers the prefill response into pw. It returns
+// errPrefillAborted in place of the http.ErrAbortHandler panic the reverse
+// proxy raises when the body copy fails, which net/http would answer by
+// resetting the client connection.
+func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec != http.ErrAbortHandler {
+				panic(rec)
+			}
+			err = errPrefillAborted
+		}
+	}()
+	h.ServeHTTP(pw, r)
+	return nil
 }
 
 // decodeResponseWriter returns the writer the decode response is streamed
