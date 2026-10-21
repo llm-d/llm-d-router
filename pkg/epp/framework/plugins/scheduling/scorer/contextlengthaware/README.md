@@ -83,7 +83,8 @@ length plus the output cap that the request parser normalizes across APIs
 (for example `max_completion_tokens` or `max_tokens` for Chat Completions and
 `max_output_tokens` for Responses). With `enableFiltering`, a pod is removed
 when that length exceeds its range maximum, so set each range maximum to at
-most the pod's `--max-model-len`. If the filter removes every decode pod, the
+most the pod's maximum model length (vLLM `--max-model-len`, SGLang
+`--context-length`). If the filter removes every decode pod, the
 EPP returns 503 and no pod receives the request. The longer routing length
 also moves requests into higher ranges for scoring.
 
@@ -102,15 +103,13 @@ output budget, so it can complete a Chat Completions request whose prompt plus
 cap exceeds the limit when generation stops early. The reservation rejects
 such a request with 503.
 
-The prompt length comes from the `token-producer`, and filtering against
-`--max-model-len` needs an exact count. When no `token-producer` is
+The prompt length comes from the `token-producer`, and filtering against the
+maximum model length needs an exact count. When no `token-producer` is
 configured, the auto-created `estimate` backend approximates 4 bytes per
 token, so the filter can reject a request that fits. With the `vllm` backend,
 set `vllm.prefillOnly: true`; otherwise a renderer with the same maximum model
 length rejects the requests this filter should catch, no token count is
-published, and the routing length is the output cap alone. `vllm.prefillOnly`
-leaves `max_output_tokens` unchanged, so a Responses request that exceeds the
-renderer's limit still publishes no token count and reaches prefill.
+published, and the routing length is the output cap alone.
 
 ```yaml
 plugins:

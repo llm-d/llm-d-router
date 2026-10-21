@@ -422,6 +422,12 @@ func TestIncludeMaxOutputTokensFilter(t *testing.T) {
 			expected: []string{"short"},
 		},
 		{
+			name:     "explicit zero output cap reserves nothing",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 0),
+			expected: []string{"short"},
+		},
+		{
 			name:     "missing output cap reserves nothing",
 			include:  true,
 			request:  createHundredTokenRequest(),
