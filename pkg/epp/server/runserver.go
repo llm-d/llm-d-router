@@ -76,6 +76,7 @@ type ExtProcServerRunner struct {
 	PriorityBandControlPlane         contracts.PriorityBandControlPlane
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
+	MaxRequestBodySize               int
 	EnableGRPCStreamMetrics          bool
 	EmitEndpointScores               bool
 	EnableToolCallingTelemetry       bool
@@ -126,6 +127,7 @@ func NewExtProcServerRunner(
 		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		MaxRequestBodySize:               opts.MaxRequestBodySize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
 		EnableToolCallingTelemetry:       opts.EnableToolCallingTelemetry,
@@ -281,6 +283,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
 		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
+		extProcServer.SetMaxRequestBodySize(r.MaxRequestBodySize)
 		extProcServer.SetResponders(r.Responders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)
