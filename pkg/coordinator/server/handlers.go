@@ -65,15 +65,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// from "unknown" to the parsed model when they differ.
 	inflightModel := ""
 	coordmetrics.IncRequestRunning(inflightModel)
-
-	// The server WriteTimeout starts when the request header is read, so it
-	// bounds body upload plus every pipeline step, not the response write. A
-	// request that outlasts it is dropped on the final flush with no status
-	// for the client and no error for the handler. Each step bounds its own
-	// upstream call, so the deadline is cleared for every inference request.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		serverLog.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
-	}
 	// body is declared before the defer so RecordRequestSize can observe its
 	// final length even when an early validation branch returns. Read
 	// failures land here with the partial length; 413/invalid-JSON/null

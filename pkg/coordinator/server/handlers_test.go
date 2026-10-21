@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -587,21 +586,6 @@ func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
 	}
 }
 
-// deadlineRecorder wraps httptest.ResponseRecorder with a SetWriteDeadline
-// method so http.NewResponseController can reach it; it records the deadline
-// the handler sets.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	deadlineSet   bool
-	deadlineValue time.Time
-}
-
-func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	d.deadlineSet = true
-	d.deadlineValue = t
-	return nil
-}
-
 func TestHandleInference_StreamRequested(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -621,7 +605,7 @@ func TestHandleInference_StreamRequested(t *testing.T) {
 			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tc.body))
-			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			rec := httptest.NewRecorder()
 
 			srv.handleInference(rec, req)
 
@@ -634,63 +618,8 @@ func TestHandleInference_StreamRequested(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			require.NotNil(t, step.captured)
 			require.Equal(t, tc.stream, step.captured.Stream)
-			require.True(t, rec.deadlineSet, "request did not clear the write deadline")
 		})
 	}
-}
-
-func TestHandleInference_ClearsWriteDeadline(t *testing.T) {
-	// The server WriteTimeout starts when the request header is read, so it
-	// bounds the whole pipeline, not the response write. Every inference
-	// request must clear it (zero value) before the pipeline runs.
-	for name, body := range map[string]string{
-		"streaming":     `{"model":"m","stream":true}`,
-		"non-streaming": `{"model":"m"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-			newTestServer(nil).handleInference(rec, req)
-			require.Equal(t, http.StatusOK, rec.Code)
-			require.True(t, rec.deadlineSet, "request did not clear the write deadline")
-			require.True(t, rec.deadlineValue.IsZero(), "expected zero deadline to disable the timeout, got %v", rec.deadlineValue)
-		})
-	}
-}
-
-func TestHandleInference_NonStreamingOutlastsWriteTimeout(t *testing.T) {
-	// Over a real connection, a non-streaming request whose pipeline runs
-	// longer than WriteTimeout must still deliver its response. With the
-	// deadline armed, net/http drops the connection on the final flush and
-	// the client sees EOF with no status.
-	const reply = `{"choices":[]}`
-	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
-		time.Sleep(300 * time.Millisecond)
-		_, err := rc.ResponseWriter.Write([]byte(reply))
-		return err
-	}}
-	srv, err := New(config.ServerConfig{WriteTimeout: 100 * time.Millisecond}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
-	require.NoError(t, err)
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(context.Background(), l) }()
-	t.Cleanup(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		require.ErrorIs(t, <-errCh, http.ErrServerClosed)
-	})
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post("http://"+l.Addr().String()+"/v1/chat/completions", reqcommon.ContentTypeJSON, strings.NewReader(`{"model":"m"}`))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	got, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, reply, string(got))
 }
 
 func TestHandleInference_ValidRequestIDIsReflected(t *testing.T) {

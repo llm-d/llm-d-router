@@ -84,13 +84,6 @@ server:
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
   read_timeout: 30s
 
-  # write_timeout caps the response on the probe routes (/healthz, /readyz)
-  # and on routes a step registers itself. Inference requests clear it: the
-  # Go server starts it when the request header is read, so it would bound
-  # every pipeline step rather than the response write. Their duration is
-  # bounded by gateway.timeout and the per-step timeouts instead.
-  write_timeout: 120s
-
   # drain_timeout is how long the coordinator keeps serving after SIGTERM before
   # shutdown_timeout starts. During the window /readyz returns 503 and each
   # connection is closed after its next response, so clients holding pooled
