@@ -115,7 +115,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
 		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -153,7 +153,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -171,7 +171,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -201,7 +201,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to create prefill handler")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -405,7 +406,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p
 
 	newBody, err := json.Marshal(requestData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return

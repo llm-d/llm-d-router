@@ -884,7 +884,14 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 					wantCode = http.StatusBadGateway
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
-				if !strings.HasPrefix(stage, "threshold") {
+				switch {
+				case strings.HasPrefix(stage, "threshold"):
+				case stage == "encoder" || stage == "bootstrap":
+					// A 502 answers a failed upstream call with a fixed message;
+					// the parser error stays in the log.
+					require.Contains(t, rw.Body.String(), "internal error")
+					require.NotContains(t, rw.Body.String(), numberSecret)
+				default:
 					require.Contains(t, rw.Body.String(), numberSecret, "client-facing parser errors must remain unchanged")
 				}
 				mu.Lock()
@@ -1599,9 +1606,9 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 			})
 
 			assert.Equal(t, http.StatusBadGateway, rw.Code)
-			var errBody errorResponse
+			var errBody reqcommon.OpenAIErrorResponse
 			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
-			assert.Equal(t, "BadGateway", errBody.Type)
+			assert.Equal(t, "server_error", errBody.Error.Type)
 			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
 
 			failureLogged := false
@@ -3003,7 +3010,7 @@ func TestHandleNIXLV2ParallelWriteDecodeFailureCancelsPrefill(t *testing.T) {
 			assert.NotEqual(t, codes.Error, prefillSpan.Status().Code, "a cancelled prefill must not be marked as a prefill failure")
 			assert.Equal(t, tt.wantCode, rw.Code)
 			if tt.decodeAbort {
-				assert.Contains(t, rw.Body.String(), "decode aborted")
+				assert.Contains(t, rw.Body.String(), "internal error")
 			} else {
 				assert.Equal(t, "application/json", rw.Header().Get("Content-Type"))
 				assert.Equal(t, "1", rw.Header().Get("Retry-After"))

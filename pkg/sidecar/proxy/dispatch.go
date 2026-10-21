@@ -166,7 +166,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			if present {
 				var err error
 				if raw, err = json.Marshal(parsed); err != nil {
-					if err := errorJSONInvalid(err, w); err != nil {
+					if err := errorJSONInvalid(w, r, err); err != nil {
 						logger.Error(err, "failed to send error response to client")
 					}
 					return
@@ -279,5 +279,7 @@ func denySSRF(w http.ResponseWriter, r *http.Request, logger logr.Logger, span t
 		semconv.LLMDPDProxyDeniedTarget(target),
 	)
 	span.SetStatus(codes.Error, "SSRF protection: "+what+" not in allowlist")
-	http.Error(w, "Forbidden: "+what+" not allowed by SSRF protection", http.StatusForbidden)
+	if err := sendError(w, r, http.StatusForbidden, "Forbidden: "+what+" not allowed by SSRF protection"); err != nil {
+		logger.Error(err, "failed to send error response to client")
+	}
 }

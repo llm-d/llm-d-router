@@ -160,7 +160,7 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 			logger.Error(proxyErr, "proxy error")
 			switch apiType := reqcommon.DetectAPIType(req.URL.Path); apiType {
 			case reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses:
-				msg := fmt.Sprintf("internal error (request_id: %s)", req.Header.Get(reqcommon.RequestIDHeaderKey))
+				msg := reqcommon.InternalErrorMessage(req.Header.Get(reqcommon.RequestIDHeaderKey))
 				if err := reqcommon.WriteAPIError(w, apiType, http.StatusBadGateway, msg); err != nil {
 					logger.Error(err, "failed to write error response")
 				}

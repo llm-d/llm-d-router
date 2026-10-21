@@ -295,7 +295,7 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
-	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+	return http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
