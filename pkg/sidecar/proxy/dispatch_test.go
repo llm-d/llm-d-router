@@ -27,6 +27,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/stretchr/testify/assert"
 	"k8s.io/utils/set"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -324,6 +325,35 @@ func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("expected stateful fields to be rejected, got status %d: %s", recorder.Code, recorder.Body.String())
 			}
+		})
+	}
+}
+
+// A denied prefill target is refused like any other sidecar error, in the
+// error envelope of the API the request was sent to.
+func TestServer_SSRFDeniedPrefillAnswersWithErrorEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		apiType reqcommon.APIType
+		want    string
+	}{
+		{reqcommon.APITypeChatCompletions, `{"error":{"message":"Forbidden: prefill target not allowed by SSRF protection","type":"permission_error","code":403}}`},
+		{reqcommon.APITypeMessages, `{"type":"error","error":{"type":"permission_error","message":"Forbidden: prefill target not allowed by SSRF protection"}}`},
+	} {
+		t.Run(tc.apiType.String(), func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{enabled: true, allowedTargets: set.New[string]()}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
+				t.Error("P/D connector must not run for a denied prefill target")
+			}
+			req := httptest.NewRequest(http.MethodPost, tc.apiType.Path(), strings.NewReader(`{}`))
+			req.Header.Set(routing.PrefillEndpointHeader, "10.0.0.1:8000")
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(tc.apiType)(recorder, req)
+
+			assert.Equal(t, http.StatusForbidden, recorder.Code)
+			assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+			assert.JSONEq(t, tc.want, recorder.Body.String())
 		})
 	}
 }

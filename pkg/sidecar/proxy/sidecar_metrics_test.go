@@ -1598,9 +1598,9 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 			})
 
 			assert.Equal(t, http.StatusBadGateway, rw.Code)
-			var errBody errorResponse
+			var errBody reqcommon.OpenAIErrorResponse
 			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
-			assert.Equal(t, "BadGateway", errBody.Type)
+			assert.Equal(t, "server_error", errBody.Error.Type)
 			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
 
 			failureLogged := false
