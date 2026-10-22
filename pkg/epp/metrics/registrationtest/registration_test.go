@@ -50,9 +50,9 @@ func TestRegisterWithOptionsReachesTheScrape(t *testing.T) {
 	ctx := context.Background()
 	received := time.Now()
 	// (40ms - 10ms) / (3 - 1) = 15ms, which lands in (0.01, 0.02].
-	require.True(t, metrics.RecordRequestTPOT(ctx, "m", "tm", "f", "p", true,
+	require.True(t, metrics.RecordRequestTPOT(ctx, "m", "tm", "messages", "f", "p", true,
 		received, received.Add(10*time.Millisecond), received.Add(40*time.Millisecond), 3))
-	require.True(t, metrics.RecordInterTokenLatency(ctx, "m", "tm", "f", "p", 0.0075))
+	require.True(t, metrics.RecordInterTokenLatency(ctx, "m", "tm", "messages", "f", "p", 0.0075))
 
 	tpot := gatherHistogram(t, "llm_d_epp_request_streaming_tpot_seconds")
 	require.Equal(t, tpotEdges, upperBounds(tpot))

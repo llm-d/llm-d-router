@@ -201,7 +201,7 @@ Longer ladders increase series cardinality and can affect rolling-upgrade query 
 
 - **Cardinality.** Every edge is one more series per label combination, on top of `_sum` and
   `_count`, so the cost scales with the number of distinct
-  `model_name`/`target_model_name`/`fairness_id`/`priority` combinations a deployment produces.
+  `model_name`/`target_model_name`/`fairness_id`/`priority`/`api_surface` combinations a deployment produces.
   The 64-edge limit bounds that growth; it leaves room above both default ladders, which have
   25 and 21 edges.
 - **Rolling upgrades.** Pods on the old and new layouts expose different `le` sets at the same
