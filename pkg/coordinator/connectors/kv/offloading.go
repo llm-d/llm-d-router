@@ -33,7 +33,7 @@ import (
 
 // offloadingKV implements the vLLM OffloadingConnector P2P tier protocol. The
 // prefill request declares a remote decoder under a fresh kv_request_id, so
-// the prefill pod stores the KV in its CPU tier for a pull. The decode request
+// the prefill pod stores the KV in its P2P tier for a pull. The decode request
 // names the prefill pod under the same kv_request_id, so the decode pod pulls
 // the KV from it.
 type offloadingKV struct{}
@@ -51,8 +51,6 @@ func (offloadingKV) PreparePrefillKVParams(ctx context.Context, reqCtx *pipeline
 // header the EPP p2p-source-producer sets on the prefill request and
 // request-header-copy-handler copies onto the response. The decode request
 // cannot be built without it, so a missing or malformed header is an error.
-// The two errors differ: a missing header points at the EPP setup, a malformed
-// value at the value itself.
 func (offloadingKV) ReadPrefillResponse(reqCtx *pipeline.RequestContext, headers http.Header) error {
 	value := strings.TrimSpace(headers.Get(routing.KVCachePrefillHeader))
 	if value == "" {
@@ -64,19 +62,23 @@ func (offloadingKV) ReadPrefillResponse(reqCtx *pipeline.RequestContext, headers
 		return fmt.Errorf("prefill response header %s %q is not a host:port with a TCP port",
 			routing.KVCachePrefillHeader, value)
 	}
-	reqCtx.PrefillHost = host
-	reqCtx.PrefillP2PPort = port
+	reqCtx.PrefillPeer = &pipeline.P2PPeer{Host: host, Port: port}
 	return nil
 }
 
-// PrepareDecodeKVParams returns the remote_prefiller block when the prefill
-// step ran, and an empty map otherwise, so a pipeline without a prefill step
-// leaves kv_transfer_params to the EPP plugin.
+// PrepareDecodeKVParams is empty unless this connector read the prefill
+// response, so a pipeline whose prefill step ran another connector, or has no
+// prefill step, leaves kv_transfer_params to the EPP plugin.
 func (offloadingKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any {
+	logger := log.FromContext(ctx).WithName(loggerName)
 	params := map[string]any{}
-	if reqCtx.KVRequestID != "" {
-		params = reqcommon.RemotePrefillerParams(reqCtx.KVRequestID, reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
+	if peer := reqCtx.PrefillPeer; peer != nil {
+		params = reqcommon.RemotePrefillerParams(reqCtx.KVRequestID, peer.Host, peer.Port)
+	} else {
+		// The connector cannot tell the two causes apart, so the line names
+		// both: the first is the normal case, the second is the one to act on.
+		logger.Info("no prefill P2P peer; kv_transfer_params is left to the EPP, as expected without a prefill step; a prefill step on another kv_connector stored KV that decode will not pull")
 	}
-	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", params)
+	logger.V(logutil.TRACE).Info("preparing decode kv params", "params", params)
 	return params
 }
