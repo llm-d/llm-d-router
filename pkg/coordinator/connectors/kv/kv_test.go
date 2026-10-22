@@ -23,6 +23,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -87,14 +90,6 @@ func TestBuild_EmptyReturnsDefault(t *testing.T) {
 	}
 	if c.Name() != DefaultKVConnectorName {
 		t.Fatalf("default = %q, want %q", c.Name(), DefaultKVConnectorName)
-	}
-}
-
-func TestResolveName(t *testing.T) {
-	for name, want := range map[string]string{"": DefaultKVConnectorName, Offloading: Offloading, "unknown": "unknown"} {
-		if got := ResolveName(name); got != want {
-			t.Errorf("ResolveName(%q) = %q, want %q", name, got, want)
-		}
 	}
 }
 
@@ -186,8 +181,7 @@ func TestOffloadingKV_Params(t *testing.T) {
 
 	// Decode: remote_prefiller with the same kv_request_id and the prefill pod
 	// read from the response headers.
-	reqCtx.PrefillHost = "10.0.0.42"
-	reqCtx.PrefillP2PPort = 7779
+	reqCtx.PrefillPeer = &pipeline.P2PPeer{Host: "10.0.0.42", Port: 7779}
 	wantDecode := map[string]any{
 		reqcommon.FieldRemotePrefiller: map[string]any{
 			reqcommon.FieldKVRequestID: reqCtx.KVRequestID,
@@ -240,8 +234,9 @@ func TestOffloadingKV_ReadPrefillResponse(t *testing.T) {
 			if err := (offloadingKV{}).ReadPrefillResponse(reqCtx, prefillResponseHeaders(tc.p2pAddress)); err != nil {
 				t.Fatal(err)
 			}
-			if reqCtx.PrefillHost != tc.wantHost || reqCtx.PrefillP2PPort != tc.wantPort {
-				t.Fatalf("read %q:%d, want %q:%d", reqCtx.PrefillHost, reqCtx.PrefillP2PPort, tc.wantHost, tc.wantPort)
+			want := &pipeline.P2PPeer{Host: tc.wantHost, Port: tc.wantPort}
+			if !reflect.DeepEqual(reqCtx.PrefillPeer, want) {
+				t.Fatalf("read %+v, want %+v", reqCtx.PrefillPeer, want)
 			}
 		})
 	}
@@ -273,19 +268,52 @@ func TestOffloadingKV_ReadPrefillResponse_Rejects(t *testing.T) {
 			if mentionsEPP := strings.Contains(err.Error(), "request-header-copy-handler"); mentionsEPP != (tc.wantMsg == missing) {
 				t.Fatalf("error %q: mentions EPP plugins = %v", err, mentionsEPP)
 			}
-			if reqCtx.PrefillHost != "" || reqCtx.PrefillP2PPort != 0 {
-				t.Fatalf("context set on error: %q:%d", reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
+			if reqCtx.PrefillPeer != nil {
+				t.Fatalf("context set on error: %+v", reqCtx.PrefillPeer)
 			}
 		})
 	}
 }
 
+// logCapture returns a context whose logger appends each Info line to the
+// returned slice.
+func logCapture() (context.Context, *[]string) {
+	var lines []string
+	logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+	return log.IntoContext(context.Background(), logger), &lines
+}
+
 // A pipeline without a prefill step leaves kv_transfer_params to the EPP
-// p2p-source-producer: the decode params are an empty object, not nil.
-func TestOffloadingKV_NoPrefill_EmptyDecodeParams(t *testing.T) {
+// p2p-source-producer: the decode params are an empty object, not nil, and
+// one Info line names the cause, since TRACE is off in deployments. A prefill
+// request prepared without its response read has no peer to name, so it is
+// the same case rather than a remote_prefiller block with an empty host.
+func TestOffloadingKV_NoPrefillPeer_EmptyDecodeParams(t *testing.T) {
 	c, _ := Build(Offloading)
-	got := c.PrepareDecodeKVParams(context.Background(), &pipeline.RequestContext{PrefillHost: "10.0.0.42", PrefillP2PPort: 7777})
-	if got == nil || len(got) != 0 {
-		t.Errorf("decode params = %v, want an empty map", got)
+	noPrefill := &pipeline.RequestContext{}
+	prefillNotRead := &pipeline.RequestContext{}
+	c.PreparePrefillKVParams(context.Background(), prefillNotRead)
+	for name, reqCtx := range map[string]*pipeline.RequestContext{"no prefill": noPrefill, "prefill response not read": prefillNotRead} {
+		t.Run(name, func(t *testing.T) {
+			ctx, lines := logCapture()
+			got := c.PrepareDecodeKVParams(ctx, reqCtx)
+			if got == nil || len(got) != 0 {
+				t.Errorf("decode params = %v, want an empty map", got)
+			}
+			if len(*lines) != 1 || !strings.Contains((*lines)[0], "no prefill P2P peer") {
+				t.Errorf("log lines = %v, want one naming the missing peer", *lines)
+			}
+		})
+	}
+}
+
+// A decode request that names its prefill peer is the normal path, so it logs
+// nothing at the default level.
+func TestOffloadingKV_PrefillPeer_NoInfoLog(t *testing.T) {
+	c, _ := Build(Offloading)
+	ctx, lines := logCapture()
+	c.PrepareDecodeKVParams(ctx, &pipeline.RequestContext{KVRequestID: "K", PrefillPeer: &pipeline.P2PPeer{Host: "10.0.0.7", Port: 7779}})
+	if len(*lines) != 0 {
+		t.Errorf("log lines = %v, want none", *lines)
 	}
 }

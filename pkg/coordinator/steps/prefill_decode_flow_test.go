@@ -22,10 +22,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -189,6 +191,74 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	}
 	if decodeReceivedKVParams["peer_host"] != "10.0.0.42" {
 		t.Fatalf("decode sent wrong peer_host: %v", decodeReceivedKVParams["peer_host"])
+	}
+}
+
+// The prefill pod stores the KV under the kv_request_id its request declared,
+// and the decode pod asks for that id, so the two requests must carry the
+// same one. A mismatch is silent: the pull finds nothing and decode recomputes
+// the prompt.
+func TestOffloadingKVRequestID_FlowFromPrefillToDecode(t *testing.T) {
+	const prefillP2PAddress = "10.0.0.7:7779"
+	var prefillKVParams, decodeKVParams map[string]any
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		kvParams, _ := parsed["kv_transfer_params"].(map[string]any)
+		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+		case gateway.PhasePrefill:
+			prefillKVParams = kvParams
+			w.Header().Set(routing.KVCachePrefillHeader, prefillP2PAddress)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case gateway.PhaseDecode:
+			decodeKVParams = kvParams
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "done"}},
+				},
+			})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.Offloading})
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.Offloading})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "test-offloading-flow",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 2345},
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	remoteDecoder, _ := prefillKVParams[reqcommon.FieldRemoteDecoder].(map[string]any)
+	prefillID, _ := remoteDecoder[reqcommon.FieldKVRequestID].(string)
+	if prefillID == "" {
+		t.Fatalf("prefill kv_transfer_params = %v, want a remote_decoder.kv_request_id", prefillKVParams)
+	}
+	want := map[string]any{
+		reqcommon.FieldKVRequestID: prefillID,
+		reqcommon.FieldRemoteHost:  "10.0.0.7",
+		reqcommon.FieldRemotePort:  float64(7779),
+	}
+	if got := decodeKVParams[reqcommon.FieldRemotePrefiller]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("decode remote_prefiller = %v, want %v", got, want)
 	}
 }
 

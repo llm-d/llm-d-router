@@ -19,72 +19,13 @@ package builder
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/go-logr/logr/funcr"
-
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
-
-func TestKVConnectorName(t *testing.T) {
-	cases := map[string]struct {
-		params map[string]any
-		want   string
-	}{
-		"set":       {params: map[string]any{steps.ParamKVConnector: kv.Offloading}, want: kv.Offloading},
-		"unset":     {params: map[string]any{}, want: kv.DefaultKVConnectorName},
-		"empty":     {params: map[string]any{steps.ParamKVConnector: ""}, want: kv.DefaultKVConnectorName},
-		"nil map":   {params: nil, want: kv.DefaultKVConnectorName},
-		"not a str": {params: map[string]any{steps.ParamKVConnector: 1}, want: kv.DefaultKVConnectorName},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			if got := kvConnectorName(tc.params); got != tc.want {
-				t.Errorf("kvConnectorName() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestWarnKVConnectorMismatch(t *testing.T) {
-	cases := map[string]struct {
-		prefill, decode string
-		wantWarning     bool
-	}{
-		"different":    {prefill: kv.Offloading, decode: kv.SharedStorage, wantWarning: true},
-		"same":         {prefill: kv.Offloading, decode: kv.Offloading},
-		"no prefill":   {decode: kv.Offloading},
-		"no decode":    {prefill: kv.Offloading},
-		"neither step": {},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			var logs []string
-			logger := funcr.New(func(_, args string) { logs = append(logs, args) }, funcr.Options{})
-			warnKVConnectorMismatch(logger, tc.prefill, tc.decode)
-			if !tc.wantWarning {
-				if len(logs) != 0 {
-					t.Fatalf("unexpected warning: %v", logs)
-				}
-				return
-			}
-			if len(logs) != 1 {
-				t.Fatalf("got %d log lines, want 1: %v", len(logs), logs)
-			}
-			for _, want := range []string{"warning: prefill and decode use different kv_connector values",
-				`"prefill"="` + tc.prefill + `"`, `"decode"="` + tc.decode + `"`} {
-				if !strings.Contains(logs[0], want) {
-					t.Errorf("warning %q does not contain %q", logs[0], want)
-				}
-			}
-		})
-	}
-}
 
 func TestValidatePipeline(t *testing.T) {
 	render := config.StepConfig{Type: steps.RenderStepName}

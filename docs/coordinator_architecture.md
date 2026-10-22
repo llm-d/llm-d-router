@@ -289,6 +289,10 @@ routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
+A client-provided `kv_transfer_params` body field is dropped on the inference routes,
+which parse the body, because it names the pod a model server pulls KV from and
+`p2p-source-producer` treats a request that carries `remote_prefiller` as a decode request.
+The passthrough forwards the body verbatim, so the field reaches EPP on every other path.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -424,7 +428,7 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-nixl` | `nixlv2` | NIXL P2P RDMA: prefill stores KV for remote decode; decode pulls it via `remote_engine_id` / `remote_block_ids` / `remote_host` / `remote_port`. |
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
-| `kv-offloading` | `offloading` | vLLM `OffloadingConnector` P2P tier: prefill stores KV in its CPU tier under `remote_decoder.kv_request_id`; decode pulls it with `remote_prefiller` (`kv_request_id`, `remote_host`, `remote_port`). |
+| `kv-offloading` | `offloading` | vLLM `OffloadingConnector` P2P tier: prefill stores KV in its P2P tier under `remote_decoder.kv_request_id`; decode pulls it with `remote_prefiller` (`kv_request_id`, `remote_host`, `remote_port`). |
 
 The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
@@ -440,38 +444,16 @@ and the decode request names the prefill pod with it. A prefill response without
 header, or with a value that is not a `host:port` with a TCP port, fails the request
 before decode is sent.
 
-The prefill profile must be named `prefill` in two places, or every prefill request fails:
-
-- The coordinator always sends the prefill request with `x-llm-d-epp-profile: prefill`;
-  this value cannot be changed. The EPP runs the profile with that name, so the prefill
-  EPP must have a profile named `prefill`.
-- `p2p-source-producer` finds the prefill pod by its `prefillProfileName` parameter
-  (default `prefill`), and writes the prefill pod's P2P address only when it finds it.
-  Leave `prefillProfileName` unset, or set it to `prefill`.
-
-If the names differ, the plugin writes no address, and the request fails before decode is
-sent with the missing-header error. Two examples: `prefillProfileName: p`; or an EPP with
-one profile named `default`, which `header-profile-handler` runs for every request, so
-the chosen pod is stored under `default`, not `prefill`.
-
-A prefill EPP config that works:
-
-```yaml
-plugins:
-  - type: header-profile-handler
-  - type: p2p-source-producer       # prefillProfileName unset: prefill
-schedulingProfiles:
-  - name: prefill                   # must be prefill
-    plugins: [...]
-```
-
-See [Prefill profile name](../pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/README.md#prefill-profile-name)
-for the sidecar case.
+`p2p-source-producer` writes the prefill pod's P2P address only when its
+`prefillProfileName` parameter (default `prefill`) names the profile the prefill EPP ran,
+which `header-profile-handler` picks from `x-llm-d-epp-profile: prefill`. See
+[Prefill profile name](../pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/README.md#prefill-profile-name).
 
 A cached-prefix pull from a third pod is written by the same EPP plugin into
 the prefill request body, so the coordinator never handles it; on a decode request it
 writes nothing next to `remote_prefiller`. A pipeline without a `prefill` step sends an
-empty `kv_transfer_params`, which the plugin fills on the decode request. See the
+empty `kv_transfer_params`, which the plugin may fill with a cached-prefix source on the
+decode request. See the
 [plugin README](../pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/README.md)
 and the [header copy README](../pkg/epp/framework/plugins/requestcontrol/responsereceived/headercopy/README.md).
 

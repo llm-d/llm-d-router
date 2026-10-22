@@ -138,6 +138,13 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 	}
 }
 
+// P2PPeer is a pod's OffloadingConnector P2P tier address, the one a KV pull
+// dials. The pod's serving address is a different port.
+type P2PPeer struct {
+	Host string
+	Port int
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -209,11 +216,13 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
-	// KVRequestID, PrefillHost and PrefillP2PPort carry the kv-offloading
-	// connector's prefill-to-decode state; empty with any other connector.
-	KVRequestID    string
-	PrefillHost    string
-	PrefillP2PPort int
+	// KVRequestID is the kv-offloading transfer id. Set by the connector's
+	// PreparePrefillKVParams; empty with any other connector.
+	KVRequestID string
+	// PrefillPeer is the prefill pod's P2P tier address. Set by the
+	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
+	// response and with any other connector.
+	PrefillPeer *P2PPeer
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string

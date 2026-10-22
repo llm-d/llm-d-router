@@ -66,7 +66,7 @@ available.
 
 - `prefixMatchInfoProducerName` (string, optional): Name of the prefix-cache producer instance that supplies `PrefixCacheMatchInfo`. Empty selects the default unnamed producer.
 - `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to write the source. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
-- `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. It must equal the name of the prefill profile that runs: the `disagg-profile-handler` `profiles.prefill` behind the sidecar, and `prefill` behind the coordinator, which always sends `x-llm-d-epp-profile: prefill`. The plugin writes `x-llm-d-kv-cache-prefill-p2p-host-port` only when it finds a target under this name. If the names differ, no prefill P2P address is written: the sidecar `offloading` connector returns HTTP 500 and the coordinator `kv-offloading` connector fails the request, for every disaggregated request. When no prefill profile result exists under this name, the primary profile target is used as the endpoint that computes the prefix.
+- `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
 
@@ -163,8 +163,10 @@ dataLayer:
 
 `prefillProfileName` must equal the name of the scheduling profile that picks the prefill
 pod. Both names default to `prefill`, so a config that leaves them unset works. When you
-rename the prefill profile, change `prefillProfileName` to the same name; otherwise every
-disaggregated request fails (see [Parameters](#parameters)).
+rename the prefill profile, change `prefillProfileName` to the same name. If the names
+differ, the plugin writes no `x-llm-d-kv-cache-prefill-p2p-host-port`, and every
+disaggregated request fails: the sidecar `offloading` connector returns HTTP 500, and the
+coordinator `kv-offloading` connector fails the request before decode is sent.
 
 Behind the routing sidecar, the name comes from the `disagg-profile-handler`:
 
@@ -185,16 +187,17 @@ schedulingProfiles:
     plugins: [...]
 ```
 
-Behind the coordinator, the name is always `prefill`, because the coordinator sends every
-prefill request with `x-llm-d-epp-profile: prefill`. Name the profile `prefill` and leave
-`prefillProfileName` unset:
+Behind the coordinator, `header-profile-handler` runs the profile named by
+`x-llm-d-epp-profile`, which the coordinator always sets to `prefill` on the prefill
+request; with a single configured profile it runs that one whatever its name. Name the
+prefill profile `prefill` and leave `prefillProfileName` unset:
 
 ```yaml
 plugins:
   - type: header-profile-handler
   - type: p2p-source-producer       # prefillProfileName unset: prefill
 schedulingProfiles:
-  - name: prefill                   # must be prefill
+  - name: prefill                   # equals prefillProfileName
     plugins: [...]
   - name: decode
     plugins: [...]
