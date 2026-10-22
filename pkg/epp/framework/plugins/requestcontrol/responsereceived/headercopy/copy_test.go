@@ -29,6 +29,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -101,13 +102,35 @@ func TestResponseHeader_NoopWhenResponseHeadersNil(t *testing.T) {
 	})
 }
 
+func TestResponseHeader_CopiesEverySpellingEPPWrites(t *testing.T) {
+	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+	routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, "10.0.0.2:8000")
+	response := &fwkrc.Response{Headers: map[string]string{}}
+	h := newTestHandler(routing.HeaderNames(routing.PrefillEndpointHeader)...)
+
+	h.ResponseHeader(context.Background(), request, response, nil)
+
+	assert.Equal(t, map[string]string{
+		routing.PrefillEndpointHeader:       "10.0.0.2:8000",
+		routing.LegacyPrefillEndpointHeader: "10.0.0.2:8000",
+	}, response.Headers)
+}
+
 func TestFactory_LowercasesAndTrimsNames(t *testing.T) {
-	p, err := Factory("", fwkplugin.StrictDecoder([]byte(`{"headers": [" X-Llm-D-Prefiller-Host-Port ", "x-llm-d-kv-cache-prefill-p2p-host-port"]}`)), nil)
+	p, err := Factory("", fwkplugin.StrictDecoder([]byte(`{"headers": [" X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port ", "x-llm-d-kv-cache-source-p2p-host-port"]}`)), nil)
 	require.NoError(t, err)
 	h, ok := p.(*Handler)
 	require.True(t, ok)
-	assert.Equal(t, []string{routing.PrefillEndpointHeader, routing.KVCachePrefillHeader}, h.headers)
+	assert.Equal(t, []string{routing.KVCachePrefillHeader, routing.KVCacheSourceHeader}, h.headers)
 	assert.Equal(t, PluginType, h.TypedName().Name)
+}
+
+func TestFactory_ExpandsDeprecatedAlias(t *testing.T) {
+	p, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"headers": ["X-Llm-D-Prefiller-Host-Port"]}`)), nil)
+	require.NoError(t, err)
+	h, ok := p.(*Handler)
+	require.True(t, ok)
+	assert.Equal(t, []string{routing.PrefillEndpointHeader, routing.LegacyPrefillEndpointHeader}, h.headers)
 }
 
 func TestFactory_DeduplicatesNamesAndWarns(t *testing.T) {
@@ -123,6 +146,18 @@ func TestFactory_DeduplicatesNamesAndWarns(t *testing.T) {
 	require.Len(t, logs, 1)
 	assert.Contains(t, logs[0], "warning: duplicate header names")
 	assert.Contains(t, logs[0], `"duplicates"=["x-a" "x-b"]`)
+}
+
+func TestFactory_NilHandleWithDuplicates(t *testing.T) {
+	var p fwkplugin.Plugin
+	var err error
+	require.NotPanics(t, func() {
+		p, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"headers": ["x-a", "x-a"]}`)), nil)
+	})
+	require.NoError(t, err)
+	h, ok := p.(*Handler)
+	require.True(t, ok)
+	assert.Equal(t, []string{"x-a"}, h.headers)
 }
 
 func TestFactory_KeepsName(t *testing.T) {
@@ -143,6 +178,20 @@ func TestFactory_RejectsMissingHeaders(t *testing.T) {
 func TestFactory_RejectsEmptyName(t *testing.T) {
 	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"headers": ["x-a", " "]}`)), nil)
 	require.Error(t, err)
+}
+
+func TestFactory_RejectsSystemOwnedHeader(t *testing.T) {
+	for _, header := range []string{
+		metadata.ObjectiveKey,
+		metadata.OldObjectiveKey,
+		metadata.DestinationEndpointKey,
+		routing.EndpointPinHeader,
+		"Content-Length",
+	} {
+		_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"headers": ["x-a", "`+header+`"]}`)), nil)
+		require.Error(t, err, "header %q must be rejected", header)
+		assert.Contains(t, err.Error(), "system-owned")
+	}
 }
 
 func TestFactory_RejectsUnknownParameter(t *testing.T) {
