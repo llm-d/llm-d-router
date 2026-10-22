@@ -245,8 +245,8 @@ const (
 	// The state machine sends an ImmediateResponse(429) to the proxy.
 	requestEvicted
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
-	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	// The state machine sends the RequestHeadersResponse, and a RequestBodyResponse when the request has a body,
+	// with the routing decision to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
 	// requestAnsweredLocal indicates a Responder answered the request itself with an
 	// ImmediateResponse rather than routing it to a model server. The state machine sends the

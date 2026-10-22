@@ -390,16 +390,13 @@ dataLayer:
 					// The headers frame has no EndOfStream: the upgraded stream stays open with no body.
 					name: "protocol: websocket upgrade routed at header time",
 					requests: integration.ReqRaw(map[string]string{
+						":method":                    "GET",
 						reqcommon.RequestIDHeaderKey: "test-request-id",
 						"connection":                 "Upgrade",
 						"upgrade":                    "websocket",
 					}),
-					pods: []PodState{P(0, 0, 0, "foo")},
-					wantResponses: integration.NewRequestHeaderResponse("192.168.1.1:8000",
-						&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: reqcommon.RequestIDHeaderKey, RawValue: []byte("test-request-id")}},
-						&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: "connection", RawValue: []byte("Upgrade")}},
-						&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: "upgrade", RawValue: []byte("websocket")}},
-					),
+					pods:          []PodState{P(0, 0, 0, "foo")},
+					wantResponses: integration.NewRequestHeaderResponse("192.168.1.1:8000"),
 				},
 
 				// --- Response Processing (Buffering & Streaming) ---

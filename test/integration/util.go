@@ -349,36 +349,13 @@ func NewRequestBufferedResponse(
 	rewrittenBody []byte,
 	otherHeaders ...*envoyCorev3.HeaderValueOption,
 ) []*extProcPb.ProcessingResponse {
-	setHeaders := make([]*envoyCorev3.HeaderValueOption, 0, 2+len(otherHeaders))
-	setHeaders = append(setHeaders,
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      metadata.DestinationEndpointKey,
-				RawValue: []byte(destinationEndpoint),
-			},
+	contentLength := &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      headerKeyContentLength,
+			RawValue: []byte(strconv.Itoa(len(rewrittenBody))),
 		},
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      headerKeyContentLength,
-				RawValue: []byte(strconv.Itoa(len(rewrittenBody))),
-			},
-		})
-	setHeaders = append(setHeaders, otherHeaders...)
-
-	headerResponse := &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &extProcPb.HeadersResponse{
-				Response: &extProcPb.CommonResponse{
-					ClearRouteCache: true,
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders:    setHeaders,
-						RemoveHeaders: unsetRoutingHeaders,
-					},
-				},
-			},
-		},
-		DynamicMetadata: makeDestinationMetadata(destinationEndpoint),
 	}
+	headerResponses := NewRequestHeaderResponse(destinationEndpoint, append([]*envoyCorev3.HeaderValueOption{contentLength}, otherHeaders...)...)
 
 	bodyResponse := &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_RequestBody{
@@ -397,11 +374,11 @@ func NewRequestBufferedResponse(
 		},
 	}
 
-	return []*extProcPb.ProcessingResponse{headerResponse, bodyResponse}
+	return append(headerResponses, bodyResponse)
 }
 
-// NewRequestHeaderResponse creates the single Header response the EPP sends when it routes a request
-// without a body response, such as a WebSocket upgrade.
+// NewRequestHeaderResponse creates the Header response that routes a request to destinationEndpoint.
+// A request routed without a body response, such as a WebSocket upgrade, gets only this message.
 func NewRequestHeaderResponse(
 	destinationEndpoint string,
 	otherHeaders ...*envoyCorev3.HeaderValueOption,
