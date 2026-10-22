@@ -26,13 +26,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	requtil "github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 // PluginType is the plugin type for the request header copy handler.
@@ -40,9 +43,13 @@ const PluginType = "request-header-copy-handler"
 
 type parameters struct {
 	// Headers lists the request header names to copy onto the response. Each
-	// one is copied when present on the request, under the same name. The
-	// list is explicit: the request header map holds every client header, so
-	// a copy of all of them would echo client credentials onto the response.
+	// one is copied when present on the request, under the same name; one
+	// named by its current spelling, which EPP also writes under a deprecated
+	// alias, is copied under both spellings. A system-owned name is rejected:
+	// the director drops it from the response header mutation, so the entry
+	// would copy nothing. The list is explicit: the request header map holds
+	// every client header, so a copy of all of them would echo client
+	// credentials onto the response.
 	Headers []string `json:"headers"`
 }
 
@@ -67,18 +74,29 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		if header == "" {
 			return nil, fmt.Errorf("invalid configuration for '%s' handler: headers must not contain an empty name", PluginType)
 		}
+		if requtil.IsSystemOwnedHeader(header) {
+			return nil, fmt.Errorf("invalid configuration for '%s' handler: header %q is system-owned and is dropped from the response", PluginType, header)
+		}
 		if seen.Has(header) {
 			duplicates = append(duplicates, header)
 			continue
 		}
-		seen.Insert(header)
-		headers = append(headers, header)
+		for _, spelling := range routing.HeaderNames(header) {
+			if !seen.Has(spelling) {
+				seen.Insert(spelling)
+				headers = append(headers, spelling)
+			}
+		}
 	}
 	if name == "" {
 		name = PluginType
 	}
 	if len(duplicates) > 0 {
-		log.FromContext(handle.Context()).Info("warning: duplicate header names in the configuration are copied once",
+		logger := logr.Discard()
+		if handle != nil {
+			logger = log.FromContext(handle.Context())
+		}
+		logger.Info("warning: duplicate header names in the configuration are copied once",
 			"plugin", name, "duplicates", duplicates)
 	}
 	return &Handler{
