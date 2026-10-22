@@ -21,10 +21,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -707,6 +709,16 @@ func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	return nil
 }
 
+func headersFrame(headers map[string]string) *extProcPb.ProcessingRequest_RequestHeaders {
+	hv := make([]*configPb.HeaderValue, 0, len(headers))
+	for k, v := range headers {
+		hv = append(hv, &configPb.HeaderValue{Key: k, Value: v})
+	}
+	return &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: hv}},
+	}
+}
+
 func TestIsWebSocketUpgrade(t *testing.T) {
 	t.Parallel()
 
@@ -722,7 +734,7 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 		},
 		{
 			name:    "case-insensitive values and token list",
-			headers: map[string]string{"connection": "keep-alive, UPGRADE", "upgrade": "WebSocket"},
+			headers: map[string]string{"Connection": "keep-alive, UPGRADE", "Upgrade": "WebSocket"},
 			want:    true,
 		},
 		{
@@ -740,48 +752,70 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 			headers: map[string]string{"connection": "Upgrade", "upgrade": "h2c"},
 			want:    false,
 		},
-		{
-			name:    "no headers",
-			headers: map[string]string{},
-			want:    false,
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, isWebSocketUpgrade(tc.headers))
+			assert.Equal(t, tc.want, isWebSocketUpgrade(headersFrame(tc.headers)))
 		})
 	}
 }
 
-func TestHandleRequestHeaders_WebSocketUpgrade(t *testing.T) {
+func TestHandleRequestHeadersRejectsNonGetWebSocketUpgrade(t *testing.T) {
 	t.Parallel()
-
-	upgradeHeaders := []*configPb.HeaderValue{
-		{Key: "Connection", Value: "Upgrade"},
-		{Key: "Upgrade", Value: "websocket"},
-		{Key: ":path", Value: "/v1/realtime"},
-	}
 
 	server := &StreamingServer{director: &mockDirectorRequest{}}
 	reqCtx := &RequestContext{
 		Request:  &Request{Headers: make(map[string]string)},
 		Response: &Response{Headers: make(map[string]string)},
 	}
-	req := &extProcPb.ProcessingRequest_RequestHeaders{
-		RequestHeaders: &extProcPb.HttpHeaders{
-			// EndOfStream is false: an upgrade keeps its request stream open.
-			Headers: &configPb.HeaderMap{Headers: upgradeHeaders},
-		},
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodPost,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	assert.Equal(t, errcommon.BadRequest, errcommon.CanonicalCode(err))
+	assert.Empty(t, reqCtx.TargetEndpoint)
+}
+
+func TestProcessClosesStreamAfterWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &blockingReplayProcessServer{replayProcessServer{ctx: ctx, reqs: []*extProcPb.ProcessingRequest{
+		{Request: headersFrame(map[string]string{
+			":method":    http.MethodGet,
+			":path":      "/v1/realtime",
+			"connection": "Upgrade",
+			"upgrade":    "websocket",
+		})},
+		// A WebSocket frame the EPP must never receive.
+		{Request: &extProcPb.ProcessingRequest_RequestBody{
+			RequestBody: &extProcPb.HttpBody{Body: []byte{0x81, 0x82, 0, 0, 0, 0, 'h', 'i'}},
+		}},
+	}}}
+	server := NewStreamingServer(nil, &mockDirectorRequest{}, nil, 0)
+
+	done := make(chan error, 1)
+	go func() { done <- server.Process(stream) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Process kept the ext_proc stream open after a WebSocket upgrade")
 	}
 
-	err := server.HandleRequestHeaders(context.Background(), reqCtx, req)
-	assert.NoError(t, err)
-
-	assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint, "upgrade must be routed to an endpoint at header time")
-	assert.Equal(t, requestResponseProcessingSkipped, reqCtx.requestState,
-		"upgrade must skip body and response processing")
-	assert.NotNil(t, reqCtx.reqHeaderResp, "header response must carry the routing decision")
+	require.Len(t, stream.sentResponses, 1)
+	setHeaders := map[string]string{}
+	for _, h := range stream.sentResponses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders() {
+		setHeaders[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
+	}
+	assert.Equal(t, "1.2.3.4:80", setHeaders[metadata.DestinationEndpointKey])
+	assert.NotContains(t, setHeaders, "connection")
+	assert.NotContains(t, setHeaders, "upgrade")
 }
 
 type mockDirectorRequest struct {
