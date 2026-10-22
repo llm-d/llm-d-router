@@ -841,6 +841,18 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 | `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
 | `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
+### QoS admission
+
+These metrics are owned by the `qos-admission` RequestHeader plugin and are registered only when
+it is configured. The `team` label shares the fairness ID cardinality bound.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `mode` | `decision` is `admitted`, `downgraded`, `rejected_quota`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `served_class` is empty for rejections. |
+| `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
+| `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency cap. |
+| `llm_d_epp_qos_bucket_tokens` | Gauge | `team` | Token bucket level at its last update. |
+
 ### Latency by prompt bucket and path
 
 These metrics are owned by the `latency-reporter` response plugin and are registered only when it
