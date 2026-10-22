@@ -37,8 +37,7 @@ func RemotePrefillerParams(kvRequestID, host string, port int) map[string]any {
 // P2PPeerParams returns an OffloadingConnector P2P tier peer block of
 // kv_transfer_params: the kv_request_id of the transfer and the host and tier
 // port a pull dials. It is the value of remote_prefiller on a decode request
-// (see RemotePrefillerParams) and of remote_kv_source on a request that pulls
-// a cached prefix.
+// and of remote_kv_source on a request that pulls a cached prefix.
 func P2PPeerParams(kvRequestID, host string, port int) map[string]any {
 	return map[string]any{
 		FieldKVRequestID: kvRequestID,

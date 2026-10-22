@@ -39,11 +39,12 @@ const loggerName = "kv"
 
 // Connector controls the kv_transfer_params wire shape on the prefill and
 // decode requests. Implementations are stateless and safe to share across
-// requests.
+// requests; per-request state lives on reqCtx.
 type Connector interface {
 	Name() string
 	// PreparePrefillKVParams returns the kv_transfer_params map written into
-	// the prefill request body.
+	// the prefill request body. It may store on reqCtx what the decode
+	// request must repeat, such as a transfer id.
 	PreparePrefillKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any
 	// PrepareDecodeKVParams returns the kv_transfer_params map written into
 	// the decode request body. The prefill response's kv_transfer_params is
@@ -54,21 +55,17 @@ type Connector interface {
 // PrefillResponseReader is implemented by a connector whose decode request
 // depends on the prefill response headers. PrefillStep calls it once the
 // prefill response arrives; an error fails the request before decode is sent.
+// It is optional, as RouteRegistrar is for steps, so the connectors that
+// read no header carry no no-op method.
 type PrefillResponseReader interface {
 	ReadPrefillResponse(reqCtx *pipeline.RequestContext, headers http.Header) error
 }
 
-// ResolveName returns name, or DefaultKVConnectorName when name is empty.
-func ResolveName(name string) string {
-	if name == "" {
-		return DefaultKVConnectorName
-	}
-	return name
-}
-
 // Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.
 func Build(name string) (Connector, error) {
-	name = ResolveName(name)
+	if name == "" {
+		name = DefaultKVConnectorName
+	}
 	switch name {
 	case NIXL:
 		return nixlKV{}, nil

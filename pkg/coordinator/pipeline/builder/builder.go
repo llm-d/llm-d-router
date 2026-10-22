@@ -22,11 +22,7 @@ package builder
 import (
 	"fmt"
 
-	"github.com/go-logr/logr"
-	ctrl "sigs.k8s.io/controller-runtime"
-
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
-	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
@@ -78,24 +74,6 @@ func mergePipelineDefaults(params map[string]any, cfg config.PipelineConfig) map
 	return out
 }
 
-// kvConnectorName returns the KV connector a step's merged params select, with
-// an unset name resolved to the default.
-func kvConnectorName(params map[string]any) string {
-	name, _ := params[steps.ParamKVConnector].(string)
-	return kv.ResolveName(name)
-}
-
-// warnKVConnectorMismatch logs when prefill and decode resolve to different KV
-// connectors. Each step builds its own connector, so the mismatch is valid
-// config, but decode then does not ask for the KV prefill stored and
-// recomputes the prompt, and no request fails to show it.
-func warnKVConnectorMismatch(logger logr.Logger, prefill, decode string) {
-	if prefill != "" && decode != "" && prefill != decode {
-		logger.Info("warning: prefill and decode use different kv_connector values; decode does not read the KV prefill stores",
-			"prefill", prefill, "decode", decode)
-	}
-}
-
 // Build validates cfg.Pipeline and constructs its pipeline.
 func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, error) {
 	if err := validatePipeline(cfg.Pipeline); err != nil {
@@ -103,7 +81,6 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 	}
 
 	pipelineSteps := make([]pipeline.Step, 0, len(cfg.Pipeline.Steps))
-	var prefillKV, decodeKV string
 	for _, stepCfg := range cfg.Pipeline.Steps {
 		params := mergePipelineDefaults(stepCfg.Params, cfg.Pipeline)
 		if usesOpenAIFormatParam(stepCfg.Type) {
@@ -116,14 +93,7 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 			return nil, err
 		}
 
-		switch stepCfg.Type {
-		case steps.PrefillStepName:
-			prefillKV = kvConnectorName(params)
-		case steps.DecodeStepName:
-			decodeKV = kvConnectorName(params)
-		}
 		pipelineSteps = append(pipelineSteps, step)
 	}
-	warnKVConnectorMismatch(ctrl.Log.WithName("builder"), prefillKV, decodeKV)
 	return pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
 }

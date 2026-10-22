@@ -214,8 +214,7 @@ func TestDecodeStep_ConnectorShapesDecodeBody(t *testing.T) {
 				Model:            "m",
 				KVTransferParams: tc.prefillResponse,
 				KVRequestID:      "K",
-				PrefillHost:      "10.0.0.7",
-				PrefillP2PPort:   7779,
+				PrefillPeer:      &pipeline.P2PPeer{Host: "10.0.0.7", Port: 7779},
 				Body:             map[string]any{"model": "m"},
 				ResponseWriter:   recorder,
 			}

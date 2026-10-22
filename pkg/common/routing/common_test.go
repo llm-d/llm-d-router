@@ -363,6 +363,8 @@ func TestParseHostPort(t *testing.T) {
 		{"ipv4", "10.0.0.7:7779", "10.0.0.7", 7779, true},
 		{"ipv6", "[fd00::2]:7777", "fd00::2", 7777, true},
 		{"surrounding whitespace", " 10.0.0.7:7779\t", "10.0.0.7", 7779, true},
+		// Only the ends are trimmed; net/http strips those on the wire anyway.
+		{"whitespace before the colon stays in the host", "10.0.0.7 :7779", "10.0.0.7 ", 7779, true},
 		{"lowest port", "10.0.0.7:1", "10.0.0.7", 1, true},
 		{"highest port", "10.0.0.7:65535", "10.0.0.7", 65535, true},
 		{"empty", "", "", 0, false},

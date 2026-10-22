@@ -1085,8 +1085,8 @@ func TestPrefillStep_ReadsPrefillResponseForConnector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reqCtx.PrefillHost != "10.0.0.7" || reqCtx.PrefillP2PPort != 7779 {
-		t.Fatalf("read %q:%d, want 10.0.0.7:7779", reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
+	if p := reqCtx.PrefillPeer; p == nil || p.Host != "10.0.0.7" || p.Port != 7779 {
+		t.Fatalf("read %+v, want 10.0.0.7:7779", p)
 	}
 
 	if _, err := runPrefillWithP2PAddress(t, kv.Offloading, ""); err == nil {
@@ -1100,8 +1100,8 @@ func TestPrefillStep_OtherConnectors_IgnorePrefillResponseHeaders(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reqCtx.PrefillHost != "" || reqCtx.PrefillP2PPort != 0 {
-		t.Fatalf("read %q:%d, want empty", reqCtx.PrefillHost, reqCtx.PrefillP2PPort)
+	if reqCtx.PrefillPeer != nil {
+		t.Fatalf("read %+v, want nil", reqCtx.PrefillPeer)
 	}
 }
 

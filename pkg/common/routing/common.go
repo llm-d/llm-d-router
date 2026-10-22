@@ -82,9 +82,9 @@ func IsTCPPort(port int) bool {
 	return port >= 1 && port <= 65535
 }
 
-// ParseHostPort parses a host:port header value after trimming surrounding
-// whitespace. It reports false unless the host is non-empty and the port is a
-// TCP port.
+// ParseHostPort splits a trimmed host:port, reporting false when
+// net.SplitHostPort rejects it, the host is empty, or the port is outside the
+// TCP range.
 func ParseHostPort(value string) (string, int, bool) {
 	host, portStr, err := net.SplitHostPort(strings.TrimSpace(value))
 	if err != nil || host == "" {

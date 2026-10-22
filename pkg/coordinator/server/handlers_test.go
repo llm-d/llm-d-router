@@ -31,12 +31,15 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	ctrl "sigs.k8s.io/controller-runtime"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -693,27 +696,80 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	}
 }
 
-func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
-	step := &capturingStep{}
-	srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	body := `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
-		`{"kv_request_id":"x","remote_host":"10.9.9.9","remote_port":7777}}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	srv.handleInference(httptest.NewRecorder(), req)
+// handlerLog captures the request-scoped handler logger, which hangs off the
+// process-wide controller-runtime logger. That logger is fulfilled once per
+// process, so the capture is installed once and tests read it by position.
+var handlerLog struct {
+	once  sync.Once
+	mu    sync.Mutex
+	lines []string
+}
 
-	if step.captured == nil {
-		t.Fatal("pipeline step did not run")
+func handlerLogLines(t *testing.T, run func()) []string {
+	t.Helper()
+	handlerLog.once.Do(func() {
+		ctrl.SetLogger(funcr.New(func(_, args string) {
+			handlerLog.mu.Lock()
+			defer handlerLog.mu.Unlock()
+			handlerLog.lines = append(handlerLog.lines, args)
+		}, funcr.Options{Verbosity: logutil.DEFAULT}))
+	})
+	handlerLog.mu.Lock()
+	start := len(handlerLog.lines)
+	handlerLog.mu.Unlock()
+	run()
+	handlerLog.mu.Lock()
+	defer handlerLog.mu.Unlock()
+	return append([]string(nil), handlerLog.lines[start:]...)
+}
+
+// The drop is logged by presence only: the value carries a host, a port and a
+// request id, so none of it may reach the log.
+func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
+	const dropped = "dropped client-supplied kv_transfer_params"
+	const host = "10.9.9.9"
+	cases := map[string]struct {
+		body     string
+		wantDrop bool
+	}{
+		"client block": {body: `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
+			`{"kv_request_id":"x","remote_host":"` + host + `","remote_port":7777}}}`, wantDrop: true},
+		"no block": {body: `{"model":"m","messages":[]}`},
 	}
-	if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
-		t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
-	}
-	for _, field := range []string{"model", "messages"} {
-		if _, ok := step.captured.Body[field]; !ok {
-			t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
-		}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			lines := handlerLogLines(t, func() { srv.handleInference(httptest.NewRecorder(), req) })
+
+			if step.captured == nil {
+				t.Fatal("pipeline step did not run")
+			}
+			if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
+				t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
+			}
+			for _, field := range []string{"model", "messages"} {
+				if _, ok := step.captured.Body[field]; !ok {
+					t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
+				}
+			}
+			var drops int
+			for _, line := range lines {
+				if strings.Contains(line, dropped) {
+					drops++
+				}
+				if strings.Contains(line, host) {
+					t.Fatalf("log line carries the client value: %s", line)
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantDrop]; drops != want {
+				t.Fatalf("%d drop lines, want %d: %v", drops, want, lines)
+			}
+		})
 	}
 }
 
