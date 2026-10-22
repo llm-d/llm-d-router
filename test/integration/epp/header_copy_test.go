@@ -21,6 +21,7 @@ import (
 	"net"
 	"testing"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -77,11 +78,14 @@ func TestRequestHeaderCopyHandler_CopiesPreRequestHeader(t *testing.T) {
 	configText := fmt.Sprintf(headerCopyConfigBase, "      deciders:\n        prefill: always-disagg-pd-decider")
 	h := setupPDHarness(t, configText)
 
-	value := sendRequestGetResponseHeader(t, h, nil, routing.PrefillEndpointHeader)
+	setHeaders := sendRequestGetResponseHeaders(t, h, nil)
+	value := headerValue(setHeaders, routing.PrefillEndpointHeader)
 	host, port, err := net.SplitHostPort(value)
 	require.NoError(t, err, "response must carry the prefill endpoint as host:port, got %q", value)
 	require.Contains(t, []string{"192.168.1.1", "192.168.1.2"}, host, "the copied address must be a prefill pod")
 	require.Equal(t, "8000", port)
+	require.Equal(t, value, headerValue(setHeaders, routing.LegacyPrefillEndpointHeader),
+		"the deprecated alias spelling must be copied with the same value")
 }
 
 // TestRequestHeaderCopyHandler_DoesNotEchoClientValue validates that a
@@ -94,15 +98,15 @@ func TestRequestHeaderCopyHandler_DoesNotEchoClientValue(t *testing.T) {
 	configText := fmt.Sprintf(headerCopyConfigBase, "      {}")
 	h := setupPDHarness(t, configText)
 
-	value := sendRequestGetResponseHeader(t, h,
-		map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:9999"}, routing.PrefillEndpointHeader)
+	value := headerValue(sendRequestGetResponseHeaders(t, h,
+		map[string]string{routing.PrefillEndpointHeader: "10.0.0.1:9999"}), routing.PrefillEndpointHeader)
 	require.Empty(t, value, "a client-sent value must not be copied onto the response")
 }
 
-// sendRequestGetResponseHeader drives one full request/response transaction
-// with the given extra request headers and returns the value of the named
-// header in the response headers mutation, or "" when absent.
-func sendRequestGetResponseHeader(t *testing.T, h *TestHarness, extraHeaders map[string]string, key string) string {
+// sendRequestGetResponseHeaders drives one full request/response transaction
+// with the given extra request headers and returns the response headers
+// mutation's set-headers list.
+func sendRequestGetResponseHeaders(t *testing.T, h *TestHarness, extraHeaders map[string]string) []*configPb.HeaderValueOption {
 	t.Helper()
 
 	requests := append(newRoutedRequest(extraHeaders), ReqResponseOnly(
@@ -110,5 +114,5 @@ func sendRequestGetResponseHeader(t *testing.T, h *TestHarness, extraHeaders map
 		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
 	)...)
 	responses := streamRequests(t, h, requests, 4)
-	return headerValue(responses[2].GetResponseHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), key)
+	return responses[2].GetResponseHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
 }

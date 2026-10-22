@@ -15,14 +15,20 @@ is the client of that exchange and never sees the request after EPP changed it.
 
 Runs after response headers are received (`ResponseHeader`). For each name in the
 `headers` parameter that is present on the request, it writes the same name and value
-onto the response headers. The director sends every non-system-owned response header to
-Envoy as a header mutation, so the copied headers reach the coordinator.
+onto the response headers. The copy is written under the lowercased configured name and
+replaces a response header stored under that exact key. EPP keeps the casing the model
+server used for response header keys, so a response header sent under another casing of
+the name stays, and the client receives both. The director sends every non-system-owned
+response header to Envoy as a header mutation, so the copied headers reach the
+coordinator.
 
 The value is the one the request carries when the response arrives. For the internal
 routing headers, such as `x-llm-d-prefiller-host-port` and
 `x-llm-d-kv-cache-prefill-p2p-host-port`, only EPP plugins can supply it, because EPP
-drops client values on ingress. For any other name in the `headers` parameter, the value
-can come from the client.
+drops client values on ingress. EPP writes `x-llm-d-prefiller-host-port` under its
+deprecated alias `x-prefiller-host-port` as well, and the plugin copies both spellings
+when the current name is configured; a config naming the alias copies the alias spelling
+only. For any other name in the `headers` parameter, the value can come from the client.
 
 Sets nothing when the request or the response has no header map.
 
@@ -35,7 +41,7 @@ carries them.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `headers` | yes | none | Request header names to copy onto the response, each one when present on the request. Names are compared case-insensitively. A name listed more than once is copied once, and EPP logs a warning at startup. |
+| `headers` | yes | none | Request header names to copy onto the response, each one when present on the request. Names are lowercased, and EPP lowercases request header keys on ingress, so the match against the request is case-insensitive. A name listed more than once is copied once, and EPP logs a warning at startup. A system-owned name, such as `x-llm-d-inference-objective` or `x-gateway-destination-endpoint`, fails startup: the director drops it from the response header mutation, so the entry would copy nothing. |
 
 The list is explicit on purpose: the request header map holds every client header
 (`authorization`, `cookie`, `host`, `content-type`, ...), so a copy of every request
