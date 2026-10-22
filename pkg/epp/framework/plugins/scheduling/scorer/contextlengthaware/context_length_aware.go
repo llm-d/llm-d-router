@@ -55,8 +55,8 @@ type contextLengthAwareParameters struct {
 	EnableFiltering bool `json:"enableFiltering"`
 
 	// ReusableTokensProducerName is the name of the p2p-source-producer whose
-	// reusable prefix token count is subtracted from the request length. Empty
-	// disables cache subtraction.
+	// reusable prefix token count is subtracted from the total token count
+	// across all prompts. Empty disables cache subtraction.
 	ReusableTokensProducerName string `json:"reusableTokensProducerName,omitempty"`
 }
 
@@ -292,6 +292,9 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 // server checks each prompt of a multi-prompt request against its maximum
 // model length separately.
 func longestPromptTokens(tp *scheduling.TokenizedRequest) int {
+	if tp == nil {
+		return 0
+	}
 	n := 0
 	for _, p := range tp.Prompts {
 		n = max(n, len(p.TokenIDs))

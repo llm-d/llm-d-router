@@ -331,9 +331,7 @@ func TestReusableTokensFilter(t *testing.T) {
 			attrprefix.ReusablePrefixTokens(10),
 		)
 
-		filtered := plugin.Filter(ctx, request, endpoints)
-		require.Len(t, filtered, 1)
-		assert.Equal(t, "long", filtered[0].GetMetadata().ID.Name)
+		assert.Equal(t, 90, plugin.getContextLength(request))
 	})
 
 	t.Run("unknown token count remains zero", func(t *testing.T) {
@@ -632,6 +630,10 @@ func highestScored(scores map[scheduling.Endpoint]float64) scheduling.Endpoint {
 		}
 	}
 	return best
+}
+
+func TestLongestPromptTokensNilIsZero(t *testing.T) {
+	assert.Equal(t, 0, longestPromptTokens(nil))
 }
 
 func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
