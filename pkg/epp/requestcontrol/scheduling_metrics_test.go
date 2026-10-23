@@ -59,13 +59,14 @@ func (s *schedulingMetricsStream) Recv() (*extProcPb.ProcessingRequest, error) {
 }
 
 type apiSurfaceProfile struct {
-	surface, path string
-	fail          bool
+	surface reqcommon.APISurface
+	path    string
+	fail    bool
 }
 
 func (p *apiSurfaceProfile) Run(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	p.surface, p.path = request.APISurface, request.Headers[":path"]
-	request.APISurface = reqcommon.APITypeResponses.String()
+	request.APISurface = reqcommon.APITypeResponses.Surface()
 	if p.fail {
 		return nil, errors.New("scheduling failed")
 	}
@@ -98,7 +99,7 @@ func TestSchedulingMetricsRetainIncomingAPISurface(t *testing.T) {
 				}}
 				server := handlers.NewStreamingServer(nil, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}, logr.Discard()), 0)
 				require.NoError(t, server.Process(stream))
-				require.Equal(t, apiType.String(), profile.surface, "the director must carry the incoming surface to the scheduler")
+				require.Equal(t, apiType.Surface(), profile.surface, "the director must carry the incoming surface to the scheduler")
 				require.Equal(t, reqcommon.PathChatCompletions, profile.path, "the header plugin must run before scheduling")
 				counts := map[string]float64{
 					"llm_d_epp_scheduler_e2e_duration_seconds":      1,

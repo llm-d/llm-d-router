@@ -853,7 +853,7 @@ func TestHandleResponseMetricsByAPISurface(t *testing.T) {
 					openai.NewOpenAIParser(), anthropic.NewAnthropicParser(),
 				}, logr.Discard()), 0)
 				reqCtx := &RequestContext{
-					IncomingModelName: "model", TargetModelName: "model", apiSurface: apiType.String(),
+					IncomingModelName: "model", TargetModelName: "model", apiSurface: apiType.Surface(),
 					RequestReceivedTimestamp: time.Now().Add(-time.Second), modelServerStreaming: streaming,
 					Request:  &Request{Headers: map[string]string{":path": apiType.Path()}},
 					Response: &Response{Headers: map[string]string{reqcommon.HeaderContentType: contentType}},
@@ -996,7 +996,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
-		apiSurface:        reqcommon.APITypeMessages.String(),
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",
@@ -1067,7 +1067,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
-		apiSurface:        reqcommon.APITypeMessages.String(),
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",

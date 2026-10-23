@@ -170,7 +170,7 @@ type RequestContext struct {
 	FlowControlQueueDuration time.Duration
 
 	// Lifecycle bookkeeping.
-	apiSurface                 string
+	apiSurface                 reqcommon.APISurface
 	firstTokenTimestamp        time.Time
 	lastChunkReceivedTimestamp time.Time
 	responseCompleteTimestamp  time.Time
@@ -274,7 +274,7 @@ func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Pars
 }
 
 // APISurface returns the generation API captured at ingress.
-func (r *RequestContext) APISurface() string {
+func (r *RequestContext) APISurface() reqcommon.APISurface {
 	return r.apiSurface
 }
 
@@ -578,7 +578,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			ctx = extractTraceContext(ctx, v)
 			ctx, span = tracer.Start(ctx, "request",
 				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface)),
+				trace.WithAttributes(semconv.LLMDEPPAPISurface(reqCtx.apiSurface.String())),
 			)
 
 			// Tag every log line of this request with the trace it belongs to.

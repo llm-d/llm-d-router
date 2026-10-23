@@ -95,10 +95,32 @@ func TestDetectAPISurface(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := DetectAPISurface(tt.path); got != tt.want {
+			if got := DetectAPISurface(tt.path).String(); got != tt.want {
 				t.Errorf("DetectAPISurface(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAPISurfaceString(t *testing.T) {
+	var zero APISurface
+	for _, surface := range []APISurface{zero, APISurfaceUnknown, APISurface(-1), APISurface(1000)} {
+		if got := surface.String(); got != "unknown" {
+			t.Errorf("APISurface(%d).String() = %q, want unknown", surface, got)
+		}
+	}
+	for _, apiType := range []APIType{
+		APITypeChatCompletions, APITypeCompletions, APITypeResponses,
+		APITypeVLLMGenerate, APITypeSGLangGenerate, APITypeMessages,
+	} {
+		if got := apiType.Surface().String(); got != apiType.String() {
+			t.Errorf("%v surface = %q, want %q", apiType, got, apiType.String())
+		}
+	}
+	for _, apiType := range []APIType{APIType(-1), APIType(1000)} {
+		if got := apiType.Surface(); got != APISurfaceUnknown {
+			t.Errorf("%v surface = %v, want unknown", apiType, got)
+		}
 	}
 }
 

@@ -34,7 +34,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
 	received := time.Now()
-	record := func(surface string) {
+	record := func(surface reqcommon.APISurface) {
 		RecordRequestCounter("model", "target", surface, "", 0)
 		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
 		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
@@ -58,10 +58,11 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses,
 		reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
 	} {
-		record(apiType.String())
+		record(apiType.Surface())
 	}
 	for i := 0; i < 1000; i++ {
-		record(fmt.Sprintf("/unrecognized/%d", i))
+		record(reqcommon.DetectAPISurface(fmt.Sprintf("/unrecognized/%d", i)))
+		record(reqcommon.APISurface(1000 + i))
 	}
 	for _, collector := range []prometheus.Collector{
 		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
@@ -71,10 +72,10 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 	} {
 		require.Equal(t, 7, promtestutil.CollectAndCount(collector), "six supported surfaces plus unknown must bound the series count")
 	}
-	require.Equal(t, float64(1000), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
-		boundModel("model"), boundModel("target"), "", "0", reqcommon.APISurfaceUnknown,
+	require.Equal(t, float64(2000), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
+		boundModel("model"), boundModel("target"), "", "0", reqcommon.APISurfaceUnknown.String(),
 	)))
-	for _, surface := range []string{reqcommon.APITypeMessages.String(), reqcommon.APISurfaceUnknown} {
+	for _, surface := range []string{reqcommon.APITypeMessages.String(), reqcommon.APISurfaceUnknown.String()} {
 		require.Zero(t, promtestutil.ToFloat64(llmdRunningRequests.WithLabelValues(
 			boundModel("model"), boundModel("target"), "", "0", surface,
 		)))

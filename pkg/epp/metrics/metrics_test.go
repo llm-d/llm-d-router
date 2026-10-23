@@ -391,7 +391,7 @@ func TestRecordNormalizedTimePerOutputToken(t *testing.T) {
 
 			// Verify llm_d_epp metric labels directly.
 			if !scenario.invalid {
-				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown)
+				observed, err := getHistogramVecLabelValues(t, llmdNormalizedTimePerOutputToken, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), observed.GetSampleCount())
 				require.InEpsilon(t, 0.03, observed.GetSampleSum(), 0.000001)
@@ -1275,12 +1275,12 @@ func TestRecordRequestTTFT(t *testing.T) {
 		require.True(t, RecordRequestTTFT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, timeBaseline, timeBaseline.Add(1600*time.Millisecond)))
 		require.True(t, RecordRequestTTFT(ctx, "m20", "t20", reqcommon.APISurfaceUnknown, "tenant-b", "5", false, timeBaseline, timeBaseline.Add(120*time.Millisecond)))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown, "true")
+		h, err := getHistogramVecLabelValues(t, llmdRequestTTFT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String(), "true")
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), h.GetSampleCount())
 		require.InDelta(t, 1.61, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown, "false")
+		h, err = getHistogramVecLabelValues(t, llmdRequestTTFT, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown.String(), "false")
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.12, h.GetSampleSum(), 0.001)
@@ -1306,7 +1306,7 @@ func TestRecordRequestTPOT(t *testing.T) {
 		complete := timeBaseline.Add(2000 * time.Millisecond)
 		require.True(t, RecordRequestTPOT(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", true, received, firstToken, complete, 11))
 
-		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown)
+		h, err := getHistogramVecLabelValues(t, llmdRequestTPOT, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.15, h.GetSampleSum(), 0.001)
@@ -1350,12 +1350,12 @@ func TestRecordInterTokenLatency(t *testing.T) {
 		require.True(t, RecordInterTokenLatency(ctx, "m10", "t10", reqcommon.APISurfaceUnknown, "tenant-a", "3", 0.12))
 		require.True(t, RecordInterTokenLatency(ctx, "m20", "t20", reqcommon.APISurfaceUnknown, "tenant-b", "5", 0.03))
 
-		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown)
+		h, err := getHistogramVecLabelValues(t, llmdInterTokenLatency, "m10", "t10", "tenant-a", "3", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(3), h.GetSampleCount())
 		require.InDelta(t, 0.25, h.GetSampleSum(), 0.001)
 
-		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown)
+		h, err = getHistogramVecLabelValues(t, llmdInterTokenLatency, "m20", "t20", "tenant-b", "5", reqcommon.APISurfaceUnknown.String())
 		require.NoError(t, err)
 		require.Equal(t, uint64(1), h.GetSampleCount())
 		require.InDelta(t, 0.03, h.GetSampleSum(), 0.001)
