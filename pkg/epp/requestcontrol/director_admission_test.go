@@ -101,7 +101,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 		{
 			name: "no endpoints after the admission controller admits",
 			setup: func(d *Director) {
-				d.endpointCandidates = &mockEndpointCandidates{}
+				d.endpointCandidates = &mocks.MockEndpointCandidates{}
 			},
 			wantDecision: "rejected",
 			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
