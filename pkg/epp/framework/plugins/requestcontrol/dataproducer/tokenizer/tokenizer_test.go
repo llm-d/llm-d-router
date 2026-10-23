@@ -393,3 +393,25 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 	assert.Nil(t, h)
 	assert.Nil(t, r)
 }
+
+func TestProduces_PublishesBackendAttribute(t *testing.T) {
+	ctx := context.Background()
+
+	vp, err := NewPlugin(ctx, PluginType, &tokenizerPluginConfig{ModelName: "m", VLLM: &vllmConfig{}})
+	require.NoError(t, err)
+	assert.Equal(t, map[plugin.DataKey]any{
+		TokenizedPromptDataKey: plugin.ProducedData{
+			Type:       fwkrh.TokenizedRequest{},
+			Attributes: map[string]string{"backend": BackendVLLM},
+		},
+	}, vp.Produces())
+
+	ep, err := NewPlugin(ctx, PluginType, &tokenizerPluginConfig{Estimate: &estimateConfig{}})
+	require.NoError(t, err)
+	assert.Equal(t, map[plugin.DataKey]any{
+		TokenizedPromptDataKey: plugin.ProducedData{
+			Type:       fwkrh.TokenizedRequest{},
+			Attributes: map[string]string{"backend": BackendEstimate},
+		},
+	}, ep.Produces())
+}

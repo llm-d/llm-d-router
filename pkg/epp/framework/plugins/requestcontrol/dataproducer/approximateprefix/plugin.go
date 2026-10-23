@@ -29,12 +29,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixmetrics"
@@ -56,19 +58,46 @@ const (
 var minBlockSizeTokens = 64
 
 var (
-	_ requestcontrol.DataProducer = &dataProducer{}
-	_ requestcontrol.PreRequest   = &dataProducer{}
-	_ plugin.StateDumper          = &dataProducer{}
+	_ requestcontrol.DataProducer       = &dataProducer{}
+	_ requestcontrol.PreRequest         = &dataProducer{}
+	_ plugin.StateDumper                = &dataProducer{}
+	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
+	_ datalayer.Registrant              = &dataProducer{}
+	_ datalayer.CrossReplicaContributor = (*dataProducer)(nil)
 )
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
-	typedName   plugin.TypedName
-	config      config
-	indexerInst indexerInterface
-	pluginState *plugin.PluginState
-	wg          sync.WaitGroup // Used for waiting on async cache updates in tests.
-	dk          plugin.DataKey
+	typedName             plugin.TypedName
+	config                config
+	handle                plugin.Handle
+	indexerInst           indexerInterface
+	pluginState           *plugin.PluginState
+	wg                    sync.WaitGroup // Used for waiting on async cache updates in tests.
+	dk                    plugin.DataKey
+	syncHashDK            plugin.DataKey
+	syncCrossReplicaState bool
+	recent                *recentWindow
+	// registeredEndpoints maps endpointID to the Endpoint pointer last seen on
+	// AddOrUpdate so Extract can ignore stale deletes for a replaced object.
+	registeredEndpoints sync.Map
+	// peerMerged tracks peer prompt keys already folded into the indexer per
+	// endpoint so a stable peer window does not re-Add (and LRU-touch) on every
+	// request. Each merge replaces the set with the active peer-only window so
+	// the map stays bounded and prompts that leave and return can be re-indexed.
+	// Values are *mergedKeySet.
+	peerMerged sync.Map
+}
+
+// mergedKeySet is the per-endpoint set stored in peerMerged. keys holds only
+// prompt keys present in the latest peer sync window for that endpoint.
+// digest is the xxhash of the last processed PrefixHashSet.Prompts so Produce
+// can skip snapshot/key work when the sync attribute is unchanged.
+type mergedKeySet struct {
+	mu         sync.Mutex
+	keys       map[string]struct{}
+	digest     uint64
+	haveDigest bool
 }
 
 // TypedName returns the type and name of the plugin.
@@ -127,16 +156,25 @@ func (p *dataProducer) snapshotState() prefixIndexState {
 
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	out := map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	if p.syncCrossReplicaState {
+		out[p.syncHashDK] = attrprefix.PrefixHashSet{}
+	}
+	return out
 }
 
 // Consumes declares the TokenizedRequest dependency so the data-layer DAG orders
 // the token-producer before this producer runs and auto-creates one when none
-// is configured.
+// is configured. PrefixHashSet is optional: when a CrossReplicaSyncer is wired,
+// Produce reads the syncer-backed attribute to merge peer recent windows.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
-	return plugin.DataDependencies{
+	deps := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}},
 	}
+	if p.syncCrossReplicaState {
+		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
+	}
+	return deps
 }
 
 // newDataProducer returns a new DataProducer plugin.
@@ -178,20 +216,54 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 
 	indexer := newIndexer(ctx, config.LRUCapacityPerServer, name, ApproxPrefixCachePluginType)
 
+	syncCrossReplicaState := true
+	if config.SyncCrossReplicaState != nil {
+		syncCrossReplicaState = *config.SyncCrossReplicaState
+	}
+	maxSynced := syncedHashBudget(config)
+
 	p := &dataProducer{
 		typedName: plugin.TypedName{
 			Type: ApproxPrefixCachePluginType,
 			Name: name,
 		},
-		config:      config,
-		indexerInst: indexer,
-		pluginState: plugin.NewPluginState(ctx),
-		dk:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		config:                config,
+		handle:                handle,
+		indexerInst:           indexer,
+		pluginState:           plugin.NewPluginState(ctx),
+		dk:                    attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
+		syncHashDK:            attrprefix.PrefixHashSetDataKey.WithNonEmptyProducerName(name),
+		syncCrossReplicaState: syncCrossReplicaState,
+		recent:                newRecentWindow(maxSynced),
 	}
 
 	go p.CleanUpInactivePods(ctx, handle)
 
 	return p, nil
+}
+
+// syncedHashBudget converts MaxSyncedTokens into a hash-count cap for the
+// recent window. Unset MaxSyncedTokens uses defaultMaxSyncedTokens.
+func syncedHashBudget(cfg config) int {
+	blockSize := cfg.BlockSizeTokens
+	if blockSize <= 0 {
+		blockSize = defaultBlockSizeTokens
+	}
+	tokens := cfg.MaxSyncedTokens
+	if tokens <= 0 {
+		tokens = defaultMaxSyncedTokens
+	}
+	n := tokens / blockSize
+	if n <= 0 {
+		return 1
+	}
+	return n
+}
+
+// syncerActive is true when this producer should publish/merge cross-replica
+// state: sync is enabled and a CrossReplicaSyncer is wired on the handle.
+func (p *dataProducer) syncerActive() bool {
+	return p.syncCrossReplicaState && p.handle != nil && p.handle.CrossReplicaSyncer() != nil
 }
 
 // CleanUpInactivePods starts a goroutine that periodically removes inactive pods from the indexer.
@@ -213,6 +285,11 @@ func (p *dataProducer) CleanUpInactivePods(ctx context.Context, handle plugin.Ha
 			for _, pod := range p.indexerInst.Pods() {
 				if _, ok := activePods[pod]; !ok {
 					p.indexerInst.RemovePod(pod)
+					id := pod.String()
+					if p.recent != nil {
+						p.recent.forget(id)
+					}
+					p.forgetPeerMerged(id)
 					log.FromContext(ctx).V(logutil.VERBOSE).Info("Removed pod not in active set", "pod", pod)
 				}
 			}
@@ -232,6 +309,8 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
+	p.mergeRemoteHashes(pods)
+
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
@@ -279,6 +358,158 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
+// mergeRemoteHashes folds peer recent-window prompts into the local indexer.
+// Runs only when a CrossReplicaSyncer is configured. The syncer-backed
+// attribute is Aggregate(local, peers); local prompts and prompts already
+// merged for this endpoint are skipped so Produce does not re-warm or
+// LRU-touch the indexer on every request. Each new peer prompt is Added on its
+// own so indexer LRU eviction keeps prompt-prefix semantics. Peer prompts are
+// not recorded into the recent window (no echo). When the attribute digest
+// matches the last processed value, the pod is skipped without snapshot or
+// prompt-key work.
+func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
+	if !p.syncerActive() || p.indexerInst == nil {
+		return
+	}
+	for _, pod := range pods {
+		set, ok := peekPrefixHashSet(pod, p.syncHashDK)
+		if !ok || set == nil {
+			continue
+		}
+		endpointID := pod.GetMetadata().ID.String()
+		digest := set.ContentDigest()
+		if p.peerMergedDigestMatches(endpointID, digest) {
+			continue
+		}
+		if len(set.Prompts) == 0 {
+			p.reconcilePeerMerged(endpointID, map[string]struct{}{})
+			p.rememberPeerMergedDigest(endpointID, digest)
+			continue
+		}
+		local := p.recent.snapshot(endpointID)
+		localSet := make(map[string]struct{}, len(local))
+		for _, prompt := range local {
+			localSet[promptKey(prompt)] = struct{}{}
+		}
+		active := make(map[string]struct{}, len(set.Prompts))
+		for _, prompt := range set.Prompts {
+			if len(prompt) == 0 {
+				continue
+			}
+			key := promptKeyUint64(prompt)
+			if _, ok := localSet[key]; ok {
+				continue
+			}
+			active[key] = struct{}{}
+		}
+		if p.peerMergedCovers(endpointID, active) {
+			p.rememberPeerMergedDigest(endpointID, digest)
+			continue
+		}
+		novel := p.reconcilePeerMerged(endpointID, active)
+		if len(novel) == 0 {
+			p.rememberPeerMergedDigest(endpointID, digest)
+			continue
+		}
+		server := p.makeserver(pod)
+		for _, prompt := range set.Prompts {
+			if len(prompt) == 0 {
+				continue
+			}
+			key := promptKeyUint64(prompt)
+			if _, ok := novel[key]; !ok {
+				continue
+			}
+			p.indexerInst.Add(uint64sToBlockHashes(prompt), server)
+		}
+		p.rememberPeerMergedDigest(endpointID, digest)
+	}
+}
+
+// peekPrefixHashSet returns the sync attribute without cloning when the
+// endpoint supports Peek. The result must not be mutated.
+func peekPrefixHashSet(pod fwksched.Endpoint, key plugin.DataKey) (*attrprefix.PrefixHashSet, bool) {
+	type peeker interface {
+		Peek(plugin.DataKey) (datalayer.Cloneable, bool)
+	}
+	var val datalayer.Cloneable
+	var ok bool
+	if p, okp := pod.(peeker); okp {
+		val, ok = p.Peek(key)
+	} else {
+		val, ok = pod.Get(key)
+	}
+	if !ok {
+		return nil, false
+	}
+	set, ok := val.(*attrprefix.PrefixHashSet)
+	return set, ok
+}
+
+func (p *dataProducer) peerMergedDigestMatches(endpointID string, digest uint64) bool {
+	v, ok := p.peerMerged.Load(endpointID)
+	if !ok {
+		return false
+	}
+	s := v.(*mergedKeySet)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.haveDigest && s.digest == digest
+}
+
+func (p *dataProducer) rememberPeerMergedDigest(endpointID string, digest uint64) {
+	v, _ := p.peerMerged.LoadOrStore(endpointID, &mergedKeySet{keys: make(map[string]struct{})})
+	s := v.(*mergedKeySet)
+	s.mu.Lock()
+	s.digest = digest
+	s.haveDigest = true
+	s.mu.Unlock()
+}
+
+// peerMergedCovers reports whether endpointID's remembered set already matches
+// active, so Produce can skip reconcile and Add work on a stable peer window.
+func (p *dataProducer) peerMergedCovers(endpointID string, active map[string]struct{}) bool {
+	v, ok := p.peerMerged.Load(endpointID)
+	if !ok {
+		return false
+	}
+	s := v.(*mergedKeySet)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.keys) != len(active) {
+		return false
+	}
+	for k := range active {
+		if _, ok := s.keys[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcilePeerMerged replaces the remembered peer keys for endpointID with
+// active and returns keys that were not previously remembered (need Add).
+func (p *dataProducer) reconcilePeerMerged(endpointID string, active map[string]struct{}) map[string]struct{} {
+	v, _ := p.peerMerged.LoadOrStore(endpointID, &mergedKeySet{keys: make(map[string]struct{})})
+	s := v.(*mergedKeySet)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	novel := make(map[string]struct{})
+	next := make(map[string]struct{}, len(active))
+	for k := range active {
+		next[k] = struct{}{}
+		if _, ok := s.keys[k]; !ok {
+			novel[k] = struct{}{}
+		}
+	}
+	s.keys = next
+	return novel
+}
+
+func (p *dataProducer) forgetPeerMerged(endpointID string) {
+	p.peerMerged.Delete(endpointID)
+}
+
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
@@ -309,6 +540,9 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				p.indexerInst.Add(hashes, s)
+				if p.syncerActive() {
+					p.recent.record(s.String(), hashes)
+				}
 			}
 		}
 	})
@@ -356,6 +590,94 @@ func bestAmongScored(scored []fwksched.ScoredEndpoint, predicted map[ServerID]in
 		}
 	}
 	return best
+}
+
+// RegisterDependencies attaches this producer to endpoint lifecycle events so
+// the cross-replica publisher can discover it as a contributor.
+func (p *dataProducer) RegisterDependencies(r datalayer.Registrar) error {
+	return r.Register(datalayer.PendingRegistration{
+		Owner:         p.TypedName(),
+		SourceType:    sourcenotifications.EndpointNotificationSourceType,
+		Extractor:     p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
+
+// CrossReplicaState publishes recent prefix hashes for peer EPPs to merge.
+func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
+	return datalayer.CrossReplicaSpec{
+		StateKey:     datalayer.StateKey("approx-prefix:" + p.typedName.Name),
+		AttributeKey: p.syncHashDK,
+		SyncDisabled: !p.syncCrossReplicaState,
+		Read: func(endpointID string) datalayer.Cloneable {
+			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(p.recent.snapshot(endpointID))}
+		},
+		Aggregate: func(values []any) any {
+			// Each input is already capped by the publishing replica's
+			// maxSyncedTokens. Do not re-trim the union: redis-syncer orders
+			// peer fields by replica ID, so a global cap would drop whole
+			// replicas rather than oldest prompts.
+			seen := make(map[string]struct{})
+			var out [][]blockHash
+			for _, v := range values {
+				set, ok := v.(*attrprefix.PrefixHashSet)
+				if !ok || set == nil {
+					continue
+				}
+				for _, prompt := range set.Prompts {
+					if len(prompt) == 0 {
+						continue
+					}
+					hashes := uint64sToBlockHashes(prompt)
+					key := promptKey(hashes)
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+					out = append(out, hashes)
+				}
+			}
+			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(out)}
+		},
+	}
+}
+
+// Extract installs a local placeholder for the sync attribute. The cross-replica
+// publisher overwrites it with a syncer-backed DynamicAttribute on add/update.
+func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEvent) error {
+	if event.Endpoint == nil || event.Endpoint.GetMetadata() == nil {
+		return nil
+	}
+	endpointID := event.Endpoint.GetMetadata().ID.String()
+	switch event.Type {
+	case datalayer.EventDelete:
+		// Same pointer-identity guard as inflightload: an out-of-order delete for
+		// a replaced endpoint must not clear the live recent window.
+		if registered, ok := p.registeredEndpoints.Load(endpointID); ok && registered != event.Endpoint {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", endpointID)
+			return nil
+		}
+		p.registeredEndpoints.Delete(endpointID)
+		if p.recent != nil {
+			p.recent.forget(endpointID)
+		}
+		p.forgetPeerMerged(endpointID)
+		return nil
+	case datalayer.EventAddOrUpdate:
+		p.registeredEndpoints.Store(endpointID, event.Endpoint)
+		// Placeholder for the sync attribute only when a syncer will publish.
+		// Without a syncer, installing a local-only DynamicAttribute would make
+		// every Produce snapshot and skip the local window for no benefit.
+		if !p.syncerActive() {
+			return nil
+		}
+		event.Endpoint.GetAttributes().Put(p.syncHashDK, &datalayer.DynamicAttribute{
+			Get: func() datalayer.Cloneable {
+				return p.CrossReplicaState().Read(endpointID)
+			},
+		})
+	}
+	return nil
 }
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {

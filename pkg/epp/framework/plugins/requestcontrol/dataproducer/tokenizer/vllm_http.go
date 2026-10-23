@@ -374,7 +374,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
 	if r.prefillOnly {
-		if payload, err = renderOnlyBudget(payload); err != nil {
+		if payload, err = renderOnlyBudget(path, payload); err != nil {
 			return fmt.Errorf("apply render-only output budget: %w", err)
 		}
 	}
@@ -412,7 +412,7 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 // renderOnlyBudget caps the output budget on the render copy of a JSON
 // envelope. Nested values stay raw JSON, so message and tool content reaches
 // the renderer with its key order intact.
-func renderOnlyBudget(payload []byte) ([]byte, error) {
+func renderOnlyBudget(path string, payload []byte) ([]byte, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, err
@@ -433,6 +433,16 @@ func renderOnlyBudget(payload []byte) ([]byte, error) {
 	}
 	if _, ok := envelope["min_tokens"]; ok {
 		envelope["min_tokens"] = json.RawMessage("0")
+	}
+	// vLLM requires an enabled thinking's budget_tokens to stay below max_tokens and applies
+	// it only as a sampling budget, so dropping it leaves the rendered prompt unchanged.
+	if path == messagesRenderPath {
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(envelope["thinking"], &thinking) == nil && thinking.Type == "enabled" {
+			delete(envelope, "thinking")
+		}
 	}
 	return json.Marshal(envelope)
 }

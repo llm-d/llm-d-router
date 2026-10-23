@@ -81,6 +81,7 @@ const (
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
+	toolCallingTelemetryFlag  = "enable-tool-calling-telemetry"
 	metricsPort               = "metrics-port"
 	metricsCertDir            = "metrics-cert-dir"
 
@@ -112,32 +113,33 @@ const (
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
-	Port                    int      `json:"port,omitempty"`
-	ModelServerPort         int      `json:"model-server-port,omitempty"`
-	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
-	DataParallelSize        int      `json:"data-parallel-size,omitempty"`
-	KVConnector             string   `json:"kv-connector,omitempty"`
-	ECConnector             string   `json:"ec-connector,omitempty"`
-	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
-	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
-	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-serving,omitempty"`
-	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
-	CertPath                string   `json:"cert-path,omitempty"`
-	EnableTLS               []string `json:"enable-tls,omitempty"`
-	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
-	TLSMinVersion           string   `json:"tls-min-version,omitempty"`
-	TLSCipherSuites         []string `json:"tls-cipher-suites,omitempty"`
-	InferencePool           string   `json:"inference-pool,omitempty"`
-	PoolGroup               string   `json:"pool-group,omitempty"`
-	MaxIdleConnsPerHost     int      `json:"max-idle-conns-per-host,omitempty"`
-	PrefillMaxRetries       *int     `json:"prefill-max-retries,omitempty"`
-	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
-	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
-	Tracing                 *bool    `json:"tracing,omitempty"`
-	MetricsPort             int      `json:"metrics-port,omitempty"`
-	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
+	Port                       int      `json:"port,omitempty"`
+	ModelServerPort            int      `json:"model-server-port,omitempty"`
+	MooncakeBootstrapPort      int      `json:"mooncake-bootstrap-port,omitempty"`
+	P2PConnectorPort           int      `json:"p2p-connector-port,omitempty"`
+	DataParallelSize           int      `json:"data-parallel-size,omitempty"`
+	KVConnector                string   `json:"kv-connector,omitempty"`
+	ECConnector                string   `json:"ec-connector,omitempty"`
+	EnableSSRFProtection       *bool    `json:"enable-ssrf-protection,omitempty"`
+	EnablePrefillerSampling    *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableP2PPull              *bool    `json:"enable-p2p-pull,omitempty"`
+	SecureServing              *bool    `json:"secure-serving,omitempty"`
+	SecureProxy                *bool    `json:"secure-proxy,omitempty"`
+	CertPath                   string   `json:"cert-path,omitempty"`
+	EnableTLS                  []string `json:"enable-tls,omitempty"`
+	TLSInsecureSkipVerify      []string `json:"tls-insecure-skip-verify,omitempty"`
+	TLSMinVersion              string   `json:"tls-min-version,omitempty"`
+	TLSCipherSuites            []string `json:"tls-cipher-suites,omitempty"`
+	InferencePool              string   `json:"inference-pool,omitempty"`
+	PoolGroup                  string   `json:"pool-group,omitempty"`
+	MaxIdleConnsPerHost        int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries          *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff        string   `json:"prefill-retry-backoff,omitempty"`
+	DecodeChunkSize            int      `json:"decode-chunk-size,omitempty"`
+	Tracing                    *bool    `json:"tracing,omitempty"`
+	EnableToolCallingTelemetry *bool    `json:"enable-tool-calling-telemetry,omitempty"`
+	MetricsPort                int      `json:"metrics-port,omitempty"`
+	MetricsCertDir             string   `json:"metrics-cert-dir,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -290,6 +292,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"Only `inference.networking.k8s.io` is currently supported.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
+	fs.BoolVar(&opts.EnableToolCallingTelemetry, toolCallingTelemetryFlag, opts.EnableToolCallingTelemetry, "Enable tool-calling request telemetry")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 
@@ -885,6 +888,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing
+	}
+	if cfg.EnableToolCallingTelemetry != nil && !opts.isFlagSet(toolCallingTelemetryFlag) {
+		opts.EnableToolCallingTelemetry = *cfg.EnableToolCallingTelemetry
 	}
 }
 

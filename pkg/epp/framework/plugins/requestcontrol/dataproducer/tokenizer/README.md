@@ -481,11 +481,14 @@ the existing token-producer error behavior.
 Set `vllm.prefillOnly: true` when the renderer should validate the full prompt
 without reserving the client's generation budget. The render copy uses
 `max_tokens: 1`, caps `max_completion_tokens` and `max_output_tokens` at one
-when present, and sets `min_tokens` to zero when present. The inference
-payload, prompt, and requested generation budget are unchanged. The render
-copy re-serializes the JSON envelope; nested content such as messages and tool
-schemas keeps its key order. This option is false by default and also works
-with `vllm.url`.
+when present, and sets `min_tokens` to zero when present. A Messages render
+copy also drops a `thinking` of type `enabled`: vLLM requires its
+`budget_tokens` to be less than `max_tokens` and applies it only during
+sampling, so the rendered prompt is unchanged. Other `thinking` types stay.
+The inference payload, prompt, and requested generation budget are unchanged.
+The render copy re-serializes the JSON envelope; nested content such as
+messages and tool schemas keeps its key order. This option is false by default
+and also works with `vllm.url`.
 
 This avoids rejecting a prompt solely because its requested output would
 exceed the renderer's context capacity. The prompt itself must still fit;

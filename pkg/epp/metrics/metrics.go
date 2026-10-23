@@ -42,9 +42,40 @@ var (
 
 var registerMetrics sync.Once
 
-// Register all metrics.
+// RegisterOptions carries the parts of the EPP configuration that change how
+// collectors are built rather than how they are observed. The zero value keeps
+// every default.
+type RegisterOptions struct {
+	// RequestTPOTBuckets overrides the bucket edges of
+	// request_streaming_tpot_seconds. An empty slice keeps
+	// DefaultRequestTPOTBuckets.
+	RequestTPOTBuckets []float64
+
+	// RequestITLBuckets overrides the bucket edges of
+	// request_streaming_itl_seconds. An empty slice keeps
+	// DefaultInterTokenLatencyBuckets.
+	RequestITLBuckets []float64
+}
+
+// Register all metrics with the default collector configuration.
 func Register(customCollectors ...prometheus.Collector) {
+	RegisterWithOptions(RegisterOptions{}, customCollectors...)
+}
+
+// RegisterWithOptions registers all metrics after rebuilding the streaming
+// latency histograms from opts. The rebuild happens before registration
+// because a registered HistogramVec has no API to change its buckets, and the
+// recording helpers read these package variables on each call, so they observe
+// the replacement.
+func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Collector) {
 	registerMetrics.Do(func() {
+		if len(opts.RequestTPOTBuckets) > 0 {
+			llmdRequestTPOT = newRequestTPOTHistogram(opts.RequestTPOTBuckets)
+		}
+		if len(opts.RequestITLBuckets) > 0 {
+			llmdInterTokenLatency = newInterTokenLatencyHistogram(opts.RequestITLBuckets)
+		}
+
 		// Register other metrics
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)

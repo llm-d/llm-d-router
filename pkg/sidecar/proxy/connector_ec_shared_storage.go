@@ -47,10 +47,12 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, body, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
 
 	// Generate unique request UUID
 	reqUUID, err := uuid.NewUUID()
@@ -68,7 +70,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
+			s.logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}

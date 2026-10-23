@@ -152,6 +152,8 @@ type Config struct {
 
 	// Tracing enables OpenTelemetry tracing.
 	Tracing bool
+	// EnableToolCallingTelemetry enables tool-specific request observations.
+	EnableToolCallingTelemetry bool
 	// MoRIIOWriteMode enables MoRI-IO WRITE-mode: the sidecar populates the
 	// prefill request's kv_transfer_params so the prefill engine pushes KV to decode
 	// via RDMA Write. Only meaningful with --kv-connector=nixlv2.

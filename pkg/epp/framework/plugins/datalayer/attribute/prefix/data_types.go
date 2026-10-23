@@ -18,8 +18,10 @@ limitations under the License.
 package prefix
 
 import (
+	"encoding/binary"
 	"maps"
 
+	"github.com/cespare/xxhash/v2"
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -29,6 +31,72 @@ import (
 )
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// PrefixHashSetDataKey carries the cross-replica recent-window of prefix block
+// hashes this EPP believes an endpoint holds. Used by approx-prefix-cache-producer
+// when a CrossReplicaSyncer is configured.
+var PrefixHashSetDataKey = plugin.NewDataKey("PrefixHashSetDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// PrefixHashSet is a capped recent window of prompt hash sequences for one
+// endpoint, published across EPP replicas and union-aggregated before matching.
+// Each inner slice is one prompt's block hashes starting at block 0; prompts
+// are ordered oldest to newest.
+type PrefixHashSet struct {
+	Prompts [][]uint64
+	// digest caches ContentDigest for the Produce hot path. Not serialized.
+	digest       uint64
+	digestCached bool
+}
+
+// ContentDigest returns a content hash of Prompts. The value is cached on s
+// because Prompts are not mutated after the set is published.
+func (s *PrefixHashSet) ContentDigest() uint64 {
+	if s == nil {
+		return 0
+	}
+	if s.digestCached {
+		return s.digest
+	}
+	s.digest = hashPrompts(s.Prompts)
+	s.digestCached = true
+	return s.digest
+}
+
+// hashPrompts is length-prefixed so adjacent equal hashes from different
+// prompt boundaries cannot collide.
+func hashPrompts(prompts [][]uint64) uint64 {
+	h := xxhash.New()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(len(prompts)))
+	_, _ = h.Write(buf[:])
+	for _, p := range prompts {
+		binary.LittleEndian.PutUint64(buf[:], uint64(len(p)))
+		_, _ = h.Write(buf[:])
+		for _, v := range p {
+			binary.LittleEndian.PutUint64(buf[:], v)
+			_, _ = h.Write(buf[:])
+		}
+	}
+	return h.Sum64()
+}
+
+// Clone returns an independent copy of the hash set.
+func (s *PrefixHashSet) Clone() fwkdl.Cloneable {
+	if s == nil {
+		return nil
+	}
+	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts))}
+	for i, p := range s.Prompts {
+		cp := make([]uint64, len(p))
+		copy(cp, p)
+		out.Prompts[i] = cp
+	}
+	if s.digestCached {
+		out.digest = s.digest
+		out.digestCached = true
+	}
+	return out
+}
 
 // ReusablePrefixTokensDataKey identifies the request-wide reusable prefix
 // token floor published by a p2p-source-producer instance.

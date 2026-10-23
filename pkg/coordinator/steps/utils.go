@@ -153,6 +153,54 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	return reqcommon.APITypeVLLMGenerate
 }
 
+// buildPrefillMMFeatures builds features for the prefill request, deciding
+// per entry whether to ship mm_metadata or kwargs_data. An entry whose hash
+// has a descriptor in ecTransferParams and carries non-empty MMMetadata is
+// emitted as mm_metadata with a null kwargs_data slot; every other entry is
+// emitted as kwargs_data with a null mm_metadata slot. Both fields are
+// always present so vLLM's per-item merge (merge_mm_kwargs_items) can
+// reconstruct each entry from whichever side is non-null.
+//
+// The choice is per entry because a single encode sub-request can return no
+// descriptor for its image (nixlEC.MergeEncodeResponse logs a warning and
+// continues rather than failing the request): that entry has no EC path, so
+// its tensor data stays inline. vLLM's _require_ec_for_metadata_only is a
+// request-level check and does not catch partial coverage, so the coverage
+// reconciliation lives here.
+//
+// Entries are grouped by Modality: a mixed-modality request has one key per
+// modality in each feature map.
+func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams map[string]any) map[string]any {
+	if len(entries) == 0 {
+		return nil
+	}
+	hashesByMod := make(map[reqcommon.Modality][]string)
+	placeholdersByMod := make(map[reqcommon.Modality][]any)
+	kwargsByMod := make(map[reqcommon.Modality][]any)
+	metadataByMod := make(map[reqcommon.Modality][]any)
+	for _, entry := range entries {
+		mod := entry.Modality
+		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
+		placeholdersByMod[mod] = append(placeholdersByMod[mod], map[string]any{
+			"offset": entry.Placeholder.Offset,
+			"length": entry.Placeholder.Length,
+		})
+		if _, hasEC := ecTransferParams[entry.Hash]; hasEC && entry.MMMetadata != "" {
+			kwargsByMod[mod] = append(kwargsByMod[mod], nil)
+			metadataByMod[mod] = append(metadataByMod[mod], kwargsSentinel(entry.MMMetadata))
+		} else {
+			kwargsByMod[mod] = append(kwargsByMod[mod], kwargsSentinel(entry.KwargsData))
+			metadataByMod[mod] = append(metadataByMod[mod], nil)
+		}
+	}
+	return map[string]any{
+		"mm_hashes":       hashesByMod,
+		"mm_placeholders": placeholdersByMod,
+		"kwargs_data":     kwargsByMod,
+		"mm_metadata":     metadataByMod,
+	}
+}
+
 // promptItemsField returns the body field an API carries its prompt items in:
 // messages for chat completions and Messages, input for Responses. ok is false
 // for an API that carries no item array.
@@ -316,45 +364,6 @@ func modalityLocalIndexes(entries []pipeline.MultimodalEntry) []int {
 		counter[entry.Modality]++
 	}
 	return local
-}
-
-// buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
-// and optionally kwargs_data) from the request's multimodal entries. It returns
-// nil when there are no entries. Entries are grouped by Modality, so a
-// mixed-modality request has one key per modality in each feature map. Those
-// maps are keyed by reqcommon.Modality rather than string: encoding/json keys a
-// map by any string-kind type, so the wire body is identical.
-func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
-	if len(entries) == 0 {
-		return nil
-	}
-	hashesByMod := make(map[reqcommon.Modality][]string)
-	placeholdersByMod := make(map[reqcommon.Modality][]any)
-	// Left nil unless the caller asked for kwargs_data: the decode and
-	// conditional-decode bodies never carry it.
-	var kwargsByMod map[reqcommon.Modality][]any
-	if includeKwargs {
-		kwargsByMod = make(map[reqcommon.Modality][]any)
-	}
-	for _, entry := range entries {
-		mod := entry.Modality
-		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
-		placeholdersByMod[mod] = append(placeholdersByMod[mod], map[string]any{
-			"offset": entry.Placeholder.Offset,
-			"length": entry.Placeholder.Length,
-		})
-		if includeKwargs {
-			kwargsByMod[mod] = append(kwargsByMod[mod], kwargsSentinel(entry.KwargsData))
-		}
-	}
-	features := map[string]any{
-		"mm_hashes":       hashesByMod,
-		"mm_placeholders": placeholdersByMod,
-	}
-	if includeKwargs {
-		features["kwargs_data"] = kwargsByMod
-	}
-	return features
 }
 
 // validateEntryModalities rejects a MultimodalEntry with no Modality. Render is

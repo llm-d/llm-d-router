@@ -723,6 +723,7 @@ the sidecar's outbound connections to the encode, prefill and decode stages.
 | `--enable-prefiller-sampling` | `ENABLE_PREFILLER_SAMPLING` | `true` / `false` | `false` | If true, the prefill instance is selected randomly from the provided prefill host values. |
 | `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. See [SSRF Protection](#ssrf-protection). |
 | `--tracing` | — | `true` / `false` | `false` | Enable OpenTelemetry tracing. See [Sidecar Tracing](#sidecar-tracing). |
+| `--enable-tool-calling-telemetry` | — | `true` / `false` | `false` | Observe tool-calling request fields. Traces and the metrics listener are configured separately. |
 | `--metrics-port` | — | port | `0` (disabled) | Serve Prometheus `/metrics` on this port. See [P/D sidecar metrics](metrics.md#pd-sidecar). |
 
 ### Sidecar Tracing

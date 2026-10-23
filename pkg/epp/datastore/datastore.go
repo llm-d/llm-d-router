@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -138,6 +139,14 @@ type datastore struct {
 	// key: types.NamespacedName, value: fwkdl.Endpoint
 	pods *sync.Map
 	epf  datalayer.EndpointFactory
+	// podsVersion is bumped on every pods mutation. PodList compares it against
+	// snapshotVersion to decide whether podsSnapshot must be rebuilt, so concurrent
+	// readers between mutations share one rebuild instead of each re-ranging pods.
+	podsVersion atomic.Uint64
+	// snapshotMu guards podsSnapshot and snapshotVersion.
+	snapshotMu      sync.RWMutex
+	snapshotVersion uint64
+	podsSnapshot    []fwkdl.Endpoint
 	// needsResync forces the next PoolSet to run podResyncAll even when the pool is unchanged.
 	// PoolSet stores the pool before resyncing, so without this flag a PoolSet retried after a
 	// resync failure would compare the incoming pool against the already-stored identical pool
@@ -162,6 +171,7 @@ func (ds *datastore) Clear() {
 		return true
 	})
 	ds.pods.Clear()
+	ds.podsVersion.Add(1)
 }
 
 // /// Pool APIs ///
@@ -284,17 +294,43 @@ func (ds *datastore) ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite {
 // TODO: add a flag for callers to specify the staleness threshold for metrics.
 // ref: https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/1046#discussion_r2246351694
 func (ds *datastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint {
-	res := []fwkdl.Endpoint{}
-
-	ds.pods.Range(func(k, v any) bool {
-		ep := v.(fwkdl.Endpoint)
+	snapshot := ds.podsSnapshotCurrent()
+	res := make([]fwkdl.Endpoint, 0, len(snapshot))
+	for _, ep := range snapshot {
 		if predicate(ep) {
 			res = append(res, ep)
 		}
+	}
+	return res
+}
+
+// podsSnapshotCurrent returns a slice of all tracked endpoints, rebuilding it from
+// ds.pods only when a mutation has happened since the last rebuild. The returned
+// slice is shared with concurrent callers and must not be modified.
+func (ds *datastore) podsSnapshotCurrent() []fwkdl.Endpoint {
+	ds.snapshotMu.RLock()
+	if ds.snapshotVersion == ds.podsVersion.Load() {
+		snapshot := ds.podsSnapshot
+		ds.snapshotMu.RUnlock()
+		return snapshot
+	}
+	ds.snapshotMu.RUnlock()
+
+	ds.snapshotMu.Lock()
+	defer ds.snapshotMu.Unlock()
+	version := ds.podsVersion.Load()
+	if ds.snapshotVersion == version {
+		return ds.podsSnapshot
+	}
+
+	snapshot := []fwkdl.Endpoint{}
+	ds.pods.Range(func(_, v any) bool {
+		snapshot = append(snapshot, v.(fwkdl.Endpoint))
 		return true
 	})
-
-	return res
+	ds.podsSnapshot = snapshot
+	ds.snapshotVersion = version
+	return snapshot
 }
 
 func (ds *datastore) PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod) error {
@@ -383,6 +419,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		namespacedName := createEndpointNamespacedName(pod, idx)
 		if ep, ok := ds.pods.Load(namespacedName); ok {
 			ds.pods.Delete(namespacedName)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
 		}
 	}
@@ -395,6 +432,7 @@ func (ds *datastore) PodDelete(podName string) {
 		ep := v.(fwkdl.Endpoint)
 		if ep.GetMetadata().Name == podName {
 			ds.pods.Delete(k)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep)
 		}
 		return true
@@ -409,6 +447,7 @@ func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMet
 
 func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 	if v, ok := ds.pods.LoadAndDelete(id); ok {
+		ds.podsVersion.Add(1)
 		ds.epf.ReleaseEndpoint(v.(fwkdl.Endpoint))
 	}
 }
@@ -444,6 +483,7 @@ func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMet
 			return false, fmt.Errorf("endpoint %s: %w", meta.ID, errRegistrationDropped)
 		}
 		ds.pods.Store(meta.ID, ep)
+		ds.podsVersion.Add(1)
 		return true, nil
 	}
 }
@@ -483,6 +523,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 		if !activeEndpoints.Has(endpointName) {
 			logger.V(logutil.VERBOSE).Info("Removing endpoint", "endpoint", endpointName)
 			ds.pods.Delete(k)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep)
 		}
 		return true

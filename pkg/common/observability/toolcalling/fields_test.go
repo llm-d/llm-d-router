@@ -258,9 +258,16 @@ func TestRequestSnapshotCanSkipCapture(t *testing.T) {
 			require.Zero(t, allocations, "absence check must not allocate")
 			for _, body := range []string{
 				`{"messages":[{"content":"tools tool_choice"}]}`,
+				`{"messages":[{"content":"tools"}]}`,
+			} {
+				require.True(t, empty.CanSkipCapture([]byte(body)), body)
+			}
+			for _, body := range []string{
 				`{"messages":[{"tools":[]}]}`,
+				`{"tools" : []}`,
 				`{"messages":[{"content":"\u0061"}]}`,
 				`{"to\u006fls":[]}`,
+				`{"messages":[{"content":"tool_choice`,
 			} {
 				require.False(t, empty.CanSkipCapture([]byte(body)), body)
 			}
@@ -421,6 +428,7 @@ func BenchmarkCaptureRequestJSON(b *testing.B) {
 			{name: "prompt_unicode_escape", body: `{"messages":[{"content":"\u0061` + prompt + `"}]}`},
 			{name: "nested_fields", body: `{"messages":[{"tools":[],"content":"` + prompt + `"}]}`},
 			{name: "tool", body: `{"messages":[{"content":"` + prompt + `"}],"tools":[{"type":"function","function":{"name":"private","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}],"tool_choice":"auto"}`},
+			{name: "large_tool_schema", body: `{"tools":[{"parameters":{"description":"` + prompt + `"}}]}`},
 			{name: "escaped_tool_key", body: `{"messages":[{"content":"` + prompt + `"}],"to\u006fls":[{"name":"private","parameters":{"type":"object"}}]}`},
 		} {
 			b.Run(fmt.Sprintf("%s/%d", tt.name, size), func(b *testing.B) {
@@ -649,6 +657,15 @@ func TestSpanAttributesOmittedForRequestsWithoutToolCallingFields(t *testing.T) 
 	require.Empty(t, snapshot.SpanAttributes(statuses))
 }
 
+func TestSpanAttributesOmitAbsentToolChoice(t *testing.T) {
+	snapshot, err := CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(`{"tools":[]}`))
+	require.NoError(t, err)
+	require.Equal(t, []attribute.KeyValue{
+		attribute.String("llm_d.tool_calling.api_surface", "chat_completions"),
+		attribute.Bool("llm_d.tool_calling.present", true),
+	}, snapshot.SpanAttributes(nil))
+}
+
 func TestSpanAttributesRetainObservedToolCallingMutation(t *testing.T) {
 	snapshot, err := captureRequest(reqcommon.APITypeChatCompletions, map[string]any{"model": "test-model"})
 	require.NoError(t, err)
@@ -709,6 +726,27 @@ func TestToolCountBucket(t *testing.T) {
 	}
 	for _, tt := range tests {
 		require.Equal(t, tt.want, bucketToolCount(tt.count))
+	}
+}
+
+func TestCaptureRequestJSONToolCount(t *testing.T) {
+	for _, tt := range []struct {
+		name, value string
+		want        ToolCountBucket
+	}{
+		{name: "empty", value: `[ ]`},
+		{name: "null", value: `null`},
+		{name: "non-array", value: `{}`},
+		{name: "one", value: `[null]`, want: ToolCountBucketOne},
+		{name: "nested values and escapes", value: `["a,b", "c\"d", {"nested":[1,2]}]`, want: ToolCountBucketTwoToFive},
+		{name: "six", value: `[null,null,null,null,null,null]`, want: ToolCountBucketSixToTen},
+		{name: "eleven", value: `[` + strings.Repeat(`null,`, 10) + `null]`, want: ToolCountBucketElevenPlus},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot, err := CaptureRequestJSON(reqcommon.APITypeChatCompletions, []byte(`{"tools":`+tt.value+`}`))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, snapshot.Summary().ToolCountBucket)
+		})
 	}
 }
 

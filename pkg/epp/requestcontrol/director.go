@@ -568,7 +568,7 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		result[i] = fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		result[i] = fwksched.NewEndpointFromSnapshot(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
 	}
 
 	return result

@@ -1452,6 +1452,28 @@ func TestEndpointDelete_Existing(t *testing.T) {
 	assert.Empty(t, ds.PodList(AllPodsPredicate))
 }
 
+// TestPodsSnapshotCurrent_CachedBetweenMutations verifies that the pods snapshot backing
+// PodList is reused across calls that fall between mutations, and rebuilt once a mutation
+// (EndpointUpsert/EndpointDelete) changes the pods map (#3078).
+func TestPodsSnapshotCurrent_CachedBetweenMutations(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}).(*datastore)
+	id1 := types.NamespacedName{Name: "ep1", Namespace: "default"}
+	id2 := types.NamespacedName{Name: "ep2", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id1})
+
+	first := ds.podsSnapshotCurrent()
+	second := ds.podsSnapshotCurrent()
+	require.Len(t, first, 1)
+	assert.Same(t, &first[0], &second[0], "snapshot should be reused when the pods map has not changed")
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id2})
+
+	third := ds.podsSnapshotCurrent()
+	require.Len(t, third, 2, "snapshot should be rebuilt after a mutation")
+}
+
 func TestEndpointDelete_Missing(t *testing.T) {
 	ctx := context.Background()
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
@@ -1522,6 +1544,7 @@ func TestUpsertEndpoint_ConcurrentStoreDuringNilAppliesMetadata(t *testing.T) {
 		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 			staleMeta := &fwkdl.EndpointMetadata{ID: id, Address: "10.0.0.1"}
 			ds.pods.Store(id, fwkdl.NewEndpoint(staleMeta, fwkdl.NewMetrics()))
+			ds.podsVersion.Add(1)
 			return nil
 		},
 	}

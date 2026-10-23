@@ -860,7 +860,12 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 		wantToolBucket        string
 		wantFields            map[string]string
 		wantToolCallingAbsent bool
+		disabled              bool
 	}{
+		{
+			name: "tool telemetry disabled", path: reqcommon.PathChatCompletions,
+			body: chatBody, wantDirector: true, disabled: true,
+		},
 		{
 			name: "chat fields preserved", path: reqcommon.PathChatCompletions,
 			body: chatBody, wantDirector: true, wantSurface: "chat_completions",
@@ -1151,6 +1156,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			}
 			registry := NewParserRegistry(parsers, logr.Discard())
 			server := NewStreamingServer(nil, director, registry, 0)
+			server.SetToolCallingTelemetryEnabled(!tt.disabled)
 			server.bufferPool.New = func() any { return requestBuffer }
 			require.NoError(t, server.Process(srv))
 			require.Zero(t, requestBuffer.Len(), "request buffer must be reset on success and failure")

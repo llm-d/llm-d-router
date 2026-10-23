@@ -114,3 +114,23 @@ endpoints:
 `multicluster-file-discovery` is the cluster-scoped variant: it discovers peer clusters as endpoints, differing from the pod file discovery only in address validation. A cluster is reached by its gateway host, so an address may be an RFC-1123 hostname or an IP, not only an IPv4 pod address.
 
 A peer may serve its pool metrics on a different host or port than its routable address. Set a `metricsAddress` label (and an optional `metricsPort` label, defaulting to the endpoint port) on the entry, and the metrics source scrapes there instead of the endpoint address.
+
+## Endpoint attributes
+
+An entry may declare an `attributes` section: string key/value pairs published on the endpoint as dynamic attributes (resolved on read, so edits to a watched file take effect) and surfaced by the `attributes-producer` extractor for downstream plugins to consume through the framework's declared data dependencies. For example, the `endpoint-header-stamper` PreRequest plugin can prepend such an attribute to the request path, so endpoints behind one shared gateway host are discriminated by path instead of needing a hostname per endpoint:
+
+```yaml
+endpoints:
+  - name: "model-a"
+    address: "shared-gw.example.com"
+    port: "80"
+    attributes:
+      pathPrefix: "/model-a"
+  - name: "model-b"
+    address: "shared-gw.example.com"
+    port: "80"
+    attributes:
+      pathPrefix: "/model-b"
+```
+
+See the [`endpoint-header-stamper` README](../../../requestcontrol/headerstamp/README.md) for stamp configuration (`:path` prepend and header `set` variants, proxy support notes).

@@ -150,30 +150,9 @@ var (
 		modelLabelsWithFairnessPriorityStreaming,
 	)
 
-	llmdRequestTPOT = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_streaming_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Average time per output token in seconds for streaming requests, computed as (e2e - TTFT) / (output_tokens - 1).", compbasemetrics.ALPHA),
-			Buckets: []float64{
-				0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
-				0.3, 0.4, 0.5, 0.6, 0.8, 1, 2,
-			},
-		},
-		modelLabelsWithFairnessPriority,
-	)
+	llmdRequestTPOT = newRequestTPOTHistogram(DefaultRequestTPOTBuckets)
 
-	llmdInterTokenLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "request_streaming_itl_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Inter-token latency in seconds for streaming requests, measured as the time between consecutive response body chunks.", compbasemetrics.ALPHA),
-			Buckets: []float64{
-				0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2,
-			},
-		},
-		append(append([]string{}, modelLabels...), "fairness_id", "priority"),
-	)
+	llmdInterTokenLatency = newInterTokenLatencyHistogram(DefaultInterTokenLatencyBuckets)
 )
 
 // --- llm-d Inference Pool Metrics ---

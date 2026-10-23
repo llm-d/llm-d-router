@@ -18,6 +18,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -214,6 +215,28 @@ func TestExecute_ErrPipelineDoneLeavesSpansUnset(t *testing.T) {
 	}
 
 	for _, name := range []string{"conditional-decode", pipelineSpanName} {
+		if got := spanNamed(t, recorder, name).Status().Code; got != codes.Unset {
+			t.Errorf("span %q status = %v, want %v", name, got, codes.Unset)
+		}
+	}
+}
+
+func TestExecute_ClientCancellationLeavesSpansUnset(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	steps := []Step{
+		&mockStep{name: "prefill", fn: func(ctx context.Context, _ *RequestContext) error {
+			cancel()
+			return ctx.Err()
+		}},
+	}
+
+	if err := New(steps).Execute(ctx, &RequestContext{Model: "m"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the context error, got %v", err)
+	}
+
+	for _, name := range []string{"prefill", pipelineSpanName} {
 		if got := spanNamed(t, recorder, name).Status().Code; got != codes.Unset {
 			t.Errorf("span %q status = %v, want %v", name, got, codes.Unset)
 		}

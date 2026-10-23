@@ -374,6 +374,9 @@ func hasResponsesTools(v any) bool {
 // and "none" as enable_thinking=false.
 func responsesThinking(v any) *bool {
 	m, ok := v.(map[string]any)
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		ok = json.Unmarshal(raw, &m) == nil && m != nil
+	}
 	if !ok {
 		return nil
 	}

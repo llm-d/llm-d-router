@@ -6,37 +6,13 @@ on:
     types: [checks_requested]
 
 jobs:
-  check-signed-commits:
-    name: Check signed commits in PR
-    # Skip signed-commits enforcement for the bot-authored release-notes
-    # assembly branch: the release-notes App can't sign commits, and
-    # assembly is a deterministic transform reviewed by a maintainer before
-    # merge. Pin to the specific prefix so an unrelated bot pushing to
-    # release-notes/<other> doesn't bypass.
-    if: |
-      github.event_name == 'pull_request_target' &&
-      !(
-        startsWith(github.head_ref, 'release-notes/assemble-') &&
-        endsWith(github.event.pull_request.user.login, '[bot]')
-      )
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write # Required to post comments on PRs
-    steps:
-      - name: Check signed commits in PR
-        uses: 1Password/check-signed-commits-action@v1 # Use the action
-        with:
-          comment: |
-            🚨 Unsigned commits detected! Please sign your commits.
-
-            For instructions on how to set up GPG/SSH signing and verify your commits, please see [GitHub Documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification).
-
   dco-check:
     name: dco-check
-    # Runs on pull_request_target (not merge_group) for the same bot-branch
-    # skip as check-signed-commits; merge_group entries never originate from
-    # those bot branches directly, so the skip only needs to guard the PR side.
+    # Skip the bot-authored release-notes assembly branch: assembly is a
+    # deterministic transform reviewed by a maintainer before merge. Pin to the
+    # specific prefix so an unrelated bot pushing to release-notes/<other>
+    # doesn't bypass. merge_group entries never originate from those bot
+    # branches directly, so the skip only needs to guard the PR side.
     if: |
       github.event_name == 'merge_group' ||
       (

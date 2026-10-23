@@ -57,7 +57,9 @@ func (s *Server) runConcurrentPD(
 	// prepareRequests lets a connector mutate the cloned requests before dispatch,
 	// e.g. Mooncake sets a DP-rank header so prefill lands on the same rank decode reads from.
 	prepareRequests func(prefillReq, decodeReq *http.Request),
+	toolFields *toolCallingRequest,
 ) {
+	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx, cancelDecode := context.WithCancel(r.Context())
 	defer cancelDecode()
@@ -78,6 +80,7 @@ func (s *Server) runConcurrentPD(
 	ctx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	prefillReq = prefillReq.WithContext(trace.ContextWithSpan(prefillReq.Context(), prefillSpan))
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillTarget(prefillHost),
 		semconv.LLMDPDProxyConnector(connector),
@@ -95,12 +98,14 @@ func (s *Server) runConcurrentPD(
 		return
 	}
 
+	// Aggregate before starting the worker so reporting does not wait for prefill.
+	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	go func() {
 		defer cancelPrefill()
 		defer prefillSpan.End()
 		defer func() {
 			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
+				s.logger.Error(fmt.Errorf("prefill handler panicked (%T)", rec), "panic in prefill request")
 			}
 		}()
 		pw := &bufferedResponseWriter{}
@@ -156,6 +161,7 @@ func (s *Server) runConcurrentPD(
 		})
 		context.AfterFunc(prefillCtx, func() { graceTimer.Stop() })
 	}()
+	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
 

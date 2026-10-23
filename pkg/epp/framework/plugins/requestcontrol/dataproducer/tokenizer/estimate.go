@@ -267,7 +267,7 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
 	default:

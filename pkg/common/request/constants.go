@@ -60,6 +60,8 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
+	FieldTools                = "tools"
+	FieldToolChoice           = "tool_choice"
 	FieldSamplingParams       = "sampling_params"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
@@ -74,6 +76,7 @@ const (
 	FieldConversation         = "conversation"
 	FieldBackground           = "background"
 	FieldInput                = "input"
+	FieldInstructions         = "instructions"
 	FieldContent              = "content"
 	FieldFileID               = "file_id"
 	FieldMessages             = "messages"
@@ -118,6 +121,9 @@ const (
 	SSEDoneMarker = "[DONE]"
 	SSEDone       = SSEDataPrefix + SSEDoneMarker
 )
+
+// ToolChoiceNone is the tool_choice value that forbids the model from calling a tool.
+const ToolChoiceNone = "none"
 
 // Content part types, the values a content part's FieldType takes. A
 // chat-completions *_url part nests its URL and options under one object keyed
