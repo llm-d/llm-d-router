@@ -19,7 +19,9 @@ package weightedrandom
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -150,8 +152,8 @@ func TestPickWeightedRandomPickerTemperature(t *testing.T) {
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
 
 	// Temperature reshapes the selection distribution: probability becomes proportional to
-	// score^(1/T). T<1 sharpens toward the highest score, T>1 flattens toward uniform, T=1 and
-	// non-positive (fallback) stay proportional.
+	// score^(1/T). T<1 sharpens toward the highest score, T>1 flattens toward uniform, T=1 stays
+	// proportional.
 	tests := []struct {
 		name        string
 		temperature float64
@@ -181,31 +183,18 @@ func TestPickWeightedRandomPickerTemperature(t *testing.T) {
 				{Endpoint: endpoint2, Score: 1},
 			},
 		},
-		{
-			name:        "Non-positive temperature falls back to default",
-			temperature: 0,
-			input: []*fwksched.ScoredEndpoint{
-				{Endpoint: endpoint1, Score: 2},
-				{Endpoint: endpoint2, Score: 1},
-			},
-		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			picker := NewWeightedRandomPicker(1).WithTemperature(test.temperature)
 
-			// Expected probability is proportional to score^(1/T), using the default temperature
-			// when the configured value is non-positive (matching WithTemperature's fallback).
-			effectiveTemperature := test.temperature
-			if effectiveTemperature <= 0 {
-				effectiveTemperature = DefaultTemperature
-			}
-
+			// Expected probability is proportional to score^(1/T). The picker normalizes scores by
+			// their max before applying the exponent, which preserves these ratios.
 			totalWeight := 0.0
 			endpointWeights := make(map[string]float64)
 			for _, endpoint := range test.input {
-				w := math.Pow(endpoint.Score, 1.0/effectiveTemperature)
+				w := math.Pow(endpoint.Score, 1.0/test.temperature)
 				endpointWeights[endpoint.GetMetadata().ID.Name] = w
 				totalWeight += w
 			}
@@ -227,6 +216,33 @@ func TestPickWeightedRandomPickerTemperature(t *testing.T) {
 					t.Errorf("Endpoint %s: expected probability %.3f +/-%.1f%%, got %.3f (count: %d/%d)",
 						endpointName, expectedProb, tolerance*100, actualProb, selectionCounts[endpointName], testIterations)
 				}
+			}
+		})
+	}
+}
+
+// TestWeightedRandomPickerFactoryTemperature verifies that the factory rejects non-positive
+// temperatures and accepts a valid or omitted value.
+func TestWeightedRandomPickerFactoryTemperature(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    string
+		expectErr bool
+	}{
+		{name: "valid temperature", params: `{"temperature": 0.5}`, expectErr: false},
+		{name: "temperature omitted uses default", params: `{}`, expectErr: false},
+		{name: "zero temperature rejected", params: `{"temperature": 0}`, expectErr: true},
+		{name: "negative temperature rejected", params: `{"temperature": -1}`, expectErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := WeightedRandomPickerFactory("test", json.NewDecoder(strings.NewReader(test.params)), nil)
+			if test.expectErr && err == nil {
+				t.Errorf("expected an error for params %s, got nil", test.params)
+			}
+			if !test.expectErr && err != nil {
+				t.Errorf("unexpected error for params %s: %v", test.params, err)
 			}
 		})
 	}
