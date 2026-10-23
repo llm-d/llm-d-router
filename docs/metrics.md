@@ -132,9 +132,10 @@ Requests answered locally by a responder, such as `GET /v1/models`, are not coun
 `llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
 `llm_d_epp_request_error_total` with empty `model_name` and `target_model_name` labels.
 
-The `api_surface` label distinguishes `messages`, `chat_completions`, `completions`,
-`responses`, `vllm_generate`, and `sglang_generate`. Missing or unrecognized generation
-paths, including auxiliary token-count and render routes, use `unknown`. EPP captures
+The `api_surface` label identifies generation APIs with the values `messages`,
+`chat_completions`, `completions`, `responses`, `vllm_generate`, and `sglang_generate`.
+Responses item reads (`/v1/responses/{id}`), auxiliary token-count and render routes,
+and missing or unrecognized paths use `unknown`. EPP captures
 the surface from the incoming path before routing can rewrite it. The corresponding
 request span carries `llm_d.epp.api_surface`, including requests without tools and
 requests rejected during parsing.
