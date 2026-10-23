@@ -264,7 +264,8 @@ FlowControl:
 - The flow control admission layer itself is off by default; enable it with
   `featureGates: ["flowControl"]` in the configuration, or with
   `--feature-gates=flowControl=true` on the command line.
-- `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
+- `fcfs-ordering-policy`, `global-strict-fairness-policy`, `static-usage-limit-policy`, and
+  `strict-band-selection-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 - When the saturation detector implements the scheduling filter interface, as `utilization-detector`
   does, it is also appended as a filter to every scheduling profile that does not list it, whether or
