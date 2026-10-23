@@ -778,3 +778,31 @@ groups:
         annotations:
           go.name: LLMDToolCallingFieldResponseFormatStatus
           go.helper: false
+      - id: llm_d.tool_calling.response.upstream_present
+        type: boolean
+        brief: "Tool call observed in a completed JSON body or SSE event received by EPP."
+        stability: development
+        annotations:
+          go.name: LLMDToolCallingResponseUpstreamPresent
+          go.helper: false
+      - id: llm_d.tool_calling.response.forwarded_present
+        type: boolean
+        brief: "Tool call observed in a completed JSON body or SSE event whose body bytes were successfully sent to Envoy."
+        stability: development
+        annotations:
+          go.name: LLMDToolCallingResponseForwardedPresent
+          go.helper: false
+      - id: llm_d.tool_calling.response.upstream_detection_incomplete
+        type: boolean
+        brief: "Upstream response interrupted or received content could not be fully inspected."
+        stability: development
+        annotations:
+          go.name: LLMDToolCallingResponseUpstreamDetectionIncomplete
+          go.helper: false
+      - id: llm_d.tool_calling.response.forwarded_detection_incomplete
+        type: boolean
+        brief: "Forwarding interrupted or sent content could not be fully inspected."
+        stability: development
+        annotations:
+          go.name: LLMDToolCallingResponseForwardedDetectionIncomplete
+          go.helper: false

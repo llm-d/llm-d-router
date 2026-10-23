@@ -260,6 +260,14 @@ const (
 	LLMDToolCallingFieldToolsStatusKey = attribute.Key("llm_d.tool_calling.field.tools.status")
 	// LLMDToolCallingPresentKey: Whether the request contains tool-calling fields.
 	LLMDToolCallingPresentKey = attribute.Key("llm_d.tool_calling.present")
+	// LLMDToolCallingResponseForwardedDetectionIncompleteKey: Forwarding interrupted or sent content could not be fully inspected.
+	LLMDToolCallingResponseForwardedDetectionIncompleteKey = attribute.Key("llm_d.tool_calling.response.forwarded_detection_incomplete")
+	// LLMDToolCallingResponseForwardedPresentKey: Tool call observed in a completed JSON body or SSE event whose body bytes were successfully sent to Envoy.
+	LLMDToolCallingResponseForwardedPresentKey = attribute.Key("llm_d.tool_calling.response.forwarded_present")
+	// LLMDToolCallingResponseUpstreamDetectionIncompleteKey: Upstream response interrupted or received content could not be fully inspected.
+	LLMDToolCallingResponseUpstreamDetectionIncompleteKey = attribute.Key("llm_d.tool_calling.response.upstream_detection_incomplete")
+	// LLMDToolCallingResponseUpstreamPresentKey: Tool call observed in a completed JSON body or SSE event received by EPP.
+	LLMDToolCallingResponseUpstreamPresentKey = attribute.Key("llm_d.tool_calling.response.upstream_present")
 	// LLMDToolCallingToolChoiceKey: The sanitized tool-choice category.
 	LLMDToolCallingToolChoiceKey = attribute.Key("llm_d.tool_calling.tool_choice")
 	// LLMDToolCallingToolCountKey: The bucketed number of tool definitions.

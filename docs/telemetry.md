@@ -150,6 +150,10 @@ Custom llm-d router trace attributes.
 | `llm_d.tool_calling.field.tool_choice.status` | `string` | The comparison outcome for the tool_choice field. | `LLMDToolCallingFieldToolChoiceStatusKey` |
 | `llm_d.tool_calling.field.tools.status` | `string` | The comparison outcome for the tools field. | `LLMDToolCallingFieldToolsStatusKey` |
 | `llm_d.tool_calling.present` | `boolean` | Whether the request contains tool-calling fields. | `LLMDToolCallingPresentKey` |
+| `llm_d.tool_calling.response.forwarded_detection_incomplete` | `boolean` | Forwarding interrupted or sent content could not be fully inspected. | `LLMDToolCallingResponseForwardedDetectionIncompleteKey` |
+| `llm_d.tool_calling.response.forwarded_present` | `boolean` | Tool call observed in a completed JSON body or SSE event whose body bytes were successfully sent to Envoy. | `LLMDToolCallingResponseForwardedPresentKey` |
+| `llm_d.tool_calling.response.upstream_detection_incomplete` | `boolean` | Upstream response interrupted or received content could not be fully inspected. | `LLMDToolCallingResponseUpstreamDetectionIncompleteKey` |
+| `llm_d.tool_calling.response.upstream_present` | `boolean` | Tool call observed in a completed JSON body or SSE event received by EPP. | `LLMDToolCallingResponseUpstreamPresentKey` |
 | `llm_d.tool_calling.tool_choice` | `string` | The sanitized tool-choice category. | `LLMDToolCallingToolChoiceKey` |
 | `llm_d.tool_calling.tool_count` | `string` | The bucketed number of tool definitions. | `LLMDToolCallingToolCountKey` |
 
