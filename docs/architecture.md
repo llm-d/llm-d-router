@@ -258,7 +258,9 @@ Scheduling:
 - A scorer's `weight` defaults to `1.0` when omitted.
 
 RequestHandler:
-- When no parsers are configured, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, and `systemone-parser` are used, followed by `passthrough-parser` as the fallback for unclaimed paths.
+- When no parsers are configured, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, and
+  `systemone-parser` are used, followed by `passthrough-parser`, which forwards requests on paths
+  none of them claims without interpreting their payloads.
 
 FlowControl:
 - The flow control admission layer itself is off by default; enable it with
