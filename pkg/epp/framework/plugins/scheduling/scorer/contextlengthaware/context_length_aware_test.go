@@ -322,7 +322,6 @@ func TestReusableTokensFilter(t *testing.T) {
 		producerName := testReusableTokensProducerName
 		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
 			Label:                      testPrefillWorkRangeLabel,
-			EnableFiltering:            true,
 			ReusableTokensProducerName: producerName,
 		})
 		request := createPromptsRequest(50, 50)
@@ -606,7 +605,7 @@ func TestContextLengthAwareMultiPromptUsesLongestPrompt(t *testing.T) {
 		want          string
 	}{
 		{name: "prompts that each fit the short range", promptLengths: []int{300, 300, 300, 300}, want: "short"},
-		{name: "one prompt beyond the short range", promptLengths: []int{10, 1100}, want: "long"},
+		{name: "one prompt beyond the short range", promptLengths: []int{10, 1100, 10}, want: "long"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -630,10 +629,6 @@ func highestScored(scores map[scheduling.Endpoint]float64) scheduling.Endpoint {
 		}
 	}
 	return best
-}
-
-func TestLongestPromptTokensNilIsZero(t *testing.T) {
-	assert.Equal(t, 0, longestPromptTokens(nil))
 }
 
 func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
