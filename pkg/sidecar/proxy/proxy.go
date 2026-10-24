@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -262,7 +261,7 @@ type Server struct {
 	logger             logr.Logger
 	addr               net.Addr      // the proxy TCP address
 	readyCh            chan struct{} // closed once addr is set and server is listening
-	handler            http.Handler  // the handler function. either a Mux or a proxy
+	handler            http.Handler  // the routes built by createRoutes
 	allowlistValidator *AllowlistValidator
 	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
 	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
@@ -595,25 +594,6 @@ func (s *Server) createRoutes() http.Handler {
 	mux.Handle("/", s.decoderProxy)
 
 	return redirectEncodedInferencePath(mux)
-}
-
-// redirectEncodedInferencePath answers a request whose percent-encoded path
-// decodes to an inference API path with a 307 to the decoded path. EPP picks its
-// request parser from the encoded path and ServeMux matches it segment by
-// segment, so the two can classify such a request differently. The redirect
-// brings the client back through EPP with the clean path, as ServeMux does for
-// repeated slashes and dot segments.
-func redirectEncodedInferencePath(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawPath != "" {
-			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
-				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
-				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

@@ -17,8 +17,8 @@ itself.
 2. The [agentic-api](https://github.com/vllm-project/agentic-api) gateway, when
    deployed in front of llm-d, holds Responses and Conversations state. It
    answers stateful requests itself and forwards the rest to the router.
-3. The sidecar and coordinator route tables, described here. They apply whether
-   or not the agentic-api gateway is deployed.
+3. The sidecar and coordinator route tables. They apply whether or not the
+   agentic-api gateway is deployed.
 
 ## Outcomes
 
@@ -48,23 +48,24 @@ OpenAI's for the other paths.
 ## Path forms
 
 Paths are case-sensitive. The coordinator runs before EPP and the sidecar runs
-after it, so they accept different forms of the inference API paths in the
-first rows below.
+after it, so they accept different forms of the six inference API paths:
+`/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`,
+`/inference/v1/generate` and `/generate`.
 
 The coordinator cleans the path of a POST request with Go's `path.Clean`. When
 the result is an inference API path it serves, the request is routed, checked
 and sent upstream under that path, so a trailing slash, repeated slashes, dot
-segments or an encoded slash do not change the outcome. Every other request is
-forwarded as sent, so the 405 in the table applies to the exact path only.
+segments or an encoded slash do not change the outcome. Every other request
+keeps its path, so the 405 in the table applies to the exact path only.
 
 EPP picks its request parser by matching the end of the raw path and ignores a
 trailing slash. The sidecar therefore serves a POST to the six paths with or
-without a trailing slash, and no other form of them. It answers a
+without a trailing slash, and no other form of them. It answers a POST to a
 percent-encoded form of the six paths, and its `ServeMux` answers a path with
 repeated slashes or dot segments, with a 307 redirect to the clean path, for
 example `/v1%2Fresponses` and `//v1/responses` to `/v1/responses`, so the
-client sends the clean path back through EPP. It forwards any other path to the
-decoder as sent.
+client sends the clean path back through EPP. It forwards any other request to
+the decoder as sent.
 
 A gateway can normalize repeated slashes, dot segments and encoded slashes
 before the HTTPRoute, EPP and both components see the path. In Envoy these are
@@ -108,7 +109,7 @@ table.
 | POST | `/v1/chat/completions/render`, `/v1/completions/render` | passthrough | passthrough | no route |
 | GET, POST, DELETE | `/v1/chat/completions/{id}`, `/v1/chat/completions/{id}/messages` | passthrough [2] | passthrough [2] | no route |
 | GET, POST, DELETE | `/v1/messages/batches` and its sub-paths | passthrough [2] | passthrough [2] | no route |
-| GET | `/health` | answered | passthrough | terminates |
+| GET, HEAD | `/health` | answered | passthrough | terminates |
 | any | `/healthz`, `/readyz` | passthrough | answered for GET; 405 for other methods | no route |
 | GET, DELETE | `/v1/requests/{id}` | passthrough | answered by the `async-broker` step when enabled, which answers other methods with 405; otherwise passthrough | no route |
 | any | `/v1/files` and its sub-paths, `/v1/embeddings`, any other path | passthrough | passthrough | no route |

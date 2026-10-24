@@ -439,8 +439,10 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
 		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
-		{http.MethodGet, "/v1%2Fresponses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodGet, "/v1%2Fresponses", http.StatusAccepted, ""},
+		{http.MethodOptions, "/v1%2Fchat%2Fcompletions", http.StatusAccepted, ""},
 		{http.MethodGet, "/health", http.StatusOK, ""},
+		{http.MethodHead, "/health", http.StatusOK, ""},
 	} {
 		t.Run(tt.method+" "+tt.target, func(t *testing.T) {
 			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
