@@ -265,7 +265,7 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 		return 0
 	}
 	if p.reusableTokensProducerName == "" {
-		if request.Body == nil || request.Body.TokenizedRequest == nil {
+		if request.Body == nil {
 			return 0
 		}
 		return longestPromptTokens(request.Body.TokenizedRequest)
