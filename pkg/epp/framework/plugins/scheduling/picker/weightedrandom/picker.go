@@ -41,6 +41,9 @@ import (
 const (
 	// WeightedRandomPickerType is the registered name of the weighted random picker plugin.
 	WeightedRandomPickerType = "weighted-random-picker"
+
+	// DefaultTemperature yields selection probability proportional to each endpoint's score.
+	DefaultTemperature = 1.0
 )
 
 // weightedScoredEndpoint represents a scored endpoint with its A-Res sampling key
@@ -49,19 +52,29 @@ type weightedScoredEndpoint struct {
 	key float64
 }
 
+// weightedRandomParameters extends the shared picker parameters with the temperature control
+// specific to the weighted random picker.
+type weightedRandomParameters struct {
+	picker.PickerParameters
+	Temperature float64 `json:"temperature"`
+}
+
 // compile-time type validation
 var _ fwksched.Picker = &WeightedRandomPicker{}
 
 // WeightedRandomPickerFactory defines the factory function for WeightedRandomPicker.
 func WeightedRandomPickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
+	parameters := weightedRandomParameters{
+		PickerParameters: picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints},
+		Temperature:      DefaultTemperature,
+	}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", WeightedRandomPickerType, err)
 		}
 	}
 
-	return NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name), nil
+	return NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name).WithTemperature(parameters.Temperature), nil
 }
 
 // NewWeightedRandomPicker initializes a new WeightedRandomPicker and returns its pointer.
@@ -73,6 +86,7 @@ func NewWeightedRandomPicker(maxNumOfEndpoints int) *WeightedRandomPicker {
 	return &WeightedRandomPicker{
 		typedName:         fwkplugin.TypedName{Type: WeightedRandomPickerType, Name: WeightedRandomPickerType},
 		maxNumOfEndpoints: maxNumOfEndpoints,
+		temperature:       DefaultTemperature,
 		randomPicker:      random.NewRandomPicker(maxNumOfEndpoints),
 	}
 }
@@ -93,12 +107,23 @@ func NewWeightedRandomPicker(maxNumOfEndpoints int) *WeightedRandomPicker {
 type WeightedRandomPicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int
+	temperature       float64
 	randomPicker      *random.RandomPicker // fallback for zero weights
 }
 
 // WithName sets the name of the picker.
 func (p *WeightedRandomPicker) WithName(name string) *WeightedRandomPicker {
 	p.typedName.Name = name
+	return p
+}
+
+// WithTemperature sets the temperature that tunes how sharply selection favors higher scores.
+// Non-positive values fall back to DefaultTemperature.
+func (p *WeightedRandomPicker) WithTemperature(temperature float64) *WeightedRandomPicker {
+	if temperature <= 0 {
+		temperature = DefaultTemperature
+	}
+	p.temperature = temperature
 	return p
 }
 
@@ -141,7 +166,9 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			u = 1e-10 // Avoid 0 to ensure positive key
 		}
 
-		weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: math.Pow(u, 1.0/scoredEndpoint.Score)} // key = U^(1/weight)
+		// Temperature tunes the effective weight: w = score^(1/T). T=1 keeps probability proportional to score.
+		effectiveWeight := math.Pow(scoredEndpoint.Score, 1.0/p.temperature)
+		weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: math.Pow(u, 1.0/effectiveWeight)} // key = U^(1/w)
 	}
 
 	// Sort by key in descending order (largest keys first)

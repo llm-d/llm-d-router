@@ -139,3 +139,95 @@ func TestPickWeightedRandomPicker(t *testing.T) {
 		})
 	}
 }
+
+func TestPickWeightedRandomPickerTemperature(t *testing.T) {
+	const (
+		testIterations = 10000
+		tolerance      = 0.05 // Verify within tolerance +/-5%
+	)
+
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
+
+	// Temperature reshapes the selection distribution: probability becomes proportional to
+	// score^(1/T). T<1 sharpens toward the highest score, T>1 flattens toward uniform, T=1 and
+	// non-positive (fallback) stay proportional.
+	tests := []struct {
+		name        string
+		temperature float64
+		input       []*fwksched.ScoredEndpoint
+	}{
+		{
+			name:        "Low temperature sharpens toward the highest score",
+			temperature: 0.3,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 2},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+		{
+			name:        "High temperature flattens toward uniform",
+			temperature: 5,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 2},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+		{
+			name:        "Temperature one stays proportional",
+			temperature: 1,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 3},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+		{
+			name:        "Non-positive temperature falls back to default",
+			temperature: 0,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 2},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			picker := NewWeightedRandomPicker(1).WithTemperature(test.temperature)
+
+			// Expected probability is proportional to score^(1/T), using the default temperature
+			// when the configured value is non-positive (matching WithTemperature's fallback).
+			effectiveTemperature := test.temperature
+			if effectiveTemperature <= 0 {
+				effectiveTemperature = DefaultTemperature
+			}
+
+			totalWeight := 0.0
+			endpointWeights := make(map[string]float64)
+			for _, endpoint := range test.input {
+				w := math.Pow(endpoint.Score, 1.0/effectiveTemperature)
+				endpointWeights[endpoint.GetMetadata().ID.Name] = w
+				totalWeight += w
+			}
+
+			expectedProbabilities := make(map[string]float64)
+			for name, w := range endpointWeights {
+				expectedProbabilities[name] = w / totalWeight
+			}
+
+			selectionCounts := make(map[string]int)
+			for range testIterations {
+				result := picker.Pick(context.Background(), test.input)
+				selectionCounts[result.TargetEndpoints[0].GetMetadata().ID.Name]++
+			}
+
+			for endpointName, expectedProb := range expectedProbabilities {
+				actualProb := float64(selectionCounts[endpointName]) / float64(testIterations)
+				if math.Abs(actualProb-expectedProb) > tolerance {
+					t.Errorf("Endpoint %s: expected probability %.3f +/-%.1f%%, got %.3f (count: %d/%d)",
+						endpointName, expectedProb, tolerance*100, actualProb, selectionCounts[endpointName], testIterations)
+				}
+			}
+		})
+	}
+}
