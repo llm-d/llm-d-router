@@ -31,6 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -622,6 +624,87 @@ func TestResponsesAutoDiscoveryFallsBackOnUnsupportedStatus(t *testing.T) {
 			// One chat call confirms the legacy path renders during discovery,
 			// a second serves the request itself.
 			assert.Equal(t, []string{responsesRenderPath, chatRenderPath, chatRenderPath}, paths)
+		})
+	}
+}
+
+func TestLegacyResponsesToolFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      map[string]float64
+	}{
+		{"dropped empty fields", `{"input":"hi","tools":[],"tool_choice":"auto","parallel_tool_calls":false}`, map[string]float64{
+			"tools/dropped": 1, "tool_choice/dropped": 1, "parallel_tool_calls/dropped": 1,
+		}},
+		{"converted tools", `{"input":"hi","tools":[{"type":"function","name":"private_tool"}]}`, map[string]float64{
+			"tools/preserved": 1,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			before := renderToolFieldCounts(t)
+			renderer := newRenderServer(t, vllmConfig{}, func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, chatRenderPath, r.URL.Path)
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			})
+			parsed, err := openai.NewOpenAIParser().ParseRequest(t.Context(), []byte(tc.raw), map[string]string{":path": "/v1/responses"})
+			require.NoError(t, err)
+			p := newTestPlugin(renderer)
+			p.backend = renderBackend{tk: renderer, modelName: "m", legacyResponses: legacyResponsesForced()}
+			require.NoError(t, p.Produce(toolcalling.WithTelemetryEnabled(t.Context()), &scheduling.InferenceRequest{Body: parsed.Body}, nil))
+			after := renderToolFieldCounts(t)
+			for key, count := range before {
+				after[key] -= count
+			}
+			for key, count := range after {
+				if count == 0 {
+					delete(after, key)
+				}
+			}
+			require.Equal(t, tc.want, after)
+			require.Len(t, recorder.Ended(), 2)
+			for _, span := range recorder.Ended() {
+				assert.Equal(t, "responses", spanAttrs(span)[semconv.LLMDToolCallingAPISurfaceKey].AsString())
+			}
+		})
+	}
+}
+
+func TestLiveLegacyDiscoveryProbesUnobserved(t *testing.T) {
+	for _, surface := range []string{"messages", "responses"} {
+		t.Run(surface, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			var paths []string
+			renderer := newRenderServer(t, vllmConfig{}, func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path != chatRenderPath {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			})
+			backend := renderBackend{tk: renderer, modelName: "m"}
+			body := &fwkrh.InferenceRequestBody{}
+			var nativePath string
+			if surface == "messages" {
+				nativePath = messagesRenderPath
+				backend.legacyMessages = &legacyMessagesMode{discovery: make(chan struct{}, 1)}
+				body.Messages = &fwkrh.MessagesRequest{Messages: []fwkrh.AnthropicMessage{{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}}}}
+				body.Payload = fwkrh.PayloadMap{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+			} else {
+				nativePath = responsesRenderPath
+				backend.legacyResponses = &legacyResponsesMode{discovery: make(chan struct{}, 1)}
+				body.Responses = &fwkrh.ResponsesRequest{Input: "hi"}
+				body.Payload = fwkrh.PayloadMap{"input": "hi"}
+			}
+			p := newTestPlugin(renderer)
+			p.backend = backend
+			require.NoError(t, p.Produce(t.Context(), &scheduling.InferenceRequest{Body: body}, nil))
+			assert.Equal(t, []string{nativePath, chatRenderPath, chatRenderPath}, paths)
+			assert.Equal(t, float64(0), renderFailures(renderer.pluginName, renderReasonStatus))
+			count, _ := renderHistogram(t, renderer.pluginName, renderResultSuccess)
+			assert.Equal(t, uint64(1), count)
+			assert.Len(t, recorder.Ended(), 2, "tokenize span and request render span")
 		})
 	}
 }

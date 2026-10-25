@@ -66,9 +66,13 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	handlerName := s.profileHandler.TypedName()
 
 	scheduleStart := time.Now()
+	var failureReason string
 	defer func() {
 		metrics.RecordSchedulerE2ELatency(ctx, time.Since(scheduleStart))
 		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
+		if err != nil {
+			metrics.RecordSchedulerFailure(failureReason)
+		}
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
@@ -123,6 +127,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	}
 
 	if len(profileRunResults) == 0 {
+		failureReason = metrics.SchedulerFailureReasonNoProfileSelected
 		err = fmt.Errorf("failed to run any scheduler profile for request %s", request.RequestID)
 		return nil, err
 	}
@@ -134,8 +139,12 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	before := time.Now()
 	result, err = s.profileHandler.ProcessResults(ctx, scopedRequest, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
+	failureReason = metrics.SchedulerFailureReasonProfileHandlerError
 	if err == nil {
 		err = violations.Write()
+	} else if len(profileRunErrors) > 0 {
+		// A profile run fails only when its filters remove every candidate.
+		failureReason = metrics.SchedulerFailureReasonAllFiltered
 	}
 	if verboseEnabled && err == nil {
 		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)

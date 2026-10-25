@@ -244,6 +244,25 @@ var (
 		append([]string{"status", "target_model_name"}, llmdEndpointLabels...),
 	)
 
+	llmdSchedulerFilterEliminatedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "scheduler_filter_eliminated_total",
+			Help: metricsutil.HelpMsgWithStability("Total number of candidate endpoints removed by scheduling filters, "+
+				"by scheduler profile, plugin type and plugin name.", compbasemetrics.ALPHA),
+		},
+		[]string{"profile", "plugin_type", "plugin_name"},
+	)
+
+	llmdSchedulerFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "scheduler_failures_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of failed scheduling attempts, by reason.", compbasemetrics.ALPHA),
+		},
+		[]string{"reason"},
+	)
+
 	llmdPluginProcessingLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

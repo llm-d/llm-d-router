@@ -214,15 +214,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	trace := log.FromContext(ctx).V(logutil.TRACE)
 	for _, custom := range mapping.CustomMetrics {
-		metric, err := custom.Spec.getLatestMetric(families)
+		var value float64
+		var err error
+		if custom.Aggregation == metricAggregationSum {
+			value, err = custom.Spec.aggregateMetric(families, aggregateSum)
+		} else {
+			var metric *dto.Metric
+			metric, err = custom.Spec.getLatestMetric(families)
+			if err == nil {
+				value = extractValue(metric)
+			}
+		}
 		if err != nil {
 			if !custom.Optional {
-				errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+				errs = append(errs, fmt.Errorf("customMetrics entry %q: %w", custom.AttributeKey, err))
+			} else if trace.Enabled() {
+				trace.Info("Skipped optional customMetrics entry", "attributeKey", custom.AttributeKey, "reason", err.Error())
 			}
 			continue
 		}
-		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(value))
 		updated = true
 	}
 
@@ -231,7 +244,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		// Guarded: this runs per endpoint per scrape tick, and the logger
 		// construction, MetricNames slice, and boxed args all allocate even
 		// when TRACE is off.
-		if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+		if trace.Enabled() {
 			trace.Info("Refreshed metrics",
 				"endpoint", ep.GetMetadata().ID,
 				"metrics", mapping.MetricNames(),

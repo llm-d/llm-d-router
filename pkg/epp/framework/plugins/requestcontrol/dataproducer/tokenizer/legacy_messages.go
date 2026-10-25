@@ -29,6 +29,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
@@ -82,12 +83,13 @@ func (m *legacyMessagesMode) useLegacy(ctx context.Context, tk tokenizer, model 
 		return false, ctx.Err()
 	}
 	if m.mode == "" {
+		probeCtx := withUnobservedRender(ctx)
 		probe := fwkrh.PayloadMap{
 			"model": model, "max_tokens": 1,
 			"messages": []any{map[string]any{"role": "user", "content": "warmup"}},
 		}
 		mode := messagesRenderModeNative
-		tokens, _, err := tk.RenderMessages(ctx, probe)
+		tokens, _, err := tk.RenderMessages(probeCtx, probe)
 		if err != nil {
 			var status *renderStatusError
 			if !errors.As(err, &status) || (status.StatusCode != http.StatusNotFound && status.StatusCode != http.StatusMethodNotAllowed) {
@@ -95,7 +97,7 @@ func (m *legacyMessagesMode) useLegacy(ctx context.Context, tk tokenizer, model 
 			}
 			// Confirm that the same model can render before selecting conversion.
 			mode = messagesRenderModeLegacy
-			tokens, _, err = tk.RenderChat(ctx, probe)
+			tokens, _, err = tk.RenderChat(probeCtx, probe)
 			if err != nil {
 				return false, fmt.Errorf("discover legacy Messages rendering: %w", err)
 			}
@@ -111,8 +113,12 @@ func (m *legacyMessagesMode) useLegacy(ctx context.Context, tk tokenizer, model 
 	return m.mode == messagesRenderModeLegacy, nil
 }
 
-func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.MessagesRequest) (*fwkrh.TokenizedRequest, error) {
-	payload := legacyMessagesPayload(msg)
+func (b renderBackend) renderLegacyMessages(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
+	payload := legacyMessagesPayload(body.Messages)
+	baseline := prepareLegacyMessagesToolFields(body, payload, toolcalling.TelemetryEnabled(ctx))
+	if baseline != nil {
+		ctx = context.WithValue(ctx, renderToolBaselineCtxKey{}, baseline)
+	}
 	payload["model"] = b.modelName
 	tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, payload)
 	if err != nil {
@@ -122,6 +128,119 @@ func (b renderBackend) renderLegacyMessages(ctx context.Context, msg *fwkrh.Mess
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 	}}}, nil
+}
+
+// Compare the expected Chat representation of the original Messages fields.
+// Request spans retain the original API surface and sanitized summary.
+func prepareLegacyMessagesToolFields(body *fwkrh.InferenceRequestBody, payload fwkrh.PayloadMap, telemetryEnabled bool) *renderToolBaseline {
+	var raw []byte
+	switch source := body.WirePayload().(type) {
+	case fwkrh.RawPayload:
+		raw = source
+	case fwkrh.Marshaler:
+		var err error
+		raw, err = source.Marshal()
+		if err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return nil
+	}
+	fields := struct {
+		Tools      json.RawMessage
+		ToolChoice json.RawMessage
+	}{
+		Tools:      envelope[string(toolcalling.FieldTools)],
+		ToolChoice: envelope[string(toolcalling.FieldToolChoice)],
+	}
+	var sourceSnapshot toolcalling.RequestSnapshot
+	if telemetryEnabled {
+		var err error
+		sourceSnapshot, err = toolcalling.CaptureValidatedRequestJSON(reqcommon.APITypeMessages, raw)
+		if err != nil {
+			return nil
+		}
+	}
+	var expected fwkrh.PayloadMap
+	if telemetryEnabled {
+		expected = fwkrh.PayloadMap{}
+	}
+	if fields.Tools != nil && (telemetryEnabled || len(body.Messages.Tools) == 0) {
+		var tools []fwkrh.AnthropicTool
+		if json.Unmarshal(fields.Tools, &tools) != nil {
+			return nil
+		}
+		var converted any = convertAnthropicTools(tools)
+		if tools != nil && len(tools) == 0 {
+			converted = []any{}
+		}
+		if telemetryEnabled {
+			expected[string(toolcalling.FieldTools)] = converted
+		}
+		if len(tools) == 0 && len(body.Messages.Tools) == 0 {
+			payload[string(toolcalling.FieldTools)] = converted
+		}
+	}
+	if fields.ToolChoice != nil {
+		choice, parallel, translated := legacyMessagesToolChoice(fields.ToolChoice)
+		payload[string(toolcalling.FieldToolChoice)] = choice
+		if translated && telemetryEnabled {
+			expected[string(toolcalling.FieldToolChoice)] = choice
+		}
+		if parallel != nil {
+			payload[string(toolcalling.FieldParallelToolCalls)] = *parallel
+			if translated && telemetryEnabled {
+				expected[string(toolcalling.FieldParallelToolCalls)] = *parallel
+			}
+		}
+	}
+	if !telemetryEnabled {
+		return nil
+	}
+	normalized, err := expected.Marshal()
+	if err != nil {
+		return nil
+	}
+	comparison, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, normalized)
+	if err != nil {
+		return nil
+	}
+	return &renderToolBaseline{source: sourceSnapshot, comparison: comparison}
+}
+
+func legacyMessagesToolChoice(raw json.RawMessage) (any, *bool, bool) {
+	var choice struct {
+		Type                   string `json:"type"`
+		Name                   string `json:"name"`
+		DisableParallelToolUse *bool  `json:"disable_parallel_tool_use"`
+	}
+	if json.Unmarshal(raw, &choice) != nil {
+		return raw, nil, false
+	}
+	var translated any
+	valid := true
+	switch choice.Type {
+	case string(toolcalling.ToolChoiceAuto):
+		translated = toolcalling.ToolChoiceAuto
+	case string(toolcalling.ToolChoiceNone):
+		translated = toolcalling.ToolChoiceNone
+	case "any":
+		translated = toolcalling.ToolChoiceRequired
+	case "tool":
+		translated = map[string]any{"type": "function", "function": map[string]any{"name": choice.Name}}
+		valid = choice.Name != ""
+	default:
+		return raw, nil, false
+	}
+	if choice.DisableParallelToolUse == nil {
+		return translated, nil, valid
+	}
+	parallel := !*choice.DisableParallelToolUse
+	return translated, &parallel, valid
 }
 
 func legacyMessagesPayload(msg *fwkrh.MessagesRequest) fwkrh.PayloadMap {
