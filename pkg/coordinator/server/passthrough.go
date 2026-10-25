@@ -119,6 +119,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host
 			pipeline.StripInternalHeaders(r.Header)
+			r.Header.Del(reqcommon.DisaggregatedRevisionHeaderKey)
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
 			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
 		},
