@@ -1,6 +1,6 @@
 # Vertex AI Parser Plugin
 
-The Vertex AI Parser plugin (`vertexai-parser`) implements the `fwkrh.Parser` interface for the Vertex AI gRPC API. It enables the `llm-d-router` to parse and route incoming Vertex AI gRPC requests and extract metrics from their responses.
+The Vertex AI Parser plugin (`vertexai-parser`) implements the `fwkrh.Parser` interface for the Vertex AI prediction API. It enables the `llm-d-router` to parse and route incoming Vertex AI gRPC requests, as well as the REST requests a Vertex AI dedicated endpoint forwards, and extract metrics from their responses.
 
 ## How it Works
 
@@ -21,12 +21,30 @@ The parser automatically matches incoming requests based on the `:path` header s
 | `PredictionService/StreamRawPredict` | `aiplatformpb.StreamRawPredictRequest` | `/responses` | Streaming raw prediction service. |
 | `PredictionService/RawPredict` | `aiplatformpb.RawPredictRequest` | `/responses` | Non-streaming raw prediction service. |
 
+## Supported REST Paths
+
+A Vertex AI dedicated endpoint forwards requests over HTTP with the payload as the request body, e.g. `POST /v1/projects/P/locations/L/endpoints/E:rawPredict`. Paths are matched by suffix, so every API version (`v1`, `v1beta1`, `ui`) and both the project-ID and project-number forms are covered; the query string is ignored.
+
+| Path suffix | Inner OpenAI Path |
+| :--- | :--- |
+| `/chat/completions` | `/chat/completions` |
+| `:predict`, `:rawPredict`, `:streamRawPredict` | Chosen from the payload: `messages` → `/chat/completions`, `prompt` → `/completions`, `input` → `/responses` |
+| `/invoke/<container path>` | As above |
+
+Invoke is claimed with the registry's segment-wildcard form `invoke/*`, which matches any path containing an `/invoke/` segment.
+
+Parsing REST payloads is best effort: a dedicated endpoint may front any container, so a payload that is not OpenAI-compatible (for example a TensorFlow `{"instances": [...]}` body) is forwarded unchanged and still scheduled, rather than rejected.
+
+The parser advertises both the `kubernetes.io/h2c` and `http` application protocols, so it can serve an `InferencePool` whose backends speak HTTP/1.1.
+
 ## Response Parsing
 
-For responses, the parser:
+For gRPC responses, the parser:
 1. Extracts the gRPC payload and unmarshals it into `httpbody.HttpBody`.
 2. Extracts the raw JSON data from the body.
 3. Delegates to the OpenAI parser to extract token usage metrics (`prompt_tokens`, `completion_tokens`, `total_tokens`) which are then recorded by the router.
+
+REST responses are the model server's JSON or SSE stream as is, so they are passed straight to the OpenAI parser. The two are told apart by the `content-type` header (`application/grpc*`), or by the body when the header is absent.
 
 ## Configuration
 

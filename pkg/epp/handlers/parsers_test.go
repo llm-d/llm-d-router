@@ -211,6 +211,45 @@ func TestParserRegistryLongestSuffixWins(t *testing.T) {
 	}
 }
 
+func TestParserRegistrySegmentWildcard(t *testing.T) {
+	vertex := &testParser{name: "vertex", paths: []string{"invoke/*", ":predict"}}
+	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
+	registry := NewParserRegistry([]fwkrh.Parser{vertex, openai}, logr.Discard())
+
+	const endpoint = "/v1/projects/p/locations/l/endpoints/e"
+	tests := []struct {
+		name        string
+		requestPath string
+		wantParser  string
+		wantErr     bool
+	}{
+		{name: "segment followed by a path", requestPath: endpoint + "/invoke/generate", wantParser: "vertex"},
+		{name: "segment followed by a nested path", requestPath: endpoint + "/deployedModels/1/invoke/v2/models/m:infer", wantParser: "vertex"},
+		{name: "longer suffix claim still wins", requestPath: endpoint + "/invoke/v1/chat/completions", wantParser: "openai"},
+		{name: "segment with nothing after it", requestPath: endpoint + "/invoke", wantErr: true},
+		{name: "segment as part of a longer name", requestPath: endpoint + "/reinvoke/x", wantErr: true},
+		{name: "suffix claims unaffected", requestPath: endpoint + ":predict", wantParser: "vertex"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser, err := registry.Resolve(tt.requestPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Resolve(%q) = %q, want an error", tt.requestPath, parser.TypedName().Name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Resolve(%q) unexpected error: %v", tt.requestPath, err)
+			}
+			if parser.TypedName().Name != tt.wantParser {
+				t.Errorf("Resolve(%q) = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+			}
+		})
+	}
+}
+
 func TestParserRegistryDuplicateTypes(t *testing.T) {
 	p1 := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
 	p2 := &testParser{name: "openai", paths: []string{"v1/completions"}}

@@ -94,7 +94,7 @@ func (pr *ParserRegistry) Resolve(path string) (fwkrh.Parser, error) {
 	var longestMatchLen int
 	for _, entry := range pr.entries {
 		for _, suffix := range entry.normalizedPaths {
-			if request.MatchPathSuffix(path, suffix) && len(suffix) > longestMatchLen {
+			if matchClaim(path, suffix) && len(suffix) > longestMatchLen {
 				longestMatched = entry.parser
 				longestMatchLen = len(suffix)
 			}
@@ -108,6 +108,20 @@ func (pr *ParserRegistry) Resolve(path string) (fwkrh.Parser, error) {
 	}
 
 	return nil, fmt.Errorf("no parser registered matching path suffix for: %s", path)
+}
+
+// matchClaim reports whether path matches a single claim.
+//
+// A claim ending in "/*" matches any path containing that segment, so
+// "invoke/*" claims "/v1/.../endpoints/E/invoke/generate". Vertex AI's :invoke
+// routing appends the container's own path after the method, leaving no fixed
+// suffix to match on; every other claim keeps the existing suffix semantics.
+// Backwards compatible: no existing claim ends in "/*".
+func matchClaim(path, claim string) bool {
+	if segment, ok := strings.CutSuffix(claim, "/*"); ok {
+		return segment != "" && strings.Contains(path, "/"+segment+"/")
+	}
+	return request.MatchPathSuffix(path, claim)
 }
 
 // normalizeSuffix cleans up a suffix by removing leading and trailing slashes.
