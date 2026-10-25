@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
@@ -430,6 +431,32 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("first chunk: min_tokens exceeds chunk budget", 17, 20, 16),
 		Entry("final chunk: remaining budget below min_tokens", 5, 50, 16),
 	)
+
+	It("spends the min_tokens floor across chunks and drops it once met", func() {
+		var mu sync.Mutex
+		var seen []any
+		ti := newChunkedTestSetupWithHandler(16, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]any
+			Expect(json.NewDecoder(r.Body).Decode(&req)).To(Succeed())
+			maxTok, _ := toInt(req[reqcommon.FieldMaxTokens])
+			mu.Lock()
+			seen = append(seen, req[reqcommon.FieldMinTokens])
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, chatResponse("x", finishReasonLength, 8, maxTok))
+		}))
+		defer ti.stop()
+
+		resp := doPost(ti.addr, `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":50,"min_tokens":40}`)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(seen).To(HaveLen(4))
+		Expect(seen[0]).To(BeNumerically("==", 16))
+		Expect(seen[1]).To(BeNumerically("==", 16))
+		Expect(seen[2]).To(BeNumerically("==", 8))
+		Expect(seen[3]).To(BeNil())
+	})
 
 	Describe("non-streaming", func() {
 
