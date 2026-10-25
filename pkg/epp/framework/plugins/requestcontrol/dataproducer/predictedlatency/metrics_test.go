@@ -17,6 +17,8 @@ limitations under the License.
 package predictedlatency
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -119,6 +121,43 @@ func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
 	require.False(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))
+}
+
+const (
+	tpotRangeLoSeconds = 0.005
+	tpotRangeHiSeconds = 0.05
+	tpotMaxGapSeconds  = 0.005
+	tpotFloatSlack     = 1e-9
+)
+
+// checkTPOTBucketSpacing validates edge ordering and that no bucket overlapping
+// the 5-50 ms range is wider than 5 ms.
+func checkTPOTBucketSpacing(edges []float64) error {
+	for i, e := range edges {
+		if math.IsNaN(e) || math.IsInf(e, 0) || e <= 0 {
+			return fmt.Errorf("edge %d (%v) must be finite and positive", i, e)
+		}
+		if i > 0 && e <= edges[i-1] {
+			return fmt.Errorf("edge %d (%v) must be greater than edge %d (%v)", i, e, i-1, edges[i-1])
+		}
+	}
+	for i := 1; i < len(edges); i++ {
+		lo, hi := edges[i-1], edges[i]
+		overlaps := lo < tpotRangeHiSeconds-tpotFloatSlack && hi > tpotRangeLoSeconds+tpotFloatSlack
+		if overlaps && hi-lo > tpotMaxGapSeconds+tpotFloatSlack {
+			return fmt.Errorf("bucket (%v, %v] is wider than %v inside the 5-50 ms range", lo, hi, tpotMaxGapSeconds)
+		}
+	}
+	return nil
+}
+
+func TestTPOTBucketsSpacing(t *testing.T) {
+	require.NoError(t, checkTPOTBucketSpacing(tpotBuckets))
+}
+
+func TestTPOTBucketsSpacingRejectsCoarseEdges(t *testing.T) {
+	coarse := []float64{0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1}
+	require.Error(t, checkTPOTBucketSpacing(coarse))
 }
 
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {

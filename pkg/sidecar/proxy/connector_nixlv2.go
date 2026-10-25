@@ -607,6 +607,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 dpLocal,
 		"is_request_leader":              true,
+		// Unlike serial dispatch, this path cannot read the ID from prefill's
+		// response. Supply the shared request ID required by vLLM's NIXL connector.
+		"remote_request_id": uuidStr,
 	}
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
