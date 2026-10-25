@@ -316,10 +316,6 @@ jobs:
             docker-file: Dockerfile.sidecar
             image-name: llm-d-router-disagg-sidecar
             archive: llm-d-router-disagg-sidecar
-          - name: renderer
-            source: pull
-            image: vllm/vllm-openai-cpu:v0.21.0
-            archive: vllm-openai-cpu
     name: e2e-image-router (${{ matrix.image.name }})
     steps:
       - name: Checkout source
@@ -404,12 +400,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: e2e-image-simulator
-          path: ${{ runner.temp }}/e2e-images
-
-      - name: Download renderer image
-        uses: actions/download-artifact@v8
-        with:
-          name: e2e-image-renderer
           path: ${{ runner.temp }}/e2e-images
 
       - name: Load e2e images
