@@ -544,7 +544,7 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.32.0` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -572,7 +572,7 @@ router:
     image:
       registry: docker.io
       repository: vllm/vllm-openai-cpu
-      tag: v0.19.1
+      tag: v0.32.0
     env:
       - name: HF_TOKEN
         valueFrom:

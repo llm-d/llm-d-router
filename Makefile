@@ -41,7 +41,10 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 # plugin's HTTP backend. The dev renderer manifest overrides the image's command
 # with that CLI, so this image cannot be swapped for the simulator there. The
 # e2e suites render through the simulator instead and override this per target.
-export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
+# The tag must serve every render route the plugin calls, including
+# /v1/messages/render and /v1/responses/render; older tags answer 404 there and
+# the plugin falls back to the deprecated chat-completions conversion.
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.32.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
