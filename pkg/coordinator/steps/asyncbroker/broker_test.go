@@ -354,43 +354,40 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 }
 
 // cancelAfterSubmit ends the request context once the enqueue has succeeded,
-// so the client is gone when the hold begins.
+// so the client is gone when the hold begins. A non-nil err replaces the
+// submit's success, as for a reply lost after Redis ran the enqueue.
 type cancelAfterSubmit struct {
 	asyncSubmitter
 	cancel context.CancelFunc
+	err    error
 }
 
 func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) error {
 	err := s.asyncSubmitter.SubmitRequest(ctx, req)
 	s.cancel()
+	if err == nil {
+		err = s.err
+	}
 	return err
 }
 
-// disconnectingSubmitter submits through the real producer, then cancels the
-// request context, as a client that disconnects during the enqueue does.
-type disconnectingSubmitter struct {
-	asyncSubmitter
-	disconnect context.CancelFunc
-}
-
-func (d disconnectingSubmitter) SubmitRequest(ctx context.Context, req api.Request) error {
-	err := d.asyncSubmitter.SubmitRequest(ctx, req)
-	d.disconnect()
-	return err
-}
-
-// A client gone once the enqueue succeeds never learns a coordinator-generated
-// id, so the queued request is cancelled. A client-chosen id stays queued for
-// a fetch or re-POST by that id.
+// A client gone during the enqueue never learns a coordinator-generated id, so
+// the queued request is cancelled. A client-chosen id stays queued for a fetch
+// or re-POST by that id.
 func TestAsyncBrokerEnqueueCancelsUnreachableRequest(t *testing.T) {
 	tests := []struct {
 		name          string
 		clientID      string
+		submitErr     error
+		wantErr       error
+		wantStatus    int
 		wantCancelled bool
 	}{
-		{name: "generated id", wantCancelled: true},
-		{name: "replaced malformed id", clientID: "not valid!", wantCancelled: true},
-		{name: "client-chosen id", clientID: "req-test-1", wantCancelled: false},
+		{name: "generated id", wantErr: context.Canceled, wantCancelled: true},
+		{name: "replaced malformed id", clientID: "not valid!", wantErr: context.Canceled, wantCancelled: true},
+		{name: "client-chosen id", clientID: "req-test-1", wantErr: pipeline.ErrPipelineDone, wantStatus: http.StatusAccepted},
+		{name: "generated id, failed submit", submitErr: context.Canceled, wantErr: context.Canceled, wantCancelled: true},
+		{name: "client-chosen id, failed submit", clientID: "req-test-1", submitErr: context.Canceled, wantErr: context.Canceled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -399,13 +396,18 @@ func TestAsyncBrokerEnqueueCancelsUnreachableRequest(t *testing.T) {
 			if tc.clientID != "" {
 				headers["X-Request-Id"] = tc.clientID
 			}
-			reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+			reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			step.sub = disconnectingSubmitter{asyncSubmitter: step.sub, disconnect: cancel}
+			step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel, err: tc.submitErr}
 
 			err := step.Execute(ctx, reqCtx)
-			require.True(t, errors.Is(err, pipeline.ErrPipelineDone), "want ErrPipelineDone, got %v", err)
+			require.ErrorIs(t, err, tc.wantErr)
+			if tc.wantStatus == 0 {
+				assert.Empty(t, rec.Body.String())
+			} else {
+				assert.Equal(t, tc.wantStatus, rec.Code)
+			}
 			cancelled, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "req-test-1"))).Result()
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantCancelled, cancelled == 1)

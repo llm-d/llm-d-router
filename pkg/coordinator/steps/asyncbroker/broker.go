@@ -290,11 +290,18 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 		RequestQueueName: queue,
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
+	generatedID := reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) != reqCtx.RequestID
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
 	if err != nil {
 		if ctx.Err() != nil {
+			if generatedID {
+				// go-redis retries the enqueue after a failed reply read, and
+				// the wait before the retry returns the context error, so the
+				// submit can have landed.
+				s.cancelUnreachable(ctx, tenant, reqCtx.RequestID)
+			}
 			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
@@ -304,22 +311,28 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 
 	if mode == asyncModeEnqueue {
-		if ctx.Err() != nil && reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) != reqCtx.RequestID {
-			// The client left before the 202 and never learned the generated
-			// id, so nothing can fetch, cancel or delete the request: cancel
-			// it pre-dispatch (best effort). A client-chosen id stays queued
+		if ctx.Err() != nil && generatedID {
+			// The client left before the 202. A client-chosen id stays queued
 			// for a fetch or re-POST by that id.
-			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelFn()
-			if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, reqCtx.RequestID)}); err != nil {
-				log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel unreachable request", "id", reqCtx.RequestID)
-			}
-			return pipeline.ErrPipelineDone
+			s.cancelUnreachable(ctx, tenant, reqCtx.RequestID)
+			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		writePending(w, reqCtx.RequestID)
 		return pipeline.ErrPipelineDone
 	}
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
+}
+
+// cancelUnreachable cancels, pre-dispatch and best effort, a request whose
+// generated id never reached the client, so nothing can fetch, cancel or
+// delete it. CancelRequests skips an id with no active token, so it is safe
+// when the submit did not land.
+func (s *Step) cancelUnreachable(ctx context.Context, tenant, id string) {
+	cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFn()
+	if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
+		log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel unreachable request", "id", id)
+	}
 }
 
 // unCancelScript revives a cancelled request that is still queued. The
