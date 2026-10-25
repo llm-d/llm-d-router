@@ -464,9 +464,7 @@ func allSubstitutions(nsName string) map[string]string {
 	// needs twice ~97k tokens of context, past the raised --max-model-len, and it
 	// also requires the output limit to reach the prompt length, which the specs'
 	// max_tokens does not. No assertion here reads response content.
-	// --strict validates every body the coordinator emits against the
-	// simulator's bundled vLLM request schema and its semantic checks.
-	vllmArgs := testutils.VLLMExtraArgs("--max-model-len=131072", "--strict")
+	vllmArgs := testutils.VLLMExtraArgs("--max-model-len=131072", testutils.VLLMStrictArg)
 	// ${EPP_NAME} is the zmq endpoint the decode workers publish KV events to. In
 	// the 3-EPP topology that is the decode EPP's Service.
 	workerEPPName := eppName
