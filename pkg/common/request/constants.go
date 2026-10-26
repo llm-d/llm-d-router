@@ -68,6 +68,8 @@ const (
 	FieldEcho                 = "echo"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
+	FieldResponseFormat       = "response_format"
+	FieldStructuredOutputs    = "structured_outputs"
 	FieldSamplingParams       = "sampling_params"
 	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
@@ -131,6 +133,9 @@ const (
 
 // ToolChoiceNone is the tool_choice value that forbids the model from calling a tool.
 const ToolChoiceNone = "none"
+
+// ResponseFormatText is the response_format type that leaves the output unconstrained.
+const ResponseFormatText = "text"
 
 // Content part types, the values a content part's FieldType takes. A
 // chat-completions *_url part nests its URL and options under one object keyed
