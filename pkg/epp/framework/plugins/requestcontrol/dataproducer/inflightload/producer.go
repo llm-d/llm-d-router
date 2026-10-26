@@ -689,9 +689,12 @@ func addedTokensKey(endpointID, profileName string) string {
 // excluding any prefix already cached on it.
 //
 // When the configured prefix producer (approximate or precise) has populated
-// PrefixCacheMatchInfo on the endpoint under prefixMatchInfoKey, the matched and
+// PrefixCacheMatchInfo on the endpoint under prefixMatchInfoKey, the cached and
 // total block counts are in real (tokenized) units, so we use them directly:
-// uncached = (TotalBlocks - MatchBlocks) * BlockSizeTokens. For very long prompts
+// uncached = (TotalBlocks - CachedBlockCount) * BlockSizeTokens. CachedBlockCount
+// is the literal number of cached blocks; the precise prefix producer weights
+// MatchBlocks by cache tier for ranking, but a block in CPU RAM saves the same
+// prefill as one in GPU memory. For very long prompts
 // where the prefix index is capped (MaxPrefixTokensToMatch), any tail beyond the
 // cap is added back from the (estimated) inputTokens so the full prompt cost is
 // still reflected.
@@ -711,7 +714,7 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 	}
 
 	blockSize := int64(info.BlockSizeTokens())
-	matched := int64(info.MatchBlocks()) * blockSize
+	matched := int64(info.CachedBlockCount()) * blockSize
 	indexed := int64(info.TotalBlocks()) * blockSize
 
 	uncachedIndexed := indexed - matched
