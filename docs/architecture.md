@@ -94,7 +94,7 @@ Each scheduling profile runs the following stages. Multiple profiles may run for
 
 3. **Pod Selection**
    - The highest-scored pod is selected
-   - If multiple pods share the same score, one is selected at random
+   - If multiple pods share the top score, `max-score-picker` (the default) rotates among them round-robin
 
 ---
 
