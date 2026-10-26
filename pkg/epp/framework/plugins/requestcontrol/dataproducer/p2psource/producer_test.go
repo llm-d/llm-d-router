@@ -439,6 +439,51 @@ func TestPreRequest_BestIsChosen_NoSource(t *testing.T) {
 	assertNoSource(t, req)
 }
 
+// maxNumOfEndpoints > 1: the routing layer may serve the request from any
+// selected endpoint, so a best match among them is a self-match even when
+// it out-caches the first endpoint.
+func TestPreRequest_BestIsSecondSelected_NoSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-self-second", peer("10.0.0.2", 32))
+
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{
+				endpoint(p, "pod-a", "10.0.0.1", 0),
+				endpoint(p, "pod-b", "10.0.0.2", 2),
+			}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertNoSource(t, req)
+}
+
+// maxNumOfEndpoints > 1: a pod outside the selected endpoints still serves
+// as the source.
+func TestPreRequest_MultipleSelected_SourceFromThirdPod(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-multi-third", peer("10.0.0.3", 48))
+
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{
+				endpoint(p, "pod-a", "10.0.0.1", 0),
+				endpoint(p, "pod-b", "10.0.0.2", 2),
+			}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertSource(t, req, "10.0.0.3", defaultP2PConnectorPort)
+}
+
 // No best match stashed: nothing is written and the request is untouched.
 func TestPreRequest_NoBestMatch_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)

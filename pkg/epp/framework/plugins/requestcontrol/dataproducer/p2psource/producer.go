@@ -541,10 +541,12 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 			"computing", computingHostPort, "computingCachedTokens", computingCached, "computingWaiting", waitingQueueSize(endpoint),
 			"computingRunning", runningRequests(endpoint), "deltaTokens", best.cachedTokens-computingCached)
 	}
-	// Never point the computing pod at itself. Redundant with the delta check
-	// below while minCachedTokenDelta >= 1 (a self-match is delta 0), but
-	// explicit against a future lower floor.
-	if best.hostPort == computingHostPort {
+	// Never point the computing pod at itself: on vLLM v0.32.0 a self-named
+	// source blocks the request for the full NIXL handshake timeout. The
+	// delta check below only covers the first endpoint; with
+	// maxNumOfEndpoints > 1 the routing layer receives every selected
+	// endpoint and may serve the request from any of them.
+	if isSelected(best.hostPort, computing.TargetEndpoints) {
 		outcome = "self"
 		return nil
 	}
@@ -584,6 +586,16 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		kv = append(kv, "p2pPort", best.p2pPort)
 	}
 	return nil
+}
+
+// isSelected reports whether hostPort names one of the selected endpoints.
+func isSelected(hostPort string, endpoints []scheduling.Endpoint) bool {
+	for _, ep := range endpoints {
+		if md := ep.GetMetadata(); md != nil && net.JoinHostPort(md.Address, md.Port) == hostPort {
+			return true
+		}
+	}
+	return false
 }
 
 // p2pPort returns the endpoint's OffloadingConnector P2P tier port, the rank-0

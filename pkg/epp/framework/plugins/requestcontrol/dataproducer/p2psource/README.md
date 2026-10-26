@@ -17,7 +17,9 @@ request-ID hash. This spreads pulls across replicas that hold nearly identical
 prefixes. After scheduling, the source is written only when the sampled source
 out-caches the computing endpoint by at least `minCachedTokenDelta` tokens. The
 computing endpoint is the prefill profile's target when that profile has one, and the
-primary profile's target otherwise.
+primary profile's target otherwise. A source that is itself one of that profile's
+selected endpoints is never written: with `maxNumOfEndpoints` above `1` the routing
+layer may serve the request from any of them.
 
 ## Outputs
 
