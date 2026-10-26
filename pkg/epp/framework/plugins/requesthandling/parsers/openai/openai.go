@@ -619,6 +619,10 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //
 // It extracts usage from events with type="response.completed" or "speech.audio.done".
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
+	// A server that sets continuous_usage_stats reports cumulative usage on every
+	// chunk, so when more than one usage event lands in the same buffer the last
+	// one holds the final counts. Keep the last match rather than the first.
+	var last *fwkrh.Usage
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
@@ -649,17 +653,17 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 			}
 			var usage *fwkrh.Usage
 			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
-				return usage
+				last = usage
 			}
 		}
 		// Responses API streaming format
 		if len(streamResponse.Response.Usage) > 0 && streamResponse.Type == "response.completed" {
 			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
-				return usage
+				last = usage
 			}
 		}
 	}
-	return nil
+	return last
 }
 
 func extractRawUsage(raw json.RawMessage) *fwkrh.Usage {

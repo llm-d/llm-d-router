@@ -18,6 +18,7 @@ limitations under the License.
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"strconv"
 	"time"
@@ -72,13 +73,38 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 		reqCtx.lastChunkReceivedTimestamp = now
 	}
 
+	// For an SSE stream, a data event can be split across two ext_proc body
+	// chunks, which would leave both halves undecodable and drop the usage the
+	// final event carries. Parse only through the last complete line and carry
+	// the remainder into the next chunk. The flag is set only for a
+	// text/event-stream response, so gRPC binary frames are not touched.
+	parseBytes := responseBytes
+	if reqCtx.toolCallingResponseEventStream {
+		buf := responseBytes
+		if len(reqCtx.responseTail) > 0 {
+			buf = make([]byte, 0, len(reqCtx.responseTail)+len(responseBytes))
+			buf = append(buf, reqCtx.responseTail...)
+			buf = append(buf, responseBytes...)
+		}
+		if endOfStream {
+			parseBytes = buf
+			reqCtx.responseTail = nil
+		} else if i := bytes.LastIndexByte(buf, '\n'); i >= 0 {
+			parseBytes = buf[:i+1]
+			reqCtx.responseTail = bytes.Clone(buf[i+1:])
+		} else {
+			parseBytes = nil
+			reqCtx.responseTail = bytes.Clone(buf)
+		}
+	}
+
 	var parsedResp *fwkrh.ParsedResponse
 	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else {
 		before := time.Now()
-		parsedResp, err = parser.ParseResponse(ctx, responseBytes, reqCtx.Response.Headers, endOfStream)
+		parsedResp, err = parser.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
 		metrics.RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 		if err != nil {
 			logger.Error(err, "parsing response")

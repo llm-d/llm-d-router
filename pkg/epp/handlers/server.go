@@ -200,6 +200,11 @@ type RequestContext struct {
 	requestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
 
+	// responseTail holds the bytes after the last newline of the previous SSE
+	// chunk, carried into the next chunk so an event split across ext_proc body
+	// chunks is parsed whole.
+	responseTail []byte
+
 	reqHeaderResp *extProcPb.ProcessingResponse
 	reqBodyResp   []*extProcPb.ProcessingResponse
 
