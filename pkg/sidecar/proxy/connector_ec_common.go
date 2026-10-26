@@ -36,6 +36,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 	"golang.org/x/sync/errgroup"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // requestInput returns the request's Responses input items. A bare JSON string
@@ -191,8 +192,8 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 
 // mmItemsForFanout extracts the fanout items for one request, tagging the
 // extraction logs with requestID.
-func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
-	return extractMMItems(s.logger.WithValues("requestID", requestID), originalRequest, apiType)
+func (s *Server) mmItemsForFanout(ctx context.Context, originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
+	return extractMMItems(log.FromContext(ctx).WithValues("requestID", requestID), originalRequest, apiType)
 }
 
 // anthropicImagePart turns a Messages API image block into the image_url
@@ -234,24 +235,26 @@ func (s *Server) fanoutEncoder(
 		return fmt.Errorf("fanoutEncoder: no encoder hostPorts provided (requestID=%s)", requestID)
 	}
 
+	logger := log.FromContext(ctx)
 	encoderPath := reqcommon.PathChatCompletions
 	if apiType == reqcommon.APITypeResponses {
 		encoderPath = reqcommon.PathResponses
 	}
 
-	s.logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
+	logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
 
 	grp, gctx := errgroup.WithContext(ctx)
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
 		grp.Go(func() (err error) {
+			logger := log.FromContext(gctx)
 			defer func() {
 				if rec := recover(); rec != nil {
 					if rec != http.ErrAbortHandler {
 						panic(rec)
 					}
 					err = fmt.Errorf("encoder response interrupted for item %d: %w", idx, http.ErrAbortHandler)
-					s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+					logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				}
 			}()
 
@@ -265,27 +268,27 @@ func (s *Server) fanoutEncoder(
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
 				err = fmt.Errorf("failed to marshal encoder request for item %d: %w", idx, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			encoderHandler, err := s.encoderProxyHandler(hostPort)
 			if err != nil {
 				err = fmt.Errorf("failed to get encoder proxy handler for %s: %w", hostPort, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			req, err := http.NewRequestWithContext(gctx, "POST", encoderPath, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(reqcommon.RequestIDHeaderKey, fmt.Sprintf("%s-enc-%d", requestID, idx))
 
-			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
+			logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
 
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
@@ -294,18 +297,18 @@ func (s *Server) fanoutEncoder(
 			// the handler wrote nothing at all. isHTTPError treats it as an error.
 			if isHTTPError(pw.statusCode) {
 				err := fmt.Errorf("encoder request failed for item %d with status %d", idx, pw.statusCode)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			if perItem != nil {
 				if err := perItem(idx, pw); err != nil {
-					s.logger.Error(jsonErrorForLog(err), "encoder fanout perItem", "item", idx, "requestID", requestID)
+					logger.Error(jsonErrorForLog(err), "encoder fanout perItem", "item", idx, "requestID", requestID)
 					return err
 				}
 			}
 
-			s.logger.V(logging.DEBUG).Info("encoder request completed", "item", idx, "requestID", requestID)
+			logger.V(logging.DEBUG).Info("encoder request completed", "item", idx, "requestID", requestID)
 			return nil
 		})
 	}
@@ -325,14 +328,15 @@ func (s *Server) runPDPipeline(
 	requestID string,
 	apiType reqcommon.APIType,
 ) {
+	logger := log.FromContext(r.Context())
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
-		s.logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
+		logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
+			logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return
 	}
@@ -346,7 +350,7 @@ func (s *Server) runPDPipeline(
 	}
 
 	// Don't log the full body. Inline base64 images can be MB each.
-	if v := s.logger.V(logging.DEBUG); v.Enabled() {
+	if v := logger.V(logging.DEBUG); v.Enabled() {
 		kv := []any{
 			"requestID", requestID,
 			"destination", destination,
@@ -357,7 +361,7 @@ func (s *Server) runPDPipeline(
 	}
 
 	if len(prefillEndPoint) > 0 {
-		s.logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
+		logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
 		// The encoder path does not carry a KV cache source: the P2P prefix pull
 		// is not wired through encoder disaggregation. The empty source skips the
 		// p2p injection regardless of --enable-p2p-pull.
@@ -365,7 +369,7 @@ func (s *Server) runPDPipeline(
 		return
 	}
 
-	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
+	logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
 	toolFields, _ := captureInferenceToolCallingRequest(pdRequest, apiType, modifiedBody)
 	defer toolFields.report(r.Context())
 	decodeStart := time.Now()

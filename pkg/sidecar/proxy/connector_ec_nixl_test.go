@@ -693,7 +693,9 @@ func TestFanoutEncoderPerErrorVisibility(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 		imageURLItem("https://example.com/img3.jpg"),
 	)
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-visibility", reqcommon.APITypeChatCompletions)
+	// The connector reads its logger from the context, so the capture sink has
+	// to be seeded the way disaggregatedPrefillHandler seeds it.
+	_, _, _, err = srv.fanoutEncoderCollect(log.IntoContext(context.Background(), srv.logger), req, []string{encoderURL.Host}, "test-visibility", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "all encoders return 5xx; an error must surface")
 
 	captured := sink.snapshot()

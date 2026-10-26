@@ -948,3 +948,67 @@ func TestPrefillHandlerOmitsCorrelationWhenTracingDisabled(t *testing.T) {
 		}
 	}
 }
+
+// The shared-storage connector reads its logger from the request context, so
+// every line it writes while handling a P/D request carries the request's
+// trace_id. A connector logging through the process-scoped logger instead
+// drops the correlation and fails here.
+func TestConnectorLogsCarryRequestTraceID(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	useTracerProviderForTest(t, sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(sr),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	))
+
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer prefill.Close()
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logged []string
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorSharedStorage, DecoderURL: decoderURL})
+	s.logger = funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: logging.DEBUG})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.decoderProxy = s.createDecoderProxyHandler(decoderURL, false)
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions,
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set(routing.PrefillEndpointHeader, strings.TrimPrefix(prefill.URL, "http://"))
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+	var traceID string
+	for _, span := range sr.Ended() {
+		if span.Name() == "forward_request" {
+			traceID = span.SpanContext().TraceID().String()
+		}
+	}
+	if traceID == "" {
+		t.Fatal("forward_request span not recorded")
+	}
+
+	wantField := fmt.Sprintf("%q=%q", tracing.LogKeyTraceID, traceID)
+	connectorLine := false
+	for _, rec := range logged {
+		if !strings.Contains(rec, wantField) {
+			t.Errorf("log line missing the request's trace_id: %q", rec)
+		}
+		if strings.Contains(rec, "sending prefill request") {
+			connectorLine = true
+		}
+	}
+	if !connectorLine {
+		t.Errorf("no connector log line captured in %v", logged)
+	}
+}

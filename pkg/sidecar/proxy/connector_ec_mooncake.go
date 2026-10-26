@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -121,9 +122,10 @@ func (s *Server) fanoutEncoderMooncake(
 	apiType reqcommon.APIType,
 	prefillEndPoint string,
 ) ([]ecMooncakeItem, error) {
-	parts := s.mmItemsForFanout(originalRequest, requestID, apiType)
+	logger := log.FromContext(ctx)
+	parts := s.mmItemsForFanout(ctx, originalRequest, requestID, apiType)
 	if len(parts) == 0 {
-		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
+		logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, nil
 	}
 
@@ -131,7 +133,7 @@ func (s *Server) fanoutEncoderMooncake(
 	if err != nil {
 		return nil, err
 	}
-	s.logger.V(logging.DEBUG).Info("ec-mooncake consumer", "requestID", requestID, "consumer", consumerZMQ)
+	logger.V(logging.DEBUG).Info("ec-mooncake consumer", "requestID", requestID, "consumer", consumerZMQ)
 
 	items := make([]ecMooncakeItem, len(parts))
 	for idx, part := range parts {
@@ -170,7 +172,7 @@ func (s *Server) fanoutEncoderMooncake(
 		}
 		params := resp.ECTransferParams
 		if len(params) == 0 {
-			s.logger.V(logging.DEBUG).Info("encoder response carries no ec_transfer_params",
+			logger.V(logging.DEBUG).Info("encoder response carries no ec_transfer_params",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
@@ -367,7 +369,8 @@ func flattenECMetadata(md map[string]any) map[string]any {
 // the consumer over Mooncake, rewrites the request to reference them, and
 // hands off to the configured P/D connector.
 func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -377,7 +380,7 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -386,9 +389,9 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 	if len(encodeEndPoints) > 0 {
 		fail := func(err error) {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
+			logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+				logger.Error(err, "failed to send error response to client")
 			}
 		}
 
@@ -407,10 +410,10 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 				return
 			}
 			if transfers < len(items) {
-				s.logger.Info("warning: some multimodal items have no ec-mooncake transfer; the consumer processes them itself",
+				logger.Info("warning: some multimodal items have no ec-mooncake transfer; the consumer processes them itself",
 					"requestID", requestID, "transfers", transfers, "items", len(items))
 			}
-			s.logger.V(logging.DEBUG).Info("ec-mooncake encoder stage complete",
+			logger.V(logging.DEBUG).Info("ec-mooncake encoder stage complete",
 				"requestID", requestID, "items", len(items),
 				"rewritten", rewritten, "transfers", transfers)
 		}

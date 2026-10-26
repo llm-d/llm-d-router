@@ -29,6 +29,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -161,7 +162,7 @@ var _ = Describe("readJSONBody", func() {
 	It("logs the refusal when the response cannot be written", func() {
 		logged := captureLogs(proxy, 0)
 
-		_, _, ok := proxy.readJSONBody(postBody(`null`), errWriter{})
+		_, _, ok := proxy.readJSONBody(withContextLogger(proxy, postBody(`null`)), errWriter{})
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
@@ -172,7 +173,7 @@ var _ = Describe("readJSONBody", func() {
 		func(newRequest func() *http.Request, reason string) {
 			logged := captureLogs(proxy, logging.DEBUG)
 
-			_, _, ok := proxy.readJSONBody(newRequest(), httptest.NewRecorder())
+			_, _, ok := proxy.readJSONBody(withContextLogger(proxy, newRequest()), httptest.NewRecorder())
 
 			Expect(ok).To(BeFalse())
 			Expect(*logged).To(ContainElement(And(ContainSubstring("invalid request body"), ContainSubstring(reason))))
@@ -186,7 +187,7 @@ var _ = Describe("readJSONBody", func() {
 	It("does not log the refusal reason below debug level", func() {
 		logged := captureLogs(proxy, logging.VERBOSE)
 
-		_, _, ok := proxy.readJSONBody(postBody(`null`), httptest.NewRecorder())
+		_, _, ok := proxy.readJSONBody(withContextLogger(proxy, postBody(`null`)), httptest.NewRecorder())
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
@@ -296,7 +297,7 @@ var _ = Describe("readJSONBody", func() {
 		logged := captureLogs(proxy, 0)
 
 		_, _, ok := proxy.readJSONBody(
-			httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), httptest.NewRecorder())
+			withContextLogger(proxy, httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody)))), httptest.NewRecorder())
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).To(ContainElement(And(
@@ -332,6 +333,13 @@ func captureLogs(proxy *Server, verbosity int) *[]string {
 		*logged = append(*logged, prefix+" "+args)
 	}, funcr.Options{Verbosity: verbosity})
 	return logged
+}
+
+// withContextLogger seeds the proxy's process-scoped logger into the request
+// context, standing in for disaggregatedPrefillHandler's seeding so captured
+// lines cover code that reads the logger from the context.
+func withContextLogger(proxy *Server, r *http.Request) *http.Request {
+	return r.WithContext(log.IntoContext(r.Context(), proxy.logger))
 }
 
 // expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and

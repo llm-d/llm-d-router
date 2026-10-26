@@ -648,7 +648,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 					}
 					statusHandler(http.StatusOK, chatResponse(responseSecret, reason, 8, 3)).ServeHTTP(w, r)
 				})
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				switch connector {
 				case "nixl", "parallel":
@@ -719,7 +719,7 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 					statusHandler(http.StatusOK, `{"choices":[]}`).ServeHTTP(w, r)
 				})
 				body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.jpg"}}]}],"tools":[],"tool_choice":"auto","cache_hit_threshold":0.5}`
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				wantCode := http.StatusBadRequest
 				switch connector {
@@ -769,7 +769,7 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 			s.prefillerProxies.Add("prefill:8000", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(value) }))
 			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
 			rw := httptest.NewRecorder()
-			s.runConcurrentPD(rw, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil),
+			s.runConcurrentPD(rw, withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)),
 				[]byte(`{}`), []byte(`{}`), "prefill:8000", constants.KVConnectorSGLang, nil, nil)
 			select {
 			case <-panicLogged:
@@ -855,7 +855,7 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 					}
 					statusHandler(http.StatusOK, badResponse).ServeHTTP(w, r)
 				})
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				wantCode := http.StatusInternalServerError
 				switch stage {
@@ -1586,7 +1586,7 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 			req := chatRequest(t, textChatBody())
 			// Under a server context the reverse proxy panics with
 			// http.ErrAbortHandler when the body copy fails.
-			req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
+			req = withContextLogger(s, req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})))
 			rw := httptest.NewRecorder()
 			require.NotPanics(t, func() {
 				s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
@@ -1722,7 +1722,7 @@ func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
 	handled := make(chan struct{})
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handled)
-		s.handleNIXLV2(w, r, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
 	}))
 	defer sidecar.Close()
 
