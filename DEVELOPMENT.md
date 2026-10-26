@@ -982,7 +982,7 @@ If using coding agents, please ensure that the agent uses the PR template format
 The template contains a `release-notes` section which must be filled for any change that has
 user facing impact; a required check validates it on the PR.
 
-For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md) and the [review playbook](docs/review_playbook.md).
 
 ### Presubmit
 
