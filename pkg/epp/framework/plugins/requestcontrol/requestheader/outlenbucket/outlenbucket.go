@@ -106,7 +106,7 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	// continue_final_message, thinking_budget, and vendor-specific DeepSeek/Nemotron
 	// signals are only carried on the chat-completions shape (vLLM populates them from
 	// the client's chat_template_kwargs / extra_body). Responses API carries tools
-	// on the typed body, and reasoning.effort on the raw payload.
+	// on the typed body, and thinking signals on the raw payload.
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
@@ -134,12 +134,18 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		hasTools = hasResponsesTools(body.Responses.Tools)
 	}
 
-	// tool_choice is read from the raw payload; reasoning.effort is scoped to /v1/responses.
+	// tool_choice and API-specific reasoning effort are read from the raw payload.
 	var toolChoice string
 	if payload, ok := payloadMap(body); ok {
 		toolChoice = toolChoiceKind(body, payload["tool_choice"])
 		if body.Responses != nil {
-			enableThinking = responsesThinking(payload["reasoning"])
+			kwArgs := mapFromAny(payload["chat_template_kwargs"])
+			enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+			if enableThinking == nil {
+				enableThinking = responsesThinking(payload["reasoning"])
+			}
+		} else if body.ChatCompletions != nil && enableThinking == nil {
+			enableThinking = reasoningEffortThinking(payload["reasoning_effort"])
 		}
 	}
 
@@ -358,18 +364,25 @@ func hasResponsesTools(v any) bool {
 	return ok && len(t) > 0
 }
 
+func mapFromAny(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	if raw, ok := v.(json.RawMessage); ok {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil
+		}
+	}
+	return m
+}
+
 // responsesThinking maps the Responses API's reasoning.effort to an enable_thinking
 // boolean pointer. vLLM treats reasoning.effort != "none" as enable_thinking=true,
 // and "none" as enable_thinking=false.
 func responsesThinking(v any) *bool {
-	m, ok := v.(map[string]any)
-	if raw, isRaw := v.(json.RawMessage); isRaw {
-		ok = json.Unmarshal(raw, &m) == nil && m != nil
-	}
-	if !ok {
-		return nil
-	}
-	effort := stringFromAny(m["effort"])
+	return reasoningEffortThinking(mapFromAny(v)["effort"])
+}
+
+func reasoningEffortThinking(v any) *bool {
+	effort := stringFromAny(v)
 	if effort == "" {
 		return nil
 	}
