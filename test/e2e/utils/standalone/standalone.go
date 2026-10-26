@@ -66,7 +66,6 @@ type Config struct {
 	PodSelector   map[string]string
 	ReleaseName   string
 	KeepOnFailure bool
-	Tracing       bool
 }
 
 // Router describes the router one test case rendered and created.
@@ -140,14 +139,6 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 			"image": imageValues, "replicas": replicas,
 			"pluginsCustomConfig": map[string]string{"epp-config.yaml": plugins},
 		},
-	}
-	if cfg.Tracing {
-		routerValues["tracing"] = map[string]any{
-			"enabled": true, "sampling": map[string]string{"sampler": "always_on"},
-		}
-		routerValues["epp"].(map[string]any)["env"] = []map[string]string{
-			{"name": "OTEL_TRACES_EXPORTER", "value": "console"},
-		}
 	}
 	values, err := yaml.Marshal(map[string]any{
 		"router": routerValues,
