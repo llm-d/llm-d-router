@@ -26,7 +26,16 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 ## Code review
 
+- Apply [docs/review_playbook.md](docs/review_playbook.md) as the review checklist for every change.
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
+- Keep the per-request routing, scoring, and event-decoding path free of avoidable heap allocations, redundant copies, and work that can be hoisted to startup.
+- Keep mutex critical sections restricted to in-memory state transitions and release locks before network I/O, blocking calls, or channel sends.
+- Decode YAML and JSON configurations with strict unknown-field rejection and validate cross-field invariants in factory constructors at startup.
+- Keep shipped CLI flags, configuration fields, plugin types, HTTP headers, and metrics working across a two-release (`N+2`) deprecation window before removal.
+- Propagate producer, parser, and configuration failures as explicit errors instead of substituting placeholder counts or silent default values.
+- Bound Prometheus metric label cardinality to closed sets and register descriptors under canonical component subsystems.
+- Instantiate components in tests through production factories and decoders, and assert observable outputs and error types.
+- Keep data producers, eligibility filters, weighted scorers, and saturation detectors in separate single-signal plugins communicating through typed data-layer attributes.
 
 ## Pull requests
 
