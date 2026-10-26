@@ -650,7 +650,8 @@ source in the body. Under disaggregation the prefill request carries
 "remote_host": <source host>, "remote_port": <source P2P port>}}` (the only
 supported multi-key combination); without a prefiller the decoder-only request
 carries `{"remote_kv_source": {...}}` alone. A malformed or disallowed source is
-removed from the body and the request proceeds without a pull. A connector that
+removed from the body and the request proceeds without a pull, as is a source whose
+host and port are the prefill pod's own P2P tier address. A connector that
 cannot pull over the P2P tier does not read the field: only `offloading`, or
 NIXLv2 with `--enable-p2p-pull`, honors it. For the pulled blocks to be servable, the source
 pod must offload its generated (decode-phase) KV: set `offload_prompt_only:

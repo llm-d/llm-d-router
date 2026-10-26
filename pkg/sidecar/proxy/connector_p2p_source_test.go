@@ -172,6 +172,60 @@ var _ = Describe("P2P KV cache source in the request body", func() {
 		<-testInfo.stoppedCh
 	})
 
+	// prefillSourceRequest posts a disaggregated request whose source names
+	// the prefill pod's host on port, and returns the prefill request's
+	// kv_transfer_params.
+	prefillSourceRequest := func(port int) map[string]any {
+		proxyBaseAddr := testInfo.startProxy()
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		source := map[string]any{
+			reqcommon.FieldKVRequestID: sourceKVRequestID,
+			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemotePort:  port,
+		}
+		postChatCompletions(proxyBaseAddr, sourceBody(source, nil), map[string]string{
+			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.PrefillEndpointHeader: prefillHostPort,
+			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
+		})
+
+		Eventually(func() int {
+			return len(testInfo.prefillHandler.GetCompletionRequests())
+		}).Should(Equal(1))
+		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		return prefillKVParams
+	}
+
+	It("should drop a source that names the prefill pod's own P2P tier", func() {
+		var logged []string
+		testInfo.ctx = log.IntoContext(testInfo.ctx, funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
+
+		prefillKVParams := prefillSourceRequest(p2pConnectorPort)
+
+		Expect(prefillKVParams).To(HaveKey(reqcommon.FieldRemoteDecoder))
+		Expect(prefillKVParams).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
+		_, decodeKV := decodeKVParams()
+		Expect(decodeKV).To(HaveKey(reqcommon.FieldRemotePrefiller))
+		Expect(logged).To(ContainElement(ContainSubstring("prefill pod's own P2P tier")))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should keep a source on another rank of the prefill pod", func() {
+		prefillKVParams := prefillSourceRequest(p2pConnectorPort + 1)
+
+		p2p, ok := prefillKVParams[reqcommon.FieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort+1))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should not inject remote_kv_source without the body field", func() {
 		proxyBaseAddr := testInfo.startProxy()
 

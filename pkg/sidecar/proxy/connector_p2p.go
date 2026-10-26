@@ -109,14 +109,25 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
+	source := p2p.source
+	// EPP never names the prefill endpoint as the source, so a match here is
+	// an EPP without that check. On vLLM v0.32.0 the prefill pod would dial
+	// its own tier and wait out the NIXL handshake timeout. Another rank of
+	// the prefill pod differs in port and is a valid peer.
+	if source != nil && source.p2pPeer == *p2p.prefill {
+		s.logger.Info("warning: KV cache source is the prefill pod's own P2P tier; proceeding without a pull",
+			"p2p_source", source.String())
+		source = nil
+	}
+
 	kvRequestID := newUUID()
 	kv := make([]any, 0, 8)
 	kv = append(kv,
 		"prefill_host", extractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
 		"p2p_prefill", p2p.prefill.String())
-	if p2p.source != nil {
-		kv = append(kv, "p2p_source", p2p.source.String())
+	if source != nil {
+		kv = append(kv, "p2p_source", source.String())
 	}
 	s.logger.Info("running P2P protocol", kv...)
 
@@ -128,7 +139,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 			reqcommon.FieldKVRequestID: kvRequestID,
 		},
 	}
-	addP2PPullToPrefill(prefillKVParams, p2p.source)
+	addP2PPullToPrefill(prefillKVParams, source)
 	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
 
