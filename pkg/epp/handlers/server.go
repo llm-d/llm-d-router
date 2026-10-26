@@ -375,6 +375,13 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	return fairnessID, priority
 }
 
+func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+		s.bufferPool.Put(buf)
+	}
+}
+
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
 
@@ -433,13 +440,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 	}()
 
-	buf := s.bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
+	var buf *bytes.Buffer
 	defer func() {
-		buf.Reset()
-		// Return to pool if capacity is within limits.
-		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
-			s.bufferPool.Put(buf)
+		if buf != nil {
+			s.putBuffer(buf)
 		}
 	}()
 	var respBody []byte
@@ -577,6 +581,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+			if buf == nil {
+				buf = s.bufferPool.Get().(*bytes.Buffer)
+				buf.Reset()
+			}
 			// In the stream case, we can receive multiple request bodies.
 			buf.Write(v.RequestBody.Body)
 
@@ -668,7 +676,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 						span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
 					}
 				}
-				buf.Reset()
+				// The response phase can last for the whole generation, so return
+				// the buffer here unless the tool-calling snapshot in ctx still
+				// references its bytes.
+				if hasInboundToolSnapshot {
+					buf.Reset()
+				} else {
+					s.putBuffer(buf)
+					buf = nil
+				}
 
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
