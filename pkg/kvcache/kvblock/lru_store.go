@@ -26,16 +26,23 @@ import (
 // path can refresh the recency of every key it visited under a single
 // acquisition instead of one per key.
 type lruStore struct {
-	mu  sync.RWMutex
-	lru *simplelru.LRU[BlockHash, *PodCache]
+	onEvict func(BlockHash)
+	mu      sync.RWMutex
+	lru     *simplelru.LRU[BlockHash, *PodCache]
 }
 
 func newLRUStore(size int) (*lruStore, error) {
-	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, nil)
+	store := &lruStore{}
+	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, func(key BlockHash, _ *PodCache) {
+		if store.onEvict != nil {
+			store.onEvict(key)
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	return &lruStore{lru: lru}, nil
+	store.lru = lru
+	return store, nil
 }
 
 // Get returns the key's cache and marks it most recently used.

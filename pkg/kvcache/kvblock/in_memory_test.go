@@ -513,3 +513,38 @@ func TestInMemoryIndexAddByEngineKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestInMemoryIndexSharedEngineOwnership(t *testing.T) {
+	for _, capacity := range []bool{false, true} {
+		t.Run(fmt.Sprint(capacity), func(t *testing.T) {
+			ctx := t.Context()
+			idx, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 8, PodCacheSize: 4})
+			require.NoError(t, err)
+			pod := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}}
+			old := []BlockHash{11, 12, 13, 14}
+			live := []BlockHash{11, 12, 23, 24}
+			require.NoError(t, idx.Add(ctx, []BlockHash{1001}, old, pod))
+			require.NoError(t, idx.Add(ctx, []BlockHash{1002}, live, pod))
+			require.NoError(t, idx.Add(ctx, []BlockHash{1002}, live, pod))
+			if capacity {
+				for i := 0; i < 7; i++ {
+					require.NoError(t, idx.Add(ctx, []BlockHash{BlockHash(2001 + i)}, []BlockHash{900}, pod))
+				}
+			} else {
+				require.NoError(t, idx.Evict(ctx, EngineKey, []BlockHash{1001}, pod))
+			}
+			got, err := idx.Lookup(ctx, live, nil)
+			require.NoError(t, err)
+			require.Len(t, got, 4, "live sibling must retain its entire prefix")
+			for _, key := range []BlockHash{13, 14} {
+				hits, err := idx.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, err)
+				require.Empty(t, hits)
+			}
+			require.NoError(t, idx.Evict(ctx, EngineKey, []BlockHash{1002}, pod))
+			got, err = idx.Lookup(ctx, live, nil)
+			require.NoError(t, err)
+			require.Empty(t, got, "last owner removal must release shared entries")
+		})
+	}
+}
