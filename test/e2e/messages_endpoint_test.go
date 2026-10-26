@@ -269,7 +269,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
 			for _, stream := range []bool{false, true} {
 				for _, apiType := range []reqcommon.APIType{reqcommon.APITypeMessages, reqcommon.APITypeChatCompletions} {
-					prompt := uuid.NewString() + " " + responsesTextInput
+					prompt := uuid.NewString() + " " + pdTextInput
 					body := map[string]any{"model": simModelName, "max_tokens": echoOutputTokens, "stream": stream, "messages": []any{map[string]string{"role": "user", "content": prompt}}}
 					traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
 					headers := map[string]string{"traceparent": "00-" + traceID + "-0123456789abcdef-01"}
@@ -363,7 +363,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 				processed float64
 			}{
 				{[]byte(`{"model":`), 0},
-				{mustMarshal(map[string]any{"model": simModelName, "messages": []any{map[string]string{"role": "user", "content": responsesTextInput}}}), 1},
+				{mustMarshal(map[string]any{"model": simModelName, "messages": []any{map[string]string{"role": "user", "content": pdTextInput}}}), 1},
 			} {
 				before := apiSurfaceMetrics(metricsURL)
 				resp, raw := doRequest(reqcommon.PathMessages, failureCase.body)
