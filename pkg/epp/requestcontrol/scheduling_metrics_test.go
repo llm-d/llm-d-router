@@ -59,21 +59,20 @@ func (s *schedulingMetricsStream) Recv() (*extProcPb.ProcessingRequest, error) {
 }
 
 type apiSurfaceProfile struct {
-	surface reqcommon.APISurface
-	path    string
-	fail    bool
+	path string
+	fail bool
 }
 
 func (p *apiSurfaceProfile) Run(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
-	p.surface, p.path = request.APISurface, request.Headers[":path"]
-	request.APISurface = reqcommon.APITypeResponses.Surface()
+	p.path = request.Headers[":path"]
+	request.Headers[":path"] = reqcommon.PathResponses
 	if p.fail {
 		return nil, errors.New("scheduling failed")
 	}
 	return &fwksched.ProfileRunResult{TargetEndpoints: endpoints}, nil
 }
 
-func TestSchedulingMetricsRetainIncomingAPISurface(t *testing.T) {
+func TestRequestMetricsRetainIncomingAPISurface(t *testing.T) {
 	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeMessages, reqcommon.APITypeChatCompletions} {
 		for _, fail := range []bool{false, true} {
 			status := eppmetrics.SchedulerStatusSuccess
@@ -99,12 +98,16 @@ func TestSchedulingMetricsRetainIncomingAPISurface(t *testing.T) {
 				}}
 				server := handlers.NewStreamingServer(nil, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}, logr.Discard()), 0)
 				require.NoError(t, server.Process(stream))
-				require.Equal(t, apiType.Surface(), profile.surface, "the director must carry the incoming surface to the scheduler")
 				require.Equal(t, reqcommon.PathChatCompletions, profile.path, "the header plugin must run before scheduling")
 				counts := map[string]float64{
 					"llm_d_epp_scheduler_e2e_duration_seconds":      1,
 					"llm_d_epp_scheduler_attempts_total":            1,
 					"llm_d_epp_request_processing_duration_seconds": 1,
+				}
+				if fail {
+					counts["llm_d_epp_request_error_total"] = 1
+				} else {
+					counts["llm_d_epp_request_total"] = 1
 				}
 				families, err := ctrlmetrics.Registry.Gather()
 				require.NoError(t, err)
@@ -119,16 +122,23 @@ func TestSchedulingMetricsRetainIncomingAPISurface(t *testing.T) {
 					for _, label := range metric.GetLabel() {
 						labels[label.GetName()] = label.GetValue()
 					}
-					require.Equal(t, apiType.String(), labels["api_surface"], family.GetName())
+					switch family.GetName() {
+					case "llm_d_epp_scheduler_e2e_duration_seconds", "llm_d_epp_scheduler_attempts_total":
+						require.NotContains(t, labels, "api_surface", family.GetName())
+					default:
+						require.Equal(t, apiType.String(), labels["api_surface"], family.GetName())
+					}
 					if metric.GetCounter() != nil {
-						require.Equal(t, status, labels["status"])
+						if family.GetName() == "llm_d_epp_scheduler_attempts_total" {
+							require.Equal(t, status, labels["status"])
+						}
 						require.Equal(t, want, metric.GetCounter().GetValue())
 					} else {
 						require.Equal(t, uint64(want), metric.GetHistogram().GetSampleCount())
 					}
 					delete(counts, family.GetName())
 				}
-				require.Empty(t, counts, "all scheduling metrics must be emitted")
+				require.Empty(t, counts, "all request and scheduler metrics must be emitted")
 			})
 		}
 	}

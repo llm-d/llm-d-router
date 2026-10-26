@@ -273,11 +273,6 @@ func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Pars
 	return parser, nil
 }
 
-// APISurface returns the generation API captured at ingress.
-func (r *RequestContext) APISurface() reqcommon.APISurface {
-	return r.apiSurface
-}
-
 // apiType classifies the request by its path. A request rejected before its
 // headers are copied has no path and classifies as chat completions.
 func (r *RequestContext) apiType() reqcommon.APIType {

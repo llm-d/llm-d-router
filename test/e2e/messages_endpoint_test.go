@@ -327,7 +327,7 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 					surface := apiType.String()
 					gomega.Eventually(func(g gomega.Gomega) {
 						after := apiSurfaceMetrics(metricsURL)
-						for _, name := range []string{"request_total", "request_duration_seconds_count", "request_size_bytes_count", "response_size_bytes_count", "request_input_tokens_count", "request_output_tokens_count", "request_ttft_seconds_count", "scheduler_e2e_duration_seconds_count", "scheduler_attempts_total", "request_processing_duration_seconds_count", "response_processing_duration_seconds_count"} {
+						for _, name := range []string{"request_total", "request_duration_seconds_count", "request_size_bytes_count", "response_size_bytes_count", "request_input_tokens_count", "request_output_tokens_count", "request_ttft_seconds_count", "request_processing_duration_seconds_count", "response_processing_duration_seconds_count"} {
 							g.Expect(after[surface][name]-before[surface][name]).To(gomega.Equal(float64(1)), name)
 						}
 						g.Expect(after[surface]["request_running"]).To(gomega.BeZero())

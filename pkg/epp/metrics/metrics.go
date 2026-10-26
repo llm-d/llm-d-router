@@ -396,8 +396,8 @@ func RecordInferencePoolReadyPods(name string, runningPods float64) {
 }
 
 // RecordSchedulerE2ELatency records the end-to-end scheduling latency.
-func RecordSchedulerE2ELatency(ctx context.Context, apiSurface reqcommon.APISurface, duration time.Duration) {
-	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(apiSurface.String()), duration.Seconds())
+func RecordSchedulerE2ELatency(ctx context.Context, duration time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
 }
 
 // RecordRequestProcessingLatency records the EPP request processing latency,
@@ -413,9 +413,9 @@ func RecordResponseProcessingLatency(apiSurface reqcommon.APISurface, duration t
 }
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
-func RecordSchedulerAttempt(err error, targetModelName string, apiSurface reqcommon.APISurface, result *fwksched.SchedulingResult) {
+func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.SchedulingResult) {
 	if err != nil {
-		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "", apiSurface.String()).Inc()
+		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
 		return
 	}
 
@@ -427,14 +427,14 @@ func RecordSchedulerAttempt(err error, targetModelName string, apiSurface reqcom
 			if len(primaryResults.TargetEndpoints) > 0 {
 				metadata := primaryResults.TargetEndpoints[0].GetMetadata()
 				if metadata != nil {
-					llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port, apiSurface.String()).Inc()
+					llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, metadata.Name, metadata.ID.Namespace, metadata.Port).Inc()
 					return
 				}
 			}
 		}
 	}
 
-	llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "", apiSurface.String()).Inc()
+	llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusSuccess, targetModelName, "", "", "").Inc()
 }
 
 const (

@@ -761,7 +761,7 @@ func TestSchedulerE2ELatency(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, duration := range scenario.durations {
-				RecordSchedulerE2ELatency(context.Background(), reqcommon.APISurfaceUnknown, duration)
+				RecordSchedulerE2ELatency(context.Background(), duration)
 			}
 
 			// Verify llm_d_epp metric
@@ -969,8 +969,8 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 				},
 			},
 		}
-		RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, result)
-		RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, result)
+		RecordSchedulerAttempt(nil, "modelA", result)
+		RecordSchedulerAttempt(nil, "modelA", result)
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_with_result_metrics")
 	})
 
@@ -1001,8 +1001,8 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 				},
 			},
 		}
-		RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, result)
-		RecordSchedulerAttempt(nil, "modelB", reqcommon.APISurfaceUnknown, result)
+		RecordSchedulerAttempt(nil, "modelA", result)
+		RecordSchedulerAttempt(nil, "modelB", result)
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_multiple_endpoints_metrics")
 	})
 
@@ -1042,19 +1042,19 @@ func TestSchedulerAttemptsTotal(t *testing.T) {
 				},
 			},
 		}
-		RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, resultA)
-		RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, resultA)
-		RecordSchedulerAttempt(nil, "modelB", reqcommon.APISurfaceUnknown, resultB)
+		RecordSchedulerAttempt(nil, "modelA", resultA)
+		RecordSchedulerAttempt(nil, "modelA", resultA)
+		RecordSchedulerAttempt(nil, "modelB", resultB)
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_different_models_metrics")
 	})
 
 	t.Run("mixed success and failure attempts", func(t *testing.T) {
 		Reset()
 		for range 10 {
-			RecordSchedulerAttempt(nil, "modelA", reqcommon.APISurfaceUnknown, nil)
+			RecordSchedulerAttempt(nil, "modelA", nil)
 		}
 		for range 5 {
-			RecordSchedulerAttempt(errors.New("simulated scheduling failure"), "modelA", reqcommon.APISurfaceUnknown, nil)
+			RecordSchedulerAttempt(errors.New("simulated scheduling failure"), "modelA", nil)
 		}
 		compareMetrics(t, "llm_d_epp_scheduler_attempts_total", "testdata/llm_d_scheduler_attempts_total_metrics")
 	})

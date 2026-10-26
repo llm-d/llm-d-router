@@ -49,8 +49,6 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
 		IncRunningRequests("model", "target", surface, "", "0")
 		DecRunningRequests("model", "target", surface, "", "0")
-		RecordSchedulerE2ELatency(context.Background(), surface, time.Millisecond)
-		RecordSchedulerAttempt(nil, "target", surface, nil)
 		RecordRequestProcessingLatency(surface, time.Millisecond)
 		RecordResponseProcessingLatency(surface, time.Millisecond)
 	}
@@ -68,7 +66,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
 		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
 		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
-		llmdSchedulerE2ELatency, llmdSchedulerAttemptsTotal, llmdRequestProcessingLatency, llmdResponseProcessingLatency,
+		llmdRequestProcessingLatency, llmdResponseProcessingLatency,
 	} {
 		require.Equal(t, 7, promtestutil.CollectAndCount(collector), "six supported surfaces plus unknown must bound the series count")
 	}
