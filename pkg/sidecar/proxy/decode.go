@@ -144,6 +144,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// vLLM applies a structured-output constraint to one request's output, so a chunk
+	// that continues earlier text starts the structure over and the joined output is invalid.
+	if requestUsesStructuredOutput(body) {
+		s.logger.V(logging.DEBUG).Info("chunked decode: structured output requested, using regular decode")
+		regularDecode()
+		return
+	}
+
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
@@ -530,4 +538,20 @@ func requestMayCallTools(body map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// requestUsesStructuredOutput reports whether the request sets structured_outputs, or a
+// response_format with a type other than text. Both fields arrive as json.RawMessage.
+func requestUsesStructuredOutput(body map[string]any) bool {
+	if raw, ok := body[reqcommon.FieldStructuredOutputs].(json.RawMessage); ok && string(raw) != "null" {
+		return true
+	}
+	raw, ok := body[reqcommon.FieldResponseFormat].(json.RawMessage)
+	if !ok || string(raw) == "null" {
+		return false
+	}
+	var format struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &format) != nil || format.Type != reqcommon.ResponseFormatText
 }
