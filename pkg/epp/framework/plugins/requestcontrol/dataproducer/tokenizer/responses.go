@@ -345,7 +345,8 @@ func appendResponsesItem(conversation []tokenizerTypes.Conversation, item any) (
 // item missing one fails the conversion; a namespaced call renders under a
 // flattened name this code does not derive, so it fails too.
 func responsesToolCall(m map[string]any) (map[string]any, error) {
-	if _, namespaced := m["namespace"]; namespaced {
+	// vLLM can emit namespace: null for ordinary function calls.
+	if m["namespace"] != nil {
 		return nil, fmt.Errorf("responses input item type %q with a namespace is not supported by legacy translation", responsesItemTypeFunctionCall)
 	}
 	callID, _ := m["call_id"].(string)

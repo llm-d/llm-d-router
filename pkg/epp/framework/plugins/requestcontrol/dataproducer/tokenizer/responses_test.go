@@ -111,6 +111,27 @@ func TestResponsesPayloadWire_ToolCallTurn(t *testing.T) {
 	]}`, string(body))
 }
 
+func TestResponsesPayloadWire_ToolCallTurnNullNamespace(t *testing.T) {
+	r := &fwkrh.ResponsesRequest{
+		Input: []any{
+			map[string]any{"role": "user", "content": "what is the weather"},
+			map[string]any{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": `{"city":"Paris"}`, "namespace": nil},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
+		},
+	}
+	got, err := responsesPayload(r)
+	require.NoError(t, err)
+	body, err := got.Marshal()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"messages":[
+		{"role":"user","content":"what is the weather"},
+		{"role":"assistant","tool_calls":[
+			{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}
+		]},
+		{"role":"tool","content":"sunny","tool_call_id":"call_1"}
+	]}`, string(body))
+}
+
 // TestResponsesPayloadWire_AssistantTurnFolds covers a turn spelled as
 // reasoning, message and two function_call items, followed by both outputs:
 // vLLM renders the four items as one assistant message, so the translation
