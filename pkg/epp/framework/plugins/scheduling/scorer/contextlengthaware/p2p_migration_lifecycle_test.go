@@ -18,6 +18,8 @@ package contextlengthaware
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +27,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	concretedatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -44,6 +47,10 @@ const (
 	migrationPrefixProducer    = "precise-prefix"
 	migrationP2PProducer       = "session-migration-p2p"
 	migrationLongSourceAddress = "10.0.0.10"
+	// P-long's data parallel rank; its P2P tier port is the rank-0 port plus
+	// this.
+	migrationLongSourceRank   = 1
+	migrationP2PConnectorPort = 7777
 )
 
 // tokenizedPromptTestProducer satisfies the scorer's tokenized-request
@@ -109,6 +116,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 		PrefixMatchInfoProducerName: migrationPrefixProducer,
 		MinCachedTokenDelta:         1,
 		PrefillProfileName:          "prefill",
+		P2PConnectorPort:            migrationP2PConnectorPort,
 	})
 	workRouter := NewContextLengthAware("prefill-work-router", &contextLengthAwareParameters{
 		Label:                      migrationWorkRangeLabel,
@@ -139,6 +147,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	// the work-range filter selects P-short and PreRequest points it at P-long.
 	warmLong := migrationPrefiller("p-long", migrationLongSourceAddress, "8193-131072",
 		prefixDataKey, migrationInitialTokens/migrationBlockSize, migrationFollowUpTokens/migrationBlockSize)
+	warmLong.GetMetadata().RankIndex = migrationLongSourceRank
 	warmShort := migrationPrefiller("p-short", "10.0.0.20", "0-8192",
 		prefixDataKey, 0, migrationFollowUpTokens/migrationBlockSize)
 	followUpRequest := migrationTokenizedRequest("follow-up-101k", migrationFollowUpTokens)
@@ -151,7 +160,11 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	require.Len(t, warmCandidates, 1)
 	assert.Equal(t, "p-short", warmCandidates[0].GetMetadata().ID.Name)
 	require.NoError(t, p2p.PreRequest(ctx, followUpRequest, migrationPrefillResult(warmCandidates[0])))
-	assert.Equal(t, migrationLongSourceAddress, migrationKVSource(followUpRequest)[reqcommon.FieldRemoteHost])
+	source := migrationKVSource(followUpRequest)
+	assert.Equal(t, migrationLongSourceAddress, source[reqcommon.FieldRemoteHost])
+	assert.Equal(t, migrationP2PConnectorPort+migrationLongSourceRank, source[reqcommon.FieldRemotePort])
+	assert.Equal(t, net.JoinHostPort(migrationLongSourceAddress, strconv.Itoa(migrationP2PConnectorPort+migrationLongSourceRank)),
+		followUpRequest.Headers[routing.KVCacheSourceHeader])
 }
 
 // migrationKVSource returns the kv_transfer_params.remote_kv_source block the
