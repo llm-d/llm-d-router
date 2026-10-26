@@ -75,6 +75,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/attribute"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	labelproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/label"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -112,6 +113,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/headerstamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
@@ -130,6 +132,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointhealth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
@@ -151,6 +154,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/latencyobservation"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraresidency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/mmcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -465,7 +469,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
-	metrics.Register(r.customCollectors...)
+	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
 	// Register metrics handler.
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
@@ -585,6 +589,22 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	return mgr, ds, nil
 }
 
+// metricsRegisterOptions maps the configuration file's metrics section onto the
+// metrics package. Both discovery paths call it with the same parsed config, and
+// both call it before registration because the histograms are built there and
+// are process-wide. The edges themselves are validated with the rest of the
+// configuration in pkg/epp/config/loader, so startup has already failed by here
+// if they are unusable.
+func metricsRegisterOptions(rawConfig *configapiv1.EndpointPickerConfig) metrics.RegisterOptions {
+	if rawConfig == nil || rawConfig.Metrics == nil {
+		return metrics.RegisterOptions{}
+	}
+	return metrics.RegisterOptions{
+		RequestTPOTBuckets: rawConfig.Metrics.RequestTPOTBuckets,
+		RequestITLBuckets:  rawConfig.Metrics.RequestITLBuckets,
+	}
+}
+
 // newMetricsServerOptions configures the EPP metrics server. OpenMetrics is
 // enabled because exemplars only exist in that format.
 func newMetricsServerOptions(port uint16, authEnabled bool) metricsserver.Options {
@@ -649,6 +669,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
 	fwkplugin.Register(endpointpin.PluginType, fwkplugin.StabilityAlpha, endpointpin.Factory)
 
+	// request control pre-request handlers
+	// Alpha
+	fwkplugin.Register(headerstamp.PluginType, fwkplugin.StabilityAlpha, headerstamp.Factory)
+
 	// request control response-received handlers
 	// Alpha
 	fwkplugin.Register(topologystamp.PluginType, fwkplugin.StabilityAlpha, topologystamp.Factory)
@@ -665,6 +689,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, fwkplugin.StabilityAlpha, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(topologyaffinityfilter.FilterType, fwkplugin.StabilityAlpha, topologyaffinityfilter.Factory)
 	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
+	fwkplugin.Register(endpointhealth.EndpointHealthFilterType, fwkplugin.StabilityAlpha, endpointhealth.Factory)
 
 	// extra scheduling scorers
 	// Beta
@@ -683,6 +708,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(respondermodels.ModelsResponderType, fwkplugin.StabilityAlpha, respondermodels.Factory)
 	fwkplugin.Register(labelproducer.LabelProducerType, fwkplugin.StabilityAlpha, labelproducer.Factory)
+	fwkplugin.Register(attribute.AttributeProducerType, fwkplugin.StabilityAlpha, attribute.Factory)
 	fwkplugin.Register(attrtopology.TopologyExtractorType, fwkplugin.StabilityAlpha, exttopology.Factory)
 
 	// cross-replica syncers
@@ -723,6 +749,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
 	fwkplugin.Register(selectivekv.PluginType, fwkplugin.StabilityAlpha, selectivekv.PluginFactory)
+	fwkplugin.Register(loraresidency.Type, fwkplugin.StabilityAlpha, loraresidency.Factory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
@@ -892,17 +919,13 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	r.schedulerConfig = cfg.SchedulerConfig
 
+	pollStatus := datalayer.NewPollStatusProducer(cfg.DataConfig)
+	handle.AddPlugin(pollStatus.TypedName().Name, pollStatus)
+
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
 	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
 		return nil, fmt.Errorf("failed to create missing data producers - %w", err)
-	}
-
-	// Runs after auto-defaults so an absent token-producer (now materialized as
-	// the estimate backend) is caught; the check is independent of factory
-	// instantiation order. See #1471.
-	if err := preciseproducer.ValidateTokenProducer(handle); err != nil {
-		return nil, fmt.Errorf("invalid configuration - %w", err)
 	}
 
 	// Add requestControl plugins
@@ -1096,9 +1119,8 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 
 // initAdmissionControl builds the request admission controller, gated by the
 // FlowControl feature gate. With FC on it constructs the FlowRegistry and
-// FlowController and wraps endpointCandidates in a short-lived cache; with FC
-// off it returns the legacy saturation-only controller. Shared by the K8s and
-// file-discovery startup paths so the two cannot drift.
+// FlowController; with FC off it returns the legacy saturation-only controller.
+// Shared by the K8s and file-discovery startup paths so the two cannot drift.
 func (r *Runner) initAdmissionControl(
 	ctx context.Context,
 	opts *runserver.Options,
@@ -1112,7 +1134,6 @@ func (r *Runner) initAdmissionControl(
 			nil,
 			nil
 	}
-	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
 	setupLog.Info("Initializing Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 
@@ -1295,7 +1316,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
-	metrics.Register(r.customCollectors...)
+	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.RecordInferenceExtensionInfo(version.CommitSHA, version.BuildRef)
 
 	setupLog.Info("EPP starting (file discovery mode)",

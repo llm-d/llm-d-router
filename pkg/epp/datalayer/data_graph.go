@@ -248,7 +248,9 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 						// Check types are same. A nil witness declares no type, matching the
 						// datalayer Registry, so a consumer that accepts several value types
 						// (e.g. any string kind) can still depend on a typed producer.
-						if producedData != nil && consumedData != nil && reflect.TypeOf(producedData) != reflect.TypeOf(consumedData) {
+						producedType := plugin.UnwrapDataType(producedData)
+						consumedType := plugin.UnwrapDataType(consumedData)
+						if producedType != nil && consumedType != nil && reflect.TypeOf(producedType) != reflect.TypeOf(consumedType) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
 						}
 						if pluginToLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {

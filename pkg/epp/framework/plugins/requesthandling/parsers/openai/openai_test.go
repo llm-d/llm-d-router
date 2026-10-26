@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"mime/multipart"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1364,7 +1365,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
 
-			if tt.want.Completions != nil || tt.want.ChatCompletions != nil {
+			if rawFields := wantEnvelopeRawFields(tt.want); rawFields != nil {
 				tt.want.RawBody = bodyBytes
 				payload, _ := tt.want.Payload.AsMap()
 				for key, value := range payload {
@@ -1372,7 +1373,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if key == promptField || raw[0] == '{' || raw[0] == '[' {
+					if slices.Contains(rawFields, key) || raw[0] == '{' || raw[0] == '[' {
 						payload[key] = json.RawMessage(raw)
 					}
 				}
@@ -1384,6 +1385,19 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// wantEnvelopeRawFields returns the string fields an envelope-only payload keeps
+// opaque for the API the expected body belongs to, or nil for a fully decoded payload.
+func wantEnvelopeRawFields(want *fwkrh.InferenceRequestBody) []string {
+	switch {
+	case want.Responses != nil:
+		return envelopeRawFields[responsesAPI]
+	case want.Completions != nil || want.ChatCompletions != nil:
+		return envelopeRawFields[chatCompletionsAPI]
+	default:
+		return nil
 	}
 }
 

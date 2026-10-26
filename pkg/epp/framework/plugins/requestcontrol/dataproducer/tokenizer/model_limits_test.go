@@ -198,7 +198,7 @@ func TestRenderOnlyBudgetKeepsRawEnvelopeContent(t *testing.T) {
 		{"adds budget when absent", `{"model":"adapter","tools":` + tools + `}`, "1", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := renderOnlyBudget([]byte(tc.payload))
+			out, err := renderOnlyBudget(chatRenderPath, []byte(tc.payload))
 			require.NoError(t, err)
 			var envelope map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out, &envelope))
@@ -209,7 +209,7 @@ func TestRenderOnlyBudgetKeepsRawEnvelopeContent(t *testing.T) {
 			assert.Equal(t, `"adapter"`, string(envelope["model"]))
 		})
 	}
-	_, err := renderOnlyBudget([]byte(`[1,2]`))
+	_, err := renderOnlyBudget(chatRenderPath, []byte(`[1,2]`))
 	require.Error(t, err)
 }
 
@@ -257,6 +257,42 @@ func TestRenderOnlyBudgetCapsResponsesOutput(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, string(seen["max_output_tokens"]))
 			assert.Equal(t, `"hi"`, string(seen["input"]))
+		})
+	}
+}
+
+func TestRenderOnlyBudgetDropsEnabledMessagesThinking(t *testing.T) {
+	const enabled = `{"type":"enabled","budget_tokens":1024}`
+	for _, tc := range []struct {
+		name     string
+		path     string
+		thinking string
+		want     string
+	}{
+		{"drops enabled", messagesRenderPath, enabled, ""},
+		{"keeps disabled", messagesRenderPath, `{"type":"disabled"}`, `{"type":"disabled"}`},
+		{"keeps adaptive", messagesRenderPath, `{"type":"adaptive"}`, `{"type":"adaptive"}`},
+		{"chat keeps thinking", chatRenderPath, enabled, enabled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen map[string]json.RawMessage
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, tc.path, r.URL.Path)
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&seen))
+				_, _ = w.Write([]byte(`{"token_ids":[1,2,3]}`))
+			}))
+			defer server.Close()
+			renderer, err := newVLLMHTTPRenderer(&vllmConfig{URL: server.URL, PrefillOnly: true})
+			require.NoError(t, err)
+			payload := fwkrh.RawPayload(`{"model":"adapter","messages":[{"role":"user","content":"hi"}],"max_tokens":1500,"thinking":` + tc.thinking + `}`)
+			if tc.path == messagesRenderPath {
+				_, _, err = renderer.RenderMessages(t.Context(), payload)
+			} else {
+				_, _, err = renderer.RenderChat(t.Context(), payload)
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "1", string(seen["max_tokens"]))
+			assert.Equal(t, tc.want, string(seen["thinking"]))
 		})
 	}
 }

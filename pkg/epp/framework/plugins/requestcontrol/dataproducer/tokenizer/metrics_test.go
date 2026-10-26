@@ -19,8 +19,10 @@ package tokenizer
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,10 +34,187 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	otelsemconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
+
+func renderToolFieldCounts(t *testing.T) map[string]float64 {
+	t.Helper()
+	eppmetrics.Register()
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	counts := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels[toolcalling.MetricLabelComponent] == "tokenizer_http" {
+				require.Len(t, labels, 4)
+				require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
+				counts[labels[toolcalling.MetricLabelField]+"/"+labels[toolcalling.MetricLabelStatus]] = metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return counts
+}
+
+func TestRenderToolFieldMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		fields           []toolcalling.Field
+		status           int
+		warmup           bool
+		transform        bool
+		disabled         bool
+	}{
+		{name: "disabled", path: chatRenderPath, body: `{"tools":[]}`, disabled: true},
+		{name: "chat", path: chatRenderPath, body: `{"tools":[],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`, fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}, transform: true},
+		{name: "messages", path: messagesRenderPath, body: `{"tools":[],"tool_choice":{"type":"any"}}`, fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "responses", path: responsesRenderPath, body: `{"tools":[],"tool_choice":"auto"}`, fields: []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}},
+		{name: "plain", path: chatRenderPath, body: `{"messages":[]}`},
+		{name: "completions", path: completionsRenderPath, body: `{"tools":[]}`},
+		{name: "invalid capture", path: chatRenderPath, body: `{"tools":[`},
+		{name: "warmup", path: chatRenderPath, body: `{"tools":[]}`, warmup: true},
+		{name: "HTTP error", path: chatRenderPath, body: `{"tools":[]}`, fields: []toolcalling.Field{toolcalling.FieldTools}, status: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := renderToolFieldCounts(t)
+			renderer := newRenderServer(t, vllmConfig{PrefillOnly: tc.transform, OmitMMKwargs: tc.transform}, func(w http.ResponseWriter, _ *http.Request) {
+				if tc.status != 0 {
+					w.WriteHeader(tc.status)
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			})
+			ctx := t.Context()
+			if !tc.disabled {
+				ctx = toolcalling.WithTelemetryEnabled(ctx)
+			}
+			if tc.warmup {
+				ctx = withUnobservedRender(ctx)
+			}
+			var out renderResponse
+			err := renderer.postJSON(ctx, tc.path, fwkrh.RawPayload(tc.body), time.Second, &out)
+			require.Equal(t, tc.status != 0, err != nil)
+			after := renderToolFieldCounts(t)
+			for key, value := range before {
+				after[key] -= value
+			}
+			for key, value := range after {
+				if value == 0 {
+					delete(after, key)
+				}
+			}
+			want := map[string]float64{}
+			for _, field := range tc.fields {
+				want[string(field)+"/"+string(toolcalling.FieldStatusPreserved)] = 1
+			}
+			assert.Equal(t, want, after)
+		})
+	}
+}
+
+func TestRenderToolFieldMetrics_Retry(t *testing.T) {
+	recorder := setupSpanRecorder(t)
+	before := renderToolFieldCounts(t)
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	for _, name := range []string{"a", "b"} {
+		require.NoError(t, picker.Upsert(discoveredEndpoint(name, name, "8000").GetMetadata()))
+	}
+	calls := 0
+	renderer := &vllmHTTPRenderer{
+		endpointPicker: picker,
+		timeout:        time.Second,
+		pluginName:     fmt.Sprintf("%s-%d", t.Name(), renderTestRuns.Add(1)),
+		client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			status := http.StatusOK
+			if calls == 1 {
+				status = http.StatusServiceUnavailable
+			}
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"token_ids":[1]}`))}, nil
+		})},
+	}
+	request := chatRequest()
+	request.Body.Payload = fwkrh.RawPayload(`{"tools":[]}`)
+	err = newTestPlugin(renderer).Produce(toolcalling.WithTelemetryEnabled(t.Context()), request, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, calls)
+	after := renderToolFieldCounts(t)
+	assert.Equal(t, float64(1), after["tools/preserved"]-before["tools/preserved"])
+	assert.Equal(t, before["tools/rejected"], after["tools/rejected"])
+	count, _ := renderHistogram(t, renderer.pluginName, renderResultSuccess)
+	assert.Equal(t, uint64(1), count)
+	assert.Zero(t, renderSeriesCount(t, renderFailuresTotal, renderer.pluginName))
+	assert.Equal(t, renderResultSuccess, spanAttrs(tokenizeSpan(t, recorder))[semconv.LLMDEPPTokenProducerResultKey].AsString())
+}
+
+func TestProduce_ToolRenderOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, result, reason, spanResult string
+		status                                 int
+	}{
+		{"success", `{"token_ids":[1]}`, renderResultSuccess, "", renderResultSuccess, http.StatusOK},
+		{"HTTP rejection", `{"detail":"private_tool"}`, renderResultError, renderReasonStatus, renderResultError, http.StatusUnprocessableEntity},
+		{"server failure", `{"detail":"private_tool"}`, renderResultError, renderReasonStatus, renderResultError, http.StatusServiceUnavailable},
+		{"decode failure", `{"token_ids":"private_tool"}`, renderResultError, renderReasonDecode, renderResultError, http.StatusOK},
+		{"no tokens", `{"token_ids":[]}`, renderResultSuccess, "", resultSkippedNoTokens, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			renderer := newRenderServer(t, vllmConfig{}, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			request := chatRequest()
+			request.Body.Payload = fwkrh.RawPayload(`{"tools":[{"type":"function","function":{"name":"private_tool"}}]}`)
+			err := newTestPlugin(renderer).Produce(toolcalling.WithTelemetryEnabled(t.Context()), request, nil)
+			require.Equal(t, tc.reason != "", err != nil)
+			assert.Equal(t, tc.reason == "" && tc.spanResult != resultSkippedNoTokens, request.Body.TokenizedRequest != nil)
+			count, _ := renderHistogram(t, renderer.pluginName, tc.result)
+			assert.Equal(t, uint64(1), count)
+			if tc.reason == "" {
+				assert.Zero(t, renderSeriesCount(t, renderFailuresTotal, renderer.pluginName))
+			} else {
+				assert.Equal(t, float64(1), renderFailures(renderer.pluginName, tc.reason))
+				assert.Equal(t, codes.Error, tokenizeSpan(t, recorder).Status().Code)
+			}
+			attrs := spanAttrs(tokenizeSpan(t, recorder))
+			assert.Equal(t, tc.spanResult, attrs[semconv.LLMDEPPTokenProducerResultKey].AsString())
+			assert.True(t, attrs[semconv.LLMDToolCallingPresentKey].AsBool())
+			assert.Equal(t, string(toolcalling.FieldStatusPreserved), attrs[semconv.LLMDToolCallingFieldToolsStatusKey].AsString())
+			require.Len(t, recorder.Ended(), 2)
+			for _, span := range recorder.Ended() {
+				if span.SpanKind() == trace.SpanKindClient {
+					assert.Equal(t, int64(tc.status), spanAttrs(span)[otelsemconv.HTTPResponseStatusCodeKey].AsInt64())
+				}
+			}
+		})
+	}
+}
+
+func TestRenderToolFieldMetrics_NoEndpoints(t *testing.T) {
+	before := renderToolFieldCounts(t)
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+	renderer := &vllmHTTPRenderer{endpointPicker: picker, timeout: time.Second}
+	_, _, err = renderer.RenderChat(t.Context(), fwkrh.RawPayload(`{"tools":[]}`))
+	require.ErrorIs(t, err, errNoRenderEndpoints)
+	assert.Equal(t, before, renderToolFieldCounts(t))
+}
 
 // renderHistogram returns the sample count and sum of renderDurationSeconds for
 // one plugin name and result.

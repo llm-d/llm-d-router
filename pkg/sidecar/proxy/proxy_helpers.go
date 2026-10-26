@@ -39,8 +39,11 @@ import (
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+const logBodyBytesKey = "bodyBytes"
 
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
@@ -57,7 +60,8 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	close(s.readyCh)
 
 	// Wrap handler with OpenTelemetry middleware to extract trace context from incoming requests
-	handler := otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
+	// The attribution handoff wraps it so every route's server span carries EPP's fairness identity.
+	handler := tracing.WithAttributionHandoff(otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			path := ""
 			if r.URL != nil {
@@ -65,7 +69,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 			return r.Method + " " + path
 		}),
-	)
+	))
 
 	server := &http.Server{
 		Handler: handler,
@@ -264,7 +268,7 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}

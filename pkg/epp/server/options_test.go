@@ -38,6 +38,15 @@ const (
 	testConfigFile = "fake-config.yaml"
 )
 
+func TestToolCallingTelemetryOption(t *testing.T) {
+	opts := NewOptions()
+	require.False(t, opts.EnableToolCallingTelemetry)
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry"}))
+	require.True(t, opts.EnableToolCallingTelemetry)
+}
+
 // TestEndpointTargetPorts
 func TestEndpointTargetPorts(t *testing.T) {
 	tests := []struct {

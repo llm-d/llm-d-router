@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -56,6 +57,8 @@ var (
 			metadata.FlowQueueDurationHeaderKey,
 		),
 		errcommon.RequestDroppedReasonHeaderKey,
+		tracing.FairnessIDHandoffHeader,
+		tracing.FairnessSourceHandoffHeader,
 	)
 
 	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.

@@ -29,11 +29,13 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
@@ -317,17 +319,51 @@ func TestAsyncBrokerEnqueueFailure(t *testing.T) {
 	assert.InDelta(t, 1.0, upstreamRequestCount(t, reg, coordmetrics.UpstreamAsyncBroker), 1e-9)
 }
 
-// A client gone before the enqueue returns is not counted as an error.
-func TestAsyncBrokerEnqueueClientGone(t *testing.T) {
-	step, _ := newAsyncTestStep(t, nil)
-	require.NoError(t, step.rdb.Close())
-	reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+// A departed client ends the step with the context error on both the enqueue
+// and the hold path.
+func TestAsyncBrokerClientGone(t *testing.T) {
+	t.Run("enqueue", func(t *testing.T) {
+		step, _ := newAsyncTestStep(t, nil)
+		require.NoError(t, step.rdb.Close())
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var logged []string
+		logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
 
-	err := step.Execute(ctx, reqCtx)
-	assert.True(t, errors.Is(err, pipeline.ErrPipelineDone), "want ErrPipelineDone, got %v", err)
+		err := step.Execute(log.IntoContext(ctx, logger), reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+		for _, line := range logged {
+			assert.NotContains(t, line, "failed to enqueue request")
+		}
+	})
+	t.Run("wait", func(t *testing.T) {
+		step, _ := newAsyncTestStep(t, nil)
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+	})
+}
+
+// cancelAfterSubmit ends the request context once the enqueue has succeeded,
+// so the client is gone when the hold begins.
+type cancelAfterSubmit struct {
+	asyncSubmitter
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) error {
+	err := s.asyncSubmitter.SubmitRequest(ctx, req)
+	s.cancel()
+	return err
 }
 
 func upstreamRequestCount(t *testing.T, reg *prometheus.Registry, upstream string) float64 {

@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -42,9 +41,40 @@ var (
 
 var registerMetrics sync.Once
 
-// Register all metrics.
+// RegisterOptions carries the parts of the EPP configuration that change how
+// collectors are built rather than how they are observed. The zero value keeps
+// every default.
+type RegisterOptions struct {
+	// RequestTPOTBuckets overrides the bucket edges of
+	// request_streaming_tpot_seconds. An empty slice keeps
+	// DefaultRequestTPOTBuckets.
+	RequestTPOTBuckets []float64
+
+	// RequestITLBuckets overrides the bucket edges of
+	// request_streaming_itl_seconds. An empty slice keeps
+	// DefaultInterTokenLatencyBuckets.
+	RequestITLBuckets []float64
+}
+
+// Register all metrics with the default collector configuration.
 func Register(customCollectors ...prometheus.Collector) {
+	RegisterWithOptions(RegisterOptions{}, customCollectors...)
+}
+
+// RegisterWithOptions registers all metrics after rebuilding the streaming
+// latency histograms from opts. The rebuild happens before registration
+// because a registered HistogramVec has no API to change its buckets, and the
+// recording helpers read these package variables on each call, so they observe
+// the replacement.
+func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Collector) {
 	registerMetrics.Do(func() {
+		if len(opts.RequestTPOTBuckets) > 0 {
+			llmdRequestTPOT = newRequestTPOTHistogram(opts.RequestTPOTBuckets)
+		}
+		if len(opts.RequestITLBuckets) > 0 {
+			llmdInterTokenLatency = newInterTokenLatencyHistogram(opts.RequestITLBuckets)
+		}
+
 		// Register other metrics
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
@@ -68,6 +98,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(llmdSchedulerE2ELatency)
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFilterEliminatedTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFailuresTotal)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
@@ -128,6 +160,8 @@ func Reset() {
 	llmdInferencePoolReadyEndpoints.Reset()
 	llmdSchedulerE2ELatency.Reset()
 	llmdSchedulerAttemptsTotal.Reset()
+	llmdSchedulerFilterEliminatedTotal.Reset()
+	llmdSchedulerFailuresTotal.Reset()
 	llmdPluginProcessingLatencies.Reset()
 	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
@@ -191,51 +225,10 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 		return false
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
-	observeWithTraceExemplar(ctx,
+	metricsutil.ObserveWithTraceExemplar(ctx,
 		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority),
 		elapsedSeconds)
 	return true
-}
-
-// Exemplar label names. Grafana links exemplars to traces by the trace_id label
-// name, so don't rename it.
-const (
-	exemplarTraceIDLabel = "trace_id"
-	exemplarSpanIDLabel  = "span_id"
-)
-
-// observeWithTraceExemplar records an observation and attaches the request's
-// trace as a Prometheus exemplar, so a point on a latency graph links to its trace.
-//
-// Nothing is attached for unsampled spans: they have a trace ID, but no trace was
-// exported, so the link would go nowhere.
-//
-// span_id is only added when the span is recording, meaning the EPP started it.
-// With EPP tracing off the context still holds the caller's span, which isn't
-// the EPP's, so only trace_id is attached.
-//
-// Exemplars only reach the wire over OpenMetrics; see newMetricsServerOptions
-// in cmd/epp/runner.
-func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer, value float64) {
-	exemplarObserver, ok := observer.(prometheus.ExemplarObserver)
-	if !ok {
-		observer.Observe(value)
-		return
-	}
-
-	span := trace.SpanFromContext(ctx)
-	spanCtx := span.SpanContext()
-	if !spanCtx.IsSampled() {
-		observer.Observe(value)
-		return
-	}
-
-	// trace_id + span_id is 63 runes, under OpenMetrics' 128-rune exemplar limit.
-	labels := prometheus.Labels{exemplarTraceIDLabel: spanCtx.TraceID().String()}
-	if span.IsRecording() {
-		labels[exemplarSpanIDLabel] = spanCtx.SpanID().String()
-	}
-	exemplarObserver.ObserveWithExemplar(value, labels)
 }
 
 // RecordResponseSizes records the response sizes.
@@ -287,7 +280,7 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 	elapsedSeconds := complete.Sub(received).Seconds()
 	secondsPerToken := elapsedSeconds / float64(outputTokenCount)
 
-	observeWithTraceExemplar(ctx, llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority), secondsPerToken)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority), secondsPerToken)
 	return true
 }
 
@@ -309,7 +302,7 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 		streamingLabel = "true"
 	}
 	ttftSeconds := firstToken.Sub(received).Seconds()
-	observeWithTraceExemplar(ctx, llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel), ttftSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel), ttftSeconds)
 	return true
 }
 
@@ -338,7 +331,7 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 	e2eSeconds := complete.Sub(received).Seconds()
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
-	observeWithTraceExemplar(ctx, llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority), tpotSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority), tpotSeconds)
 	return true
 }
 
@@ -351,7 +344,7 @@ func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fa
 			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
 		return false
 	}
-	observeWithTraceExemplar(ctx, llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority), itlSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority), itlSeconds)
 	return true
 }
 
@@ -403,7 +396,7 @@ func RecordInferencePoolReadyPods(name string, runningPods float64) {
 
 // RecordSchedulerE2ELatency records the end-to-end scheduling latency.
 func RecordSchedulerE2ELatency(ctx context.Context, duration time.Duration) {
-	observeWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
 }
 
 // RecordRequestProcessingLatency records the EPP request processing latency,
@@ -448,6 +441,24 @@ const (
 	SchedulerStatusFailure = "failure"
 )
 
+// RecordSchedulerFilterEliminated records the number of candidate endpoints a
+// filter removed in a scheduler profile run.
+func RecordSchedulerFilterEliminated(profile, pluginType, pluginName string, count int) {
+	llmdSchedulerFilterEliminatedTotal.WithLabelValues(profile, pluginType, pluginName).Add(float64(count))
+}
+
+// Reasons for RecordSchedulerFailure.
+const (
+	SchedulerFailureReasonAllFiltered         = "all_filtered"
+	SchedulerFailureReasonNoProfileSelected   = "no_profile_selected"
+	SchedulerFailureReasonProfileHandlerError = "profile_handler_error"
+)
+
+// RecordSchedulerFailure records a failed scheduling attempt with its reason.
+func RecordSchedulerFailure(reason string) {
+	llmdSchedulerFailuresTotal.WithLabelValues(reason).Inc()
+}
+
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
@@ -479,7 +490,7 @@ func RecordFlowControlRequestQueueDuration(
 ) {
 	fairnessID = boundFairnessID(fairnessID)
 	modelName, targetModelName = boundModels(modelName, targetModelName)
-	observeWithTraceExemplar(ctx, llmdFlowControlRequestQueueDuration.WithLabelValues(
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdFlowControlRequestQueueDuration.WithLabelValues(
 		fairnessID, priority, outcome,
 		inferencePool,
 		modelName, targetModelName,

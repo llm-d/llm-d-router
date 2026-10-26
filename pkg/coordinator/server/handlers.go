@@ -205,6 +205,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
+		if pipeline.IsClientCancellation(ctx, err) {
+			logger.V(logutil.VERBOSE).Info("pipeline aborted: client cancelled", "error", err)
+			return
+		}
 		logger.Error(err, "pipeline execution failed")
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		var streamed *pipeline.UpstreamStreamedError

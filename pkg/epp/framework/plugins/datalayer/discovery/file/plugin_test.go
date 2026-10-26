@@ -183,6 +183,29 @@ endpoints:
 	assert.Equal(t, "10.0.0.1:8000", notifier.upserted[0].MetricsHost)
 }
 
+func TestStart_AttributesSectionCarriedIntoMetadata(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: ep1
+    address: "10.0.0.1"
+    port: "8000"
+    attributes:
+      pathPrefix: /laneA
+      model: fp8
+  - name: ep2
+    address: "10.0.0.2"
+    port: "8000"
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+	require.Len(t, notifier.upserted, 2)
+	assert.Equal(t, map[string]string{"pathPrefix": "/laneA", "model": "fp8"}, notifier.upserted[0].Attributes)
+	assert.Empty(t, notifier.upserted[1].Attributes)
+}
+
 func TestStart_MissingFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

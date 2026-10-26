@@ -17,7 +17,10 @@ limitations under the License.
 
 package metadata
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 const (
 	// SubsetFilterNamespace is the key for the outer namespace struct in the metadata field of the extproc request that is used to wrap the subset filter.
@@ -104,4 +107,9 @@ func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, boo
 	}
 	value, ok := headers[key]
 	return value, ok
+}
+
+// IsFiniteFloat reports whether a value is neither NaN nor infinite.
+func IsFiniteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }

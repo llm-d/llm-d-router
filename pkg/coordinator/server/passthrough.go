@@ -32,18 +32,19 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 // passthroughHandler is the chi NotFound catch-all: any path the coordinator
 // does not register (e.g. /v1/models, /v1/messages/count_tokens, /v1/embeddings)
 // is reverse-proxied to the gateway with x-llm-d-epp-profile: decode, so EPP dispatches
 // it to a decode pod. Method, body, query, and forwarded headers are preserved;
-// X-Request-Id is validated and replaced with a UUID if malformed, matching
-// handleInference's sanitization.
+// X-Request-Id is validated and replaced with a UUID if malformed, and
+// coordinator-owned headers are stripped from the request and the response,
+// as on the registered paths.
 type passthroughHandler struct {
 	gatewayURL         *url.URL
 	transport          http.RoundTripper
@@ -106,20 +107,26 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // newPassthroughProxy builds the reverse proxy that streams to the gateway.
-// The director rewrites the outbound scheme/host to the gateway, stamps the
-// decode profile and sanitized request id, and drops a client endpoint pin,
-// which EPP routes on. Transport errors return 502; a
-// failure after the upstream response has started can only surface through
-// ErrorLog, so it is wired to the request-scoped logger.
+// The director rewrites the outbound scheme/host to the gateway, strips the
+// coordinator-owned headers, and stamps the decode profile and sanitized
+// request id. Transport errors return 502; a failure after the upstream
+// response has started can only surface through ErrorLog, so it is wired to
+// the request-scoped logger.
 func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http.RoundTripper, requestID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(r *http.Request) { //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
 			r.URL.Scheme = gatewayURL.Scheme
 			r.URL.Host = gatewayURL.Host
 			r.Host = gatewayURL.Host
+			pipeline.StripInternalHeaders(r.Header)
 			r.Header.Set(reqcommon.RequestIDHeaderKey, requestID)
 			r.Header.Set(reqcommon.EPPProfileHeaderKey, gateway.PhaseDecode)
-			r.Header.Del(routing.EndpointPinHeader)
+		},
+		// A plugin on the decode profile can stamp coordinator-owned headers on
+		// the response.
+		ModifyResponse: func(resp *http.Response) error {
+			pipeline.StripInternalHeaders(resp.Header)
+			return nil
 		},
 		FlushInterval: -1,
 		Transport:     transport,

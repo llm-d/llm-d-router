@@ -186,11 +186,14 @@ func (s *EncodeStep) executeOne(
 		headers:  gatewayHeaders(reqCtx, gateway.PhaseEncode),
 	})
 	if err != nil {
-		var upstream *pipeline.UpstreamError
-		if errors.As(err, &upstream) {
-			logger.Error(err, "encode fanout status", "status", upstream.StatusCode)
-		} else {
-			logger.Error(err, "encode fanout request", "path", path)
+		// A cancelled fan-out is reported once by the handler.
+		if !pipeline.IsClientCancellation(ctx, err) {
+			var upstream *pipeline.UpstreamError
+			if errors.As(err, &upstream) {
+				logger.Error(err, "encode fanout status", "status", upstream.StatusCode)
+			} else {
+				logger.Error(err, "encode fanout request", "path", path)
+			}
 		}
 		return nil, nil, err
 	}
@@ -199,7 +202,9 @@ func (s *EncodeStep) executeOne(
 	var encResp encodeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&encResp); err != nil {
 		err = fmt.Errorf("encode[%d]: decode response: %w", index, err)
-		logger.Error(err, "encode fanout decode")
+		if !pipeline.IsClientCancellation(ctx, err) {
+			logger.Error(err, "encode fanout decode")
+		}
 		return nil, nil, err
 	}
 	return coerceParamsMap(logger, encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil

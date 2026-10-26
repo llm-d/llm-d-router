@@ -38,23 +38,26 @@ var hopByHopHeaders = map[string]bool{
 
 // internalForwardingHeaders are set only by the coordinator; a client copy is
 // dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port.
+// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
+// Prefer: if-available, the conditional-decode probe's signal, with 412 on
+// any other leg.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
+	routing.PreferHeader:                  true,
 }
 
 func isForwardableHeader(name string) bool {
 	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
 }
 
-// StripInternalHeaders removes headers the coordinator alone injects into
-// requests it forwards (e.g. x-llm-d-peer-topology, copied from the prefill
-// response onto the decode request). Call this on a client request's headers
-// as soon as they are received, so a client-supplied value is never mistaken
-// for one the coordinator generated itself.
+// StripInternalHeaders removes the internalForwardingHeaders. Call it on a
+// client request as soon as it is received, so a client-supplied value is
+// never mistaken for one the coordinator generated, and on an upstream
+// response before it is copied to the client, so a value stamped by an EPP
+// plugin is not exposed.
 func StripInternalHeaders(headers http.Header) {
 	for key := range internalForwardingHeaders {
 		headers.Del(key)
@@ -219,6 +222,12 @@ type RequestContext struct {
 // The bytes stay in the request body (data URI or input_audio.data) rather than
 // on the entry, so a large audio or video payload is not duplicated on reqCtx.
 //
+// KwargsData is the full MultiModalKwargsItem blob (encoder tensors plus
+// metadata). MMMetadata is the sibling metadata-only blob from render
+// (placeholder_metadata_fields and keep_on_cpu fields such as image_grid_thw),
+// without encoder inputs like pixel_values. Prefill may send MMMetadata with
+// ec_transfer_params instead of KwargsData.
+//
 // An entry's position in this slice means nothing on its own: steps pair an
 // entry with its content part by counting entries of the same Modality. See
 // steps.collectMediaParts for the invariant that keeps the two lined up.
@@ -226,6 +235,7 @@ type MultimodalEntry struct {
 	Modality    reqcommon.Modality
 	Hash        string
 	KwargsData  string
+	MMMetadata  string
 	Placeholder PlaceholderRange
 }
 

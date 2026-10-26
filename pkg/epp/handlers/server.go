@@ -90,6 +90,11 @@ func (s *StreamingServer) SetEmitEndpointScores(enabled bool) {
 	s.emitEndpointScores = enabled
 }
 
+// SetToolCallingTelemetryEnabled controls tool-specific request and response observations.
+func (s *StreamingServer) SetToolCallingTelemetryEnabled(enabled bool) {
+	s.toolCallingTelemetryEnabled = enabled
+}
+
 // SetResponders sets the plugins that may answer a request instead of routing it. They are
 // asked in the given order.
 func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
@@ -119,7 +124,8 @@ type StreamingServer struct {
 	maxPoolBufferSize int
 	// emitEndpointScores enables emitting per-endpoint scheduler scores in the request-path
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
-	emitEndpointScores bool
+	emitEndpointScores          bool
+	toolCallingTelemetryEnabled bool
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
 	responders []fwkrc.Responder
 }
@@ -170,6 +176,16 @@ type RequestContext struct {
 	responseComplete           bool
 	responseStatusCode         string
 	requestRunning             bool
+
+	toolCallingSurface             reqcommon.APIType
+	toolCallingRequest             bool
+	toolCallingResponseEventStream bool
+	toolCallingUpstreamDetector    *toolcalling.ResponseDetector
+	toolCallingForwardedDetector   *toolcalling.ResponseDetector
+	toolCallingUpstreamPresent     bool
+	toolCallingForwardedPresent    bool
+	toolCallingForwardedComplete   bool
+	toolCallingResponseRecorded    bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
 	// streamed response it is the sum of the per-chunk handler slices, since the
@@ -279,6 +295,7 @@ func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
 }
 
 func compareEPPToolCallingSnapshotToBody(surface reqcommon.APIType, inbound toolcalling.RequestSnapshot, inboundBody, outboundBody []byte) ([]toolcalling.FieldStatus, error) {
+	// Reuse the ingress fields when the body is unchanged or cannot contain supported keys.
 	if bytes.Equal(inboundBody, outboundBody) || inbound.CanSkipCapture(outboundBody) {
 		return toolcalling.CompareRequests(inbound, inbound)
 	}
@@ -389,6 +406,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			Headers: make(map[string]string),
 		},
 	}
+	defer func() {
+		// Finalize observations before detector cleanup and span.End.
+		if !reqCtx.responseHeadersReceivedAt.IsZero() {
+			reqCtx.recordToolCallingResponse(span)
+		}
+		reqCtx.clearToolCallingResponseDetectors()
+	}()
 
 	// Request-phase failures (parser resolution, body parsing, admission
 	// rejection) leave the switch before the success path, so both call this.
@@ -510,7 +534,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if s.evictionLookup != nil {
 				reqCtx.requestDroppedReason = s.evictionLookup.GetReason(evictionRequestID)
 			}
-			if sendErr := reqCtx.updateStateAndSendIfNeeded(srv, logger); sendErr != nil {
+			if sendErr := reqCtx.updateStateAndSendIfNeeded(srv, logger, span); sendErr != nil {
 				return sendErr
 			}
 			return nil
@@ -574,7 +598,11 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: resolveErr.Error()}
 					break
 				}
-				apiType, hasToolCallingAPI := toolCallingAPIForPath(fwkrequest.GetRequestPath(reqCtx.Request.Headers))
+				var apiType reqcommon.APIType
+				hasToolCallingAPI := false
+				if s.toolCallingTelemetryEnabled {
+					apiType, hasToolCallingAPI = toolCallingAPIForPath(fwkrequest.GetRequestPath(reqCtx.Request.Headers))
+				}
 				before := time.Now()
 				parseResult, parseErr := parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				metrics.RecordPluginProcessingLatency(fwkrh.RequestParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
@@ -611,6 +639,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					break
 				}
 
+				if s.toolCallingTelemetryEnabled {
+					ctx = toolcalling.WithTelemetryEnabled(ctx)
+				}
+				if hasInboundToolSnapshot {
+					ctx = toolcalling.WithRequestSnapshot(ctx, inboundBody, inboundToolSnapshot)
+				}
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				// The Director may resolve agent identity after this request span opened.
 				tracing.AttributeRequest(ctx, span)
@@ -622,6 +656,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				if hasToolCallingAPI && hasInboundToolSnapshot {
+					reqCtx.toolCallingSurface = apiType
+					reqCtx.toolCallingRequest = inboundToolSnapshot.Summary().ToolCallingPresent &&
+						(apiType == reqcommon.APITypeChatCompletions || apiType == reqcommon.APITypeMessages)
 					statuses, compareErr := compareEPPToolCallingSnapshotToBody(apiType, inboundToolSnapshot, inboundBody, reqCtx.Request.RawBody)
 					if compareErr != nil {
 						logger.Error(compareErr, "Error comparing tool-calling request fields")
@@ -674,11 +711,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if traceEnabled {
 					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
 				}
-				// Envoy sends the response status as the ":status" pseudo-header.
-				if (header.Key == ":status" || header.Key == "status") && string(header.RawValue) != "200" {
+				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && string(header.RawValue) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
-				} else if header.Key == reqcommon.HeaderContentType && strings.Contains(string(header.RawValue), fwkrequest.MediaTypeEventStream) {
+				} else if header.Key == reqcommon.HeaderContentType {
+					mediaType, _, _ := strings.Cut(envoy.GetHeaderValue(header), ";")
+					if !strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream) {
+						continue
+					}
 					reqCtx.modelServerStreaming = true
+					reqCtx.toolCallingResponseEventStream = true
 					if traceEnabled {
 						loggerTrace.Info("model server is streaming response")
 					}
@@ -695,21 +736,23 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			chunk := v.ResponseBody.Body
 
 			if reqCtx.modelServerStreaming {
+				upstreamChunk := chunk
 				respBodyStart := time.Now()
 				if endOfStream {
 					reqCtx.responseComplete = true
 					reqCtx.responseCompleteTimestamp = time.Now()
 				}
+				reqCtx.observeToolCallingResponse(upstreamChunk, endOfStream, false, span)
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
-					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
+					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true, span)
 				}
 			}
 		case *extProcPb.ProcessingRequest_ResponseTrailers:
@@ -720,7 +763,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if cause := terminationCauseFromGRPCTrailers(v.ResponseTrailers); cause != "" {
 				reqCtx.TerminationCause = cause
 			}
-			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
+			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
@@ -743,7 +786,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return nil
 		}
 		loggerTrace.Info("checking", "request state", reqCtx.requestState)
-		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger); err != nil {
+		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger, span); err != nil {
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
@@ -767,7 +810,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 // finishResponse ensures all post-response logic, such as metric recording
 // and state updates, is executed exactly once for the request lifecycle.
-func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool) {
+func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestContext, body []byte, modelStreaming bool, setEos bool, span trace.Span) {
 	// Return early if the response has already been finished to prevent
 	// duplicate execution of side effects and metrics.
 	if reqCtx.responseComplete {
@@ -777,6 +820,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 	start := time.Now()
 	reqCtx.responseComplete = true
 	reqCtx.responseCompleteTimestamp = time.Now()
+	reqCtx.observeToolCallingResponse(body, true, false, span)
 	reqCtx = s.HandleResponseBody(ctx, reqCtx, body, true)
 	if !modelStreaming {
 		// Rewrite the model name in response body back to the original client-facing name.
@@ -790,6 +834,55 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		// Supersedes the header slice already accumulated: the interval since the
 		// response headers arrived covers it and the body wait in between.
 		reqCtx.responseProcessingDuration = time.Since(reqCtx.responseHeadersReceivedAt)
+	}
+}
+
+func (r *RequestContext) observeToolCallingResponse(body []byte, endOfStream, forwarded bool, span trace.Span) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
+		return
+	}
+	detector, present := &r.toolCallingUpstreamDetector, &r.toolCallingUpstreamPresent
+	if forwarded {
+		// Include inspection cost in response processing without timing the Send call.
+		start := time.Now()
+		defer func() { r.responseProcessingDuration += time.Since(start) }()
+		detector, present = &r.toolCallingForwardedDetector, &r.toolCallingForwardedPresent
+	}
+	if *detector == nil {
+		responseDetector, err := toolcalling.NewResponseDetector(r.toolCallingSurface, r.toolCallingResponseEventStream)
+		if err != nil {
+			return
+		}
+		*detector = responseDetector
+	}
+	*present = (*detector).Observe(body, endOfStream)
+}
+
+func (r *RequestContext) recordToolCallingResponse(span trace.Span) {
+	if r == nil || !r.toolCallingRequest || r.toolCallingResponseRecorded || span == nil || !span.IsRecording() {
+		return
+	}
+	r.toolCallingResponseRecorded = true
+	span.SetAttributes((toolcalling.ResponseSummary{
+		ToolCallingRequested:         true,
+		UpstreamToolCallPresent:      r.toolCallingUpstreamPresent,
+		ForwardedToolCallPresent:     r.toolCallingForwardedPresent,
+		UpstreamDetectionIncomplete:  !r.responseComplete || r.toolCallingUpstreamDetector.DetectionIncomplete(),
+		ForwardedDetectionIncomplete: !r.toolCallingForwardedComplete || r.toolCallingForwardedDetector.DetectionIncomplete(),
+	}).SpanAttributes()...)
+}
+
+func (r *RequestContext) clearToolCallingResponseDetectors() {
+	if r == nil {
+		return
+	}
+	if r.toolCallingUpstreamDetector != nil {
+		r.toolCallingUpstreamDetector.Close()
+		r.toolCallingUpstreamDetector = nil
+	}
+	if r.toolCallingForwardedDetector != nil {
+		r.toolCallingForwardedDetector.Close()
+		r.toolCallingForwardedDetector = nil
 	}
 }
 
@@ -820,13 +913,15 @@ func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, b
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.
 // Order of requests matter in FULL_DUPLEX_STREAMING. For both request and response, the order of response sent back MUST be: Header->Body->Trailer, with trailer being optional.
-func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger) error {
+func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger, span trace.Span) error {
 	loggerTrace := logger.V(logutil.TRACE)
 
 	// Handle eviction — send ImmediateResponse(429) to Envoy to reset the upstream connection.
 	if r.requestState == requestEvicted {
 		loggerTrace.Info("Sending ImmediateResponse for evicted request")
 		evicted := errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "request evicted by flow control"}
+		// Counted by Process's deferred error metric.
+		r.responseStatusCode = evicted.Code
 		if r.requestDroppedReason != "" {
 			evicted.Headers = map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(r.requestDroppedReason)}
 		}
@@ -900,6 +995,11 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 			if err := srv.Send(response); err != nil {
 				return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
 			}
+			body := response.GetResponseBody().GetResponse().GetBodyMutation().GetStreamedResponse()
+			r.observeToolCallingResponse(body.GetBody(), body.GetEndOfStream(), true, span)
+			if body.GetEndOfStream() {
+				r.toolCallingForwardedComplete = true
+			}
 		}
 		if r.responseComplete {
 			logger.V(logutil.DEFAULT).Info("EPP sent response body back to proxy")
@@ -910,9 +1010,11 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	}
 	if r.requestState == bodyResponseResponsesComplete && r.respTrailerResp != nil {
 		// Trailers in responses are not guaranteed
+		r.observeToolCallingResponse(nil, true, true, span)
 		if err := srv.Send(r.respTrailerResp); err != nil {
 			return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
 		}
+		r.toolCallingForwardedComplete = true
 		logger.V(logutil.DEBUG).Info("EPP sent trailer back to proxy")
 	}
 	return nil

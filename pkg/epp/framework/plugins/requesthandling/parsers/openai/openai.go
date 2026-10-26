@@ -135,9 +135,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	}
 
 	var bodyMap fwkrh.PayloadMap
-	if apiType == chatCompletionsAPI || apiType == completionsAPI {
+	if rawFields, ok := envelopeRawFields[apiType]; ok {
 		var payload map[string]any
-		payload, err = parserutil.UnmarshalEnvelope(body, promptField)
+		payload, err = parserutil.UnmarshalEnvelope(body, rawFields...)
 		bodyMap = fwkrh.PayloadMap(payload)
 		extractedBody.RawBody = body
 	} else if rawField := tokenInputField(extractedBody); rawField == "" {
@@ -159,6 +159,15 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	extractedBody.MaxOutputTokens = maxOutputTokensForAPI(apiType, bodyMap)
 	extractedBody.Stream = isStreamingRequest(apiType, bodyMap)
 	return &fwkrh.ParseResult{Body: extractedBody, JSONValidated: true, SkipResponseProcessing: false}, nil
+}
+
+// envelopeRawFields lists the APIs whose payload map holds only the routing
+// envelope, and the string fields each keeps opaque. Prompt content is decoded
+// once into the typed body; the original bytes are forwarded unless mutated.
+var envelopeRawFields = map[string][]string{
+	chatCompletionsAPI: {promptField},
+	completionsAPI:     {promptField},
+	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
 }
 
 func isStreamingRequest(apiType string, bodyMap map[string]any) bool {

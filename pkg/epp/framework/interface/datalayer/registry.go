@@ -18,15 +18,16 @@ package datalayer
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // Registry holds the set of data keys the framework knows how to write and
-// read, paired with the reflect.Type of their declared values. It is built
-// once at framework startup by walking every registered ProducerPlugin's
-// Produces() declaration, then used to validate:
+// read, paired with the reflect.Type of their declared values and any Level-2
+// producer attributes. It is built once at framework startup by walking every
+// registered ProducerPlugin's Produces() declaration, then used to validate:
 //
 //   - that every producer declares a single, consistent type for each key
 //     it produces (catches two plugins claiming the same DataKey with
@@ -34,20 +35,30 @@ import (
 //   - that every consumer's Consumes() declaration references a key the
 //     registry knows and names the same type the producer declared (catches
 //     a typo in a consumer's key and a type the consumer expected to read
-//     but no producer writes).
+//     but no producer writes),
+//   - that when a consumer specifies a Level-2 attribute matcher
+//     (plugin.ConsumedData.Matches), the producer's declared attributes
+//     (plugin.ProducedData.Attributes or AllAttributes) satisfy the matcher.
 //
 // This is the value-safety complement to PR 2190's key-safety check, which
 // constrains WHO may produce or consume a key. The registry constrains
-// WHAT (the DataKey name + declared value type) — which plugin claims the
-// key is handled separately by key-safety validation.
+// WHAT (the DataKey name, declared value type, and Level-2 producer attributes)
+// — which plugin claims the key is handled separately by key-safety validation.
 type Registry struct {
-	types map[string]reflect.Type
+	entries map[string]regEntry
+}
+
+type regEntry struct {
+	valueType    reflect.Type
+	producerName string
+	attrs        map[string]string
+	allAttrs     bool
 }
 
 // NewRegistry returns an empty registry. Tests use this; production code
 // builds one via BuildRegistry from the registered producers.
 func NewRegistry() *Registry {
-	return &Registry{types: make(map[string]reflect.Type)}
+	return &Registry{entries: make(map[string]regEntry)}
 }
 
 // TypeOf returns the declared reflect.Type for key, or nil if the registry
@@ -56,7 +67,7 @@ func (r *Registry) TypeOf(key plugin.DataKey) reflect.Type {
 	if r == nil {
 		return nil
 	}
-	return r.types[key.String()]
+	return r.entries[key.String()].valueType
 }
 
 // Has reports whether the registry knows about key.
@@ -64,7 +75,7 @@ func (r *Registry) Has(key plugin.DataKey) bool {
 	if r == nil {
 		return false
 	}
-	_, ok := r.types[key.String()]
+	_, ok := r.entries[key.String()]
 	return ok
 }
 
@@ -73,8 +84,8 @@ func (r *Registry) Keys() []string {
 	if r == nil {
 		return nil
 	}
-	out := make([]string, 0, len(r.types))
-	for k := range r.types {
+	out := make([]string, 0, len(r.entries))
+	for k := range r.entries {
 		out = append(out, k)
 	}
 	return out
@@ -99,33 +110,46 @@ func BuildRegistry(plugins []plugin.Plugin) (*Registry, error) {
 			continue
 		}
 		for dk, val := range prod.Produces() {
-			declared := typeOfProduced(val)
-			existing, found := r.types[dk.String()]
+			declared, attrs, allAttrs := unpackProduced(val)
+			existing, found := r.entries[dk.String()]
 			if found {
-				if !typesCompatible(existing, declared) {
+				if !typesCompatible(existing.valueType, declared) {
 					return nil, fmt.Errorf(
 						"data key %q is produced by %q with type %v, but already registered with type %v",
-						dk.String(), p.TypedName().String(), declared, existing,
+						dk.String(), p.TypedName().String(), declared, existing.valueType,
+					)
+				}
+				if existing.allAttrs != allAttrs || !maps.Equal(existing.attrs, attrs) {
+					return nil, fmt.Errorf(
+						"data key %q is produced by %q with attributes (all=%t, %v), but already registered by %q with attributes (all=%t, %v)",
+						dk.String(), p.TypedName().String(), allAttrs, attrs, existing.producerName, existing.allAttrs, existing.attrs,
 					)
 				}
 				continue
 			}
-			r.types[dk.String()] = declared
+			r.entries[dk.String()] = regEntry{
+				valueType:    declared,
+				producerName: p.TypedName().String(),
+				attrs:        maps.Clone(attrs),
+				allAttrs:     allAttrs,
+			}
 		}
 	}
 	return r, nil
 }
 
 // ValidateConsumer checks that every DataKey consumer c declares in
-// Consumes() is known to the registry and carries the same value type the
-// registry recorded for it. This is run at startup, alongside the DAG
-// build, so a typo or stale key is caught before traffic flows.
+// Consumes() is known to the registry, carries the same value type the
+// registry recorded for it, and satisfies any Level-2 attribute matcher
+// declared via plugin.ConsumedData. This is run at startup, alongside the DAG
+// build, so a typo, stale key, or incompatible producer configuration is caught
+// before traffic flows.
 //
 // Required keys with no producer are an error. Optional keys with no
 // producer are skipped: CreateMissingDataProducers already tolerates an
 // Optional key going unproduced (the consumer falls back at read time), so
 // the registry must not turn that into a startup error. An Optional key
-// that IS produced is still type-checked like a Required one.
+// that IS produced is still type- and attribute-checked like a Required one.
 func (r *Registry) ValidateConsumer(c plugin.ConsumerPlugin) error {
 	if r == nil {
 		return nil
@@ -149,21 +173,63 @@ func (r *Registry) ValidateConsumer(c plugin.ConsumerPlugin) error {
 }
 
 func (r *Registry) checkKey(consumerName string, dk plugin.DataKey, val any) error {
-	declared := typeOfProduced(val)
-	registered, ok := r.types[dk.String()]
+	declared, matches := unpackConsumed(val)
+	entry, ok := r.entries[dk.String()]
 	if !ok {
 		return fmt.Errorf(
 			"plugin %q consumes data key %q which is not produced by any registered plugin",
 			consumerName, dk.String(),
 		)
 	}
-	if !typesCompatible(registered, declared) {
+	if !typesCompatible(entry.valueType, declared) {
 		return fmt.Errorf(
 			"plugin %q consumes data key %q with type %v, but the producer declared type %v",
-			consumerName, dk.String(), declared, registered,
+			consumerName, dk.String(), declared, entry.valueType,
 		)
 	}
+	if matches != nil && !entry.allAttrs {
+		if len(entry.attrs) == 0 {
+			return fmt.Errorf(
+				"plugin %q requires attribute validation on data key %q, but producer %q declared no attributes",
+				consumerName, dk.String(), entry.producerName,
+			)
+		}
+		if err := matches(maps.Clone(entry.attrs)); err != nil {
+			return fmt.Errorf(
+				"plugin %q rejected producer %q for data key %q: %w",
+				consumerName, entry.producerName, dk.String(), err,
+			)
+		}
+	}
 	return nil
+}
+
+func unpackProduced(v any) (reflect.Type, map[string]string, bool) {
+	switch d := v.(type) {
+	case plugin.ProducedData:
+		return typeOfProduced(d.Type), d.Attributes, d.AllAttributes
+	case *plugin.ProducedData:
+		if d == nil {
+			return nil, nil, false
+		}
+		return typeOfProduced(d.Type), d.Attributes, d.AllAttributes
+	default:
+		return typeOfProduced(v), nil, false
+	}
+}
+
+func unpackConsumed(v any) (reflect.Type, func(map[string]string) error) {
+	switch d := v.(type) {
+	case plugin.ConsumedData:
+		return typeOfProduced(d.Type), d.Matches
+	case *plugin.ConsumedData:
+		if d == nil {
+			return nil, nil
+		}
+		return typeOfProduced(d.Type), d.Matches
+	default:
+		return typeOfProduced(v), nil
+	}
 }
 
 // typeOfProduced returns the reflect.Type encoded in a Produces()/Consumes()

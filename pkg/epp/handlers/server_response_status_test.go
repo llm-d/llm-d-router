@@ -22,6 +22,7 @@ import (
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -71,6 +72,62 @@ func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 		})
 	}
 }
+
+// A request evicted after dispatch is answered with 429 and must be counted
+// like any other failed request.
+func TestProcessCountsEvictionAsRequestError(t *testing.T) {
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	t.Cleanup(eppmetrics.Reset)
+
+	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+	t.Cleanup(cancel)
+	srv := &blockingReplayProcessServer{replayProcessServer: replayProcessServer{
+		ctx: ctx,
+		reqs: []*extProcPb.ProcessingRequest{
+			newRequestHeaders(map[string]string{":path": "/v1/completions", "x-request-id": "req-evicted"}),
+			{Request: &extProcPb.ProcessingRequest_RequestBody{
+				RequestBody: &extProcPb.HttpBody{Body: []byte(`{"model":"m","prompt":"hi"}`), EndOfStream: true},
+			}},
+		},
+	}}
+	server := NewStreamingServer(nil, &mockDirector{}, NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
+	server.SetEvictChannelLookup(closedEvictLookup{})
+
+	require.NoError(t, server.Process(srv))
+
+	last := srv.sentResponses[len(srv.sentResponses)-1]
+	require.Equal(t, envoyTypePb.StatusCode_TooManyRequests, last.GetImmediateResponse().GetStatus().GetCode())
+	require.Equal(t, 1.0, requestErrorCount(t, errcommon.ResourceExhausted))
+}
+
+// blockingReplayProcessServer replays its requests, then blocks like an open stream.
+type blockingReplayProcessServer struct {
+	replayProcessServer
+}
+
+func (m *blockingReplayProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
+	if len(m.reqs) == 0 {
+		<-m.ctx.Done()
+		return nil, m.ctx.Err()
+	}
+	return m.replayProcessServer.Recv()
+}
+
+// closedEvictLookup evicts every request as soon as it is dispatched.
+type closedEvictLookup struct{}
+
+func (closedEvictLookup) Get(string) chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+func (closedEvictLookup) GetReason(string) errcommon.RequestDroppedReason {
+	return errcommon.RequestDroppedReasonEvicted
+}
+
+func (closedEvictLookup) Deregister(string) {}
 
 // requestErrorCount sums llm_d_epp_request_error_total over every series with the given error code.
 func requestErrorCount(t *testing.T, code string) float64 {

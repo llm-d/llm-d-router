@@ -33,6 +33,12 @@ const (
 	LLMDToolCallingFieldParallelToolCallsStatusKey = attribute.Key("llm_d.tool_calling.field.parallel_tool_calls.status")
 	LLMDToolCallingFieldResponseFormatStatusKey    = attribute.Key("llm_d.tool_calling.field.response_format.status")
 
+	// Tool-calling response attributes
+	LLMDToolCallingResponseUpstreamPresentKey              = attribute.Key("llm_d.tool_calling.response.upstream_present")
+	LLMDToolCallingResponseForwardedPresentKey             = attribute.Key("llm_d.tool_calling.response.forwarded_present")
+	LLMDToolCallingResponseUpstreamDetectionIncompleteKey  = attribute.Key("llm_d.tool_calling.response.upstream_detection_incomplete")
+	LLMDToolCallingResponseForwardedDetectionIncompleteKey = attribute.Key("llm_d.tool_calling.response.forwarded_detection_incomplete")
+
 	// EPP Scheduling attributes
 	LLMDEPPProfileNameKey               = attribute.Key("llm_d.epp.scheduling.profile.name")
 	LLMDEPPFilterDecisionKey            = attribute.Key("llm_d.epp.filter.decision")

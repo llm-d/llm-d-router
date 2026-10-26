@@ -643,6 +643,27 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestToolCallingTelemetryOption(t *testing.T) {
+	opts := NewOptions()
+	require.False(t, opts.EnableToolCallingTelemetry)
+	enabled := true
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.True(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry=false"}))
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.False(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs = pflag.NewFlagSet(t.Name()+"-enabled", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry"}))
+	require.True(t, opts.EnableToolCallingTelemetry)
+}
+
 func TestP2PConnectorPort(t *testing.T) {
 	t.Run("defaults to 7777", func(t *testing.T) {
 		opts := NewOptions()

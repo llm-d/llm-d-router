@@ -440,6 +440,14 @@ func TestEstimateOutlen_ResponsesSignals(t *testing.T) {
 			want: Long,
 		},
 		{
+			name: "responses reasoning.effort=high as raw JSON -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
+				Payload:   fwkrh.PayloadMap{"input": json.RawMessage(`"hi"`), "reasoning": json.RawMessage(`{"effort":"high"}`)},
+			},
+			want: Long,
+		},
+		{
 			name: "responses reasoning.effort=medium -> LONG",
 			body: &fwkrh.InferenceRequestBody{
 				Responses: &fwkrh.ResponsesRequest{Input: "hi"},
@@ -582,4 +590,11 @@ func TestResponsesThinking(t *testing.T) {
 	require.Nil(t, responsesThinking(nil))
 	require.Nil(t, responsesThinking("invalid"))
 	require.Nil(t, responsesThinking(123))
+	// The parser keeps nested objects as raw JSON in the envelope.
+	require.Equal(t, true, *responsesThinking(json.RawMessage(`{"effort":"high"}`)))
+	require.Equal(t, false, *responsesThinking(json.RawMessage(`{"effort":"none"}`)))
+	require.Nil(t, responsesThinking(json.RawMessage(`{}`)))
+	require.Nil(t, responsesThinking(json.RawMessage(`null`)))
+	require.Nil(t, responsesThinking(json.RawMessage(`"high"`)))
+	require.Nil(t, responsesThinking(json.RawMessage(`{"effort":`)))
 }

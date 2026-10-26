@@ -201,6 +201,56 @@ func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
 	}
 }
 
+func TestPassthrough_StripsClientSuppliedInternalHeaders(t *testing.T) {
+	// Peer topology and revision decision id are set by the coordinator alone;
+	// a client copy must not reach EPP through the passthrough any more than
+	// through handleInference.
+	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
+	srv := newTestServerWithGateway(nil, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`))
+	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
+	req.Header.Set(reqcommon.RevisionDecisionIDHeaderKey, "shared-by-everyone")
+	req.Header.Set("X-Keep", "kept")
+	doPassthrough(t, srv, req)
+
+	_, _, _, headers, _ := cap.get()
+	for _, name := range []string{reqcommon.PeerTopologyHeaderKey, reqcommon.RevisionDecisionIDHeaderKey} {
+		if got := headers.Values(name); len(got) != 0 {
+			t.Fatalf("client %s reached the gateway: %q", name, got)
+		}
+	}
+	if got := headers.Get("X-Keep"); got != "kept" {
+		t.Fatalf("X-Keep: got %q want %q, other client headers must still be forwarded", got, "kept")
+	}
+}
+
+func TestPassthrough_StripsUpstreamSuppliedInternalHeaders(t *testing.T) {
+	// topology-stamp-handler on the decode profile stamps the serving pod's
+	// topology on the response; it is meaningful only between phases and must
+	// not reach the client, as on the decode proxy.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(reqcommon.PeerTopologyHeaderKey, "host=node12,rack=r7")
+		w.Header().Set("X-Keep", "kept")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	srv := newTestServerWithGateway(nil, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := doPassthrough(t, srv, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got := rec.Header().Values(reqcommon.PeerTopologyHeaderKey); len(got) != 0 {
+		t.Fatalf("upstream %s reached the client: %q", reqcommon.PeerTopologyHeaderKey, got)
+	}
+	if got := rec.Header().Get("X-Keep"); got != "kept" {
+		t.Fatalf("X-Keep: got %q want %q, other response headers must still be forwarded", got, "kept")
+	}
+}
+
 func TestPassthrough_TransportErrorReturns502(t *testing.T) {
 	// Point at a closed listener: the transport fails and the passthrough must
 	// answer 502 rather than surface a raw error to the client.
