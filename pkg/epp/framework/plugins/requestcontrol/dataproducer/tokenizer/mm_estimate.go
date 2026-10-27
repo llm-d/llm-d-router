@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -163,11 +164,55 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 	// Image decoding is streamed to reduce memory overhead, since
 	// only headers are necessary.
 	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64))
-	cfg, _, err := image.DecodeConfig(r)
+	var header [32]byte
+	n, _ := io.ReadFull(r, header[:])
+	if n >= 12 && string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP" {
+		if w, h, ok := webpDimensions(header[:n]); ok {
+			return w, h, true
+		}
+	}
+	cfg, _, err := image.DecodeConfig(io.MultiReader(bytes.NewReader(header[:n]), r))
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 		return 0, 0, false
 	}
 	return cfg.Width, cfg.Height, true
+}
+
+// webpDimensions reads the canvas size from a WebP header. Go's image package
+// does not register a WebP decoder, so image.DecodeConfig cannot read these
+// dimensions. The three header forms are VP8X (extended), VP8 (lossy), and
+// VP8L (lossless).
+func webpDimensions(header []byte) (width, height int, ok bool) {
+	if len(header) < 16 {
+		return 0, 0, false
+	}
+	switch string(header[12:16]) {
+	case "VP8X":
+		if len(header) < 30 {
+			return 0, 0, false
+		}
+		width = int(uint32(header[24])|uint32(header[25])<<8|uint32(header[26])<<16) + 1
+		height = int(uint32(header[27])|uint32(header[28])<<8|uint32(header[29])<<16) + 1
+	case "VP8 ":
+		if len(header) < 30 || header[23] != 0x9d || header[24] != 0x01 || header[25] != 0x2a {
+			return 0, 0, false
+		}
+		width = int(binary.LittleEndian.Uint16(header[26:28]) & 0x3fff)
+		height = int(binary.LittleEndian.Uint16(header[28:30]) & 0x3fff)
+	case "VP8L":
+		if len(header) < 25 || header[20] != 0x2f {
+			return 0, 0, false
+		}
+		bits := binary.LittleEndian.Uint32(header[21:25])
+		width = int(bits&0x3fff) + 1
+		height = int((bits>>14)&0x3fff) + 1
+	default:
+		return 0, 0, false
+	}
+	if width <= 0 || height <= 0 {
+		return 0, 0, false
+	}
+	return width, height, true
 }
 
 // mmMetadata carries per-request multimodal properties parsed from the
