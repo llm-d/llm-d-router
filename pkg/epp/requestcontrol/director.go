@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -752,13 +753,45 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 		return nil
 	}
 	// Each producer runs under its own timeout so a slow one does not extend the
-	// budget of the others.
-	for _, p := range plugins {
-		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
-			return err
+	// budget of the others. A failed producer does not stop the ones after it;
+	// only producers that require a key it would have produced are skipped, and
+	// their own keys count as missing in turn. The errors are returned joined.
+	var errs []error
+	missing := map[string]struct{}{}
+	markMissing := func(p fwkrc.DataProducer) {
+		for key := range p.Produces() {
+			missing[key.String()] = struct{}{}
 		}
 	}
-	return nil
+	for _, p := range plugins {
+		if key, ok := missingRequiredInput(p, missing); ok {
+			errs = append(errs, fmt.Errorf("DataProducer %q skipped: required input %s was not produced", p.TypedName().String(), key))
+			markMissing(p)
+			continue
+		}
+		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+			errs = append(errs, err)
+			markMissing(p)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// missingRequiredInput returns a key that p requires and that is in missing.
+func missingRequiredInput(p fwkrc.DataProducer, missing map[string]struct{}) (string, bool) {
+	if len(missing) == 0 {
+		return "", false
+	}
+	consumer, ok := p.(fwkplugin.ConsumerPlugin)
+	if !ok {
+		return "", false
+	}
+	for key := range consumer.Consumes().Required {
+		if _, ok := missing[key.String()]; ok {
+			return key.String(), true
+		}
+	}
+	return "", false
 }
 
 func (d *Director) runScreeners(ctx context.Context,
