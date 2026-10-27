@@ -265,13 +265,13 @@ func (c *tokenizerPluginConfig) resolveBackend() (string, error) {
 		}
 	}
 	if c.Estimate != nil && (c.VLLM != nil || c.ModelName != "") {
-		return "", fmt.Errorf("only one of 'estimate' or 'vllm' may be set")
+		return "", errors.New("only one of 'estimate' or 'vllm' may be set")
 	}
 	// modelName is required only by the real-tokenizer backend; the zero-config
 	// path selects the estimate backend, which needs none.
 	if c.VLLM != nil || c.ModelName != "" {
 		if c.ModelName == "" {
-			return "", fmt.Errorf("'modelName' must be specified")
+			return "", errors.New("'modelName' must be specified")
 		}
 		return BackendVLLM, nil
 	}
