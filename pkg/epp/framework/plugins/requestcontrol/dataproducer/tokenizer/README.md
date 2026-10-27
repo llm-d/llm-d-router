@@ -17,6 +17,11 @@ upstream list shape, sorted by placeholder offset.
 
 Backend selection:
 
+- **`backend`**: names the backend explicitly, `estimate` or `vllm`. It takes
+  precedence over the inference below and has to agree with the configuration:
+  `backend: vllm` requires `modelName` and rejects `estimate`, and
+  `backend: estimate` rejects `vllm`. Set it in deployments that want the
+  backend visible in the configuration rather than inferred.
 - **`estimate`** (default): tokenizer-free byte-packing — no model, no service.
   Selected when no backend is set, and auto-created by the framework for any
   config whose plugins consume `TokenizedPrompt` (prefix cache, context-length,
@@ -156,6 +161,7 @@ EPP contract does not establish parity for them.
 
 | Parameter                  | Default                 | Description                                                                  |
 | -------------------------- | ----------------------- | ---------------------------------------------------------------------------- |
+| `backend`                  | - (inferred)            | Selects the backend explicitly: `estimate` or `vllm`. `vllm` requires `modelName` and rejects `estimate`; `estimate` rejects `vllm`. Without it, the backend is inferred from `modelName`, `vllm`, and `estimate`. |
 | `modelName`                | - (required for `vllm`) | Model for startup probes, model-limit discovery, native gRPC text, and legacy Messages/Responses conversion. Native HTTP rendering retains the effective request model. |
 | `vllm.messagesRenderMode`  | `auto`                 | Discover Messages rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
 | `vllm.responsesRenderMode` | `auto`                 | Discover Responses rendering, or force `native` (pass-through) or `legacy` (deprecated conversion). |
