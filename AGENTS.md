@@ -27,7 +27,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 ## Code review
 
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
-- Apply [docs/review_playbook.md](docs/review_playbook.md) as the review checklist across Scope and process, Plugin framework contracts, Project direction, Configuration, Helm, and compatibility, Concurrency and shared state, Error handling and boundaries, Protocol parsing and wire fidelity, Performance on the request path, Observability, Testing and CI, Security and trust boundaries, and Documentation and comments.
+- Apply [docs/review_playbook.md](docs/review_playbook.md) as the review checklist. It states one rule per maintainer-enforced contract, with example review threads, across process, plugin framework, project direction, configuration and compatibility, concurrency, error handling, protocol fidelity, request-path performance, observability, testing, security, and documentation.
 
 ## Pull requests
 
