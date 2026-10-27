@@ -474,7 +474,10 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 	}
 
 	// Remove key from main cache if empty.
-	// Re-fetch and hold the lock through removal to prevent racing with Add.
+	// Hold m.mu as Add does, so an Add that already fetched this cache finishes
+	// its write before the emptiness re-check below.
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	currentCache, stillExists := m.data.Peek(requestKey)
 	if !stillExists || currentCache == nil {
 		return
@@ -491,8 +494,8 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 // Clear removes every entry for the pod from the index, across all device tiers.
 // O(N) over the index for a pod it has held, and O(1) for a pod it never held,
 // such as one whose first snapshot is about to load. Reuses
-// evictPodsFromRequestKey for race-safe removal, and holds no global lock — only
-// each PodCache's mu, briefly — so it does not stall Lookup.
+// evictPodsFromRequestKey for race-safe removal. It takes m.mu only briefly, to
+// remove an emptied key, and Lookup does not take m.mu, so Clear does not stall Lookup.
 //
 // Context cancellation does not interrupt Clear.
 //
