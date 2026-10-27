@@ -271,15 +271,24 @@ func (s *DecodeStep) buildGenerateBody(reqCtx *pipeline.RequestContext, kvParams
 	}
 
 	// sampling_params is required by the generate API and has no server-side
-	// default, so a client whose cap sits at the top level of another API's body
-	// needs it moved under here; without the move the worker falls back to its
-	// own max_tokens default (16) and truncates the answer.
+	// default, so a client whose limits sit at the top level of another API's
+	// body needs them moved under here; without the move the worker falls back
+	// to its own max_tokens default (16) and truncates the answer, and the
+	// client's min_tokens floor is lost.
+	//
+	// The cap is read through OutputTokenLimit rather than copied by name,
+	// since each API names it differently (max_completion_tokens,
+	// max_output_tokens) and the generate API accepts only max_tokens.
+	// min_tokens is named the same everywhere, so it is carried across as is.
 	sampling, _ := body[reqcommon.FieldSamplingParams].(map[string]any)
-	limits := make(map[string]any, len(sampling)+1)
+	limits := make(map[string]any, len(sampling)+2)
 	maps.Copy(limits, sampling)
 	if clientAPI != reqcommon.APITypeVLLMGenerate {
 		if limit, ok := reqcommon.OutputTokenLimit(reqCtx.Body, clientAPI); ok {
 			limits[reqcommon.FieldMaxTokens] = limit
+		}
+		if floor, ok := reqCtx.Body[reqcommon.FieldMinTokens]; ok && floor != nil {
+			limits[reqcommon.FieldMinTokens] = floor
 		}
 	}
 	body[reqcommon.FieldSamplingParams] = limits

@@ -639,10 +639,14 @@ func TestDecodeStep_TokensInFormat_RewritesChatRequest(t *testing.T) {
 		Model:            testModelName,
 		TokenIDs:         []int{1, 2, 3},
 		KVTransferParams: map[string]any{"block_id": "block-1"},
+		// Limits stay json.RawMessage for the fields the server does not decode
+		// (see inspectedRequestFields), which is how they reach this step.
 		Body: map[string]any{
-			"model":      testModelName,
-			"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
-			"max_tokens": 64,
+			"model":                            testModelName,
+			"messages":                         []any{map[string]any{"role": "user", "content": "hi"}},
+			reqcommon.FieldMaxTokens:           json.RawMessage(`64`),
+			reqcommon.FieldMinTokens:           json.RawMessage(`2`),
+			reqcommon.FieldMaxCompletionTokens: json.RawMessage(`100`),
 		},
 		ResponseWriter: httptest.NewRecorder(),
 	}
@@ -671,6 +675,14 @@ func TestDecodeStep_TokensInFormat_RewritesChatRequest(t *testing.T) {
 	}
 	if sampling[reqcommon.FieldMaxTokens] != float64(64) {
 		t.Fatalf("sampling_params.max_tokens = %v, want the client's 64", sampling[reqcommon.FieldMaxTokens])
+	}
+	if sampling[reqcommon.FieldMinTokens] != float64(2) {
+		t.Fatalf("sampling_params.min_tokens = %v, want the client's 2", sampling[reqcommon.FieldMinTokens])
+	}
+	// max_completion_tokens is not a generate field, so the cap it named
+	// arrives as sampling_params.max_tokens or not at all.
+	if _, ok := parsed[reqcommon.FieldMaxCompletionTokens]; ok {
+		t.Error("max_completion_tokens reached the generate route")
 	}
 	if _, ok := parsed[reqcommon.FieldKVTransferParams].(map[string]any); !ok {
 		t.Fatal("expected top-level kv_transfer_params on the generate leg")
