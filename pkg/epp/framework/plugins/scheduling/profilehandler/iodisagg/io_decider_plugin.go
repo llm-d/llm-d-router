@@ -27,5 +27,5 @@ import (
 // ioDeciderPlugin decides whether the disaggregated stage should run for the request.
 type ioDeciderPlugin interface {
 	plugin.Plugin
-	disaggregate(ctx context.Context, request *scheduling.InferenceRequest, post_process_endpoint scheduling.Endpoint, pre_process_endpoint ...scheduling.Endpoint) bool
+	disaggregate(ctx context.Context, request *scheduling.InferenceRequest, postProcessEndpoint scheduling.Endpoint, preProcessEndpoint ...scheduling.Endpoint) bool
 }

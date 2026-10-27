@@ -27,7 +27,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -41,7 +40,7 @@ const (
 )
 
 // disaggregatedIOProcessorHandler routes IO Processor requests
-func (s *Server) disaggregatedIOProcessorHandler(apiType reqcommon.APIType) http.HandlerFunc {
+func (s *Server) disaggregatedIOProcessorHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
 		tracer := tracing.Tracer(tracerScope)
@@ -86,13 +85,12 @@ func (s *Server) disaggregatedIOProcessorHandler(apiType reqcommon.APIType) http
 			span.SetStatus(codes.Error, "No preprocess target was provided")
 			http.Error(w, "Bad Request: No preprocess target was provided", http.StatusBadRequest)
 			return
-		} else {
-			span.SetAttributes(
-				attribute.Bool("llm_d.io_disagg_proxy.preprocess_disaggregation_used", true),
-				attribute.String("llm_d.io_disagg_proxy.preprocess_target", preprocessHostPort),
-				attribute.Int("llm_d.io_disagg_proxy.preprocess_candidates", numPreprocessHosts),
-			)
 		}
+		span.SetAttributes(
+			attribute.Bool("llm_d.io_disagg_proxy.preprocess_disaggregation_used", true),
+			attribute.String("llm_d.io_disagg_proxy.preprocess_target", preprocessHostPort),
+			attribute.Int("llm_d.io_disagg_proxy.preprocess_candidates", numPreprocessHosts),
+		)
 
 		if len(preprocessHostPort) > 0 {
 			if !s.allowlistValidator.IsAllowed(preprocessHostPort) {

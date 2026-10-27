@@ -60,6 +60,6 @@ func (d *AlwaysDisaggPreprocessDecider) WithName(name string) *AlwaysDisaggPrepr
 	return d
 }
 
-func (d *AlwaysDisaggPreprocessDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, post_process_endpoint scheduling.Endpoint, pre_process_endpoint ...scheduling.Endpoint) bool {
+func (d *AlwaysDisaggPreprocessDecider) disaggregate(ctx context.Context, request *scheduling.InferenceRequest, postProcessEndpoint scheduling.Endpoint, preProcessEndpoint ...scheduling.Endpoint) bool {
 	return true
 }

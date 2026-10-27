@@ -317,7 +317,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 	postprocessStart := time.Now()
 
 	postProcessPoolingRequest := map[string]any{
-		"request_id": fmt.Sprintf("pooling-%s", requestID),
+		"request_id": "pooling-" + requestID,
 		"model":      model,
 		"responses":  inferenceResponses,
 	}
@@ -338,7 +338,7 @@ func (s *Server) handleIOCommon(w http.ResponseWriter, r *http.Request, preproce
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(reqcommon.RequestIDHeaderKey, fmt.Sprintf("pooling-%s", requestID))
+	req.Header.Set(reqcommon.RequestIDHeaderKey, "pooling-"+requestID)
 
 	// Decoder proxy in this case is the postprocessor instance. It sends the request to the vLLM server (localhost:vLLMPort)
 	s.logger.Info("executing postprocessing", "requestID", requestID)
