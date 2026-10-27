@@ -16,7 +16,14 @@ limitations under the License.
 
 package engineadapter
 
-import "strings"
+import (
+	"fmt"
+	"math"
+	"strings"
+
+	"github.com/vmihailenco/msgpack/v5"
+	"github.com/vmihailenco/msgpack/v5/msgpcode"
+)
 
 const (
 	// Common event type tags shared across engine adapters.
@@ -32,4 +39,34 @@ func parseTopic(topic string) (string, string) {
 		return topicParts[1], topicParts[2]
 	}
 	return topic, ""
+}
+
+func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {
+	code, err := dec.PeekCode()
+	if err != nil {
+		return 0, err
+	}
+	if !isIntegerCode(code) {
+		return 0, fmt.Errorf("unsupported numeric type: MessagePack code %#x", code)
+	}
+	var value uint64
+	if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
+		signed, decodeErr := dec.DecodeInt64()
+		err = decodeErr
+		if signed > 0 {
+			value = uint64(signed)
+		}
+	} else {
+		value, err = dec.DecodeUint64()
+	}
+	if err != nil {
+		return 0, err
+	}
+	return uint32(min(value, uint64(math.MaxUint32))), nil
+}
+
+func isIntegerCode(code byte) bool {
+	return msgpcode.IsFixedNum(code) || code == msgpcode.Uint8 || code == msgpcode.Uint16 ||
+		code == msgpcode.Uint32 || code == msgpcode.Uint64 || code == msgpcode.Int8 ||
+		code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
 }

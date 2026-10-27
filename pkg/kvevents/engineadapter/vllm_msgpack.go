@@ -611,30 +611,6 @@ func decodeTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
 	return tokens, nil
 }
 
-func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {
-	code, err := dec.PeekCode()
-	if err != nil {
-		return 0, err
-	}
-	if !isIntegerCode(code) {
-		return 0, fmt.Errorf("unsupported numeric type: MessagePack code %#x", code)
-	}
-	var value uint64
-	if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
-		signed, decodeErr := dec.DecodeInt64()
-		err = decodeErr
-		if signed > 0 {
-			value = uint64(signed)
-		}
-	} else {
-		value, err = dec.DecodeUint64()
-	}
-	if err != nil {
-		return 0, err
-	}
-	return uint32(min(value, uint64(math.MaxUint32))), nil
-}
-
 func decodeInt(dec *msgpack.Decoder) (int, error) {
 	code, err := dec.PeekCode()
 	if err != nil {
@@ -982,10 +958,4 @@ func discardBytes(dec *msgpack.Decoder, length int) error {
 		length -= chunk
 	}
 	return nil
-}
-
-func isIntegerCode(code byte) bool {
-	return msgpcode.IsFixedNum(code) || code == msgpcode.Uint8 || code == msgpcode.Uint16 ||
-		code == msgpcode.Uint32 || code == msgpcode.Uint64 || code == msgpcode.Int8 ||
-		code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
 }
