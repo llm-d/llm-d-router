@@ -31,12 +31,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-const (
-	fieldBootstrapHost = "bootstrap_host"
-	fieldBootstrapPort = "bootstrap_port"
-	fieldBootstrapRoom = "bootstrap_room"
-)
-
 // envSGLangBootstrapPort optionally overrides the bootstrap port advertised to
 // prefill pods. A value that is not a valid integer is rejected in favor of the
 // default and logged, so the fallback is observable.
@@ -94,8 +88,8 @@ func (sglangKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestC
 	params := map[string]any{
 		reqcommon.FieldDoRemoteDecode:  true,
 		reqcommon.FieldDoRemotePrefill: false,
-		fieldBootstrapPort:             resolveSGLangBootstrapPort(ctx),
-		fieldBootstrapRoom:             uuid.NewString(),
+		reqcommon.FieldBootstrapPort:   resolveSGLangBootstrapPort(ctx),
+		reqcommon.FieldBootstrapRoom:   uuid.NewString(),
 	}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params

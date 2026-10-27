@@ -107,6 +107,30 @@ func TestRequestHeader(t *testing.T) {
 			wantAttrFound: false,
 		},
 		{
+			name: "whitespace-only header falls through to next priority header",
+			headers: map[string]string{
+				ClaudeCodeSessionHeader: "   ",
+				OpenCodeSessionHeader:   "oc-session-1",
+			},
+			wantIdentity:  "oc-session-1",
+			wantAttrFound: true,
+		},
+		{
+			name: "whitespace-only header with no fallback leaves no attribute",
+			headers: map[string]string{
+				ClaudeCodeSessionHeader: "   ",
+			},
+			wantAttrFound: false,
+		},
+		{
+			name: "leading and trailing whitespace is trimmed",
+			headers: map[string]string{
+				ClaudeCodeSessionHeader: "  session-abc  ",
+			},
+			wantIdentity:  "session-abc",
+			wantAttrFound: true,
+		},
+		{
 			name:          "nil body does not panic",
 			headers:       map[string]string{},
 			body:          nil,
@@ -259,5 +283,18 @@ func TestAgentIdentityKeyMatchesDocumentedConfig(t *testing.T) {
 	const documented = "agent-identity"
 	if got := fwkplugin.NewDataKey(documented, ""); got != AgentIdentityKey {
 		t.Errorf("config %q resolves to %s, want %s", documented, got, AgentIdentityKey)
+	}
+}
+
+func TestProducesAgentIdentity(t *testing.T) {
+	t.Parallel()
+
+	plugin := &Plugin{}
+	produced, ok := plugin.Produces()[AgentIdentityKey]
+	if !ok {
+		t.Fatalf("Produces() does not declare %s", AgentIdentityKey)
+	}
+	if _, ok := produced.(string); !ok {
+		t.Fatalf("Produces()[%s] has type %T, want string", AgentIdentityKey, produced)
 	}
 }

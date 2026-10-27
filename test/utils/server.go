@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -45,7 +47,7 @@ const bufSize = 1024 * 1024
 
 var testListener *bufconn.Listener
 
-func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
+func PrepareForTestStreamingServer(t *testing.T, objectives []*apixv1.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
 	poolPort int32) (context.Context, context.CancelFunc, datastore.Datastore) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -67,6 +69,7 @@ func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.Inferenc
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha2.Install(scheme)
+	_ = apixv1.Install(scheme)
 	_ = v1.Install(scheme)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).

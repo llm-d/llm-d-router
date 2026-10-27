@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 )
 
@@ -232,4 +234,47 @@ func TestNewEncodeStep_FloatFormattedLimit(t *testing.T) {
 	if es.maxParallel != 4 {
 		t.Fatalf("maxParallel = %d, want 4", es.maxParallel)
 	}
+}
+
+// testBuildConnector runs the parameter cases that buildKVConnector and
+// buildECConnector share.
+func testBuildConnector[C interface{ Name() string }](t *testing.T, build func(map[string]any) (C, error), param, defaultName, otherName string) {
+	cases := []struct {
+		name     string
+		params   map[string]any
+		wantName string
+		wantErr  bool
+	}{
+		{name: "nil params select the default", params: nil, wantName: defaultName},
+		{name: "absent parameter selects the default", params: map[string]any{"other": "x"}, wantName: defaultName},
+		{name: "empty name selects the default", params: map[string]any{param: ""}, wantName: defaultName},
+		{name: "named connector", params: map[string]any{param: otherName}, wantName: otherName},
+		{name: "unknown connector", params: map[string]any{param: "no-such-connector"}, wantErr: true},
+		{name: "value that is not a string", params: map[string]any{param: 7}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := build(tc.params)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("build(%v) = %v, want an error", tc.params, conn)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build(%v): %v", tc.params, err)
+			}
+			if conn.Name() != tc.wantName {
+				t.Errorf("connector = %q, want %q", conn.Name(), tc.wantName)
+			}
+		})
+	}
+}
+
+func TestBuildKVConnector(t *testing.T) {
+	testBuildConnector(t, buildKVConnector, ParamKVConnector, kv.DefaultKVConnectorName, kv.NIXL)
+}
+
+func TestBuildECConnector(t *testing.T) {
+	testBuildConnector(t, buildECConnector, ParamECConnector, ec.DefaultECConnectorName, ec.NIXL)
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +28,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
@@ -42,8 +44,8 @@ func createGrpcPayload(t *testing.T, msg proto.Message) []byte {
 	}
 
 	payload := make([]byte, 5+len(b))
-	payload[0] = 0 // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b)))
+	payload[0] = 0                                           // 0 = uncompressed
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //#nosec G115 -- test fixture, small proto messages
 	copy(payload[5:], b)
 
 	return payload
@@ -127,7 +129,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{
-						TokenIDs: []uint32{11, 12, 13},
+						TokenIDs: [][]uint32{{11, 12, 13}},
 					},
 				},
 				Payload: fwkrh.PayloadProto{
@@ -164,7 +166,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103, 104, 105}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -187,8 +189,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					Prompts: []fwkrh.PromptTokens{{
 						TokenIDs: []uint32{101, 102, 103, 104, 105},
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
-							{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
 						},
 					}},
 				},
@@ -214,7 +216,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
 				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: []uint32{201, 202, 203, 204}},
+					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
 				},
 				Payload: fwkrh.PayloadProto{
 					Message: &pb.GenerateRequest{
@@ -237,8 +239,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					Prompts: []fwkrh.PromptTokens{{
 						TokenIDs: []uint32{201, 202, 203, 204},
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
-							{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 2, Length: 2},
 						},
 					}},
 				},
@@ -297,7 +299,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			want: &fwkrh.InferenceRequestBody{
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{
-						TokenIDs: []uint32{4, 5, 6},
+						TokenIDs: [][]uint32{{4, 5, 6}},
 					},
 				},
 				Payload: fwkrh.PayloadProto{

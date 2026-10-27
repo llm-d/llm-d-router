@@ -13,15 +13,68 @@ spec:
         app: vllm-grpc-qwen3-32b
         llm-d.ai/engine-type: vllm
     spec:
+      initContainers:
+      - name: vllm-render
+        image: vllm/vllm-openai-cpu:v0.21.0
+        imagePullPolicy: IfNotPresent
+        # Native sidecars require Kubernetes 1.29 or newer.
+        restartPolicy: Always
+        command:
+        - vllm
+        args:
+        - launch
+        - render
+        - Qwen/Qwen3-32B
+        - --port=8082
+        ports:
+        - name: http-render
+          containerPort: 8082
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 2
+          periodSeconds: 1
+          failureThreshold: 600
+          timeoutSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 10
+          failureThreshold: 5
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          periodSeconds: 5
+          failureThreshold: 5
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4Gi
+            ephemeral-storage: 10Gi
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 10Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
       containers:
       - name: vllm-sim
-        image: ghcr.io/llm-d/llm-d-inference-sim:v0.10.2
+        image: ghcr.io/llm-d/llm-d-inference-sim:v1.0.0
         imagePullPolicy: Always
         args:
         - --model
         - Qwen/Qwen3-32B
         - --port
         - "8000"
+        - --render-url
+        - http://localhost:8082
         env:
         - name: POD_NAME
           valueFrom:
@@ -38,3 +91,7 @@ spec:
         resources:
           requests:
             cpu: 10m
+      volumes:
+      - name: model-cache
+        emptyDir:
+          sizeLimit: 10Gi

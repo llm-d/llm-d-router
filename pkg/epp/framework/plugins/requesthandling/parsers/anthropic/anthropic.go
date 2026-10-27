@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,9 +26,11 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
 const (
@@ -36,11 +38,6 @@ const (
 
 	messagesAPI    = "messages"
 	countTokensAPI = "messages/count_tokens"
-
-	streamingRespPrefix = "data: "
-
-	contentType     = "content-type"
-	eventStreamType = "text/event-stream"
 )
 
 // compile-time type validation
@@ -68,7 +65,7 @@ func (p *AnthropicParser) TypedName() fwkplugin.TypedName {
 
 func (p *AnthropicParser) Claims() fwkrh.Claims {
 	return fwkrh.Claims{
-		Paths:     []string{messagesAPI, countTokensAPI},
+		Paths:     []string{messagesAPI, countTokensAPI, messagesAPI + "/render"},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 }
@@ -84,46 +81,53 @@ func (p *AnthropicParser) WithName(name string) *AnthropicParser {
 
 func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	path := request.GetRequestPath(headers)
-
-	// The count_tokens endpoint returns only a token count and gains nothing from
-	// structured parsing or response interception; forward the body unchanged.
-	if strings.HasSuffix(path, "/"+countTokensAPI) {
-		return &fwkrh.ParseResult{
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
-			SkipResponseProcessing: true,
-		}, nil
+	if request.MatchPathSuffix(path, messagesAPI+"/render") {
+		return parserutil.ParseRenderRequest(body)
 	}
 
-	if !strings.HasSuffix(path, "/"+messagesAPI) {
+	countTokens := request.MatchPathSuffix(path, countTokensAPI)
+	if !countTokens && !request.MatchPathSuffix(path, messagesAPI) {
 		return nil, fmt.Errorf("unsupported API endpoint: %s", path)
 	}
 
-	bodyMap := make(map[string]any)
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
+	bodyMap, err := parserutil.UnmarshalEnvelope(body, "system")
+	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}
 
-	var messagesReq fwkrh.MessagesRequest
-	if err := json.Unmarshal(body, &messagesReq); err != nil {
-		return nil, fmt.Errorf("error parsing messages request: %w", err)
-	}
-	if len(messagesReq.Messages) == 0 {
-		return nil, errors.New("invalid messages request: must have at least one message")
-	}
-
 	result := &fwkrh.InferenceRequestBody{
-		Messages:        &messagesReq,
 		Payload:         fwkrh.PayloadMap(bodyMap),
+		RawBody:         body,
 		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		result.Model = model
 	}
+
+	// count_tokens delegates token counting to the server and passes its response
+	// through, so only the envelope is read: Messages stays nil, while the model
+	// still resolves and rewrites.
+	if countTokens {
+		return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: true}, nil
+	}
+
+	var messagesReq fwkrh.MessagesRequest
+	if err := json.Unmarshal(body, &messagesReq); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && typeErr.Field != "" {
+			err = &fwkrh.RequestFieldError{Field: typeErr.Field, Err: err}
+		}
+		return nil, fmt.Errorf("error parsing messages request: %w", err)
+	}
+	if len(messagesReq.Messages) == 0 {
+		return nil, errors.New("invalid messages request: must have at least one message")
+	}
+	result.Messages = &messagesReq
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		result.Stream = true
 	}
 
-	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
+	return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: false}, nil
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
@@ -143,7 +147,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 
 	isStream := false
 	for k, v := range headers {
-		if strings.ToLower(k) == contentType && strings.Contains(strings.ToLower(v), eventStreamType) {
+		if strings.ToLower(k) == reqcommon.HeaderContentType && strings.Contains(strings.ToLower(v), request.MediaTypeEventStream) {
 			isStream = true
 			break
 		}
@@ -171,21 +175,36 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	usage := fwkrh.Usage{}
-	if v, ok := usg["input_tokens"].(float64); ok {
-		usage.PromptTokens = int(v)
-	}
-	if v, ok := usg["output_tokens"].(float64); ok {
-		usage.CompletionTokens = int(v)
-	}
+	applyInputTokens(&usage, usg)
+	usage.CompletionTokens = jsonInt(usg, "output_tokens")
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
-	if v, ok := usg["cache_read_input_tokens"].(float64); ok {
-		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-			CachedTokens: int(v),
-		}
-	}
-
 	return &usage, nil
+}
+
+// applyInputTokens sums the Messages API input counts into usage.PromptTokens.
+// input_tokens counts only the tokens that were neither read from nor written to
+// the prompt cache, so the input the server processed is input_tokens +
+// cache_read_input_tokens + cache_creation_input_tokens.
+//
+// A block reporting none of the three, or reporting them as zero before any count
+// is known, is left alone rather than zeroing what an earlier block set. A
+// zero-token prompt is unreachable on a path that requires at least one message.
+func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
+	read := jsonInt(usg, "cache_read_input_tokens")
+	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
+	if total == 0 {
+		return
+	}
+	usage.PromptTokens = total
+	if read != 0 {
+		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
+	}
+}
+
+func jsonInt(m map[string]any, key string) int {
+	v, _ := m[key].(float64)
+	return int(v)
 }
 
 // Anthropic SSE streaming format:
@@ -194,13 +213,26 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	data: {"type":"message_start","message":{"usage":{"input_tokens":25},...}}
 //
 //	event: message_delta
-//	data: {"type":"message_delta","delta":{...},"usage":{"output_tokens":15}}
+//	data: {"type":"message_delta","delta":{...},"usage":{"input_tokens":30,"output_tokens":15}}
 //
 //	event: message_stop
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
+	}, nil
+}
+
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		if _, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix)); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
@@ -208,7 +240,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
-		content, ok := bytes.CutPrefix(line, []byte(streamingRespPrefix))
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
 		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
 		if !ok || !bytes.Contains(content, []byte("usage")) {
 			continue
@@ -231,23 +263,16 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 				if result == nil {
 					result = &fwkrh.Usage{}
 				}
-				if v, ok := event.Message.Usage["input_tokens"].(float64); ok {
-					result.PromptTokens = int(v)
-				}
-				if v, ok := event.Message.Usage["cache_read_input_tokens"].(float64); ok {
-					result.PromptTokenDetails = &fwkrh.PromptTokenDetails{
-						CachedTokens: int(v),
-					}
-				}
+				applyInputTokens(result, event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
 					result = &fwkrh.Usage{}
 				}
-				if v, ok := event.Usage["output_tokens"].(float64); ok {
-					result.CompletionTokens = int(v)
-				}
+				// The delta counts are cumulative and authoritative over message_start.
+				applyInputTokens(result, event.Usage)
+				result.CompletionTokens = jsonInt(event.Usage, "output_tokens")
 			}
 		}
 	}

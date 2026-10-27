@@ -9,7 +9,7 @@
 #
 # Note: If these utilization-detector thresholds are raised, requests will
 # undergo flow control queueing before reaching the probabilistic-admitter.
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: probabilistic-admitter

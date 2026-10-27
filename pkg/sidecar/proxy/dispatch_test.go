@@ -1,0 +1,666 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package proxy
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
+	"k8s.io/utils/set"
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+)
+
+// testPrefillHeaderRouting is a shared table-driven helper that exercises
+// prefill-header parsing, sampling, passthrough, and P/D protocol invocation
+// for any reqcommon.APIType.  Both TestServer_chatCompletionsHandler and
+// TestServer_responsesHandler delegate to it.
+func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
+	t.Helper()
+	tests := []struct {
+		name     string
+		sampling bool
+		r        *http.Request
+
+		expectedCode             int
+		expectedPrefillHostPorts []string
+		expectedPassthrough      bool
+	}{
+		{
+			name: "passthrough by default",
+			r:    &http.Request{},
+
+			expectedPassthrough: true,
+		},
+		{
+			name: "passthrough with no header value",
+			r:    &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{}}},
+
+			expectedPassthrough: true,
+		},
+		{
+			name: "default prefill to one header value",
+			r:    &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a"}}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			name: "default prefill to first header value",
+			r:    &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,b"}}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that predates the rename sends only the legacy spelling.
+			name: "legacy prefill header still routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An upgraded EPP writes both spellings with the same value.
+			name: "both spellings present routes to that value",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"a"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that predates the rename forwards a client-supplied canonical
+			// name untouched. It must not override the target EPP itself set (#3087).
+			name: "canonical spelling does not override the legacy target",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"attacker"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// The canonical spelling alone still routes, which is what a release
+			// that has dropped the alias sends.
+			name: "canonical spelling alone routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			name:     "sample from comma delimited header",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,b"}}},
+			sampling: true,
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a", "b"},
+		},
+		{
+			name:     "sample from comma delimited header with whitespace",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{" a, b"}}},
+			sampling: true,
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a", "b"},
+		},
+		{
+			name:     "sample from duplicate values",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,a"}}},
+			sampling: true,
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			name:     "sample from multiple header values",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a", "b"}}},
+			sampling: true,
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a", "b"},
+		},
+		{
+			name:     "sample from empty header value",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{""}}},
+			sampling: true,
+
+			expectedPassthrough: true,
+		},
+		{
+			name:     "sample from multiple empty header values",
+			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"", ""}}},
+			sampling: true,
+
+			expectedPassthrough: true,
+		},
+	}
+	for _, tt := range tests {
+		maxAttempts := len(tt.expectedPrefillHostPorts) + 1
+
+		for i := 0; i < maxAttempts; i++ {
+			t.Run(fmt.Sprintf("%s_%d", tt.name, i), func(t *testing.T) {
+				s := NewProxy(Config{Port: "8000", EnablePrefillerSampling: tt.sampling})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.prefillSamplerFn = func(n int) int { return i % n }
+				var hostPort string
+				var capturedReq *http.Request
+				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ string, _ reqcommon.APIType) {
+					hostPort = selectedHostPort
+					capturedReq = r
+				}
+				var passthrough bool
+				s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					passthrough = true
+					capturedReq = r
+				})
+				s.dataParallelProxies = make(map[string]http.Handler)
+				recorder := httptest.NewRecorder()
+				recorder.Code = 0
+				req := tt.r.Clone(tt.r.Context())
+				if req.URL == nil {
+					// A server never hands a handler a nil URL or Body; the
+					// decoder-only passthrough for a Responses request reads
+					// both to check for unsupported stateful fields.
+					req.URL = &url.URL{Path: apiType.Path()}
+				}
+				if req.Body == nil {
+					req.Body = io.NopCloser(strings.NewReader("{}"))
+				}
+				s.disaggregatedPrefillHandler(apiType)(recorder, req)
+
+				resp := recorder.Result()
+				if passthrough {
+					if !tt.expectedPassthrough {
+						t.Errorf("unexpected passthrough to decode")
+					}
+					if recorder.Code != 0 || recorder.Body.Len() > 0 || len(resp.Header) > 0 {
+						t.Errorf("unexpected write to recorder during passthrough: %#v %#v", recorder, resp)
+					}
+					if len(hostPort) > 0 {
+						t.Errorf("unexpected hostPort set")
+					}
+				} else {
+					if tt.expectedPassthrough {
+						t.Fatal("unexpected handled request")
+					}
+					if resp.StatusCode != tt.expectedCode {
+						t.Errorf("unexpected code: %d", resp.StatusCode)
+					}
+					expected, actual := tt.expectedPrefillHostPorts[i%len(tt.expectedPrefillHostPorts)], hostPort
+					if expected != actual {
+						t.Errorf("expected=%s actual=%s", expected, actual)
+					}
+				}
+				if capturedReq != nil {
+					// Both spellings must go, or a worker sees a routing header.
+					for _, name := range routing.HeaderNames(routing.PrefillEndpointHeader) {
+						if v := capturedReq.Header.Get(name); v != "" {
+							t.Errorf("%s should be stripped before forwarding, got %q", name, v)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestServer_chatCompletionsHandler(t *testing.T) {
+	testPrefillHeaderRouting(t, reqcommon.APITypeChatCompletions)
+}
+
+func TestServer_responsesHandler(t *testing.T) {
+	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
+}
+
+func TestServer_createRoutes(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, apiType := range []reqcommon.APIType{
+		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions,
+		reqcommon.APITypeMessages, reqcommon.APITypeResponses,
+		reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
+	} {
+		for _, tt := range []struct {
+			name    string
+			method  string
+			suffix  string
+			prefill bool
+		}{
+			{name: "canonical", method: http.MethodPost, prefill: true},
+			{name: "trailing_slash", method: http.MethodPost, suffix: "/", prefill: true},
+			{name: "subpath", method: http.MethodPost, suffix: "/extra"},
+			{name: "subpath_trailing_slash", method: http.MethodPost, suffix: "/extra/"},
+			{name: "get", method: http.MethodGet},
+			{name: "get_trailing_slash", method: http.MethodGet, suffix: "/"},
+		} {
+			t.Run(apiType.String()+"/"+tt.name, func(t *testing.T) {
+				s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ string, gotAPI reqcommon.APIType) {
+					if gotAPI != apiType || hostPort != "127.0.0.1:9000" {
+						t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, apiType)
+					}
+					if r.URL.Path != apiType.Path() || r.URL.RawPath != "" || r.URL.RawQuery != "request=1" {
+						t.Errorf("connector received URL %v, want %s?request=1", r.URL, apiType.Path())
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil || string(body) != "{}" {
+						t.Errorf("connector received body %q and error %v, want {}", body, err)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}
+
+				uri := apiType.Path() + tt.suffix + "?request=1"
+				req := httptest.NewRequest(tt.method, uri, strings.NewReader("{}"))
+				req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+				recorder := httptest.NewRecorder()
+				s.createRoutes().ServeHTTP(recorder, req)
+
+				if tt.prefill {
+					if recorder.Code != http.StatusNoContent {
+						t.Errorf("expected prefill connector, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+				} else {
+					if recorder.Code != http.StatusAccepted {
+						t.Errorf("expected decoder passthrough, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+					if got := recorder.Header().Get("X-Forwarded-URI"); got != uri {
+						t.Errorf("decoder received URI %q, want %q", got, uri)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
+	for _, suffix := range []string{"", "/"} {
+		t.Run("path"+suffix, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}})
+			s.allowlistValidator = &AllowlistValidator{}
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses+suffix, strings.NewReader(statefulResponsesTestBody))
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf("expected stateful fields to be rejected, got status %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// The plain decoder passthrough: no prefill, encoder, P2P or data-parallel
+// header, so nothing downstream reads the body.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// Reading the body to run the guard consumes it, so the decoder has to be handed
+// a request whose body is still readable. Nothing else asserts this: every other
+// decoder-only spec either expects a refusal, or installs a proxy that does not
+// read what it is given.
+func TestServer_ResponsesDecoderOnlyPassthroughForwardsTheBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	const body = `{"model":"m","input":"hi","max_output_tokens":20}`
+	var forwarded []byte
+	var contentLength int64
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		forwarded, _ = io.ReadAll(r.Body)
+		contentLength = r.ContentLength
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected the request to be forwarded, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if string(forwarded) != body {
+		t.Errorf("decoder received %q, want %q", forwarded, body)
+	}
+	if contentLength != int64(len(body)) {
+		t.Errorf("ContentLength = %d, want %d", contentLength, len(body))
+	}
+}
+
+// dataParallelHandler forwards straight to another rank and never reads the
+// body, so it depends entirely on the caller having refused the request.
+func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+
+	var dispatched bool
+	const dpHostPort = "10.0.0.5:8001"
+	s.dataParallelProxies = map[string]http.Handler{
+		dpHostPort: http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			dispatched = true
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	req.Header.Set(routing.DataParallelEndpointHeader, dpHostPort)
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// decodeWithP2PSource reads the body itself, so this path checks twice.
+func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:9000")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// The decoder-only branch's body read fails closed: a client that drops the
+// connection mid-body is refused rather than forwarded unchecked.
+func TestServer_ResponsesDecoderOnlyPassthroughRejectsUnreadableBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000"})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, errReader{})
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if dispatched {
+		t.Errorf("expected decoder proxy not to be invoked on an unreadable body")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d", http.StatusBadRequest, recorder.Code)
+	}
+}
+
+func TestServer_encoderEndpointRouting(t *testing.T) {
+	encoderHeader := http.CanonicalHeaderKey(routing.EncoderEndpointsHeader)
+	prefillHeader := http.CanonicalHeaderKey(routing.PrefillEndpointHeader)
+
+	tests := []struct {
+		name string
+		r    *http.Request
+
+		// allowlist config: nil means disabled (allow all), non-nil means enabled with given hosts
+		allowedHosts []string
+
+		// set to true to install a mock EPD runner
+		epdConfigured bool
+
+		expectedEPD         bool
+		expectedEPDEncoders []string
+		expectedEPDPrefill  string
+		expectedPD          bool
+		expectedPDHost      string
+		expectedPassthrough bool
+	}{
+		{
+			name: "encoder header allowed invokes EPD protocol",
+			r: &http.Request{Header: http.Header{
+				encoderHeader: []string{"enc1:8000"},
+			}},
+			epdConfigured:       true,
+			expectedEPD:         true,
+			expectedEPDEncoders: []string{"enc1:8000"},
+			expectedEPDPrefill:  "",
+		},
+		{
+			name: "multiple encoder headers allowed invokes EPD protocol with all",
+			r: &http.Request{Header: http.Header{
+				encoderHeader: []string{"enc1:8000,enc2:8000"},
+			}},
+			epdConfigured:       true,
+			expectedEPD:         true,
+			expectedEPDEncoders: []string{"enc1:8000", "enc2:8000"},
+			expectedEPDPrefill:  "",
+		},
+		{
+			name: "encoder header all denied falls back to decoder passthrough",
+			r: &http.Request{
+				Header: http.Header{
+					encoderHeader: []string{"enc1:8000"},
+				},
+				URL: &url.URL{Path: "/v1/chat/completions"},
+			},
+			allowedHosts:        []string{"other-host:8000"},
+			epdConfigured:       true,
+			expectedPassthrough: true,
+		},
+		{
+			name: "encoder header partially denied filters to allowed only",
+			r: &http.Request{
+				Header: http.Header{
+					encoderHeader: []string{"enc1:8000,denied:8000"},
+				},
+				URL: &url.URL{Path: "/v1/chat/completions"},
+			},
+			allowedHosts:        []string{"enc1:8000"},
+			epdConfigured:       true,
+			expectedEPD:         true,
+			expectedEPDEncoders: []string{"enc1:8000"},
+			expectedEPDPrefill:  "",
+		},
+		{
+			name: "encoder header all denied falls back to P/D when prefill header present",
+			r: &http.Request{
+				Header: http.Header{
+					encoderHeader: []string{"enc1:8000"},
+					prefillHeader: []string{"prefill1:8000"},
+				},
+				URL: &url.URL{Path: "/v1/chat/completions"},
+			},
+			allowedHosts:   []string{"prefill1:8000"},
+			epdConfigured:  true,
+			expectedPD:     true,
+			expectedPDHost: "prefill1:8000",
+		},
+		{
+			name: "encoder and prefill headers both allowed invokes EPD with prefill host",
+			r: &http.Request{Header: http.Header{
+				encoderHeader: []string{"enc1:8000"},
+				prefillHeader: []string{"prefill1:8000"},
+			}},
+			epdConfigured:       true,
+			expectedEPD:         true,
+			expectedEPDEncoders: []string{"enc1:8000"},
+			expectedEPDPrefill:  "prefill1:8000",
+		},
+		{
+			name: "encoder header allowed but no EPD connector configured falls back to decoder",
+			r: &http.Request{Header: http.Header{
+				encoderHeader: []string{"enc1:8000"},
+			}},
+			epdConfigured:       false,
+			expectedPassthrough: true,
+		},
+		{
+			name: "encoder header allowed but no EPD connector with prefill header falls back to P/D",
+			r: &http.Request{Header: http.Header{
+				encoderHeader: []string{"enc1:8000"},
+				prefillHeader: []string{"prefill1:8000"},
+			}},
+			epdConfigured:  false,
+			expectedPD:     true,
+			expectedPDHost: "prefill1:8000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+
+			if tt.allowedHosts != nil {
+				s.allowlistValidator = &AllowlistValidator{
+					enabled:        true,
+					allowedTargets: set.New(tt.allowedHosts...),
+				}
+			} else {
+				s.allowlistValidator = &AllowlistValidator{}
+			}
+
+			var epdCalled bool
+			var epdPrefill string
+			var epdEncoders []string
+			var capturedReq *http.Request
+			if tt.epdConfigured {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ reqcommon.APIType) {
+					epdCalled = true
+					epdPrefill = prefillHost
+					epdEncoders = encoders
+					capturedReq = r
+				}
+			}
+
+			var pdCalled bool
+			var pdHost string
+			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
+				pdCalled = true
+				pdHost = host
+				capturedReq = r
+			}
+
+			var passthrough bool
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				passthrough = true
+				capturedReq = r
+			})
+			s.dataParallelProxies = make(map[string]http.Handler)
+
+			recorder := httptest.NewRecorder()
+			recorder.Code = 0
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, tt.r)
+
+			switch {
+			case tt.expectedEPD:
+				if !epdCalled {
+					t.Fatal("expected EPD protocol to be called, but it was not")
+				}
+				if epdPrefill != tt.expectedEPDPrefill {
+					t.Errorf("EPD prefill host: got %q, want %q", epdPrefill, tt.expectedEPDPrefill)
+				}
+				if len(epdEncoders) != len(tt.expectedEPDEncoders) {
+					t.Fatalf("EPD encoders: got %v, want %v", epdEncoders, tt.expectedEPDEncoders)
+				}
+				for i, enc := range tt.expectedEPDEncoders {
+					if epdEncoders[i] != enc {
+						t.Errorf("EPD encoder[%d]: got %q, want %q", i, epdEncoders[i], enc)
+					}
+				}
+				if pdCalled {
+					t.Error("P/D protocol should not be called when EPD is used")
+				}
+				if passthrough {
+					t.Error("decoder passthrough should not happen when EPD is used")
+				}
+			case tt.expectedPD:
+				if !pdCalled {
+					t.Fatal("expected P/D protocol to be called, but it was not")
+				}
+				if pdHost != tt.expectedPDHost {
+					t.Errorf("P/D host: got %q, want %q", pdHost, tt.expectedPDHost)
+				}
+				if epdCalled {
+					t.Error("EPD protocol should not be called when falling back to P/D")
+				}
+				if passthrough {
+					t.Error("decoder passthrough should not happen when P/D is used")
+				}
+			case tt.expectedPassthrough:
+				if !passthrough {
+					t.Fatal("expected decoder passthrough, but it did not happen")
+				}
+				if epdCalled {
+					t.Error("EPD protocol should not be called during passthrough")
+				}
+				if pdCalled {
+					t.Error("P/D protocol should not be called during passthrough")
+				}
+
+			}
+			if capturedReq != nil {
+				if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
+					t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
+				}
+				if v := capturedReq.Header.Get(routing.EncoderEndpointsHeader); v != "" {
+					t.Errorf("EncoderEndpointsHeader should be stripped before forwarding, got %q", v)
+				}
+			}
+		})
+	}
+}

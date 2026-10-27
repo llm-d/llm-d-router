@@ -6,9 +6,6 @@ metadata:
   labels:
     {{- include "llm-d-router.labels" . | nindent 4 }}
 rules:
-- apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferenceobjectives", "inferencemodelrewrites"]
-  verbs: ["get", "watch", "list"]
 - apiGroups: ["llm-d.ai"]
   resources: ["inferenceobjectives", "inferencemodelrewrites"]
   verbs: ["get", "watch", "list"]

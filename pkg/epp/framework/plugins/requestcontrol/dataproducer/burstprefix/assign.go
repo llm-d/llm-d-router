@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -98,7 +98,7 @@ func sharedPrefixKeys(groups map[string][]*entry, order []string, minColocateBlo
 // groups against groups already placed in this batch. Because a whole prompt
 // prefix is added at once, holding block i implies holding blocks 0..i, so a
 // greedy walk that stops at the first unheld block yields the longest contiguous
-// shared prefix per replica (the approximateprefix matchLongestPrefix property).
+// shared prefix per replica (the approximateprefix MatchLongestPrefix property).
 type batchIndex struct {
 	holders map[prefixhash.BlockHash]map[string]struct{}
 }

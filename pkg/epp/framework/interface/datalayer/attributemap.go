@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,7 +48,10 @@ func (d *DynamicAttribute) Clone() Cloneable {
 // Keys are DataKey values rather than strings so that a plugin can only reach
 // an attribute through a key it holds -- the same value it names in Produces()
 // or Consumes(). This removes the raw-string escape hatch by which a plugin
-// could read or write an attribute unrelated to its declaration.
+// could read or write an attribute unrelated to its declaration. Put is the
+// canonical write entry point and is what Slot[T].Put calls; the slot is the
+// recommended path because it additionally pins the value type at compile
+// time.
 type AttributeMap interface {
 	Put(fwkplugin.DataKey, Cloneable)
 	Get(fwkplugin.DataKey) (Cloneable, bool)
@@ -66,10 +70,12 @@ func NewAttributes() AttributeMap {
 	return &Attributes{}
 }
 
-// Put adds or updates an attribute in the map.
+// Put adds or updates an attribute in the map. The value is cloned before
+// storage so that a caller mutating what it passed in after Put returns
+// cannot affect the stored copy.
 func (a *Attributes) Put(key fwkplugin.DataKey, value Cloneable) {
 	if value != nil {
-		a.data.Store(key, value) // TODO: Clone into map to ensure isolation
+		a.data.Store(key, value.Clone())
 	}
 }
 
@@ -90,6 +96,29 @@ func (a *Attributes) Get(key fwkplugin.DataKey) (Cloneable, bool) {
 
 	if cloneable, ok := val.(Cloneable); ok {
 		return cloneable.Clone(), true
+	}
+	return nil, false
+}
+
+// Peek returns the stored attribute without cloning. Callers must not mutate
+// the result. DynamicAttribute is resolved but not cloned again (Get() is
+// expected to return a fresh value). Prefer Get when the caller may write.
+func (a *Attributes) Peek(key fwkplugin.DataKey) (Cloneable, bool) {
+	val, ok := a.data.Load(key)
+	if !ok {
+		return nil, false
+	}
+
+	if dynamic, ok := val.(*DynamicAttribute); ok {
+		realVal := dynamic.Get()
+		if realVal == nil {
+			return nil, false
+		}
+		return realVal, true
+	}
+
+	if cloneable, ok := val.(Cloneable); ok {
+		return cloneable, true
 	}
 	return nil, false
 }

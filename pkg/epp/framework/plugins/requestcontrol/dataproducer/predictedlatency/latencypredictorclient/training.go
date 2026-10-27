@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -131,7 +133,7 @@ func (p *Predictor) sampleFromSlice(entries []TrainingEntry, sampleSize int) []T
 	// Create a copy and shuffle
 	sample := make([]TrainingEntry, len(entries))
 	copy(sample, entries)
-	p.rng.Shuffle(len(sample), func(i, j int) {
+	rand.Shuffle(len(sample), func(i, j int) { //#nosec -- non-crypto sampling for training-set order
 		sample[i], sample[j] = sample[j], sample[i]
 	})
 
@@ -174,7 +176,7 @@ func (p *Predictor) flushTraining(ctx context.Context) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		p.logger.Error(err, "Bulk POST failed", "url", url)
 		return
@@ -217,6 +219,18 @@ func (p *Predictor) ValidateTrainingEntry(entry TrainingEntry) error {
 	}
 	if entry.ActualTPOT < 0.0 {
 		return fmt.Errorf("actual_tpot_ms must be non-negative, got %f", entry.ActualTPOT)
+	}
+	if entry.PredictedTTFT != nil && *entry.PredictedTTFT < 0.0 {
+		return fmt.Errorf("predicted_ttft_ms must be non-negative, got %f", *entry.PredictedTTFT)
+	}
+	if entry.PredictedTTFT != nil && (math.IsNaN(*entry.PredictedTTFT) || math.IsInf(*entry.PredictedTTFT, 0)) {
+		return fmt.Errorf("predicted_ttft_ms must be a finite number, got %f", *entry.PredictedTTFT)
+	}
+	if entry.PredictedTPOT != nil && *entry.PredictedTPOT < 0.0 {
+		return fmt.Errorf("predicted_tpot_ms must be non-negative, got %f", *entry.PredictedTPOT)
+	}
+	if entry.PredictedTPOT != nil && (math.IsNaN(*entry.PredictedTPOT) || math.IsInf(*entry.PredictedTPOT, 0)) {
+		return fmt.Errorf("predicted_tpot_ms must be a finite number, got %f", *entry.PredictedTPOT)
 	}
 	if entry.PrefixCacheScore < 0.0 || entry.PrefixCacheScore > 1.0 {
 		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", entry.PrefixCacheScore)
@@ -271,7 +285,7 @@ func (p *Predictor) refreshModelInfo(ctx context.Context) error {
 		return fmt.Errorf("failed to create model info request: %w", err)
 	}
 
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.httpClient.Do(req) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return fmt.Errorf("failed to call /model/download/info endpoint: %w", err)
 	}
@@ -375,7 +389,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("failed to create TTFT trees request: %w", err)
 	}
 
-	ttftResp, err := p.httpClient.Do(ttftReq)
+	ttftResp, err := p.httpClient.Do(ttftReq) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch TTFT trees: %w", err)
 	}
@@ -397,7 +411,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("failed to create TPOT trees request: %w", err)
 	}
 
-	tpotResp, err := p.httpClient.Do(tpotReq)
+	tpotResp, err := p.httpClient.Do(tpotReq) //#nosec -- operator-config URL via config.TrainingURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch TPOT trees: %w", err)
 	}

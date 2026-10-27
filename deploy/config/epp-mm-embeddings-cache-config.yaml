@@ -1,5 +1,5 @@
 # Sample EPP configuration with multimodal embeddings cache affinity.
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: token-producer
@@ -12,12 +12,12 @@ plugins:
   - type: core-metrics-extractor
   - type: mm-embeddings-cache-producer
     parameters:
-      cacheSizeInMB: 2048
+      cacheSizeInMBPerServer: 2048
   - type: mm-embeddings-cache-scorer
   - type: precise-prefix-cache-producer
     parameters:
       tokenProcessorConfig:
-        blockSize: 64
+        blockSizeTokens: 64
       indexerConfig:
         kvBlockIndexConfig:
           enableMetrics: true

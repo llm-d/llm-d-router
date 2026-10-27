@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package bylabel_test
 
 import (
@@ -435,29 +451,4 @@ func createEndpoint(nsn k8stypes.NamespacedName, ipaddr string, labels map[strin
 
 func PrefillDecodeRolesInLWS(blf *bylabel.Selector, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	return blf.Filter(context.Background(), nil, endpoints)
-}
-
-// TestDeprecatedSelectorFactoryBackwardCompat verifies that the deprecated DeprecatedSelectorFactory
-// still works and produces functional filters with the legacy type name.
-func TestDeprecatedSelectorFactoryBackwardCompat(t *testing.T) {
-	rawParams := json.RawMessage(`{"matchLabels": {"app": "nginx"}}`)
-
-	plugin, err := bylabel.DeprecatedSelectorFactory("compat-test", fwkplugin.StrictDecoder(rawParams), nil) //nolint:staticcheck // testing deprecated function
-	require.NoError(t, err)
-	require.NotNil(t, plugin)
-
-	blf, ok := plugin.(*bylabel.Selector)
-	require.True(t, ok, "deprecated factory should still produce *Selector")
-	assert.Equal(t, bylabel.ByLabelSelectorType, blf.TypedName().Type)
-
-	ctx := utils.NewTestContext(t)
-
-	endpoints := []scheduling.Endpoint{
-		createEndpoint(k8stypes.NamespacedName{Name: "nginx-1"}, "10.0.0.1", map[string]string{"app": "nginx"}),
-		createEndpoint(k8stypes.NamespacedName{Name: "redis-1"}, "10.0.0.2", map[string]string{"app": "redis"}),
-	}
-
-	filtered := blf.Filter(ctx, nil, endpoints)
-	require.Len(t, filtered, 1)
-	assert.Equal(t, "nginx-1", filtered[0].GetMetadata().ID.Name)
 }

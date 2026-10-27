@@ -13,5 +13,5 @@ spec:
         args:
         - "--port=8000"
         - "--ec-connector=${EC_CONNECTOR_TYPE}"
-        - "--secure-proxy=false"
+        - "--secure-serving=false"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"

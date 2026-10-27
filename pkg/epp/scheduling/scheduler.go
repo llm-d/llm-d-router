@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,12 +26,13 @@ import (
 	"slices"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -58,14 +60,19 @@ type Scheduler struct {
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
 func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (result *fwksched.SchedulingResult, err error) {
-	loggerVerbose := log.FromContext(ctx).V(logutil.VERBOSE)
+	logger := log.FromContext(ctx)
+	loggerVerbose := logger.V(logutil.VERBOSE)
 	verboseEnabled := loggerVerbose.Enabled()
 	handlerName := s.profileHandler.TypedName()
 
 	scheduleStart := time.Now()
+	var failureReason string
 	defer func() {
-		metrics.RecordSchedulerE2ELatency(time.Since(scheduleStart))
+		metrics.RecordSchedulerE2ELatency(ctx, time.Since(scheduleStart))
 		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
+		if err != nil {
+			metrics.RecordSchedulerFailure(failureReason)
+		}
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
@@ -79,8 +86,13 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		if verboseEnabled {
 			loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", handlerName)
 		}
+		// violations dropped: Pick has no error return, so a rejected write is
+		// visible only through plugin_data_scope_violations_total. The profiles
+		// the handler returns run against the unscoped request below; each
+		// filter and scorer is scoped against its own declarations.
+		scopedRequest, _ := datalayer.ScopeRequest(logger, profilePickerExtensionPoint, s.profileHandler, request)
 		before := time.Now()
-		profiles := s.profileHandler.Pick(ctx, request, s.profiles, profileRunResults)
+		profiles := s.profileHandler.Pick(ctx, scopedRequest, s.profiles, profileRunResults)
 		metrics.RecordPluginProcessingLatency(profilePickerExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
 		if verboseEnabled {
 			loggerVerbose.Info("Completed running profile handler Pick profiles successfully", "plugin", handlerName, "result", profiles)
@@ -115,6 +127,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	}
 
 	if len(profileRunResults) == 0 {
+		failureReason = metrics.SchedulerFailureReasonNoProfileSelected
 		err = fmt.Errorf("failed to run any scheduler profile for request %s", request.RequestID)
 		return nil, err
 	}
@@ -122,10 +135,18 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	if verboseEnabled {
 		loggerVerbose.Info("Running profile handler, ProcessResults", "plugin", handlerName)
 	}
+	scopedRequest, violations := datalayer.ScopeRequest(logger, processProfilesResultsExtensionPoint, s.profileHandler, request)
 	before := time.Now()
-	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
+	result, err = s.profileHandler.ProcessResults(ctx, scopedRequest, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, handlerName.Type, handlerName.Name, time.Since(before))
-	if verboseEnabled {
+	failureReason = metrics.SchedulerFailureReasonProfileHandlerError
+	if err == nil {
+		err = violations.Write()
+	} else if len(profileRunErrors) > 0 {
+		// A profile run fails only when its filters remove every candidate.
+		failureReason = metrics.SchedulerFailureReasonAllFiltered
+	}
+	if verboseEnabled && err == nil {
 		loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", handlerName)
 	}
 
@@ -152,7 +173,7 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 ) (*fwksched.ProfileRunResult, error) {
 	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, "run_scheduler_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attribute.String("llm_d.epp.scheduling.profile.name", name)),
+		trace.WithAttributes(semconv.LLMDEPPProfileName(name)),
 	)
 	defer span.End()
 

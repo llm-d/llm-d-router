@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +29,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
@@ -220,7 +222,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		copy(copiedTokenIDsInt, inputIDs)
 		body = &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
+				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedRequest: &fwkrh.TokenizedRequest{
@@ -261,7 +263,7 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 		}
 
 		feature := fwkrh.MultiModalFeature{
-			Modality: fwkrh.ModalityImage,
+			Modality: reqcommon.ModalityImage,
 			Hash:     hash,
 		}
 		if placeholder != nil {
@@ -284,7 +286,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 		body = &fwkrh.InferenceRequestBody{
 			Embeddings: &fwkrh.EmbeddingsRequest{
 				Input: fwkrh.EmbeddingsInput{
-					TokenIDs: tokenIDs,
+					TokenIDs: [][]uint32{tokenIDs},
 				},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},

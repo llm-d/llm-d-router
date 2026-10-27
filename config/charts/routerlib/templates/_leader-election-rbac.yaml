@@ -1,5 +1,6 @@
 {{- define "llm-d-epp.leader-election-rbac" -}}
-{{- if gt (.Values.router.epp.replicas | int) 1 }}
+{{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml -}}
+{{- if index $eppFlags "ha-enable-leader-election" }}
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1

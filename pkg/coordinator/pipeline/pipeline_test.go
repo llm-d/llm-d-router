@@ -19,7 +19,17 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 )
 
 type mockStep struct {
@@ -56,6 +66,116 @@ func TestPipeline_ExecutesStepsInOrder(t *testing.T) {
 	}
 	if len(order) != 3 || order[0] != "a" || order[1] != "b" || order[2] != "c" {
 		t.Fatalf("unexpected execution order: %v", order)
+	}
+}
+
+func TestPipeline_GeneratesRevisionDecisionID(t *testing.T) {
+	var decisionID string
+	p := New([]Step{&mockStep{name: "capture", fn: func(_ context.Context, rc *RequestContext) error {
+		decisionID = rc.RevisionDecisionID
+		return nil
+	}}})
+
+	if err := p.Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if decisionID == "" {
+		t.Fatal("pipeline did not generate a revision decision ID")
+	}
+}
+
+func TestPipeline_ForwardsConfiguredResponseHeadersBetweenArbitrarySteps(t *testing.T) {
+	steps := []Step{
+		&mockStep{name: "producer", fn: func(_ context.Context, rc *RequestContext) error {
+			if got := rc.ForwardedHeaders()["x-llm-d-disagg-revision"]; got != "" {
+				t.Fatalf("client supplied relay header reached first step: %q", got)
+			}
+			responseHeaders := make(http.Header)
+			responseHeaders.Set("X-LLM-D-Disagg-Revision", "revision-b")
+			responseHeaders.Set("X-Worker-Only", "worker-value")
+			rc.CaptureResponseHeaders(responseHeaders)
+			return nil
+		}},
+		&mockStep{name: "consumer", fn: func(_ context.Context, rc *RequestContext) error {
+			headers := rc.ForwardedHeaders()
+			if got := headers["x-llm-d-disagg-revision"]; got != "revision-b" {
+				t.Fatalf("relayed revision = %q, want %q", got, "revision-b")
+			}
+			if got := headers["x-worker-only"]; got != "" {
+				t.Fatalf("unconfigured response header was relayed: %q", got)
+			}
+			return nil
+		}},
+	}
+
+	p, err := NewWithForwardResponseHeaders(steps, []string{" X-LLM-D-Disagg-Revision "})
+	if err != nil {
+		t.Fatalf("NewWithForwardResponseHeaders() error = %v", err)
+	}
+	reqCtx := &RequestContext{OriginalHeaders: http.Header{"X-LLM-D-Disagg-Revision": {"client-revision"}}}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestPipeline_SelectsMostFrequentValueForEachForwardedHeader(t *testing.T) {
+	steps := []Step{
+		&mockStep{name: "producer", fn: func(_ context.Context, rc *RequestContext) error {
+			responses := []http.Header{
+				{"X-Route-One": {"one-b"}, "X-Route-Two": {"two-a"}},
+				{"X-Route-One": {"one-a"}, "X-Route-Two": {"two-b"}},
+				{"X-Route-One": {"one-a"}, "X-Route-Two": {"two-a"}},
+				{"X-Route-One": {"one-b"}},
+			}
+			rc.CaptureResponseHeaders(responses...)
+			return nil
+		}},
+		&mockStep{name: "consumer", fn: func(_ context.Context, rc *RequestContext) error {
+			headers := rc.ForwardedHeaders()
+			if got := headers["x-route-one"]; got != "one-b" {
+				t.Errorf("tie winner = %q, want first value %q", got, "one-b")
+			}
+			if got := headers["x-route-two"]; got != "two-a" {
+				t.Errorf("majority winner = %q, want %q", got, "two-a")
+			}
+			return nil
+		}},
+	}
+
+	p, err := NewWithForwardResponseHeaders(steps, []string{"X-Route-One", "X-Route-Two"})
+	if err != nil {
+		t.Fatalf("NewWithForwardResponseHeaders() error = %v", err)
+	}
+	if err := p.Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestCaptureResponseHeaders_IgnoresEmptyValues(t *testing.T) {
+	rc := &RequestContext{
+		forwardResponseHeaders: map[string]struct{}{"x-route": {}},
+	}
+
+	rc.CaptureResponseHeaders(
+		http.Header{"X-Route": {""}},
+		http.Header{"X-Route": {"route-a"}},
+		http.Header{"X-Route": {""}},
+	)
+
+	if got := rc.downstreamHeaders["x-route"]; got != "route-a" {
+		t.Fatalf("captured route = %q, want %q", got, "route-a")
+	}
+}
+
+func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
+	for _, headers := range [][]string{
+		{""},
+		{"x-llm-d-disagg-revision", "X-LLM-D-Disagg-Revision"},
+		{"Content-Type"},
+	} {
+		if _, err := NewWithForwardResponseHeaders(nil, headers); err == nil {
+			t.Fatalf("NewWithForwardResponseHeaders(%v) expected error", headers)
+		}
 	}
 }
 
@@ -126,5 +246,556 @@ func TestPipeline_RespectsContextCancellation(t *testing.T) {
 	err := p.Execute(ctx, &RequestContext{})
 	if err == nil {
 		t.Fatal("expected cancellation error")
+	}
+}
+
+// A step returns after the client's request context ended; only the context
+// error itself is the departure.
+func TestExecute_AbortedRequestAccounting(t *testing.T) {
+	paths := []string{metricsutil.DisaggPathDecodeOnly, metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode}
+	codes := []string{coordmetrics.ErrorCodeInternal, coordmetrics.ErrorCodeUpstream5xx}
+	cases := []struct {
+		name     string
+		before   []string // steps that complete before the client leaves
+		during   string   // step running when the client leaves
+		returns  error    // error the step returns; nil returns the context error
+		wantCode string   // step_errors_total{during, wantCode}; "" counts nothing
+		wantPath string   // "" records no path
+	}{
+		{
+			name:   "probe returns before the worker answers",
+			during: "conditional-decode",
+		},
+		{
+			name:     "decode returns after prefill",
+			before:   []string{"prefill"},
+			during:   "decode",
+			wantPath: metricsutil.DisaggPathPrefillDecode,
+		},
+		{
+			name:     "decode streamed a 500 before the client left",
+			before:   []string{"prefill"},
+			during:   "decode",
+			returns:  &UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError},
+			wantCode: coordmetrics.ErrorCodeUpstream5xx,
+			wantPath: metricsutil.DisaggPathPrefillDecode,
+		},
+		{
+			name:     "prefill answered 503 before the client left",
+			during:   "prefill",
+			returns:  &UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable},
+			wantCode: coordmetrics.ErrorCodeUpstream5xx,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			steps := make([]Step, 0, len(tc.before)+1)
+			for _, n := range tc.before {
+				steps = append(steps, &mockStep{name: n, fn: func(context.Context, *RequestContext) error { return nil }})
+			}
+			steps = append(steps, &mockStep{name: tc.during, fn: func(ctx context.Context, _ *RequestContext) error {
+				cancel()
+				if tc.returns != nil {
+					return tc.returns
+				}
+				return ctx.Err()
+			}})
+
+			err := New(steps).Execute(ctx, &RequestContext{Model: "m"})
+			if tc.returns != nil {
+				require.ErrorIs(t, err, tc.returns)
+			} else {
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			for _, code := range codes {
+				want := 0.0
+				if code == tc.wantCode {
+					want = 1
+				}
+				require.InDelta(t, want, stepErrorCount(t, reg, tc.during, code), 1e-9, "error_code %q", code)
+			}
+			for _, p := range paths {
+				want := 0.0
+				if p == tc.wantPath {
+					want = 1
+				}
+				require.InDelta(t, want, pathCount(t, reg, p), 1e-9, "path %q", p)
+			}
+		})
+	}
+}
+
+// After a 412 the decode phase is the decode step: the path is recorded once
+// it starts, whichever step the client leaves during.
+func TestExecute_DeferredProbePath(t *testing.T) {
+	cases := []struct {
+		name     string
+		cancelIn string // step that observes the client leaving; the probe itself for right after the 412
+		wantPath string // "" records no path
+	}{
+		{name: "client leaves right after the 412", cancelIn: "conditional-decode"},
+		{name: "client leaves during prefill", cancelIn: "prefill"},
+		{name: "client leaves during decode", cancelIn: "decode", wantPath: metricsutil.DisaggPathPrefillDecode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stepFn := func(name string) func(context.Context, *RequestContext) error {
+				return func(ctx context.Context, _ *RequestContext) error {
+					if name != tc.cancelIn {
+						return nil
+					}
+					cancel()
+					if name == "conditional-decode" {
+						return nil // the 412 arrived; the proxy swallows it before looking at the context
+					}
+					return ctx.Err()
+				}
+			}
+			steps := []Step{
+				&mockStep{name: "conditional-decode", fn: stepFn("conditional-decode")},
+				&mockStep{name: "prefill", fn: stepFn("prefill")},
+				&mockStep{name: "decode", fn: stepFn("decode")},
+			}
+
+			err := New(steps).Execute(ctx, &RequestContext{Model: "m"})
+			require.ErrorIs(t, err, context.Canceled)
+			for _, p := range []string{metricsutil.DisaggPathDecodeOnly, metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode} {
+				want := 0.0
+				if p == tc.wantPath {
+					want = 1
+				}
+				require.InDelta(t, want, pathCount(t, reg, p), 1e-9, "path %q", p)
+			}
+		})
+	}
+}
+
+// newMetricsRegistry wires the coordinator's package-level metric vectors
+// onto a fresh registry so the pipeline's step recording is observable in
+// isolation, and clears their state so concurrent tests do not see each
+// other's increments.
+func newMetricsRegistry(t *testing.T) *prometheus.Registry {
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+}
+
+// stepErrorCount reads the error counter for the given step and error_code
+// via the passed gatherer. Absent series is 0.
+func stepErrorCount(t *testing.T, reg *prometheus.Registry, step, errorCode string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_step_errors_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["step"] == step && labels["error_code"] == errorCode {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func TestExecute_SuccessRecordsStepDuration(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	require.InDelta(t, 0.0,
+		mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"}),
+		1e-9, "step_running must be balanced back to 0 after success",
+	)
+	require.InDelta(t, 0.0, stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal), 1e-9)
+}
+
+func TestExecute_StepPanicRecordsErrorAndBalancesGauge(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
+			panic("boom")
+		}},
+	}
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "step panic must propagate out of Execute so chi Recoverer handles it")
+		require.InDelta(t, 0.0,
+			mustGauge(t, reg, "llm_d_coordinator_step_running", map[string]string{"step": "render"}),
+			1e-9, "step_running must be balanced back to 0 after a step panic",
+		)
+		require.InDelta(t, 1.0,
+			stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeInternal),
+			1e-9, "step_errors_total must record the panic under error_code=internal",
+		)
+	}()
+	_ = New(steps).Execute(context.Background(), &RequestContext{})
+}
+
+func TestExecute_BadRequestErrorClassified(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	stepErr := fmt.Errorf("render: prompt must be a string: %w", ErrBadRequest)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err == nil {
+		t.Fatal("expected error")
+	}
+	require.InDelta(t, 1.0, stepErrorCount(t, reg, "render", coordmetrics.ErrorCodeBadRequest), 1e-9)
+}
+
+func TestExecute_Upstream4xxAnd5xxClassified(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		wantCode   string
+		otherCodes []string
+	}{
+		{"4xx", http.StatusUnprocessableEntity, coordmetrics.ErrorCodeUpstream4xx, []string{coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ErrorCodeInternal}},
+		{"5xx", http.StatusServiceUnavailable, coordmetrics.ErrorCodeUpstream5xx, []string{coordmetrics.ErrorCodeUpstream4xx, coordmetrics.ErrorCodeInternal}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			stepErr := fmt.Errorf("prefill: %w", &UpstreamError{Step: "prefill", StatusCode: tc.status})
+			steps := []Step{
+				&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+			}
+			if err := New(steps).Execute(context.Background(), &RequestContext{}); err == nil {
+				t.Fatal("expected error")
+			}
+			require.InDelta(t, 1.0, stepErrorCount(t, reg, "prefill", tc.wantCode), 1e-9)
+			for _, other := range tc.otherCodes {
+				require.Zero(t, stepErrorCount(t, reg, "prefill", other), "series for %q must be absent", other)
+			}
+		})
+	}
+}
+
+func TestUpstreamError_Error(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"status", http.StatusServiceUnavailable, "async-broker: upstream returned HTTP 503"},
+		{"transport", 0, "async-broker: upstream transport error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &UpstreamError{Step: "async-broker", StatusCode: tc.status}
+			require.Equal(t, tc.want, err.Error())
+		})
+	}
+}
+
+func TestExecute_ErrPipelineDoneIsNotAnError(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "conditional-decode", fn: func(_ context.Context, _ *RequestContext) error { return ErrPipelineDone }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("expected nil (clean early exit), got %v", err)
+	}
+	// No error code should have any observations; the metric family may still
+	// carry other series from prior tests, so scan for our step name.
+	for _, code := range []string{coordmetrics.ErrorCodeBadRequest, coordmetrics.ErrorCodeUpstream4xx, coordmetrics.ErrorCodeUpstream5xx, coordmetrics.ErrorCodeInternal} {
+		require.Zero(t, stepErrorCount(t, reg, "conditional-decode", code))
+	}
+}
+
+func TestExecute_ResponseWrittenErrorClassified(t *testing.T) {
+	cases := []struct {
+		name     string
+		cause    error
+		wantCode string
+	}{
+		{"bad request", ErrBadRequest, coordmetrics.ErrorCodeBadRequest},
+		{"upstream", &UpstreamError{Step: "async-broker", StatusCode: http.StatusGatewayTimeout}, coordmetrics.ErrorCodeUpstream5xx},
+		{"internal", errors.New("redis down"), coordmetrics.ErrorCodeInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			stepErr := &ResponseWrittenError{Step: "async-broker", StatusCode: http.StatusServiceUnavailable, Cause: tc.cause}
+			steps := []Step{
+				&mockStep{name: "async-broker", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+			}
+			err := New(steps).Execute(context.Background(), &RequestContext{})
+			require.ErrorIs(t, err, stepErr)
+			require.InDelta(t, 1.0, stepErrorCount(t, reg, "async-broker", tc.wantCode), 1e-9)
+		})
+	}
+}
+
+// pathCount reads the execution_path_total counter for the given path under
+// the test's canonical model_name "m".
+func pathCount(t *testing.T, reg *prometheus.Registry, path string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_execution_path_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["model_name"] == "m" && labels["path"] == path {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// inputTokensCount reads the request_input_tokens histogram observation count
+// for the given model. Zero means the histogram never observed a value for
+// that label combination.
+func inputTokensCount(t *testing.T, reg *prometheus.Registry, model string) uint64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_request_input_tokens" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["model_name"] == model {
+				return m.GetHistogram().GetSampleCount()
+			}
+		}
+	}
+	return 0
+}
+
+func TestExecute_ExecutionPathTable(t *testing.T) {
+	cases := []struct {
+		name      string
+		stepNames []string
+		wantPath  string
+	}{
+		{"decode-only via cache hit", []string{"conditional-decode"}, metricsutil.DisaggPathDecodeOnly},
+		{"prefill-decode without encode", []string{"prefill", "decode"}, metricsutil.DisaggPathPrefillDecode},
+		{"encode-prefill-decode full path", []string{"encode", "prefill", "decode"}, metricsutil.DisaggPathEncodePrefillDecode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			steps := make([]Step, 0, len(tc.stepNames))
+			for _, n := range tc.stepNames {
+				fn := func(_ context.Context, _ *RequestContext) error { return nil }
+				if n == "conditional-decode" {
+					// The cache-hit case returns ErrPipelineDone; the executor
+					// must still count the step toward the path.
+					fn = func(_ context.Context, _ *RequestContext) error { return ErrPipelineDone }
+				}
+				steps = append(steps, &mockStep{name: n, fn: fn})
+			}
+			if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			require.InDelta(t, 1.0, pathCount(t, reg, tc.wantPath), 1e-9)
+		})
+	}
+}
+
+func TestExecute_ExecutionPathRecordedOnDecodeFailure(t *testing.T) {
+	// Regular decode fails after running: path totals must still record the
+	// request as prefill-decode.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
+			return &UpstreamStreamedError{Step: "decode", StatusCode: http.StatusServiceUnavailable}
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	require.InDelta(t, 1.0, pathCount(t, reg, metricsutil.DisaggPathPrefillDecode), 1e-9)
+}
+
+func TestExecute_ExecutionPathRecordedOnConditionalDecodeFailure(t *testing.T) {
+	// Conditional-decode probe fails (transport error / worker 4xx/5xx):
+	// the request was routed via decode-only and must record that.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "conditional-decode", fn: func(_ context.Context, _ *RequestContext) error {
+			return &UpstreamStreamedError{Step: "conditional-decode", Cause: errors.New("connection reset")}
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	require.InDelta(t, 1.0, pathCount(t, reg, metricsutil.DisaggPathDecodeOnly), 1e-9)
+}
+
+func TestExecute_ExecutionPathNotRecordedWhenDecodeAbsent(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	// A pipeline that aborts before decode-ish must not record any path.
+	stepErr := fmt.Errorf("prefill: %w", &UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable})
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error { return stepErr }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err == nil {
+		t.Fatal("expected error")
+	}
+	for _, p := range []string{metricsutil.DisaggPathDecodeOnly, metricsutil.DisaggPathPrefillDecode, metricsutil.DisaggPathEncodePrefillDecode} {
+		require.Zero(t, pathCount(t, reg, p))
+	}
+}
+
+func TestExecute_InputTokensRecordedOnlyWhenPopulated(t *testing.T) {
+	// TokenIDs is populated by render; the executor records after any success
+	// or clean early-exit path.
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.TokenIDs = []int{1, 2, 3, 4}
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), inputTokensCount(t, reg, "m"))
+
+	// A pipeline that never runs render leaves TokenIDs empty, so the
+	// histogram must not observe zero.
+	reg2 := newMetricsRegistry(t)
+	steps2 := []Step{
+		&mockStep{name: "prefill", fn: func(_ context.Context, _ *RequestContext) error {
+			return fmt.Errorf("prefill: %w", &UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable})
+		}},
+	}
+	_ = New(steps2).Execute(context.Background(), &RequestContext{Model: "m"})
+	require.Equal(t, uint64(0), inputTokensCount(t, reg2, "m"))
+
+	// A render that succeeds with a zero-length prompt (e.g. completions
+	// empty array) is a valid observation and must be recorded.
+	reg3 := newMetricsRegistry(t)
+	steps3 := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.TokenIDs = []int{}
+			return nil
+		}},
+	}
+	if err := New(steps3).Execute(context.Background(), &RequestContext{Model: "m"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), inputTokensCount(t, reg3, "m"))
+}
+
+// mustGauge finds a gauge series matching all of labels in reg and returns
+// its value. A missing series is a test failure, so callers cannot silently
+// see 0 when the series was never emitted.
+func mustGauge(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			match := true
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			for k, v := range labels {
+				if got[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	t.Fatalf("gauge %s%v not present", name, labels)
+	return 0
+}
+
+func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	return metricstest.HistogramCount(t, reg, name, labels)
+}
+
+func histogramSampleSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	return metricstest.HistogramSum(t, reg, name, labels)
+}
+
+func TestExecute_RecordsEncodeFanoutIncludingZero(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	steps := []Step{
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	if err := New(steps).Execute(context.Background(), &RequestContext{Route: coordmetrics.RouteChatCompletions}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteChatCompletions}))
+	require.InDelta(t, 0.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteChatCompletions}), 1e-9)
+
+	reg = newMetricsRegistry(t)
+	steps = []Step{
+		&mockStep{name: "encode", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.EncodeFanout = 3
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error { return nil }},
+	}
+	// Empty Route is normalized to RouteUnknown by boundRoute at record time.
+	if err := New(steps).Execute(context.Background(), &RequestContext{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, uint64(1), histogramSampleCount(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteUnknown}))
+	require.InDelta(t, 3.0, histogramSampleSum(t, reg, "llm_d_coordinator_encode_subrequests", map[string]string{"route": coordmetrics.RouteUnknown}), 1e-9)
+}
+
+func TestExecute_AccumulatesStepDuration(t *testing.T) {
+	reqCtx := &RequestContext{}
+	// Each step sleeps briefly: with instantly-returning fns the measured
+	// durations can round to zero on coarse clocks and make the test flaky.
+	steps := []Step{
+		&mockStep{name: "render", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
+		&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
+			time.Sleep(time.Millisecond)
+			return nil
+		}},
+	}
+	if err := New(steps).Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reqCtx.StepDuration <= 0 {
+		t.Fatalf("expected StepDuration > 0, got %s", reqCtx.StepDuration)
 	}
 }

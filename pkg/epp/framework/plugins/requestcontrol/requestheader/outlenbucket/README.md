@@ -27,22 +27,25 @@ for any subsystem, exactly like `agent-identity`.
 
 ## How It Works
 
-Classification:
+Classification (first match wins):
 
-1. `enable_thinking=true` -> **LONG** (reasoning mode).
+1. `enable_thinking=true` -> **LONG**.
 2. `thinking_budget > 4000` (without explicit `enable_thinking`) -> **LONG**.
-3. `has_tools=true` **and** `enable_thinking` false/absent -> **SHORT**
-   (tool-call JSON). The `enable_thinking` guard matters: tools alone is *not*
-   a SHORT signal when thinking is also on.
-4. `max_output_tokens < 500` -> **SHORT** (explicit client cap).
-5. Otherwise -> **UNKNOWN**.
+3. `tool_choice` is `required` or a named function -> **SHORT**.
+4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice != none` -> **SHORT**.
+5. `continue_final_message=true` -> **SHORT**.
+6. `max_output_tokens < 500` -> **SHORT** (explicit client cap).
+7. Otherwise -> **UNKNOWN**.
+8. *(bin ceiling, applied last)* `max_output_tokens < 2000` downgrades a tentative **LONG** to **UNKNOWN** (a cap below the LONG floor makes a long generation physically impossible).
 
-The `enable_thinking`, `thinking_budget`, and tools signals are all read from the
-chat-completions body (`chat_template_kwargs` and `tools`). Other body shapes
-(Claude `/v1/messages`, OpenAI `/v1/responses`) are not inspected for these: their
-thinking signals are not surfaced, so a tool-call there could not be told apart
-from a reasoning request and is left UNKNOWN. `max_output_tokens` is the
-normalized client cap and applies regardless of shape.
+The `enable_thinking` and `thinking_budget` signals are read from the
+chat-completions body (`chat_template_kwargs`). Tools are read from `tools` on
+the typed body for chat-completions and `/v1/responses`. The Responses API reads
+thinking activation from `reasoning.effort` on the raw request payload.
+Claude `/v1/messages` is not inspected for these: its thinking signals are not
+surfaced, so a tool-call there could not be told apart from a reasoning request
+and is left UNKNOWN. `max_output_tokens` is the normalized client cap and
+applies regardless of shape.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
 explicit UNKNOWN read the same. The plugin is stateless and safe under
@@ -52,8 +55,14 @@ concurrent use.
 
 - `request.Body.ChatCompletions.ChatTemplateKWArgs` -- `enable_thinking`,
   `thinking_budget` (populated by vLLM from the client's `extra_body`).
+  Vendor aliases: `reasoning_budget` (Nemotron), `thinking.type` (DeepSeek V4).
   Chat-completions only.
 - `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
+- `request.Body.Responses.Tools` -- presence implies `has_tools`.
+- `request.Body.ChatCompletions.ContinueFinalMessage` -- `continue_final_message`.
+- `request.Body.Payload["tool_choice"]` -- string or named-function object.
+- `request.Body.Payload["reasoning"]["effort"]` -- `reasoning.effort` on `/v1/responses`
+  (`"none"` disables thinking; any other non-empty value enables it).
 - `request.Body.MaxOutputTokens` -- normalized client output cap.
 
 Input length is intentionally *not* consumed -- it has no correlation with
@@ -71,7 +80,7 @@ output length and only adds noise.
 runner discovers it as a `RequestHeaderProcessor` and wires it in. No parameters.
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: outlen-bucket
@@ -118,4 +127,5 @@ case; see `warnMissingOutlenBucket`.)
   but a long request is never labeled SHORT.
 - **Signals must be present on the wire.** `enable_thinking` / `thinking_budget`
   only appear when the client sends them (via `extra_body`) and the server model
-  supports them (e.g. GLM 5.2, Kimi K3).
+  supports them (e.g. GLM 5.2, Kimi K3, Nemotron via `reasoning_budget`, DeepSeek
+  via `thinking.type`).

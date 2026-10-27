@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,6 +48,15 @@ type EndpointEntry struct {
 	Address   string            `json:"address"             yaml:"address"`
 	Port      string            `json:"port"                yaml:"port"`
 	Labels    map[string]string `json:"labels,omitempty"    yaml:"labels,omitempty"`
+	// Attributes declares string attributes to stamp onto the endpoint's
+	// attribute map at construction (keyed with
+	// fwkdl.DiscoveryAttributesProducer) — e.g. routing hints a downstream
+	// plugin reads, without going through label-to-attribute mapping.
+	Attributes map[string]string `json:"attributes,omitempty" yaml:"attributes,omitempty"`
+	// RankIndex is the endpoint's pod-local rank, used to offset well-known
+	// ports (for example the KV-events socket) when multiple engines are
+	// co-located on the same address. Defaults to 0.
+	RankIndex int `json:"rankIndex,omitempty" yaml:"rankIndex,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -256,7 +265,11 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 
 	incoming := make(map[types.NamespacedName]struct{}, len(ef.Endpoints))
 	var errs []error
-	for _, e := range ef.Endpoints {
+	for i, e := range ef.Endpoints {
+		if e.Name == "" {
+			errs = append(errs, fmt.Errorf("endpoints[%d]: name is required", i))
+			continue
+		}
 		if err := f.validateAddress(e.Address); err != nil {
 			errs = append(errs, fmt.Errorf("endpoint %q: %w", e.Name, err))
 			continue
@@ -265,17 +278,28 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid port %q", e.Name, e.Port))
 			continue
 		}
+		if e.RankIndex < 0 {
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid rankIndex %d", e.Name, e.RankIndex))
+			continue
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
 		}
+		id := types.NamespacedName{Name: e.Name, Namespace: ns}
+		if _, exists := incoming[id]; exists {
+			errs = append(errs, fmt.Errorf("endpoint %q: duplicate name in namespace %q", e.Name, ns))
+			continue
+		}
 		meta := &fwkdl.EndpointMetadata{
-			ID:          types.NamespacedName{Name: e.Name, Namespace: ns},
+			ID:          id,
 			Name:        e.Name,
 			Address:     e.Address,
 			Port:        e.Port,
 			MetricsHost: net.JoinHostPort(e.Address, e.Port),
 			Labels:      e.Labels,
+			Attributes:  e.Attributes,
+			RankIndex:   e.RankIndex,
 		}
 		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)

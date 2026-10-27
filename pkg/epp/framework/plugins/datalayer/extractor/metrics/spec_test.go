@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +18,7 @@ limitations under the License.
 package metrics
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,6 +96,26 @@ func TestStringToMetricSpec(t *testing.T) {
 				Labels: map[string]string{
 					"label1": "value1",
 				},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "label with negative matcher",
+			input: "my_metric{label1!=\"value1\"}",
+			want: &Spec{
+				Name:      "my_metric",
+				Labels:    map[string]string{},
+				NotLabels: map[string]string{"label1": "value1"},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "label with unquoted negative matcher",
+			input: "my_metric{label1!=value1}",
+			want: &Spec{
+				Name:      "my_metric",
+				Labels:    map[string]string{},
+				NotLabels: map[string]string{"label1": "value1"},
 			},
 			wantErr: false,
 		},
@@ -221,6 +243,15 @@ func TestGetMetric(t *testing.T) {
 			makeMetric(map[string]string{}, 5.0, 3000),
 			makeMetric(map[string]string{}, 6.0, 1000),
 		),
+		"metric_nan": makeMetricFamily("metric_nan",
+			makeMetric(map[string]string{}, math.NaN(), 1000),
+		),
+		"metric_pos_inf": makeMetricFamily("metric_pos_inf",
+			makeMetric(map[string]string{}, math.Inf(1), 1000),
+		),
+		"metric_neg_inf": makeMetricFamily("metric_neg_inf",
+			makeMetric(map[string]string{}, math.Inf(-1), 1000),
+		),
 	}
 
 	tests := []struct {
@@ -309,6 +340,24 @@ func TestGetMetric(t *testing.T) {
 			expected:  5.0,
 			wantError: false,
 		},
+		{
+			name:      "get NaN metric, rejected",
+			spec:      Spec{Name: "metric_nan"},
+			expected:  -1,
+			wantError: true,
+		},
+		{
+			name:      "get +Inf metric, rejected",
+			spec:      Spec{Name: "metric_pos_inf"},
+			expected:  -1,
+			wantError: true,
+		},
+		{
+			name:      "get -Inf metric, rejected",
+			spec:      Spec{Name: "metric_neg_inf"},
+			expected:  -1,
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -343,7 +392,7 @@ func TestGetLoRAMetric(t *testing.T) {
 			// vLLM only emits vllm:lora_requests_info once at least one LoRA
 			// adapter has been loaded. A vanilla deployment with no LoRA must
 			// be treated as "no adapters" rather than a scrape error so the
-			// EPP doesn't spam DataLayerExtractErrorsTotal on every poll
+			// EPP doesn't spam LlmdDataLayerExtractErrorsTotal on every poll
 			// (#926).
 			name: "missing family treated as no adapters",
 			metricFamilies: sourcemetrics.PrometheusMetricMap{
@@ -463,6 +512,30 @@ func TestLabelsMatch(t *testing.T) {
 			spec:         &Spec{Labels: map[string]string{"a": "c"}},
 			want:         false,
 		},
+		{
+			name:         "negative matcher with another value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"a": "c"}},
+			want:         true,
+		},
+		{
+			name:         "negative matcher with excluded value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"a": "b"}},
+			want:         false,
+		},
+		{
+			name:         "negative matcher with missing label",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"c": "d"}},
+			want:         true,
+		},
+		{
+			name:         "negative matcher with missing label and empty excluded value",
+			metricLabels: []*dto.LabelPair{{Name: proto.String("a"), Value: proto.String("b")}},
+			spec:         &Spec{NotLabels: map[string]string{"c": ""}},
+			want:         false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -471,6 +544,27 @@ func TestLabelsMatch(t *testing.T) {
 			assert.Equal(t, tt.want, got, "labelsMatch() mismatch")
 		})
 	}
+}
+
+func TestNoMatchingMetricErrorIncludesLabelMatchers(t *testing.T) {
+	spec := &Spec{
+		Name: "metric",
+		NotLabels: map[string]string{
+			"tier": "0:primary",
+		},
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"metric": makeMetricFamily(
+			"metric",
+			makeMetric(map[string]string{"tier": "0:primary"}, 1, 0),
+		),
+	}
+
+	_, err := spec.getLatestMetric(families)
+	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
+
+	_, err = spec.aggregateMetric(families, aggregateSum)
+	require.ErrorContains(t, err, "excluded label values map[tier:0:primary]")
 }
 
 func TestExtractValue(t *testing.T) {
@@ -536,5 +630,89 @@ func BenchmarkLabelsMatch(b *testing.B) {
 		if !spec.labelsMatch(metric.GetLabel()) {
 			b.Fatal("expected match")
 		}
+	}
+}
+
+// TestAggregateMetric determines how a family exposing one series per engine is folded into one value.
+func TestAggregateMetric(t *testing.T) {
+	engines := makeMetricFamily("vllm:num_requests_waiting",
+		makeMetric(map[string]string{"engine": "0"}, 6, 0),
+		makeMetric(map[string]string{"engine": "1"}, 10, 0),
+		makeMetric(map[string]string{"engine": "2"}, 11, 0),
+		makeMetric(map[string]string{"engine": "3"}, 7, 0),
+	)
+	requestTypes := makeMetricFamily("nv_trt_llm_request_metrics",
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "0"}, 3, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "0"}, 50, 0),
+		makeMetric(map[string]string{"request_type": "waiting", "gpu": "1"}, 4, 0),
+		makeMetric(map[string]string{"request_type": "active", "gpu": "1"}, 60, 0),
+		makeMetric(map[string]string{"gpu": "2"}, 9, 0),
+	)
+	nonFinite := func(v float64) *dto.MetricFamily {
+		return makeMetricFamily("non_finite",
+			makeMetric(map[string]string{"engine": "0"}, 3, 0),
+			makeMetric(map[string]string{"engine": "1"}, v, 0),
+		)
+	}
+	families := sourcemetrics.PrometheusMetricMap{
+		"vllm:num_requests_waiting":  engines,
+		"nv_trt_llm_request_metrics": requestTypes,
+		"single":                     makeMetricFamily("single", makeMetric(nil, 5, 0)),
+		"nan":                        nonFinite(math.NaN()),
+		"pos_inf":                    nonFinite(math.Inf(1)),
+		"neg_inf":                    nonFinite(math.Inf(-1)),
+	}
+
+	tests := []struct {
+		name    string
+		spec    *Spec
+		agg     aggregation
+		want    float64
+		wantErr bool
+	}{
+		{name: "sum over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateSum, want: 34},
+		{name: "max over every engine", spec: &Spec{Name: "vllm:num_requests_waiting"}, agg: aggregateMax, want: 11},
+		{
+			name: "sum only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateSum, want: 7,
+		},
+		{
+			name: "sum series excluding one label value",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", NotLabels: map[string]string{"request_type": "active"}},
+			agg:  aggregateSum, want: 16,
+		},
+		{
+			name: "max only label-matching series",
+			spec: &Spec{Name: "nv_trt_llm_request_metrics", Labels: map[string]string{"request_type": "waiting"}},
+			agg:  aggregateMax, want: 4,
+		},
+		{name: "single series sum", spec: &Spec{Name: "single"}, agg: aggregateSum, want: 5},
+		{name: "single series max", spec: &Spec{Name: "single"}, agg: aggregateMax, want: 5},
+		{
+			name: "no matching series",
+			spec: &Spec{Name: "vllm:num_requests_waiting", Labels: map[string]string{"engine": "9"}},
+			agg:  aggregateSum, wantErr: true,
+		},
+		{name: "family not found", spec: &Spec{Name: "absent"}, agg: aggregateSum, wantErr: true},
+		{name: "nil spec", spec: nil, agg: aggregateSum, wantErr: true},
+		{name: "NaN series sum", spec: &Spec{Name: "nan"}, agg: aggregateSum, wantErr: true},
+		{name: "NaN series max", spec: &Spec{Name: "nan"}, agg: aggregateMax, wantErr: true},
+		{name: "+Inf series sum", spec: &Spec{Name: "pos_inf"}, agg: aggregateSum, wantErr: true},
+		{name: "+Inf series max", spec: &Spec{Name: "pos_inf"}, agg: aggregateMax, wantErr: true},
+		{name: "-Inf series sum", spec: &Spec{Name: "neg_inf"}, agg: aggregateSum, wantErr: true},
+		{name: "-Inf series max", spec: &Spec{Name: "neg_inf"}, agg: aggregateMax, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.spec.aggregateMetric(families, tt.agg)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.InDelta(t, tt.want, got, 1e-9)
+		})
 	}
 }

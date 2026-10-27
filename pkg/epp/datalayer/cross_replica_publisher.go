@@ -19,35 +19,46 @@ package datalayer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
-	crossReplicaPublisherType = "cross-replica-publisher"
 	// defaultCrossReplicaSyncInterval is the fallback cadence at which local
 	// per-endpoint state is pushed to the syncer when none is configured.
-	defaultCrossReplicaSyncInterval = 200 * time.Millisecond
+	defaultCrossReplicaSyncInterval   = 200 * time.Millisecond
+	defaultCrossReplicaPublishTimeout = time.Second
+	publishFailureLogInterval         = 30 * time.Second
 )
 
-// crossReplicaPublisher is a PollingDispatcher that publishes each endpoint's
-// local state to the syncer. The datalayer drives it per endpoint at interval,
-// like any other polling source.
+// crossReplicaPublisher owns cross-replica publishing and endpoint lifecycle
+// coordination. One shared ticker publishes every registered endpoint.
 type crossReplicaPublisher struct {
-	syncer       fwkdl.CrossReplicaSyncer
-	contributors []fwkdl.CrossReplicaContributor
-	interval     time.Duration
+	syncer         fwkdl.CrossReplicaSyncer
+	contributors   []fwkdl.CrossReplicaContributor
+	interval       time.Duration
+	publishTimeout time.Duration
+
+	// mu guards endpoints and orders syncer writes with endpoint removal.
+	mu        sync.RWMutex
+	endpoints sets.Set[types.NamespacedName]
+
+	publishFailureLog rate.Sometimes
 }
 
 // newCrossReplicaPublisher collects the opted-in CrossReplicaContributors, or
-// returns nil if there is no syncer or none opt in. A non-positive interval
-// falls back to defaultCrossReplicaSyncInterval.
-func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap, interval time.Duration) *crossReplicaPublisher {
+// returns nil if there is no syncer or none opt in. Non-positive durations
+// fall back to their defaults.
+func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extractorMap, interval, publishTimeout time.Duration) *crossReplicaPublisher {
 	if syncer == nil {
 		return nil
 	}
@@ -66,33 +77,236 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	if interval <= 0 {
 		interval = defaultCrossReplicaSyncInterval
 	}
-	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, interval: interval}
+	if publishTimeout <= 0 {
+		publishTimeout = defaultCrossReplicaPublishTimeout
+	}
+	return &crossReplicaPublisher{
+		syncer:            syncer,
+		contributors:      contributors,
+		interval:          interval,
+		publishTimeout:    publishTimeout,
+		publishFailureLog: rate.Sometimes{Interval: publishFailureLogInterval},
+	}
 }
 
-func (p *crossReplicaPublisher) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Type: crossReplicaPublisherType, Name: crossReplicaPublisherType}
+func (p *crossReplicaPublisher) start(ctx context.Context) {
+	go p.run(ctx)
 }
 
-// Interval is the cadence at which the datalayer calls Dispatch.
-func (p *crossReplicaPublisher) Interval() time.Duration {
-	return p.interval
+func (p *crossReplicaPublisher) registerEndpoint(key types.NamespacedName) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.endpoints == nil {
+		p.endpoints = sets.New[types.NamespacedName]()
+	}
+	if p.endpoints.Has(key) {
+		return false
+	}
+	p.endpoints.Insert(key)
+	return true
 }
 
-// Dispatch publishes each contributor's local value for ep. Set failures are
-// logged, not returned, so the Collector doesn't count them as poll errors.
-func (p *crossReplicaPublisher) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
-	endpointID := ep.GetMetadata().GetNamespacedName().String()
-	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
-	for _, c := range p.contributors {
-		spec := c.CrossReplicaState()
-		if err := p.syncer.Set(ctx, spec.StateKey, endpointID, spec.Supply(endpointID)()); err != nil {
-			logger.V(logging.DEBUG).Info("cross-replica publish failed", "key", spec.StateKey, "err", err)
+func (p *crossReplicaPublisher) run(ctx context.Context) {
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.publishAll(ctx)
 		}
 	}
-	return nil
 }
 
-// AppendExtractor is unused: the publisher pushes state, it has no extractors.
-func (p *crossReplicaPublisher) AppendExtractor(fwkplugin.Plugin) error {
-	return errors.New("cross-replica publisher does not accept extractors")
+func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
+	snapshot := p.endpointSnapshot()
+	if syncer, ok := p.syncer.(fwkdl.CrossReplicaBatchSyncer); ok {
+		p.publishBatch(ctx, syncer, snapshot)
+		return
+	}
+	for _, endpointID := range snapshot {
+		dispatchCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
+		p.publish(dispatchCtx, endpointID)
+		cancel()
+	}
+}
+
+func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, snapshot []types.NamespacedName) {
+	specs := make([]fwkdl.CrossReplicaSpec, 0, len(p.contributors))
+	for _, c := range p.contributors {
+		specs = append(specs, c.CrossReplicaState())
+	}
+	p.mu.RLock()
+	endpointIDs := make([]string, 0, len(snapshot))
+	for _, key := range snapshot {
+		if p.endpoints.Has(key) {
+			endpointIDs = append(endpointIDs, key.String())
+		}
+	}
+	p.mu.RUnlock()
+	if len(endpointIDs) == 0 {
+		return
+	}
+	logger := log.FromContext(ctx)
+	var wg sync.WaitGroup
+	for _, spec := range specs {
+		wg.Go(func() {
+			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
+			if len(failures) == 0 {
+				return
+			}
+			p.publishFailureLog.Do(func() {
+				for endpointID, err := range failures {
+					logger.Error(err, "cross-replica batch publish failed", "key", spec.StateKey, "endpoint", endpointID, "failedEndpoints", len(failures))
+					break
+				}
+			})
+		})
+	}
+	wg.Wait()
+	p.reconcileRemoved(ctx, syncer, specs, snapshot)
+}
+
+// reconcileRemoved deletes shared state left by endpoints removed while the
+// batch ran: their delete may have completed before a chunk's write landed,
+// resurrecting the field. A missed cleanup still expires within stateTTL.
+// Endpoints re-registered during the cleanup lost that field again, so they
+// are published once more; a republish that lands after a later delete is the
+// same resurrected-field case and is bounded the same way.
+func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, specs []fwkdl.CrossReplicaSpec, snapshot []types.NamespacedName) {
+	if ctx.Err() != nil {
+		return
+	}
+	logger := log.FromContext(ctx)
+	p.mu.RLock()
+	var removed []types.NamespacedName
+	for _, key := range snapshot {
+		if !p.endpoints.Has(key) {
+			removed = append(removed, key)
+		}
+	}
+	p.mu.RUnlock()
+	if len(removed) == 0 {
+		return
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
+	for _, key := range removed {
+		endpointID := key.String()
+		for _, spec := range specs {
+			if err := p.syncer.Delete(deleteCtx, spec.StateKey, endpointID); err != nil {
+				p.publishFailureLog.Do(func() {
+					logger.Error(err, "cross-replica batch delete failed", "key", spec.StateKey, "endpoint", endpointID)
+				})
+			}
+		}
+	}
+	cancel()
+	var revived []string
+	p.mu.RLock()
+	for _, key := range removed {
+		if p.endpoints.Has(key) {
+			revived = append(revived, key.String())
+		}
+	}
+	p.mu.RUnlock()
+	if len(revived) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, spec := range specs {
+		wg.Go(func() {
+			for endpointID, err := range syncer.SetBatch(ctx, spec, revived, p.publishTimeout) {
+				p.publishFailureLog.Do(func() {
+					logger.Error(err, "cross-replica batch republish failed", "key", spec.StateKey, "endpoint", endpointID)
+				})
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func (p *crossReplicaPublisher) endpointSnapshot() []types.NamespacedName {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.endpoints.UnsortedList()
+}
+
+func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event fwkdl.EndpointEvent, plugin fwkplugin.Plugin) {
+	contributor, ok := plugin.(fwkdl.CrossReplicaContributor)
+	if !ok {
+		return
+	}
+	spec := contributor.CrossReplicaState()
+	if spec.SyncDisabled {
+		return
+	}
+	if event.Type != fwkdl.EventAddOrUpdate {
+		return
+	}
+	endpointID := event.Endpoint.GetMetadata().GetNamespacedName().String()
+	event.Endpoint.GetAttributes().Put(spec.AttributeKey, &fwkdl.DynamicAttribute{
+		Get: func() fwkdl.Cloneable {
+			value, ok, err := p.get(ctx, spec, endpointID)
+			if err != nil || !ok {
+				return spec.Read(endpointID)
+			}
+			if cloneable, ok := value.(fwkdl.Cloneable); ok {
+				return cloneable
+			}
+			return spec.Read(endpointID)
+		},
+	})
+}
+
+func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	// The endpoint may have been deleted after publishAll took its snapshot.
+	if !p.endpoints.Has(key) {
+		return nil
+	}
+	return p.syncer.Set(ctx, spec, key.String())
+}
+
+func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	return p.syncer.Get(ctx, spec, endpointID)
+}
+
+func (p *crossReplicaPublisher) delete(ctx context.Context, key types.NamespacedName) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.endpoints.Has(key) {
+		return false, nil
+	}
+	p.endpoints.Delete(key)
+
+	ctx, cancel := context.WithTimeout(ctx, p.publishTimeout)
+	defer cancel()
+	endpointID := key.String()
+	var errs []error
+	for _, c := range p.contributors {
+		spec := c.CrossReplicaState()
+		if err := p.syncer.Delete(ctx, spec.StateKey, endpointID); err != nil {
+			errs = append(errs, fmt.Errorf("delete shared state for key %s: %w", spec.StateKey, err))
+		}
+	}
+	return true, errors.Join(errs...)
+}
+
+func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName) {
+	endpointID := key.String()
+	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
+	var wg sync.WaitGroup
+	for _, c := range p.contributors {
+		spec := c.CrossReplicaState()
+		wg.Go(func() {
+			if err := p.set(ctx, spec, key); err != nil {
+				p.publishFailureLog.Do(func() {
+					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
+				})
+			}
+		})
+	}
+	wg.Wait()
 }

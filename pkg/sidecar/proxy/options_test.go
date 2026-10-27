@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +31,8 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 func writeTempYAML(t *testing.T, name, content string) string {
@@ -55,7 +58,7 @@ enable-tls:
 - decoder
 tls-insecure-skip-verify:
 - prefiller
-secure-proxy: false
+secure-serving: false
 cert-path: "/etc/certificates-file"
 inference-pool: "file-ns/inference-pool-file"
 pool-group: "pool-group-file"
@@ -65,7 +68,7 @@ prefill-retry-backoff: "500ms"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
-`, KVConnectorNIXLV2, ECExampleConnector))
+`, constants.KVConnectorNIXLV2, constants.ECExampleConnector))
 }
 
 func createConfigWithUnknownKeys(t *testing.T) string {
@@ -98,7 +101,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-p2p-pull: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
-		secure-proxy: false,
+		secure-serving: false,
 		cert-path: '/etc/certificates-inline',
 		inference-pool: inline-ns/inference-pool-inline,
 		pool-group: pool-group-inline,
@@ -108,7 +111,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
-	}`, KVConnectorNIXLV2, ECExampleConnector)
+	}`, constants.KVConnectorNIXLV2, constants.ECExampleConnector)
 	invalidInlineYAML := "{port: 8200, invalid-yaml}"
 
 	// -- file YAML for testing ---
@@ -135,8 +138,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -183,8 +186,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 300
 				o.MooncakeBootstrapPort = 9000
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -225,8 +228,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                    "8111",
 				modelServerPort:         "8222",
 				dataParallelSize:        2,
-				kvConnector:             KVConnectorNIXLV2,
-				ecConnector:             ECExampleConnector,
+				kvConnector:             constants.KVConnectorNIXLV2,
+				ecConnector:             constants.ECExampleConnector,
 				enableSSRFProtection:    true,
 				enablePrefillerSampling: true,
 				enableTLS:               &[]string{prefillStage},
@@ -245,8 +248,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 200
 				o.MooncakeBootstrapPort = 9001
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -284,12 +287,12 @@ func TestSidecarConfiguration(t *testing.T) {
 		{
 			name: "flags set ECConnectorNIXL",
 			inputFlags: map[string]any{
-				ecConnector: ECConnectorNIXL,
+				ecConnector: constants.ECConnectorNIXL,
 			},
 			expected: func(o *Options) {
-				o.modelServerPort = defaultVLLMPort
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECConnectorNIXL
+				o.modelServerPort = defaultModelServerPort
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECConnectorNIXL
 			},
 			expectedError: nil,
 		},
@@ -299,8 +302,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				port:                      "8111",
 				modelServerPort:           "8222",
 				dataParallelSize:          2,
-				kvConnector:               KVConnectorNIXLV2,
-				ecConnector:               ECExampleConnector,
+				kvConnector:               constants.KVConnectorNIXLV2,
+				ecConnector:               constants.ECExampleConnector,
 				enableSSRFProtection:      true,
 				enablePrefillerSampling:   true,
 				enableTLS:                 &[]string{prefillStage},
@@ -320,8 +323,8 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.MaxIdleConnsPerHost = 400
 				o.MooncakeBootstrapPort = 9002
 
-				o.KVConnector = KVConnectorNIXLV2
-				o.ECConnector = ECExampleConnector
+				o.KVConnector = constants.KVConnectorNIXLV2
+				o.ECConnector = constants.ECExampleConnector
 
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
@@ -422,6 +425,44 @@ func TestSidecarConfiguration(t *testing.T) {
 			compareOptions(t, expected, opts)
 		})
 	}
+}
+
+func TestSecureServingFlag(t *testing.T) {
+	_, fs := newTestOptions(t)
+
+	require.NotNil(t, fs.Lookup(secureServing))
+	require.NotNil(t, fs.Lookup(secureProxy))
+	require.Equal(t, "use --secure-serving instead", fs.Lookup(secureProxy).Deprecated)
+}
+
+func TestDeprecatedSecureProxyFlag(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestDeprecatedSecureProxyYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-proxy: false}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
+}
+
+func TestSecureServingFlagBeatsYAML(t *testing.T) {
+	opts, fs := newTestOptions(t)
+	yaml := "{secure-serving: true}"
+	setFlag(t, fs, inlineConfiguration, &yaml)
+	setFlag(t, fs, secureProxy, false)
+	require.NoError(t, fs.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.False(t, opts.SecureServing)
 }
 
 func newTestOptions(t *testing.T) (*Options, *pflag.FlagSet) {
@@ -602,6 +643,27 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestToolCallingTelemetryOption(t *testing.T) {
+	opts := NewOptions()
+	require.False(t, opts.EnableToolCallingTelemetry)
+	enabled := true
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.True(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry=false"}))
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.False(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs = pflag.NewFlagSet(t.Name()+"-enabled", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry"}))
+	require.True(t, opts.EnableToolCallingTelemetry)
+}
+
 func TestP2PConnectorPort(t *testing.T) {
 	t.Run("defaults to 7777", func(t *testing.T) {
 		opts := NewOptions()
@@ -629,7 +691,7 @@ func TestP2PConnectorPort(t *testing.T) {
 func TestValidateOffloadingDP(t *testing.T) {
 	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 2
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -637,7 +699,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("allows offloading with data-parallel-size 1", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 1
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -645,7 +707,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 4
 		opts.P2PConnectorPort = 65533
 		require.NoError(t, opts.Complete())
@@ -654,7 +716,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 
 	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 4
 		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
@@ -665,7 +727,7 @@ func TestValidateOffloadingDP(t *testing.T) {
 func TestValidateEnableP2PPull(t *testing.T) {
 	t.Run("rejects enable-p2p-pull with non-NIXLv2 connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorSharedStorage
+		opts.KVConnector = constants.KVConnectorSharedStorage
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
@@ -673,7 +735,7 @@ func TestValidateEnableP2PPull(t *testing.T) {
 
 	t.Run("rejects enable-p2p-pull with offloading connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorOffloading
+		opts.KVConnector = constants.KVConnectorOffloading
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.ErrorContains(t, opts.Validate(), "--enable-p2p-pull requires --kv-connector=nixlv2")
@@ -681,7 +743,7 @@ func TestValidateEnableP2PPull(t *testing.T) {
 
 	t.Run("allows enable-p2p-pull with NIXLv2 connector", func(t *testing.T) {
 		opts := NewOptions()
-		opts.KVConnector = KVConnectorNIXLV2
+		opts.KVConnector = constants.KVConnectorNIXLV2
 		opts.EnableP2PPull = true
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
@@ -694,11 +756,11 @@ func TestValidateConnector(t *testing.T) {
 		connector string
 		wantErr   bool
 	}{
-		{"valid nixlv2", KVConnectorNIXLV2, false},
-		{"valid shared-storage", KVConnectorSharedStorage, false},
-		{"valid sglang", KVConnectorSGLang, false},
-		{"valid mooncake", KVConnectorMooncake, false},
-		{"valid offloading", KVConnectorOffloading, false},
+		{"valid nixlv2", constants.KVConnectorNIXLV2, false},
+		{"valid shared-storage", constants.KVConnectorSharedStorage, false},
+		{"valid sglang", constants.KVConnectorSGLang, false},
+		{"valid mooncake", constants.KVConnectorMooncake, false},
+		{"valid offloading", constants.KVConnectorOffloading, false},
 		{"invalid connector", "invalid", true},
 	}
 
@@ -1018,7 +1080,7 @@ func TestValidateWideEPHosts(t *testing.T) {
 }
 
 // TestCompleteWideEPValidation drives the Wide-EP validation through
-// Options.Complete() to confirm BOTH host-list legs are checked and a valid
+// Options.Complete() to confirm BOTH host lists are checked and a valid
 // 2P2D config passes end-to-end.
 func TestCompleteWideEPValidation(t *testing.T) {
 	// Skip when MoRI-IO feature is dormant since all test cases set MoRI-IO
@@ -1035,7 +1097,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 		wantErr     string
 	}{
 		{
-			name:        "valid 2P2D DP16 both legs",
+			name:        "valid 2P2D DP16 both lists",
 			remoteHosts: []string{testLocalHostname, testLocalHostname},
 			decodeHosts: []string{testLocalHostname, testLocalHostname},
 			dpSize:      16,
@@ -1051,7 +1113,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "",
 		},
 		{
-			name:        "remote-hosts leg invalid",
+			name:        "remote-hosts list invalid",
 			remoteHosts: []string{testPrefillHostIP1, testPrefillHostIP2},
 			decodeHosts: nil,
 			dpSize:      16,
@@ -1059,7 +1121,7 @@ func TestCompleteWideEPValidation(t *testing.T) {
 			wantErr:     "--moriio-remote-hosts",
 		},
 		{
-			name:        "decode-hosts leg invalid",
+			name:        "decode-hosts list invalid",
 			remoteHosts: nil,
 			decodeHosts: []string{testDecodeHostIP, testDecodeHostIP2, testDecodeHostIP3},
 			dpSize:      16,
@@ -1149,59 +1211,87 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 	})
 }
 
-// TestModelServerPortMigration verifies that the deprecated vllm-port flag
-// migrates to model-server-port.
-// Remove when vllm-port is dropped in v0.12 (see issue 2172).
-func TestModelServerPortMigration(t *testing.T) {
+func TestModelServerPort(t *testing.T) {
 	tests := []struct {
-		name               string
-		modelServerPort    string
-		vllmPort           string
-		expectedDecoderURL string
+		name  string
+		flags []string
+		want  string
 	}{
-		{"model-server-port set", "9000", "", "http://localhost:9000"},
-		{"deprecated vllm-port migrated", "", "9001", "http://localhost:9001"},
-		{"model-server-port wins over vllm-port when both set", "9000", "9001", "http://localhost:9000"},
-		{"no model-server-port, default falls back to vllm-port default", "", defaultVLLMPort, "http://localhost:" + defaultVLLMPort},
+		{"default", nil, "http://localhost:8200"},
+		{"CLI", []string{"--model-server-port=9000"}, "http://localhost:9000"},
+		{"inline YAML", []string{"--configuration={model-server-port: 8203}"}, "http://localhost:8203"},
+		{"file YAML", []string{"--configuration-file=" + writeTempYAML(t, "port.yaml", "model-server-port: 8203")}, "http://localhost:8203"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := NewOptions()
-			opts.modelServerPort = tt.modelServerPort
-			opts.vllmPort = tt.vllmPort
-
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse(tt.flags))
 			require.NoError(t, opts.Complete())
 			require.NoError(t, opts.Validate())
-			require.NotNil(t, opts.DecoderURL)
-			require.Equal(t, tt.expectedDecoderURL, opts.DecoderURL.String())
+			require.Equal(t, tt.want, opts.DecoderURL.String())
 		})
 	}
 }
 
-func TestModelServerPortYAML(t *testing.T) {
-	opts, testPFlagSet := newTestOptions(t)
-	yaml := "{model-server-port: 8203}"
-	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
-	require.NoError(t, testPFlagSet.Parse(nil))
-
-	require.NoError(t, opts.Complete())
-	require.NoError(t, opts.Validate())
-	require.Equal(t, "http://localhost:8203", opts.DecoderURL.String())
+func TestModelServerPortFlagBeatsYAML(t *testing.T) {
+	for _, value := range []string{"9000", "8200"} {
+		t.Run(value, func(t *testing.T) {
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse([]string{
+				"--model-server-port=" + value,
+				"--configuration={model-server-port: 8203}",
+			}))
+			require.NoError(t, opts.Complete())
+			require.NoError(t, opts.Validate())
+			require.Equal(t, "http://localhost:"+value, opts.DecoderURL.String())
+		})
+	}
 }
 
-// A CLI flag overrides YAML config, including the deprecated --vllm-port over a
-// model-server-port key.
-func TestModelServerPortFlagBeatsYAML(t *testing.T) {
+func TestModelServerPortRejectsLegacyFlag(t *testing.T) {
+	_, fs := newTestOptions(t)
+	require.ErrorContains(t, fs.Parse([]string{"--vllm-port=9001"}), "unknown flag: --vllm-port")
+}
+
+func TestModelServerPortRejectsLegacyYAML(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags []string
+	}{
+		{"inline", []string{"--configuration={vllm-port: 9001}"}},
+		{"file", []string{"--configuration-file=" + writeTempYAML(t, "legacy.yaml", "vllm-port: 9001")}},
+		{"mixed keys", []string{"--configuration={model-server-port: 8203, vllm-port: 9001}"}},
+		{"zero value", []string{"--configuration={vllm-port: 0}"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse(tt.flags))
+			require.ErrorContains(t, opts.Complete(), "vllm-port")
+		})
+	}
+}
+
+func TestMetricsCertDirYAML(t *testing.T) {
 	opts, testPFlagSet := newTestOptions(t)
-	yaml := "{model-server-port: 8203}"
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
 	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
-	setFlag(t, testPFlagSet, vllmPort, "9001")
 	require.NoError(t, testPFlagSet.Parse(nil))
 
 	require.NoError(t, opts.Complete())
-	require.NoError(t, opts.Validate())
-	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
+	require.Equal(t, "/etc/metrics-certs", opts.MetricsCertDir)
+}
+
+// A CLI flag overrides the metrics-cert-dir YAML key.
+func TestMetricsCertDirFlagBeatsYAML(t *testing.T) {
+	opts, testPFlagSet := newTestOptions(t)
+	yaml := "{metrics-cert-dir: /etc/metrics-certs}"
+	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
+	setFlag(t, testPFlagSet, metricsCertDir, "/etc/cli-flag-certs")
+	require.NoError(t, testPFlagSet.Parse(nil))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, "/etc/cli-flag-certs", opts.MetricsCertDir)
 }
 
 func TestCompleteTLSConfiguration(t *testing.T) {
@@ -1304,6 +1394,77 @@ func TestCompleteTLSConfiguration(t *testing.T) {
 
 		})
 	}
+}
+
+func TestCompleteTLSServingProfile(t *testing.T) {
+	tests := []struct {
+		name                 string
+		flags                []string
+		expectedMinVersion   uint16
+		expectedCipherSuites []uint16
+		expectedError        string
+	}{
+		{
+			name: "valid profile",
+			flags: []string{
+				"--tls-min-version=VersionTLS13",
+				"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			},
+			expectedMinVersion: tls.VersionTLS13,
+			expectedCipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:          "invalid minimum version",
+			flags:         []string{"--tls-min-version=VersionTLS14"},
+			expectedError: `invalid tls-min-version "VersionTLS14"`,
+		},
+		{
+			name:          "TLS 1.0 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS10"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
+			name:          "TLS 1.1 below the floor",
+			flags:         []string{"--tls-min-version=VersionTLS11"},
+			expectedError: `below the TLS 1.2 minimum`,
+		},
+		{
+			name:          "invalid cipher suite",
+			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
+			expectedError: `invalid tls-cipher-suites: unknown cipher suite "FAKE_CIPHER_SUITE"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, flagSet := newTestOptions(t)
+			require.NoError(t, flagSet.Parse(tt.flags))
+
+			err := opts.Complete()
+			if tt.expectedError != "" {
+				require.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expectedMinVersion, opts.TLSMinVersion)
+			require.Equal(t, tt.expectedCipherSuites, opts.TLSCipherSuites)
+		})
+	}
+}
+
+func TestCompleteTLSServingProfileFromYAML(t *testing.T) {
+	opts, flagSet := newTestOptions(t)
+	require.NoError(t, flagSet.Parse([]string{
+		`--configuration={tls-min-version: VersionTLS12, tls-cipher-suites: [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]}`,
+	}))
+
+	require.NoError(t, opts.Complete())
+	require.Equal(t, uint16(tls.VersionTLS12), opts.TLSMinVersion)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, opts.TLSCipherSuites)
 }
 
 // TestResolveHostsToIPs tests the DNS resolution helper function that

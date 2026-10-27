@@ -13,7 +13,7 @@ inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10"
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="4096"} 2
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="8192"} 2
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="16384"} 2
-inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="32778"} 2
+inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="32768"} 2
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="65536"} 2
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="131072"} 2
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t10",le="262144"} 2
@@ -35,7 +35,7 @@ inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11"
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="4096"} 1
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="8192"} 1
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="16384"} 1
-inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="32778"} 1
+inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="32768"} 1
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="65536"} 1
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="131072"} 1
 inference_objective_input_tokens_bucket{model_name="m10",target_model_name="t11",le="262144"} 1
@@ -57,7 +57,7 @@ inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20"
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="4096"} 1
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="8192"} 1
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="16384"} 1
-inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="32778"} 1
+inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="32768"} 1
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="65536"} 1
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="131072"} 1
 inference_objective_input_tokens_bucket{model_name="m20",target_model_name="t20",le="262144"} 1

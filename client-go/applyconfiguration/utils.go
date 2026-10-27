@@ -3,7 +3,9 @@
 package applyconfiguration
 
 import (
+	v1 "github.com/llm-d/llm-d-router/apix/v1"
 	v1alpha2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1 "github.com/llm-d/llm-d-router/client-go/applyconfiguration/apix/v1"
 	apixv1alpha2 "github.com/llm-d/llm-d-router/client-go/applyconfiguration/apix/v1alpha2"
 	internal "github.com/llm-d/llm-d-router/client-go/applyconfiguration/internal"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -15,7 +17,17 @@ import (
 // apply configuration type exists for the given GroupVersionKind.
 func ForKind(kind schema.GroupVersionKind) interface{} {
 	switch kind {
-	// Group=llm-d.ai, Version=v1alpha2
+	// Group=llm-d.ai, Version=v1
+	case v1.SchemeGroupVersion.WithKind("InferenceObjective"):
+		return &apixv1.InferenceObjectiveApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("InferenceObjectiveSpec"):
+		return &apixv1.InferenceObjectiveSpecApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("InferenceObjectiveStatus"):
+		return &apixv1.InferenceObjectiveStatusApplyConfiguration{}
+	case v1.SchemeGroupVersion.WithKind("PoolObjectReference"):
+		return &apixv1.PoolObjectReferenceApplyConfiguration{}
+
+		// Group=llm-d.ai, Version=v1alpha2
 	case v1alpha2.SchemeGroupVersion.WithKind("InferenceModelRewrite"):
 		return &apixv1alpha2.InferenceModelRewriteApplyConfiguration{}
 	case v1alpha2.SchemeGroupVersion.WithKind("InferenceModelRewriteRule"):

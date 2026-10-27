@@ -2,8 +2,9 @@
 
 The coordinator is a Go service that accepts inference requests and drives them through
 a configurable pipeline of steps. It currently supports the OpenAI-compatible API
-(`/v1/chat/completions`, `/v1/completions`), and the entry layer is designed to be
-extended to other inference protocols. Each step performs one unit of
+(`/v1/chat/completions`, `/v1/completions`, `/v1/responses`) and the Anthropic
+Messages API (`/v1/messages`). The entry layer is
+designed to be extended to other inference protocols. Each step performs one unit of
 work (download media, tokenize, encode, prefill, decode). The pre-processing steps call
 side services directly (media download, and the render service for tokenization); the
 encode, prefill, and decode steps forward sub-requests to vLLM worker pools through an
@@ -33,7 +34,9 @@ The goals the design serves:
   phase at a time, or let a worker serve a request directly when it already holds the
   needed state.
 - Tokenize the prompt once (in the render step) and reuse the token IDs across encode,
-  prefill, and decode, so workers never re-tokenize.
+  prefill, and decode in the tokens-in (`/inference/v1/generate`) format, so workers
+  never re-tokenize; the OpenAI-format (`/v1/chat/completions`) fallback re-tokenizes
+  on each worker instead.
 - Tokens-in / tokens-out operation: steps can exchange token IDs directly instead of
   raw text, cutting per-step tokenization to a single render pass. This is also
   beneficial for reinforcement learning (RL), where the training loop works in token
@@ -50,7 +53,7 @@ absorb further processing modes as they are added.
 - [Components](#components)
 - [Request lifecycle](#request-lifecycle)
   - [RequestContext](#requestcontext)
-  - [EPP-Profile routing](#epp-profile-routing)
+  - [x-llm-d-epp-profile routing](#x-llm-d-epp-profile-routing)
 - [EPP integration](#epp-integration)
   - [Per-phase scheduling profiles](#per-phase-scheduling-profiles)
   - [Decode disaggregation deciders](#decode-disaggregation-deciders)
@@ -93,18 +96,18 @@ per-request context held by the coordinator, not in a sidecar on the decode pod.
           |
           |  inference request (OpenAI-compatible API)
           v
-     Inference Gateway  --- no EPP-Profile header: default route to coordinator
+     Inference Gateway  --- no x-llm-d-epp-profile header: default route to coordinator
           |
           v
    Coordinator Service  ------------>  side services
           |                            (media download, render / tokenize)
           |
-          |  one call per phase, tagged EPP-Profile: encode | prefill | decode
+          |  one call per phase, tagged x-llm-d-epp-profile: encode | prefill | decode
           |  (re-enters the same Inference Gateway)
           v
      Inference Gateway  <-- endpoint picker protocol --> EPP
           |                            (single endpoint picker, one scheduling
-          |                             profile per phase, selected by EPP-Profile)
+          |                             profile per phase, selected by x-llm-d-epp-profile)
           |
           v
           +-------------------+-------------------+
@@ -115,7 +118,7 @@ per-request context held by the coordinator, not in a sidecar on the decode pod.
 
 
 The client opens a single connection through the Inference Gateway to the coordinator
-(the gateway's default route, taken when a request carries no `EPP-Profile` header).
+(the gateway's default route, taken when a request carries no `x-llm-d-epp-profile` header).
 Behind it, the coordinator issues several requests back to that same Gateway and
 consumes each response before issuing the next: it is an active client of the Gateway,
 not a one-shot proxy. A single step
@@ -126,7 +129,7 @@ multimodal item in parallel. The number and shape of these requests depend on th
 steps are enabled and how they are parameterized); text-only requests need no media
 download or encode at all. Across phases the coordinator sequences the round-trips
 (prefill and decode are one each), threading state from each response into the next
-request. Each Gateway call routes it by the `EPP-Profile` header to the EPP, which runs
+request. Each Gateway call routes it by the `x-llm-d-epp-profile` header to the EPP, which runs
 the matching scheduling profile and picks a pod matching that phase's role.
 
 Every call the Coordinator makes for a phase (`conditional-decode`, `encode`, `prefill`,
@@ -167,7 +170,7 @@ sequenceDiagram
     end
 
     Note over Coordinator,Decode: conditional-decode — try decode alone first
-    Coordinator->>Gateway: Call (EPP-Profile: decode)
+    Coordinator->>Gateway: Call (x-llm-d-epp-profile: decode)
     Gateway->>EPP: ext_proc: pick pod (profile=decode)
     EPP-->>Gateway: Chosen decode pod
     Gateway->>Decode: Forward request
@@ -183,7 +186,7 @@ sequenceDiagram
 
         opt request has multimodal entries
             par one call per media entry
-                Coordinator->>Gateway: Call (EPP-Profile: encode)
+                Coordinator->>Gateway: Call (x-llm-d-epp-profile: encode)
                 Gateway->>EPP: ext_proc: pick pod (profile=encode)
                 EPP-->>Gateway: Chosen encode pod
                 Gateway->>Encode: Forward request
@@ -193,14 +196,14 @@ sequenceDiagram
         end
 
         Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang) transfer KV differently - see KV and EC transfer protocols.
-        Coordinator->>Gateway: Call (EPP-Profile: prefill)
+        Coordinator->>Gateway: Call (x-llm-d-epp-profile: prefill)
         Gateway->>EPP: ext_proc: pick pod (profile=prefill)
         EPP-->>Gateway: Chosen prefill pod
         Gateway->>Prefill: Forward request
         Prefill-->>Gateway: KV transfer descriptor
         Gateway-->>Coordinator: Response
 
-        Coordinator->>Gateway: Call (EPP-Profile: decode)
+        Coordinator->>Gateway: Call (x-llm-d-epp-profile: decode)
         Gateway->>EPP: ext_proc: pick pod (profile=decode)
         EPP-->>Gateway: Chosen decode pod
         Gateway->>Decode: Forward request (pulls KV via NIXL)
@@ -219,10 +222,10 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi HTTP server. Accepts `/v1/chat/completions` and `/v1/completions`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
-| Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `EPP-Profile` header constants. |
+| Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
 | Connectors | [pkg/coordinator/connectors/](../pkg/coordinator/connectors/) | KV and EC transfer protocols. Selected by name at config time; control the `kv_transfer_params` / `ec_transfer_params` wire shapes. |
 | Config | [pkg/coordinator/config/](../pkg/coordinator/config/) | Viper-backed YAML + env loader. |
 | Entrypoint | [cmd/coordinator/](../cmd/coordinator/) | Wires config to the pipeline: builds each step, merges connector defaults, injects the gateway client. |
@@ -243,9 +246,14 @@ completions prompt is already a token array). See
      the Gateway) is forwarded with that same `4xx`, since the request was the root cause;
    - any other error, including an upstream `5xx`, returns `502 Bad Gateway`.
 
+   A client disconnect is logged at verbosity `VERBOSE`, not as an error.
+
    Upstream response bodies are logged server-side only and never returned to the client.
    A step returning `ErrPipelineDone` instead stops the pipeline and reports success, used
-   by `conditional-decode` when the decode worker serves the request directly.
+   by `conditional-decode` when the decode worker serves the request directly. A step that
+   answers the client with an error status itself returns a `ResponseWrittenError`: the
+   pipeline and server record it under the `error_code` of its `Cause`, and the server
+   writes nothing further (used by `async-broker`).
 4. The final `decode` step proxies the worker response straight back to the client
    through `RequestContext.ResponseWriter`, passing both a streaming SSE response and a
    non-streaming (buffered JSON) response through unchanged. The worker decides which
@@ -261,23 +269,40 @@ steps read and mutate. The load-bearing fields:
 | `Body` | server (parsed JSON) | every step; mutated in place as the request is enriched |
 | `OriginalPath`, `OriginalHeaders`, `OriginalBody` | server | format detection, header forwarding |
 | `Model`, `Stream` | server | request construction, response handling |
+| `RevisionDecisionID` | pipeline | EPP revision coordination across parallel and sequential phase requests |
 | `TokenIDs` | `render` | `conditional-decode`, `encode`, `prefill`, `decode` |
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| `PrefillCachedTokens` | `prefill` (from the prefill response `usage` block) | `decode` |
+| Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `EPP-Profile`.
+it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
+pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
+request. Client-provided values of the coordinator-owned headers are discarded: EPP
+routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
+`x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)),
+and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
+any other leg. The same headers are removed from the upstream response before it
+reaches the client. Both apply on the pipeline and on the passthrough.
+The pipeline can allowlist response headers with `forward_response_headers`;
+values returned by any response-producing step are stored on the request context
+for later requests. A fan-out step selects the most frequent value for each
+configured header independently. Configured names are reserved for this relay,
+so client-provided values are not sent upstream.
 
-### EPP-Profile routing
+### x-llm-d-epp-profile routing
 
-Every coordinator-to-worker call carries an `EPP-Profile` header (`encode`, `prefill`, or
+Every coordinator-to-worker call carries an `x-llm-d-epp-profile` header (`encode`, `prefill`, or
 `decode`) so the EPP can run the matching scheduling profile and pick the correct pod. The constants live in
-[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). The request path is either the client's
-original OpenAI path or the internal `/inference/v1/generate` path, depending on
-`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)). Other
+[pkg/coordinator/gateway/paths.go](../pkg/coordinator/gateway/paths.go). For encode and prefill, the request
+path is either the client's original OpenAI path or the internal `/inference/v1/generate` path, depending on
+`use_openai_format` (see [Configuring the pipeline](#configuring-the-pipeline)); decode and conditional-decode
+always forward on the client's original path regardless of that setting. Other
 paths can be added later as new protocols are supported.
 
 ## EPP integration
@@ -291,7 +316,7 @@ phase call to the configured gateway, and the EPP picks the pod for that phase.
 One EPP instance and one InferencePool cover all three worker roles (encode, prefill,
 decode); the pods differ only by their `llm-d.ai/role` label. The Gateway routes every
 coordinator-to-worker call to that EPP, which runs the scheduling profile named by the
-call's `EPP-Profile` header (see [EPP-Profile routing](#epp-profile-routing)) via the
+call's `x-llm-d-epp-profile` header (see [x-llm-d-epp-profile routing](#x-llm-d-epp-profile-routing)) via the
 `header-profile-handler` plugin. The coordinator drives the cascade across phases;
 each EPP call is single-phase scheduling.
 
@@ -301,17 +326,53 @@ each EPP call is single-phase scheduling.
 | `prefill` | `prefill` | Selects a prefill pod. |
 | `encode` | `encode` | Load-balances across encoder pods. |
 
-Each profile filters the shared pod pool down to its own role with a `by-label` role
+Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
 [deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
 That file targets the sidecar model, though, so it picks profiles via
-`disagg-profile-handler` deciders rather than the `EPP-Profile` header; header-based
+`disagg-profile-handler` deciders rather than the `x-llm-d-epp-profile` header; header-based
 selection swaps in `header-profile-handler` for that one plugin.
 
 This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
+
+### Cross-phase scheduling headers
+
+An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
+response. The coordinator forwards `x-llm-d-disagg-revision` by default. Set
+`forward_response_headers` to replace that default and carry selected headers
+through every later phase:
+
+```yaml
+pipeline:
+  forward_response_headers:
+    - x-llm-d-disagg-revision
+    - x-disagg-slice
+```
+
+Only listed response headers are carried, and client-provided values for those
+names are discarded. Encode requests run in parallel. After the fan-out completes,
+each response contributes its first value for each configured header. The most
+frequent value is forwarded to later phases; missing values are ignored, and ties
+use the value from the lowest encode index. This lets prefill prefer the slice that
+handled the largest number of encoded items. A later single-response phase can
+replace the carried value, so decode can prefer the prefill slice.
+
+Aggregation happens after the fan-out and cannot constrain sibling encode requests.
+Strict constraints shared by those requests, such as revision selection, require
+coordination before the fan-out begins.
+
+### Revision coordination
+
+The coordinator sends the same revision decision ID to every phase. A
+revision-aware EPP plugin can use an atomic cross-replica operation to choose
+one revision for parallel encode requests and reuse it for prefill and decode.
+The decision ID is independent of `x-request-id`, so a client cannot pin a
+revision by supplying a request ID. The default response-header forwarding then
+carries the selected `x-llm-d-disagg-revision` to later phases as a strict
+constraint.
 
 ### Decode disaggregation deciders
 
@@ -389,7 +450,18 @@ State produced by one phase and consumed by a later one is carried on the
 | :---- | :---- | :---- |
 | `render` | `TokenIDs`, multimodal hashes/placeholders | encode, prefill, decode (EPP uses token IDs for prefix matching) |
 | `encode` | `ECTransferParams` (merged per `mm_hash`) | prefill |
-| `prefill` | `KVTransferParams` (from the prefill response body) | decode |
+| `prefill` | `KVTransferParams` (from the response body), `PrefillCachedTokens` (from its `usage` block) | decode |
+
+A decode worker counts the KV blocks transferred from prefill as prompt-cache hits
+of its own, so the cached-token count it reports describes the handoff rather than
+the prompt cache. The `decode` step substitutes the prefill worker's count into the
+usage block it streams to the client, in the single JSON document or in the SSE usage
+frame, so a disaggregated request reports the cache hits a single-worker request
+would. The count is written to the field the route documents:
+`prompt_tokens_details`, or `input_tokens_details` on the Responses routes. Where no
+prefill measurement applies, the decode worker's own count reaches the client
+unchanged; `PrefillCachedTokens` documents those cases. The rewriting lives in
+[pkg/common/usage](../pkg/common/usage) and is shared with the routing sidecar.
 
 ## Coordinator vs. the llm-d-router sidecar model
 
@@ -409,7 +481,7 @@ worker**. No sidecar or coordination logic runs on the prefill or encode nodes. 
    multimodal content is detected), then prefill (if the P/D decider judges it
    beneficial).
 2. The EPP communicates the selected pods to the decode sidecar as **request headers**:
-   `x-prefiller-host-port` (the selected prefill worker) and `x-encoder-hosts-ports` (one
+   `x-llm-d-prefiller-host-port` (the selected prefill worker) and `x-llm-d-encoder-hosts-ports` (one
    or more encode workers). The gateway then forwards the request to the decode pod.
 3. The sidecar orchestrates the cascade: it dispatches multimodal content to the encode
    workers, sends a remote prefill request (`max_tokens=1`) to the prefill worker,
@@ -427,7 +499,7 @@ service in front of the Inference Gateway:
 
 1. The client request reaches the **coordinator**.
 2. The coordinator tokenizes once via the render service, then makes **one
-   EPP-mediated call per phase** to the gateway, tagging each with the `EPP-Profile` header.
+   EPP-mediated call per phase** to the gateway, tagging each with the `x-llm-d-epp-profile` header.
    Each EPP call is single-phase scheduling, not a one-cycle selection of all phases.
 3. Cross-phase state (token IDs, multimodal hashes, EC and KV transfer descriptors)
    lives on the coordinator's per-request `RequestContext`, not in headers handed to a
@@ -444,7 +516,7 @@ service in front of the Inference Gateway:
 | Pipeline versatility | Fixed E/P/D orchestration baked into the sidecar | Configurable pipeline of independent, reorderable plugin steps; new stages added without touching existing ones |
 | EPP scheduling | One cycle selects all phases (`disagg-profile-handler`) | One EPP call per phase, coordinator drives the cascade |
 | vLLM pod selection | All phase pods chosen up front in one scheduling cycle | Deferred per phase: each pod is selected only when that phase's call is made, at the point its destination becomes relevant |
-| Phase selection signal | EPP request headers `x-prefiller-host-port`, `x-encoder-hosts-ports` read by the sidecar | `EPP-Profile` header per call; the EPP runs the matching profile and picks the pod |
+| Phase selection signal | EPP request headers `x-llm-d-prefiller-host-port`, `x-llm-d-encoder-hosts-ports` read by the sidecar | `x-llm-d-epp-profile` header per call; the EPP runs the matching profile and picks the pod |
 | Tokenization | On the workers | Once, in the coordinator's render step; token IDs reused downstream (experimental path) |
 | Cross-phase state | Held by the sidecar | Held on the coordinator `RequestContext` |
 
@@ -479,7 +551,9 @@ type Step interface {
 - `Execute` does the work: it reads and mutates `reqCtx`, and returns an error to abort
   the request or `nil` to continue. Return `pipeline.ErrPipelineDone` to stop the
   pipeline early and report success (the response must already have been written to
-  `reqCtx.ResponseWriter`).
+  `reqCtx.ResponseWriter`, or the client is gone). A step that has written an error
+  response itself returns a `pipeline.ResponseWrittenError` instead, so the request still
+  counts as failed.
 - A response-producing step writes the client response to `reqCtx.ResponseWriter`,
   typically by proxying the upstream response with `httputil.ReverseProxy` set to
   `FlushInterval: -1`, which forwards each write immediately (SSE chunks stream through; a
@@ -567,7 +641,7 @@ edit: registration is the only wiring step.
   step can read them without the operator repeating them per step. The constants are
   `steps.ParamKVConnector` and `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildMMFeatures`, `copyBody`,
+  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection
@@ -625,7 +699,7 @@ commented with their defaults. The loader is [pkg/coordinator/config/config.go](
 ```yaml
 log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v overrides
 
-server:               # inbound HTTP listener
+server:               # inbound listener; TLS unless secure_serving is false
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
@@ -674,16 +748,16 @@ single step may override the default in its own `params` (`kv_connector:` /
 
 `pipeline.use_openai_format` selects the wire format for the encode and prefill steps
 (the steps that choose their upstream endpoint by format). Decode and conditional-decode
-always forward on the client's original OpenAI path and are unaffected by this setting:
+always forward on the client's original path and are unaffected by this setting:
 
-- `true` (default): forward the client's original OpenAI path (`/v1/chat/completions`,
-  `/v1/completions`).
+- `true` (default): forward the client's original path (`/v1/chat/completions`,
+  `/v1/completions`, `/v1/responses`, `/v1/messages`).
 - `false`: the tokens-in format. Rewrite to the internal `/inference/v1/generate`
   token-array endpoint, sending `token_ids` and `features` (including `kwargs_data`)
   directly in the body.
 
-A step can override the global with `use_openai_format:` in its own `params`. The
-exact bodies per format are in [communication.md](communication.md).
+`encode` and `prefill` can each override the global with `use_openai_format:` in
+their own `params`. The exact bodies per format are in [communication.md](communication.md).
 
 `false` requires a `render` step in the pipeline: render produces the token IDs the
 tokens-in format sends, so the coordinator fails to start when `false` is set without a
@@ -698,9 +772,12 @@ addressed.
 
 #### Format tradeoff
 
-The choice trades request size against worker recompute, and matters only for
-multimodal requests. In both formats the added `tokens` / `token_ids` field prevents
-re-tokenization on the worker; the difference is how the image is carried.
+The choice trades request size against worker recompute. The recompute half applies
+to every request, multimodal or not: in the generate format, the added `token_ids`
+field prevents re-tokenization on the worker; the chat-completions format carries no
+equivalent field, so the worker re-tokenizes there regardless. The request-size half
+matters only for multimodal requests, where the two formats differ in how the image
+is carried.
 
 - `/v1/chat/completions` carries the image as a raw `data:` URL. The body stays small,
   but the worker re-runs the vision preprocessor from the image bytes.
@@ -734,8 +811,9 @@ only the request carrier differs.
 
 | `type` | Purpose | Key params |
 | :---- | :---- | :---- |
-| `replace-media-urls` | Download `image_url` references, inline as base64 data URIs, seed `MultimodalEntries`. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries` |
-| `render` | Tokenize via the render service; populate `TokenIDs` and per-image hash/placeholder/kwargs. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
+| `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
+| `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
+| `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |

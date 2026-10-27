@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +20,7 @@ package handlers
 import (
 	"context"
 	"maps"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -29,14 +31,21 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
 	reqCtx.RequestReceivedTimestamp = time.Now()
+
+	// Responders run before the EndOfStream fallback so they can intercept bodyless
+	// GETs (e.g. /v1/models) that would otherwise be routed to a random endpoint.
+	if handled, err := s.tryRespondLocally(ctx, reqCtx, req); handled {
+		return err
+	}
 
 	// an EoS in the request headers means this request has no body or trailers.
 	if req.RequestHeaders.EndOfStream {
@@ -48,7 +57,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	}
 
 	for _, header := range req.RequestHeaders.Headers.Headers {
-		reqCtx.Request.Headers[strings.ToLower(header.Key)] = envoy.GetHeaderValue(header)
+		key := strings.ToLower(header.Key)
+		if request.InternalRoutingHeaders.Has(key) {
+			continue
+		}
+		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
 	}
 
 	reqCtx.ObjectiveKey, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ObjectiveKey)
@@ -62,7 +75,7 @@ func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *
 	if endpoint == nil {
 		return errcommon.Error{Code: errcommon.Internal, Msg: "no pods available in datastore"}
 	}
-	reqCtx.TargetEndpoint = endpoint.GetIPAddress() + ":" + endpoint.GetPort()
+	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
 	reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 
@@ -94,7 +107,8 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateHeaders(ctx, reqCtx),
+						SetHeaders:    s.generateHeaders(ctx, reqCtx),
+						RemoveHeaders: unsetRoutingHeaders(ctx, reqCtx),
 					},
 				},
 			},
@@ -137,6 +151,14 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 
+	// Hand the resolved fairness identity to the P/D sidecar so its spans carry it.
+	if id, source, ok := tracing.AttributionHandoff(ctx); ok {
+		headers = append(headers,
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessIDHandoffHeader, RawValue: []byte(id)}},
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessSourceHandoffHeader, RawValue: []byte(source)}},
+		)
+	}
+
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
 		if request.IsSystemOwnedHeader(key) {
@@ -150,6 +172,26 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 	return headers
+}
+
+// unsetRoutingHeaders lists the headers Envoy removes before forwarding: the
+// screening headers, the routing headers no plugin set, and the attribution
+// handoff when EPP does not send it, so no client-supplied value reaches the
+// sidecar or the model server.
+func unsetRoutingHeaders(ctx context.Context, reqCtx *RequestContext) []string {
+	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders)+2)
+	for key := range request.ScreeningHeaders {
+		remove = append(remove, key)
+	}
+	for key := range request.InternalRoutingHeaders {
+		if _, ok := reqCtx.Request.Headers[key]; !ok {
+			remove = append(remove, key)
+		}
+	}
+	if _, _, ok := tracing.AttributionHandoff(ctx); !ok {
+		remove = append(remove, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
+	}
+	return remove
 }
 
 func (s *StreamingServer) generateMetadata(endpoint string, endpointScores map[string]float64) *structpb.Struct {

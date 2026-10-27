@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package latencypredictorclient
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -33,7 +32,6 @@ type Predictor struct {
 	config     *Config
 	httpClient *http.Client
 	logger     logr.Logger
-	rng        *rand.Rand
 
 	metricsMu     sync.RWMutex
 	cachedMetrics *MetricsResponse
@@ -64,7 +62,6 @@ func New(config *Config, logger logr.Logger) *Predictor {
 		config:      config,
 		httpClient:  &http.Client{Timeout: config.HTTPTimeout},
 		logger:      logger.WithName("latency-predictor-client"),
-		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 		done:        make(chan struct{}),
 		coalesceCh:  make(chan *batchSubmission, 1024),
 		dispatchSem: sem,

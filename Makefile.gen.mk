@@ -29,10 +29,26 @@ sync-upstream-versions: ## Update upstream CRD version references to match go.mo
 	@sed -i 's|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-.*}"|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-$(GATEWAY_API_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
 
 .PHONY: generate
-generate: controller-gen code-generator tidy sync-upstream-versions ## Generate WebhookConfiguration, ClusterRole, CustomResourceDefinition objects, code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen code-generator yq tidy sync-upstream-versions ## Generate WebhookConfiguration, ClusterRole, CustomResourceDefinition objects, code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="/dev/null" paths="./..."
 	$(CONTROLLER_GEN) crd output:dir="./config/crd/bases" paths="./..."
 	./hack/update-codegen.sh $(LOCALBIN)
+	@mkdir -p test/integration/epp/testdata/crd test/integration/epp/testdata/crd-dual test/integration/epp/testdata/crd-dual-v1storage
+	@tmp=$$(mktemp -d); \
+	$(CONTROLLER_GEN) crd output:dir="$$tmp" paths="./apix/..."; \
+	$(YQ) eval 'del(.spec.versions[] | select(.name != "v1")) | (.spec.versions[0].served) = true | (.spec.versions[0].storage) = true' \
+		"$$tmp/llm-d.ai_inferenceobjectives.yaml" > test/integration/epp/testdata/crd/llm-d.ai_inferenceobjectives.yaml; \
+	$(YQ) eval '(.spec.versions[] | select(.name == "v1") | .served) = true' \
+		"$$tmp/llm-d.ai_inferenceobjectives.yaml" > test/integration/epp/testdata/crd-dual/llm-d.ai_inferenceobjectives.yaml; \
+	$(YQ) eval '(.spec.versions[] | select(.name == "v1") | .served) = true | (.spec.versions[] | select(.name == "v1") | .storage) = true | (.spec.versions[] | select(.name == "v1alpha2") | .storage) = false' \
+		"$$tmp/llm-d.ai_inferenceobjectives.yaml" > test/integration/epp/testdata/crd-dual-v1storage/llm-d.ai_inferenceobjectives.yaml; \
+	rm -rf "$$tmp"; \
+	test "$$($(YQ) '.spec.versions[0].name' test/integration/epp/testdata/crd/llm-d.ai_inferenceobjectives.yaml)" = "v1" || \
+		{ echo "ERROR: apix/v1 InferenceObjective missing from controller-gen output"; exit 1; }; \
+	test "$$($(YQ) '[.spec.versions[] | select(.served)] | length' test/integration/epp/testdata/crd-dual/llm-d.ai_inferenceobjectives.yaml)" = "2" || \
+		{ echo "ERROR: dual-serving CRD must serve both versions"; exit 1; }; \
+	test "$$($(YQ) '[.spec.versions[] | select(.storage)] | length' test/integration/epp/testdata/crd-dual-v1storage/llm-d.ai_inferenceobjectives.yaml)" = "1" || \
+		{ echo "ERROR: v1-storage CRD must have exactly one storage version"; exit 1; }
 
 # Use same code-generator version as k8s.io/api
 CODEGEN_VERSION := $(shell go list -m -f '{{.Version}}' k8s.io/api)

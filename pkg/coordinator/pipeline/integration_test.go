@@ -18,6 +18,7 @@ package pipeline_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -47,13 +51,13 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.kvConnector+"+"+tc.ecConnector, func(t *testing.T) {
-			renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 					"features": map[string]any{
-						"mm_hashes":       map[string][]string{steps.ModalityImage: {"vllm-hash-img0"}},
-						"mm_placeholders": map[string][]any{steps.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
-						"kwargs_data":     map[string][]string{steps.ModalityImage: {"dGVuc29yLWRhdGE="}},
+						"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-img0"}},
+						"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+						"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWRhdGE="}},
 					},
 				})
 			}))
@@ -63,7 +67,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			var capturedPrefillBody map[string]any
 
 			gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				phase := r.Header.Get(gateway.EPPProfileHeader)
+				phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 				switch phase {
 				case gateway.PhaseEncode:
 					body, _ := io.ReadAll(r.Body)
@@ -72,7 +76,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 					// Generate format: features at top level
 					features, _ := parsed["features"].(map[string]any)
 					mmHashes, _ := features["mm_hashes"].(map[string]any)
-					imageHashes, _ := mmHashes[steps.ModalityImage].([]any)
+					imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 					hash, _ := imageHashes[0].(string)
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"ec_transfer_params": map[string]any{
@@ -109,10 +113,10 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 
 			stepConfigs := []config.StepConfig{
 				{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
-				{Type: "render", Params: map[string]any{"endpoint": gateway.PathChatCompletions + "/render"}},
+				{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 				{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: tc.ecConnector}},
 				{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector, steps.ParamECConnector: tc.ecConnector}},
-				{Type: "decode", Params: map[string]any{"use_openai_format": false, steps.ParamKVConnector: tc.kvConnector}},
+				{Type: "decode", Params: map[string]any{steps.ParamKVConnector: tc.kvConnector}},
 			}
 
 			pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -138,7 +142,7 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "test-" + tc.kvConnector + "+" + tc.ecConnector,
-				OriginalPath:     gateway.PathChatCompletions,
+				OriginalPath:     reqcommon.PathChatCompletions,
 				OriginalBody:     []byte(requestBody),
 				Model:            "test-model",
 				KVTransferParams: make(map[string]any),
@@ -174,38 +178,36 @@ func TestFullPipeline_AllConnectorCombinations(t *testing.T) {
 			if captured == nil {
 				t.Fatal("prefill was not called")
 			}
-			// Generate format nests transfer params in sampling_params.extra_args.
-			var hasEC bool
-			if sp, ok := captured["sampling_params"].(map[string]any); ok {
-				if ea, ok := sp["extra_args"].(map[string]any); ok {
-					_, hasEC = ea["ec_transfer_params"]
-				}
-			}
+			// Generate format carries transfer params at the top level of the body.
+			_, hasEC := captured["ec_transfer_params"]
 			if tc.wantECInPrefill && !hasEC {
-				t.Error("expected ec_transfer_params in prefill body sampling_params.extra_args")
+				t.Error("expected top-level ec_transfer_params in prefill body")
 			}
 			if !tc.wantECInPrefill && hasEC {
-				t.Error("unexpected ec_transfer_params in prefill body sampling_params.extra_args")
+				t.Error("unexpected top-level ec_transfer_params in prefill body")
 			}
 		})
 	}
 }
 
 func TestFullPipeline_Integration(t *testing.T) {
-	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{steps.ModalityImage: {"vllm-hash-img0"}},
-				"mm_placeholders": map[string][]any{steps.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
-				"kwargs_data":     map[string][]string{steps.ModalityImage: {"dGVuc29yLWRhdGE="}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-img0"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWRhdGE="}},
 			},
 		})
 	}))
 	defer renderServer.Close()
 
+	var mu sync.Mutex
+	var capturedDecodeBody map[string]any
+
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		phase := r.Header.Get(gateway.EPPProfileHeader)
+		phase := r.Header.Get(reqcommon.EPPProfileHeaderKey)
 		switch phase {
 		case gateway.PhaseEncode:
 			body, _ := io.ReadAll(r.Body)
@@ -213,7 +215,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 			_ = json.Unmarshal(body, &parsed)
 			features, _ := parsed["features"].(map[string]any)
 			mmHashes, _ := features["mm_hashes"].(map[string]any)
-			imageHashes, _ := mmHashes[steps.ModalityImage].([]any)
+			imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 			hash, _ := imageHashes[0].(string)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ec_transfer_params": map[string]any{
@@ -229,6 +231,12 @@ func TestFullPipeline_Integration(t *testing.T) {
 				},
 			})
 		case gateway.PhaseDecode:
+			body, _ := io.ReadAll(r.Body)
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			mu.Lock()
+			capturedDecodeBody = parsed
+			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "Hello!"}},
@@ -247,10 +255,10 @@ func TestFullPipeline_Integration(t *testing.T) {
 
 	stepConfigs := []config.StepConfig{
 		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
-		{Type: "render", Params: map[string]any{"endpoint": gateway.PathChatCompletions + "/render"}},
+		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
 		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
 		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
-		{Type: "decode", Params: map[string]any{"use_openai_format": false}},
+		{Type: "decode"},
 	}
 
 	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
@@ -286,7 +294,7 @@ func TestFullPipeline_Integration(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "test-123",
-		OriginalPath:     gateway.PathChatCompletions,
+		OriginalPath:     reqcommon.PathChatCompletions,
 		OriginalBody:     []byte(requestBody),
 		Stream:           false,
 		Model:            "test-model",
@@ -317,4 +325,602 @@ func TestFullPipeline_Integration(t *testing.T) {
 	if len(reqCtx.KVTransferParams) == 0 {
 		t.Fatal("expected KVTransferParams to be populated")
 	}
+
+	// The decode step's body format must track the request's original path
+	// (/v1/chat/completions) rather than the pipeline's use_openai_format
+	// setting, which decode ignores. A regression here would nest
+	// kv_transfer_params under sampling_params.extra_args instead, the
+	// generate-shaped body a chat-completions endpoint does not read.
+	mu.Lock()
+	decodeBody := capturedDecodeBody
+	mu.Unlock()
+	if decodeBody == nil {
+		t.Fatal("decode was not called")
+	}
+	if _, ok := decodeBody["kv_transfer_params"]; !ok {
+		t.Error("expected top-level kv_transfer_params in decode body for /v1/chat/completions")
+	}
+	if sp, ok := decodeBody["sampling_params"].(map[string]any); ok {
+		if ea, ok := sp["extra_args"].(map[string]any); ok {
+			if _, ok := ea["kv_transfer_params"]; ok {
+				t.Error("kv_transfer_params must not be nested under sampling_params.extra_args for chat completions")
+			}
+		}
+	}
+}
+
+// TestFullPipeline_MetricsSmoke drives the full chat pipeline under mixed
+// text and image traffic and asserts the pipeline-amplification series land
+// in a fresh coordinator registry -- the same Register call the /metrics
+// endpoint uses. This is the smoke tier of the PR test plan: per-observation
+// correctness is covered by unit tests in steps and metrics; this test
+// proves the series show up after real end-to-end request processing.
+func TestFullPipeline_MetricsSmoke(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	// The render mock counts image_url parts in the (already inlined)
+	// request body so its features always match the request's media count.
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed struct {
+			Messages []struct {
+				Content []struct {
+					Type string `json:"type"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+		images := 0
+		for _, m := range parsed.Messages {
+			for _, part := range m.Content {
+				if part.Type == "image_url" {
+					images++
+				}
+			}
+		}
+
+		hashes := make([]string, images)
+		placeholders := make([]any, images)
+		kwargs := make([]string, images)
+		for i := range hashes {
+			hashes[i] = fmt.Sprintf("vllm-hash-img%d", i)
+			placeholders[i] = map[string]any{"offset": 1, "length": 3}
+			kwargs[i] = "dGVuc29yLWRhdGE="
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 2345, 6789},
+			"features": map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: hashes},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: placeholders},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: kwargs},
+			},
+		})
+	}))
+	defer renderServer.Close()
+
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+		case gateway.PhaseEncode:
+			body, _ := io.ReadAll(r.Body)
+			var parsed struct {
+				Features struct {
+					MMHashes struct {
+						Image []any `json:"image"`
+					} `json:"mm_hashes"`
+				} `json:"features"`
+			}
+			_ = json.Unmarshal(body, &parsed)
+			transfer := map[string]any{}
+			for _, h := range parsed.Features.MMHashes.Image {
+				if hash, ok := h.(string); ok {
+					transfer[hash] = map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": transfer})
+		case gateway.PhasePrefill:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "abc123", "peer_host": "10.0.0.2", "peer_port": 5502},
+			})
+		case gateway.PhaseDecode:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hello!"}}},
+			})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer gatewayServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gatewayServer.URL})
+
+	stepConfigs := []config.StepConfig{
+		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
+		{Type: "render", Params: map[string]any{"endpoint": reqcommon.PathChatCompletions + "/render"}},
+		{Type: "encode", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{"use_openai_format": false, steps.ParamECConnector: ec.NIXL}},
+		{Type: "decode"},
+	}
+	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
+	for _, sc := range stepConfigs {
+		step, err := pipeline.Build(sc.Type, gwClient, sc.Params)
+		if err != nil {
+			t.Fatalf("building step %s: %v", sc.Type, err)
+		}
+		if ra, ok := step.(renderAware); ok {
+			ra.SetServiceAddress(renderServer.URL)
+		}
+		pipelineSteps = append(pipelineSteps, step)
+	}
+	p := pipeline.New(pipelineSteps)
+
+	run := func(body string) error {
+		recorder := httptest.NewRecorder()
+		reqCtx := &pipeline.RequestContext{
+			RequestID:        "smoke",
+			OriginalPath:     reqcommon.PathChatCompletions,
+			OriginalBody:     []byte(body),
+			Stream:           false,
+			Model:            "test-model",
+			KVTransferParams: make(map[string]any),
+			ResponseWriter:   recorder,
+		}
+		if err := json.Unmarshal([]byte(body), &reqCtx.Body); err != nil {
+			t.Fatalf("unmarshaling request body: %v", err)
+		}
+		return p.Execute(t.Context(), reqCtx)
+	}
+
+	// Mixed traffic: text-only, a data-URI image, and a loopback image URL
+	// that the SSRF guard blocks at dial so the third pipeline run fails
+	// after the media inventory and download observations.
+	if err := run(`{"model":"test-model","stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"Hello"}]}]}`); err != nil {
+		t.Fatalf("text-only request failed: %v", err)
+	}
+	if err := run(`{"model":"test-model","stream":false,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,ZmFrZS1pbWFnZS1kYXRh"}}]}]}`); err != nil {
+		t.Fatalf("data-URI request failed: %v", err)
+	}
+	if err := run(`{"model":"test-model","stream":false,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://127.0.0.1:1/blocked.png"}}]}]}`); err == nil {
+		t.Fatal("expected the loopback image URL to be blocked by the SSRF guard")
+	}
+
+	// Every pipeline execution observes encode_subrequests once, including
+	// the failed one: 0 (text) + 1 (data URI) + 0 (blocked before encode).
+	require.Equal(t, uint64(3), histogramCount(t, reg, "llm_d_coordinator_encode_subrequests", nil))
+	require.InDelta(t, 1.0, histogramSum(t, reg, "llm_d_coordinator_encode_subrequests", nil), 1e-9)
+
+	// media_items carries one image observation per request: 0 + 1 + 1.
+	require.Equal(t, uint64(3), histogramCount(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}))
+	require.InDelta(t, 2.0, histogramSum(t, reg, "llm_d_coordinator_media_items", map[string]string{"media_type": "image"}), 1e-9)
+
+	// Only the loopback fetch started a download (dialed and refused): the
+	// data URI and the text-only request never reach the HTTP client, so no
+	// success series may exist at all.
+	require.Equal(t, uint64(1), histogramCount(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": "error"}))
+	requireHistogramAbsent(t, reg, "llm_d_coordinator_media_download_duration_seconds", map[string]string{"result": "success"})
+}
+
+// TestFullPipeline_ResponsesFormat runs a multimodal /v1/responses request
+// through the real step chain with stub upstreams. The render service is a stub
+// here, which is what makes this runnable: no renderer available to the cluster
+// e2e suite serves /v1/responses/render (llm-d/llm-d-inference-sim#708), so the
+// chained Responses path has no coverage there.
+//
+// The request carries two images in the two places a Responses body can hold
+// them: one under an input item's content, one under a function_call_output's
+// output. That pins the positional contract across the whole chain, since
+// replace-media-urls, encode and decode each walk the body independently and
+// agree only by visiting the same parts in the same order (content before
+// output, per reqcommon.ItemPartArrays).
+func TestFullPipeline_ResponsesFormat(t *testing.T) {
+	const (
+		contentHash = "vllm-hash-content"
+		outputHash  = "vllm-hash-output"
+		contentData = "data:image/png;base64,Y29udGVudC1pbWFnZQ=="
+		outputData  = "data:image/png;base64,b3V0cHV0LWltYWdl"
+	)
+
+	var renderPath string
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		renderPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+			"features": map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {contentHash, outputHash}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {
+					map[string]any{"offset": 1, "length": 3},
+					map[string]any{"offset": 4, "length": 3},
+				}},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
+			},
+		})
+	}))
+	defer renderServer.Close()
+
+	var mu sync.Mutex
+	var encodeBodies []map[string]any
+	var encodePaths []string
+	var prefillBody, decodeBody map[string]any
+
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+
+		switch phase := r.Header.Get(reqcommon.EPPProfileHeaderKey); phase {
+		case gateway.PhaseEncode:
+			// The encode leg speaks the Responses format here, so the image it
+			// primes is in the body rather than in a top-level features map. Key
+			// the ec params off the hash the fan-out is priming, found by matching
+			// the part's URL, so a swap between the two legs fails the assertions
+			// below rather than silently matching.
+			mu.Lock()
+			encodeBodies = append(encodeBodies, parsed)
+			encodePaths = append(encodePaths, r.URL.Path)
+			mu.Unlock()
+
+			hash := contentHash
+			if strings.Contains(string(body), outputData) {
+				hash = outputHash
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ec_transfer_params": map[string]any{
+					hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				},
+			})
+
+		case gateway.PhasePrefill:
+			mu.Lock()
+			prefillBody = parsed
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "abc123", "peer_host": "10.0.0.2", "peer_port": 5502},
+			})
+
+		case gateway.PhaseDecode:
+			mu.Lock()
+			decodeBody = parsed
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"output": []map[string]any{
+					{"type": "message", "role": "assistant", "content": []map[string]any{
+						{"type": "output_text", "text": "Two pictures."},
+					}},
+				},
+			})
+
+		default:
+			http.Error(w, "unexpected phase: "+phase, http.StatusNotFound)
+		}
+	}))
+	defer gatewayServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gatewayServer.URL, MaxIdleConnsPerHost: 10})
+
+	stepConfigs := []config.StepConfig{
+		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
+		{Type: "render", Params: map[string]any{}},
+		{Type: "encode", Params: map[string]any{"use_openai_format": true, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{"use_openai_format": true, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
+		{Type: "decode", Params: map[string]any{steps.ParamKVConnector: kv.NIXL}},
+	}
+
+	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
+	for _, sc := range stepConfigs {
+		step, err := pipeline.Build(sc.Type, gwClient, sc.Params)
+		if err != nil {
+			t.Fatalf("building step %s: %v", sc.Type, err)
+		}
+		if ra, ok := step.(renderAware); ok {
+			ra.SetServiceAddress(renderServer.URL)
+		}
+		pipelineSteps = append(pipelineSteps, step)
+	}
+
+	requestBody := `{
+		"model": "test-model", "stream": false, "max_output_tokens": 40,
+		"input": [
+			{"role": "user", "content": [
+				{"type": "input_text", "text": "What is in these?"},
+				{"type": "input_image", "image_url": "` + contentData + `", "detail": "auto"}
+			]},
+			{"type": "function_call_output", "call_id": "call-1", "output": [
+				{"type": "input_image", "image_url": "` + outputData + `"}
+			]}
+		]
+	}`
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "responses-chain",
+		OriginalPath:     reqcommon.PathResponses,
+		OriginalBody:     []byte(requestBody),
+		Model:            "test-model",
+		KVTransferParams: make(map[string]any),
+		ResponseWriter:   recorder,
+	}
+	if err := json.Unmarshal([]byte(requestBody), &reqCtx.Body); err != nil {
+		t.Fatalf("unmarshalling request body: %v", err)
+	}
+
+	if err := pipeline.New(pipelineSteps).Execute(t.Context(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	respBody, _ := io.ReadAll(recorder.Result().Body)
+	if !strings.Contains(string(respBody), "Two pictures.") {
+		t.Fatalf("expected the decode response to reach the client, got: %s", respBody)
+	}
+
+	if want := reqcommon.PathResponses + "/render"; renderPath != want {
+		t.Errorf("render posted to %s, want %s", renderPath, want)
+	}
+
+	// render's hashes land on the entries in walk order.
+	if len(reqCtx.MultimodalEntries) != 2 {
+		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	for i, want := range []string{contentHash, outputHash} {
+		if got := reqCtx.MultimodalEntries[i].Hash; got != want {
+			t.Errorf("entry %d hash = %q, want %q", i, got, want)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// One encode sub-request per image, each a Responses body carrying that one
+	// image part, capped and with store pinned off.
+	if len(encodeBodies) != 2 {
+		t.Fatalf("expected 2 encode sub-requests, got %d", len(encodeBodies))
+	}
+	// The fan-out is concurrent, so the sub-requests are keyed by the image they
+	// primed rather than by arrival order. Which hash belongs to which part is
+	// pinned by the decode assertions below, not here.
+	primed := map[string]map[string]any{}
+	for i, body := range encodeBodies {
+		if encodePaths[i] != reqcommon.PathResponses {
+			t.Errorf("encode sub-request %d posted to %s, want %s", i, encodePaths[i], reqcommon.PathResponses)
+		}
+		if body["max_output_tokens"] != float64(1) {
+			t.Errorf("encode sub-request %d max_output_tokens = %v, want 1", i, body["max_output_tokens"])
+		}
+		if body["store"] != false {
+			t.Errorf("encode sub-request %d store = %v, want false", i, body["store"])
+		}
+		if _, ok := body["messages"]; ok {
+			t.Errorf("encode sub-request %d must not carry a messages array", i)
+		}
+		part := encodeImagePart(t, body)
+		url, ok := part[reqcommon.FieldImageURL].(string)
+		if !ok {
+			t.Fatalf("encode sub-request %d part carries no string image_url: %v", i, part)
+		}
+		if _, dup := primed[url]; dup {
+			t.Errorf("image %q was primed more than once", url)
+		}
+		primed[url] = part
+	}
+
+	// Both images are primed, exactly once each.
+	for _, want := range []string{contentData, outputData} {
+		if _, ok := primed[want]; !ok {
+			t.Errorf("no encode sub-request primed %q", want)
+		}
+	}
+	// The part goes out unreshaped, so the client's detail sibling comes along.
+	if part, ok := primed[contentData]; ok && part["detail"] != "auto" {
+		t.Errorf("encode dropped the client's detail sibling, got %v", part["detail"])
+	}
+
+	// Prefill clones the client's Responses body, caps it, and carries both
+	// transfer params.
+	if prefillBody == nil {
+		t.Fatal("prefill was not called")
+	}
+	if prefillBody["max_output_tokens"] != float64(1) {
+		t.Errorf("prefill max_output_tokens = %v, want 1", prefillBody["max_output_tokens"])
+	}
+	if prefillBody["store"] != false {
+		t.Errorf("prefill store = %v, want false", prefillBody["store"])
+	}
+	if _, ok := prefillBody["input"].([]any); !ok {
+		t.Error("prefill body must carry the client's input array")
+	}
+	for _, field := range []string{"kv_transfer_params", "ec_transfer_params"} {
+		if _, ok := prefillBody[field]; !ok {
+			t.Errorf("prefill body missing %s", field)
+		}
+	}
+	if len(reqCtx.ECTransferParams) != 2 {
+		t.Errorf("expected ec params merged for both images, got %d", len(reqCtx.ECTransferParams))
+	}
+
+	// Decode forwards the client's own body, uncapped, with each image part
+	// stamped with its entry's hash. The output-array image getting outputHash is
+	// what proves the three walks agreed on the order.
+	if decodeBody == nil {
+		t.Fatal("decode was not called")
+	}
+	if decodeBody["max_output_tokens"] != float64(40) {
+		t.Errorf("decode max_output_tokens = %v, want the client's 40", decodeBody["max_output_tokens"])
+	}
+	input := decodeBody["input"].([]any)
+	contentPart := input[0].(map[string]any)["content"].([]any)[1].(map[string]any)
+	if contentPart["uuid"] != contentHash {
+		t.Errorf("content image uuid = %v, want %q", contentPart["uuid"], contentHash)
+	}
+	outputPart := input[1].(map[string]any)["output"].([]any)[0].(map[string]any)
+	if outputPart["uuid"] != outputHash {
+		t.Errorf("output-array image uuid = %v, want %q", outputPart["uuid"], outputHash)
+	}
+}
+
+// TestFullPipeline_MessagesFormat runs an Anthropic Messages request with three
+// images through E/P/D in the Messages format. The second turn's tool_result
+// image comes before that turn's own image, the order vLLM renders them in.
+func TestFullPipeline_MessagesFormat(t *testing.T) {
+	images := []struct{ data, hash string }{
+		{"Zmlyc3Q=", "vllm-hash-first"},
+		{"dG9vbA==", "vllm-hash-tool"},
+		{"bGFzdA==", "vllm-hash-last"},
+	}
+
+	var renderPath string
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		renderPath = r.URL.Path
+		hashes := make([]string, len(images))
+		placeholders := make([]any, len(images))
+		kwargs := make([]string, len(images))
+		for i, image := range images {
+			hashes[i] = image.hash
+			placeholders[i] = map[string]any{"offset": 1 + 3*i, "length": 3}
+			kwargs[i] = "dGVuc29y"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+			"features": map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: hashes},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: placeholders},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: kwargs},
+			},
+		})
+	}))
+	defer renderServer.Close()
+
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		switch phase := r.Header.Get(reqcommon.EPPProfileHeaderKey); phase {
+		case gateway.PhaseEncode:
+			// Key the ec params off the image the sub-request primes, so a swap
+			// between images fails the assertions below.
+			hash := ""
+			for _, image := range images {
+				if strings.Contains(string(body), image.data) {
+					hash = image.hash
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ec_transfer_params": map[string]any{hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+			})
+
+		case gateway.PhasePrefill:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "abc123", "peer_host": "10.0.0.2", "peer_port": 5502},
+			})
+
+		case gateway.PhaseDecode:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "message", "role": "assistant",
+				"content": []map[string]any{{"type": "text", "text": "Three pictures."}},
+			})
+
+		default:
+			http.Error(w, "unexpected phase: "+phase, http.StatusNotFound)
+		}
+	}))
+	defer gatewayServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gatewayServer.URL, MaxIdleConnsPerHost: 10})
+
+	stepConfigs := []config.StepConfig{
+		{Type: "replace-media-urls", Params: map[string]any{"download_timeout": "5s"}},
+		{Type: "render", Params: map[string]any{}},
+		{Type: "encode", Params: map[string]any{"use_openai_format": true, steps.ParamECConnector: ec.NIXL}},
+		{Type: "prefill", Params: map[string]any{"use_openai_format": true, steps.ParamKVConnector: kv.NIXL, steps.ParamECConnector: ec.NIXL}},
+		{Type: "decode", Params: map[string]any{steps.ParamKVConnector: kv.NIXL}},
+	}
+
+	pipelineSteps := make([]pipeline.Step, 0, len(stepConfigs))
+	for _, sc := range stepConfigs {
+		step, err := pipeline.Build(sc.Type, gwClient, sc.Params)
+		if err != nil {
+			t.Fatalf("building step %s: %v", sc.Type, err)
+		}
+		if ra, ok := step.(renderAware); ok {
+			ra.SetServiceAddress(renderServer.URL)
+		}
+		pipelineSteps = append(pipelineSteps, step)
+	}
+
+	image := func(data string) string {
+		return `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "` + data + `"}}`
+	}
+	requestBody := `{
+		"model": "test-model", "max_tokens": 40,
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "What is in these?"}, ` + image(images[0].data) + `]},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "screenshot", "input": {}}]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "toolu_1", "content": [` + image(images[1].data) + `]},
+				{"type": "text", "text": "and this one?"},
+				` + image(images[2].data) + `
+			]}
+		]
+	}`
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "messages-chain",
+		OriginalPath:     reqcommon.PathMessages,
+		OriginalBody:     []byte(requestBody),
+		Model:            "test-model",
+		KVTransferParams: make(map[string]any),
+		ResponseWriter:   recorder,
+	}
+	if err := json.Unmarshal([]byte(requestBody), &reqCtx.Body); err != nil {
+		t.Fatalf("unmarshalling request body: %v", err)
+	}
+
+	if err := pipeline.New(pipelineSteps).Execute(t.Context(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	respBody, _ := io.ReadAll(recorder.Result().Body)
+	if !strings.Contains(string(respBody), "Three pictures.") {
+		t.Fatalf("expected the decode response to reach the client, got: %s", respBody)
+	}
+	if want := reqcommon.PathMessages + "/render"; renderPath != want {
+		t.Errorf("render posted to %s, want %s", renderPath, want)
+	}
+
+	// render's hashes land on the entries in vLLM's render order.
+	if len(reqCtx.MultimodalEntries) != len(images) {
+		t.Fatalf("expected %d multimodal entries, got %d", len(images), len(reqCtx.MultimodalEntries))
+	}
+	for i, image := range images {
+		entry := reqCtx.MultimodalEntries[i]
+		if entry.Hash != image.hash || entry.Modality != reqcommon.ModalityImage {
+			t.Errorf("entry %d = {hash %q, modality %q}, want {%q, %q}", i, entry.Hash, entry.Modality, image.hash, reqcommon.ModalityImage)
+		}
+	}
+
+	// The ec params merge in entry order, so each entry's must carry the hash of
+	// the image its encode sub-request primed.
+	if len(reqCtx.ECTransferParams) != len(images) {
+		t.Fatalf("expected ec params for %d images, got %d", len(images), len(reqCtx.ECTransferParams))
+	}
+	for i, image := range images {
+		if reqCtx.ECTransferParams[i][image.hash] == nil {
+			t.Errorf("encode sub-request %d primed the wrong image, got ec params %v", i, reqCtx.ECTransferParams[i])
+		}
+	}
+}
+
+// encodeImagePart returns the single image part an encode priming body carries.
+func encodeImagePart(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	input, ok := body[reqcommon.FieldInput].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("encode body has no single-item input array: %v", body[reqcommon.FieldInput])
+	}
+	content, ok := input[0].(map[string]any)[reqcommon.FieldContent].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("encode body input item has no single content part: %v", input[0])
+	}
+	part, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("encode body content part is not an object: %v", content[0])
+	}
+	return part
 }

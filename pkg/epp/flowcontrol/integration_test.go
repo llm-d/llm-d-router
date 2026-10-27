@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	contractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
@@ -42,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictionordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
@@ -255,7 +257,7 @@ func TestDispatchOrderingSLODeadline(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(len(specs))
+		return h.reg.Stats().Global.Len == uint64(len(specs))
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -328,11 +330,11 @@ func TestPriorityBackpressure(t *testing.T) {
 
 	enqueue("low-1", lowKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "low-priority request should be queued")
 	enqueue("high-1", highKey)
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 2
+		return h.reg.Stats().Global.Len == 2
 	}, time.Second, time.Millisecond, "both requests should be queued")
 
 	detector.Unblock(1)
@@ -390,7 +392,7 @@ func TestFairnessRoundRobin(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(total)
+		return h.reg.Stats().Global.Len == clamp.Uint64(total)
 	}, time.Second, time.Millisecond, "all requests should be queued before unblocking")
 	detector.Unblock(1)
 
@@ -508,7 +510,7 @@ func TestGlobalAndBandCapacityInteraction(t *testing.T) {
 
 	const count = 3
 	release := h.fillQueue(t, key, count, 100, func() bool {
-		return h.reg.Stats().TotalLen == count
+		return h.reg.Stats().Global.Len == count
 	})
 
 	// The global limit (3) is exhausted while the band limit (10) still has room, so a further
@@ -547,7 +549,7 @@ func TestByteCapacityEnforcement(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// A 4th 300-byte request would bring the band to 1200 bytes, so it must be rejected.
@@ -586,7 +588,7 @@ func TestEmptyPoolRejectsAsNoEndpoints(t *testing.T) {
 
 	// 3 requests of 300 bytes each (900 total) fit within the 1000-byte budget.
 	release := h.fillQueue(t, key, 3, 300, func() bool {
-		return h.reg.Stats().TotalByteSize == 900
+		return h.reg.Stats().Global.ByteSize == 900
 	})
 
 	// The 4th request exceeds the byte budget, but because the pool is empty the rejection must
@@ -764,7 +766,7 @@ func TestCallerContextCancellationEvictsRequest(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before cancelling")
 	reqCancel()
 
@@ -861,7 +863,7 @@ func TestGracefulShutdownDrainsQueuedRequests(t *testing.T) {
 
 	// Wait for all requests to queue (detector is blocked).
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == uint64(numRequests)
+		return h.reg.Stats().Global.Len == uint64(numRequests)
 	}, time.Second, time.Millisecond, "all requests should be queued before shutdown")
 
 	// Simulate pod termination: cancel the controller context.
@@ -905,7 +907,7 @@ func TestZombieCapacityStarvation(t *testing.T) {
 		endpointCandidates: nonEmptyCandidates(),
 		controllerCfg: &controller.Config{
 			// The sweep finalizes and removes an expired item in the same pass, so queue-wait expiry cannot strand a
-			// zombie. A caller deadline can: it finalizes the item where it sits and leaves the sweep to reclaim it.
+			// zombie. Caller cancellation can: it finalizes the item where it sits and leaves the sweep to reclaim it.
 			// The budgets therefore sit beyond the test's horizon and the callers give up instead.
 			DefaultRequestTTL:        1 * time.Minute,
 			NoEndpointRequestTTL:     1 * time.Minute,
@@ -916,33 +918,12 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	// Fill capacity with 3 requests whose callers give up while they are queued.
-	expired := make(chan dispatchResult, 3)
-	for i := 0; i < 3; i++ {
-		id := fmt.Sprintf("zombie-%d", i)
-		go func() {
-			reqCtx, reqCancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
-			defer reqCancel()
-			req := &testRequest{id: id, key: key, byteSize: 100}
-			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
-			expired <- dispatchResult{id: id, outcome: outcome, err: err}
-		}()
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Fill capacity with 3 requests and have their callers give up only once all 3 are observably queued: only an item
+	// that reached a queue holds the capacity this test goes on to observe.
+	release := h.fillQueue(t, key, 3, 100, func() bool { return h.reg.Stats().Global.Len == 3 })
+	release()
 
-	// Wait for all to be finalized. Each must be evicted rather than rejected: only an item that reached a queue holds
-	// the capacity this test goes on to observe.
-	for i := 0; i < 3; i++ {
-		select {
-		case r := <-expired:
-			require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "zombie must have been queued before it was finalized")
-			require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("zombie %d was not finalized", i)
-		}
-	}
-
-	// All 3 expired, but cleanup hasn't run (interval=10s).
+	// All 3 are finalized, but cleanup hasn't run (interval=10s).
 	// The new request is rejected because zombies still consume capacity
 	// in the registry's atomic counters.
 	newResult := make(chan dispatchResult, 1)
@@ -956,10 +937,10 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	select {
 	case r := <-newResult:
-		// Zombie capacity starvation: the 3 expired items still occupy
+		// Zombie capacity starvation: the 3 finalized items still occupy
 		// capacity slots until the cleanup sweep reclaims them (interval=10s).
 		require.Equal(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
-			"post-zombie request should be rejected -- expired items consume capacity until cleanup sweep runs")
+			"post-zombie request should be rejected -- finalized items consume capacity until cleanup sweep runs")
 	case <-time.After(5 * time.Second):
 		t.Fatal("post-zombie request hung")
 	}
@@ -1209,7 +1190,7 @@ func TestFlowControlMetricsEmitted(t *testing.T) {
 	// would let an empty dispatch cycle consume its single slot (Saturation() charges inFlight
 	// even when nothing dispatches), leaving the request queued forever.
 	require.Eventually(t, func() bool {
-		return h.reg.Stats().TotalLen == 1
+		return h.reg.Stats().Global.Len == 1
 	}, time.Second, time.Millisecond, "request should be queued before the gauge is read")
 
 	// The increment happens before queue admission, so the gauge is already > 0 here.
@@ -1399,10 +1380,11 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 		ExpiryCleanupInterval:    50 * time.Millisecond,
 		EnqueueChannelBufferSize: 200,
 	}, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: &contractmocks.MockEndpointCandidates{},
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  &contractmocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	time.Sleep(10 * time.Millisecond)
@@ -1446,9 +1428,9 @@ func TestHighConcurrencyFlowChurnNoDeadlock(t *testing.T) {
 
 	// Verify aggregate stats are consistent after dispatch + GC.
 	stats := reg.Stats()
-	require.Equal(t, uint64(0), stats.TotalLen,
+	require.Equal(t, uint64(0), stats.Global.Len,
 		"registry should have 0 queued items after all dispatched + GC")
-	require.Equal(t, uint64(0), stats.TotalByteSize,
+	require.Equal(t, uint64(0), stats.Global.ByteSize,
 		"registry should have 0 bytes after all dispatched + GC")
 }
 

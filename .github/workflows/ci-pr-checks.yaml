@@ -1,6 +1,6 @@
 # Matrix jobs (e2e-image-common, e2e-image-router) are each
 # followed by a *-status job that aggregates their result, since GitHub
-# required status checks cannot reference individual matrix legs.
+# required status checks cannot reference individual matrix jobs.
 name: CI - Test
 
 on:
@@ -11,6 +11,8 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -57,7 +59,7 @@ jobs:
 
   verify-helm-charts:
     needs: check-changes
-    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+    if: ${{ needs.check-changes.outputs.helm == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
@@ -86,6 +88,7 @@ jobs:
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
           echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Go modules and build cache
         uses: actions/cache@v6
@@ -99,12 +102,16 @@ jobs:
 
       # Missing cache is not an error; compare-coverage.sh reports all
       # components as new and exits 0.
+      # Keyed on the builder's Go version: cmd/cover statement counts differ
+      # across Go releases.
       - name: Restore main branch coverage baseline
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/cache/restore@v6
         with:
           path: coverage/baseline
-          key: coverage-main
+          key: coverage-main-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          restore-keys: |
+            coverage-main-go${{ steps.go-cache.outputs.goversion }}-
 
       - name: Run unit tests
         shell: bash
@@ -132,13 +139,13 @@ jobs:
 
       - name: Compare coverage against main baseline
         id: coverage-gate
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         continue-on-error: true
         shell: bash
         run: make coverage-compare BASELINE_DIR=coverage/baseline
 
       - name: Find latest release branch
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         id: find-releases
         shell: bash
         run: |
@@ -152,7 +159,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Download and compare release coverage baselines
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         shell: bash
         run: |
           if [[ ! -s /tmp/release_branches.txt ]]; then
@@ -200,7 +207,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: coverage/baseline
-          key: coverage-main
+          key: coverage-main-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
       - name: Upload coverage artifact (release branches)
         if: >-
@@ -214,7 +221,7 @@ jobs:
           overwrite: true
 
       - name: Enforce coverage gate
-        if: github.event_name == 'pull_request' && steps.coverage-gate.outcome == 'failure'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.coverage-gate.outcome == 'failure'
         run: |
           echo "::error::Coverage regression detected -- see the coverage report in the job summary above."
           exit 1
@@ -240,7 +247,7 @@ jobs:
             archive: llm-d-router-endpoint-picker
           - name: simulator
             source: pull
-            image: ghcr.io/llm-d/llm-d-inference-sim:v0.10.2
+            image: ghcr.io/llm-d/llm-d-inference-sim:v1.0.0
             archive: llm-d-inference-sim
     name: e2e-image-common (${{ matrix.image.name }})
     steps:
@@ -248,13 +255,20 @@ jobs:
         if: ${{ matrix.image.source == 'build' }}
         uses: actions/checkout@v7
 
+      # $(BUILDER_IMAGE) in the Makefile resolves to the content hash tag. The
+      # e2e artifact has to match or test-e2e-run pulls a tag with nothing built.
+      - name: Compute builder tag
+        if: ${{ matrix.image.name == 'builder' }}
+        id: builder-tag
+        run: echo "tag=$(make print-builder-tag)" >> "$GITHUB_OUTPUT"
+
       - name: Build ${{ matrix.image.name }} image
         if: ${{ matrix.image.source == 'build' }}
         uses: ./.github/actions/docker-build-and-push
         with:
           docker-file: ${{ matrix.image.docker-file }}
           image-name: ${{ matrix.image.image-name }}
-          tag: dev
+          tag: ${{ matrix.image.name == 'builder' && steps.builder-tag.outputs.tag || 'dev' }}
           registry: ghcr.io/llm-d
           push: 'false'
           buildx-outputs: type=docker,dest=${{ runner.temp }}/${{ matrix.image.archive }}.tar
@@ -302,10 +316,6 @@ jobs:
             docker-file: Dockerfile.sidecar
             image-name: llm-d-router-disagg-sidecar
             archive: llm-d-router-disagg-sidecar
-          - name: renderer
-            source: pull
-            image: vllm/vllm-openai-cpu:v0.21.0
-            archive: vllm-openai-cpu
     name: e2e-image-router (${{ matrix.image.name }})
     steps:
       - name: Checkout source
@@ -392,12 +402,6 @@ jobs:
           name: e2e-image-simulator
           path: ${{ runner.temp }}/e2e-images
 
-      - name: Download renderer image
-        uses: actions/download-artifact@v8
-        with:
-          name: e2e-image-renderer
-          path: ${{ runner.temp }}/e2e-images
-
       - name: Load e2e images
         shell: bash
         run: |
@@ -412,4 +416,5 @@ jobs:
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
           PULL_VLLM_RENDER_IMAGE: "false"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXISTS_TIMEOUT: 90s
         run: make test-e2e-run

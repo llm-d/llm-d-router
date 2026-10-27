@@ -12,6 +12,8 @@ on:
     branches:
       - main
     types: [ opened, synchronize, reopened ]
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -19,7 +21,10 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Cancelling a push run to main drops its gosec SARIF upload for that
+  # commit, leaving the code scanning dashboard pinned to whichever earlier
+  # commit's run last completed. Superseded PR pushes still cancel.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   check-changes:
@@ -93,6 +98,7 @@ jobs:
             go-cache-${{ runner.os }}-
 
       - name: Run make build
+        id: build
         env:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
@@ -109,18 +115,28 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
           govulncheck ./...
 
+      # A lint or govulncheck failure would otherwise skip gosec, leaving the
+      # SARIF upload below with no file for that commit. Gated on the build
+      # because gosec on a tree that does not compile yields no findings and
+      # uploading that SARIF would close the open alerts in the gosec category.
       - name: Run make lint-security
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make lint-security
 
       # Fork PRs run with a read only GITHUB_TOKEN that cannot upload SARIF.
+      # merge_group is excluded because the checked-out ref is the merge
+      # queue's ephemeral gh-readonly-queue branch, which GitHub can delete
+      # before the upload's processing wait completes, failing the call with
+      # "ref not found". The persistent pull_request/push runs already cover
+      # code scanning for the branch.
       # Pinned to a commit SHA rather than a tag, unlike other actions in this
       # workflow, per GitHub's guidance for actions that write security data.
       - name: Upload gosec SARIF
-        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        if: ${{ !cancelled() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -135,3 +151,53 @@ jobs:
           path: gosec.sarif
           retention-days: 7
           if-no-files-found: warn
+
+  # The configs under test/testdata/plugins/stable/ are the written-down form of the
+  # backwards-compatibility promise made when a plugin is promoted to Stable. Editing
+  # one to make TestStablePluginConfigs pass would silently retract that promise, so
+  # within a major version they may only be added to, never changed or removed.
+  frozen-stable-configs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          # The diff below needs the merge base with the target branch.
+          fetch-depth: 0
+
+      - name: Fail on modified or deleted frozen plugin configs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # Added files (status A) are how a newly promoted plugin lands here, so
+          # only modifications, deletions and renames are rejected.
+          # Diffs migrating pre-v1.0 fixtures from deprecated v1alpha1 to v1 are allowed;
+          # any other modification, deletion, or rename is rejected.
+          changed=$(git diff --name-only --diff-filter=MDR "$BASE_SHA...HEAD" \
+            -- 'test/testdata/plugins/stable/v*' \
+            ':!test/testdata/plugins/stable/v1/data-parallel-profile-handler.yaml' || true)
+
+          disallowed=""
+          for f in $changed; do
+            if git diff -U0 -I '^[[:space:]]*apiVersion:' "$BASE_SHA...HEAD" -- "$f" | grep -q '^[+-][^+-]'; then
+              disallowed="$disallowed $f"
+            fi
+          done
+
+          if [ -n "$disallowed" ]; then
+            echo "::error::This PR changes frozen stable plugin configs:"
+            echo "$disallowed"
+            echo
+            echo "Files under test/testdata/plugins/stable/v*/ record the config surface a"
+            echo "Stable plugin promised to keep working for the whole major version, so they"
+            echo "may only be added to. If TestStablePluginConfigs is failing, the plugin"
+            echo "changed incompatibly: fix the plugin or drop it back to Beta. A change that"
+            echo "cannot be made compatibly belongs in the next major version's directory."
+            exit 1
+          fi
+
+          echo "No frozen stable plugin configs were changed."

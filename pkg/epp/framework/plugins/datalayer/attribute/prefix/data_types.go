@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +18,94 @@ limitations under the License.
 package prefix
 
 import (
+	"encoding/binary"
 	"maps"
 
+	"github.com/cespare/xxhash/v2"
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
+	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/constants"
 )
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// PrefixHashSetDataKey carries the cross-replica recent-window of prefix block
+// hashes this EPP believes an endpoint holds. Used by approx-prefix-cache-producer
+// when a CrossReplicaSyncer is configured.
+var PrefixHashSetDataKey = plugin.NewDataKey("PrefixHashSetDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
+
+// PrefixHashSet is a capped recent window of prompt hash sequences for one
+// endpoint, published across EPP replicas and union-aggregated before matching.
+// Each inner slice is one prompt's block hashes starting at block 0; prompts
+// are ordered oldest to newest.
+type PrefixHashSet struct {
+	Prompts [][]uint64
+	// digest caches ContentDigest for the Produce hot path. Not serialized.
+	digest       uint64
+	digestCached bool
+}
+
+// ContentDigest returns a content hash of Prompts. The value is cached on s
+// because Prompts are not mutated after the set is published.
+func (s *PrefixHashSet) ContentDigest() uint64 {
+	if s == nil {
+		return 0
+	}
+	if s.digestCached {
+		return s.digest
+	}
+	s.digest = hashPrompts(s.Prompts)
+	s.digestCached = true
+	return s.digest
+}
+
+// hashPrompts is length-prefixed so adjacent equal hashes from different
+// prompt boundaries cannot collide.
+func hashPrompts(prompts [][]uint64) uint64 {
+	h := xxhash.New()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(len(prompts)))
+	_, _ = h.Write(buf[:])
+	for _, p := range prompts {
+		binary.LittleEndian.PutUint64(buf[:], uint64(len(p)))
+		_, _ = h.Write(buf[:])
+		for _, v := range p {
+			binary.LittleEndian.PutUint64(buf[:], v)
+			_, _ = h.Write(buf[:])
+		}
+	}
+	return h.Sum64()
+}
+
+// Clone returns an independent copy of the hash set.
+func (s *PrefixHashSet) Clone() fwkdl.Cloneable {
+	if s == nil {
+		return nil
+	}
+	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts))}
+	for i, p := range s.Prompts {
+		cp := make([]uint64, len(p))
+		copy(cp, p)
+		out.Prompts[i] = cp
+	}
+	if s.digestCached {
+		out.digest = s.digest
+		out.digestCached = true
+	}
+	return out
+}
+
+// ReusablePrefixTokensDataKey identifies the request-wide reusable prefix
+// token floor published by a p2p-source-producer instance.
+var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey", p2psourceconstants.P2PSourcePluginType)
+
+// ReusablePrefixTokens is a floor on the prompt tokens every valid destination
+// can reuse either from confirmed local cache or by pulling confirmed CPU-tier
+// blocks from the sampled source.
+type ReusablePrefixTokens int
 
 // SpeculativeTierKey is the CachedBlocksByTier key for speculative index
 // entries, which carry no engine-reported device tier.
@@ -47,6 +126,11 @@ type PrefixCacheMatchInfo struct {
 	// the prefix-based PD decider) get an accurate cached-token figure rather
 	// than a tier-attenuated one. Defaults to matchBlocks when not set.
 	cachedBlockCount int
+	// unweighted count of contiguous cached prefix blocks confirmed by the
+	// engine. Speculative index entries are excluded, while confirmed blocks
+	// can move between device tiers across the prefix. Defaults to
+	// cachedBlockCount when not set.
+	confirmedCachedBlockCount int
 	// per device tier, the unweighted count of contiguous cached prefix blocks
 	// the endpoint holds in that tier, from the first block until the first
 	// block missing from that tier. A block held in several tiers counts once
@@ -59,14 +143,20 @@ type PrefixCacheMatchInfo struct {
 
 type MMMatchInfo struct {
 	MatchBlocks int
+	// MatchTokens is the MM feature tokens inside the matched prefix: each
+	// feature counts the overlap of its token span with the matched prefix,
+	// so a feature that starts or ends mid-block contributes only the tokens
+	// it holds.
+	MatchTokens int
 }
 
 func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *PrefixCacheMatchInfo {
 	return &PrefixCacheMatchInfo{
-		matchBlocks:      matchBlocks,
-		totalBlocks:      totalBlocks,
-		blockSizeTokens:  blockSizeTokens,
-		cachedBlockCount: matchBlocks,
+		matchBlocks:               matchBlocks,
+		totalBlocks:               totalBlocks,
+		blockSizeTokens:           blockSizeTokens,
+		cachedBlockCount:          matchBlocks,
+		confirmedCachedBlockCount: matchBlocks,
 	}
 }
 
@@ -74,6 +164,7 @@ func NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens int) *Pre
 // returns the receiver for chaining.
 func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *PrefixCacheMatchInfo {
 	p.cachedBlockCount = cachedBlockCount
+	p.confirmedCachedBlockCount = cachedBlockCount
 	return p
 }
 
@@ -96,6 +187,20 @@ func (p *PrefixCacheMatchInfo) CachedBlockCount() int {
 	return p.cachedBlockCount
 }
 
+// WithConfirmedCachedBlockCount sets the unweighted contiguous count of
+// confirmed, non-speculative cached blocks and returns the receiver for
+// chaining.
+func (p *PrefixCacheMatchInfo) WithConfirmedCachedBlockCount(confirmedCachedBlockCount int) *PrefixCacheMatchInfo {
+	p.confirmedCachedBlockCount = confirmedCachedBlockCount
+	return p
+}
+
+// ConfirmedCachedBlockCount returns the unweighted contiguous count of
+// confirmed, non-speculative cached blocks on the endpoint.
+func (p *PrefixCacheMatchInfo) ConfirmedCachedBlockCount() int {
+	return p.confirmedCachedBlockCount
+}
+
 // WithCachedBlocksByTier sets the per-device-tier contiguous cached-block
 // counts and returns the receiver for chaining. Takes ownership of the map;
 // the caller must not mutate it after the call.
@@ -112,12 +217,16 @@ func (p *PrefixCacheMatchInfo) CachedBlocksByTier() map[string]int {
 }
 
 func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
+	if p == nil {
+		return nil
+	}
 	clone := &PrefixCacheMatchInfo{
-		matchBlocks:        p.matchBlocks,
-		totalBlocks:        p.totalBlocks,
-		blockSizeTokens:    p.blockSizeTokens,
-		cachedBlockCount:   p.cachedBlockCount,
-		cachedBlocksByTier: maps.Clone(p.cachedBlocksByTier),
+		matchBlocks:               p.matchBlocks,
+		totalBlocks:               p.totalBlocks,
+		blockSizeTokens:           p.blockSizeTokens,
+		cachedBlockCount:          p.cachedBlockCount,
+		confirmedCachedBlockCount: p.confirmedCachedBlockCount,
+		cachedBlocksByTier:        maps.Clone(p.cachedBlocksByTier),
 	}
 	if p.mm != nil {
 		clone.mm = ptr.To(*p.mm)

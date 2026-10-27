@@ -70,7 +70,7 @@ func BenchmarkZMQSubscriber_Throughput(b *testing.B) {
 	start := time.Now()
 
 	for i := 0; i < b.N; i++ {
-		binary.BigEndian.PutUint64(seqBytes, uint64(i)) //nolint:gosec // i is a non-negative loop counter, conversion is safe
+		binary.BigEndian.PutUint64(seqBytes, uint64(i)) //#nosec -- i is a non-negative loop counter, conversion is safe
 		if err := pub.Send(zmq4.NewMsgFrom(topic, seqBytes, payload)); err != nil {
 			b.Fatalf("send failed: %v", err)
 		}

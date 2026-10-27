@@ -1,4 +1,20 @@
 /*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+/*
 Copyright 2026 llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +39,11 @@ import (
 
 // TopologicalSort performs Kahn's Algorithm on a DAG.
 // It returns the sorted order or an error if a cycle is detected.
+//
+// The order is a pure function of the graph: nodes that are ready at the same
+// time are dequeued largest name first, which the final reverse turns into
+// ascending name order. Without that tie-break the result would follow Go's
+// randomized map iteration and change from one call to the next.
 func TopologicalSort(graph map[string][]string) ([]string, error) {
 	// 1. Initialize in-degree map
 	inDegree := make(map[string]int)
@@ -49,9 +70,11 @@ func TopologicalSort(graph map[string][]string) ([]string, error) {
 
 	// 3. Process the queue
 	for len(queue) > 0 {
-		// Dequeue
-		u := queue[0]
-		queue = queue[1:]
+		// Dequeue the largest ready node. Kahn's Algorithm accepts any ready
+		// node, so the choice is free to serve as the tie-break.
+		slices.Sort(queue)
+		u := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
 
 		result = append(result, u)
 

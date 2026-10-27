@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -169,7 +170,7 @@ func parseFloatHeaderValue(s string) float64 {
 		return 0
 	}
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil || !metadata.IsFiniteFloat(v) {
 		return 0
 	}
 	return v

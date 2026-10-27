@@ -100,8 +100,11 @@ func mergeHeaders(extras, defaults []string) []string {
 	return merged
 }
 
-// compile-time interface assertion
-var _ requestcontrol.RequestHeaderProcessor = &Plugin{}
+// compile-time interface assertions
+var (
+	_ requestcontrol.RequestHeaderProcessor = &Plugin{}
+	_ plugin.ProducerPlugin                 = &Plugin{}
+)
 
 // Plugin resolves agent identity from provider-specific headers and stores it
 // as a request attribute for use by other subsystems.
@@ -114,9 +117,15 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
+// Produces declares the agent identity request attribute written by this
+// request-header processor.
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{AgentIdentityKey: ""}
+}
+
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	for _, header := range p.priorityHeaders {
-		if id := request.Headers[header]; id != "" {
+		if id := strings.TrimSpace(request.Headers[header]); id != "" {
 			request.PutAttribute(AgentIdentityKey, id)
 			return nil
 		}

@@ -19,10 +19,28 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
 var errInvalidJSON = errors.New("invalid JSON")
+
+// errDecodeAborted reports a decode request that aborted before relaying any of
+// its response, leaving the caller to write a status on its behalf.
+var errDecodeAborted = errors.New("decode aborted before sending a response")
+
+// JSON errors can contain payload values and client-supplied field paths.
+func jsonErrorForLog(err error) error {
+	var syntaxError *json.SyntaxError
+	if errors.As(err, &syntaxError) {
+		return fmt.Errorf("invalid JSON syntax at byte %d", syntaxError.Offset)
+	}
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		return fmt.Errorf("invalid JSON value at byte %d", typeError.Offset)
+	}
+	return err
+}
 
 // vLLM error response
 type errorResponse struct {
@@ -81,6 +99,7 @@ func sendError(err error, errorType string, code int, w http.ResponseWriter) err
 		return err
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, err = w.Write(b)
 	return err

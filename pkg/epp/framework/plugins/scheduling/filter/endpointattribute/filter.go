@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -81,7 +81,10 @@ type parameters struct {
 }
 
 // compile-time type assertion
-var _ scheduling.Filter = &EndpointAttributeFilter{}
+var (
+	_ scheduling.Filter     = &EndpointAttributeFilter{}
+	_ plugin.ConsumerPlugin = &EndpointAttributeFilter{}
+)
 
 // EndpointAttributeFilterFactory defines the factory function for EndpointAttributeFilter.
 func EndpointAttributeFilterFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {

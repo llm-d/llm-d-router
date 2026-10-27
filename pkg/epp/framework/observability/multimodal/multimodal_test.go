@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -59,8 +60,8 @@ func TestSummary(t *testing.T) {
 		{
 			name: "image only",
 			req: requestWith(
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "h1"},
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "h2"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h2"},
 			),
 			wantModality:  "image",
 			wantHashCount: 2,
@@ -69,7 +70,7 @@ func TestSummary(t *testing.T) {
 			name: "mixed modalities sorted and comma-joined",
 			req: requestWith(
 				fwkrh.MultiModalFeature{Modality: "video", Hash: "v1"},
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "i1"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "i1"},
 				fwkrh.MultiModalFeature{Modality: "audio", Hash: "a1"},
 			),
 			wantModality:  "audio,image,video",
@@ -97,7 +98,7 @@ func TestSummary(t *testing.T) {
 
 func TestSpanAttributes(t *testing.T) {
 	attrs := SpanAttributes(requestWith(
-		fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "h1"},
+		fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
 	))
 	assert.Len(t, attrs, 2)
 	assert.Equal(t, "mm.modality", string(attrs[0].Key))

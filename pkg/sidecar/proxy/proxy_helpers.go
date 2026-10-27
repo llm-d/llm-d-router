@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -12,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,35 +36,40 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+const logBodyBytesKey = "bodyBytes"
 
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
-	// Start SSRF protection validator
-	if err := s.allowlistValidator.Start(ctx); err != nil {
-		s.logger.Error(err, "Failed to start allowlist validator")
-		return err
-	}
-
-	ln, err := net.Listen("tcp", ":"+s.config.Port)
-	if err != nil {
-		s.logger.Error(err, "Failed to start")
-		return err
+	ln := s.HTTPListener
+	var err error
+	if ln == nil {
+		ln, err = net.Listen("tcp", ":"+s.config.Port)
+		if err != nil {
+			s.logger.Error(err, "Failed to start")
+			return err
+		}
 	}
 	s.addr = ln.Addr()
 	close(s.readyCh)
 
 	// Wrap handler with OpenTelemetry middleware to extract trace context from incoming requests
-	handler := otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
+	// The attribution handoff wraps it so every route's server span carries EPP's fairness identity.
+	handler := tracing.WithAttributionHandoff(otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			path := ""
 			if r.URL != nil {
 				path = r.URL.Path
 			}
-			return "llm_d.pd_proxy." + r.Method + " " + path
+			return r.Method + " " + path
 		}),
-	)
+	))
 
 	server := &http.Server{
 		Handler: handler,
@@ -61,16 +83,16 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	if s.config.SecureServing {
 		var tempCert tls.Certificate
 		if s.config.CertPath != "" {
-			certFile := s.config.CertPath + "/tls.crt"
-			keyFile := s.config.CertPath + "/tls.key"
+			certFile := filepath.Join(s.config.CertPath, "tls.crt")
+			keyFile := filepath.Join(s.config.CertPath, "tls.key")
 			tempCert, err = tls.LoadX509KeyPair(certFile, keyFile)
 			if err != nil {
-				return fmt.Errorf("failed to load TLS key pair from cert %q and key %q: %w", certFile, keyFile, err)
+				return fmt.Errorf("load key pair from cert %q and key %q: %w", certFile, keyFile, err)
 			}
 		} else {
-			tempCert, err = CreateSelfSignedTLSCertificate()
+			tempCert, err = tlsutil.CreateSelfSignedTLSCertificate(s.logger)
 			if err != nil {
-				return fmt.Errorf("failed to generate self-signed TLS certificate: %w", err)
+				return fmt.Errorf("create self-signed certificate: %w", err)
 			}
 		}
 		cert = &tempCert
@@ -83,37 +105,35 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		if s.config.CertPath != "" {
 			reloader, err := common.NewCertReloader(ctx, s.config.CertPath, cert)
 			if err != nil {
-				return fmt.Errorf("failed to start reloader: %w", err)
+				return fmt.Errorf("start certificate reloader: %w", err)
 			}
 			getCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 				return reloader.Get(), nil
 			}
 		}
 
+		// MinVersion is a literal so gosec/CodeQL can resolve it statically;
+		// Options.Complete already rejects a configured version below TLS 1.2.
+		// An empty suite list leaves CipherSuites nil, which selects the
+		// crypto/tls default, matching the coordinator and EPP.
+		minVersion := uint16(tls.VersionTLS12)
+		if s.config.TLSMinVersion > tls.VersionTLS12 {
+			minVersion = s.config.TLSMinVersion
+		}
 		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			},
+			MinVersion:     minVersion,
+			CipherSuites:   s.config.TLSCipherSuites,
 			GetCertificate: getCertificate,
 		}
-		s.logger.Info("server TLS configured")
 	}
+	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
 	// Setup graceful termination (not strictly needed for sidecars)
 	go func() {
 		<-ctx.Done()
 		s.logger.Info("shutting down")
 
-		// Stop allowlist validator
-		s.allowlistValidator.Stop()
-
-		ctx, cancelFn := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancelFn := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancelFn()
 		if err := server.Shutdown(ctx); err != nil {
 			s.logger.Error(err, "failed to gracefully shutdown")
@@ -148,6 +168,7 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.Is(err, syscall.ECONNREFUSED):
 			s.logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
+			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 
@@ -164,28 +185,107 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 }
 
 func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
-	defer func() { _ = r.Body.Close() }()
+	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	parsed, err := decodeRequestBody(raw)
+	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errInvalidJSON, err)
 	}
 	return raw, parsed, nil
 }
 
+// inspectedRequestFields lists the top-level request fields the sidecar reads
+// as Go values. decodeRequestBody decodes only these; every other field stays
+// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
+// map keys at every depth on Marshal, which would reorder free-form content
+// such as tools[].function.parameters that chat templates render into the
+// prompt verbatim.
+var inspectedRequestFields = map[string]struct{}{
+	reqcommon.FieldKVTransferParams:     {},
+	reqcommon.FieldECTransferParams:     {},
+	reqcommon.FieldMaxTokens:            {},
+	reqcommon.FieldMaxCompletionTokens:  {},
+	reqcommon.FieldMaxOutputTokens:      {},
+	reqcommon.FieldMinTokens:            {},
+	reqcommon.FieldSamplingParams:       {},
+	reqcommon.FieldStream:               {},
+	reqcommon.FieldStreamOptions:        {},
+	reqcommon.FieldEcho:                 {},
+	requestFieldN:                       {},
+	reqcommon.FieldCacheHitThreshold:    {},
+	reqcommon.FieldContinueFinalMessage: {},
+	reqcommon.FieldAddGenerationPrompt:  {},
+}
+
+// requestMessages returns the request's messages, decoding the array on first
+// use and keeping each element as raw bytes so that re-marshaling the request
+// preserves the key order inside every message. An absent field yields a nil
+// slice and no error.
+func requestMessages(req map[string]any) ([]json.RawMessage, error) {
+	switch v := req[reqcommon.FieldMessages].(type) {
+	case nil:
+		return nil, nil
+	case []json.RawMessage:
+		return v, nil
+	case json.RawMessage:
+		var messages []json.RawMessage
+		if err := json.Unmarshal(v, &messages); err != nil {
+			return nil, err
+		}
+		return messages, nil
+	default:
+		return nil, fmt.Errorf("messages is %T, want a JSON array", v)
+	}
+}
+
+// decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
+func decodeRequestBody(raw []byte) (map[string]any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("request body is not a JSON object")
+	}
+	parsed := make(map[string]any, len(fields))
+	for k, v := range fields {
+		if _, ok := inspectedRequestFields[k]; !ok {
+			parsed[k] = v
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(v, &decoded); err != nil {
+			return nil, err
+		}
+		parsed[k] = decoded
+	}
+	return parsed, nil
+}
+
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		if !errors.Is(err, errInvalidJSON) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(err.Error()))
-		} else if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		s.logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
 			s.logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
+	}
+	// createRoutes registers exact POST routes with and without a trailing slash
+	// for each inference path and derives apiType from DetectAPIType. The decoder
+	// catch-all handles extra segments and unrelated paths without reading their
+	// bodies, so those requests bypass this guard.
+	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
+			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+				s.logger.Error(writeErr, "failed to send error response to client")
+			}
+			return nil, nil, false
+		}
 	}
 	return raw, parsed, true
 }
@@ -234,4 +334,10 @@ func isRetryableStatus(statusCode int) bool {
 	return statusCode == http.StatusBadGateway ||
 		statusCode == http.StatusServiceUnavailable ||
 		statusCode == http.StatusGatewayTimeout
+}
+
+// WriteAll writes b to w, discarding the error. The caller has already sent
+// headers and status, so there is no recovery action for a write failure.
+func WriteAll(w io.Writer, b []byte) {
+	_, _ = w.Write(b)
 }

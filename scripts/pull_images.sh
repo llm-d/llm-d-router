@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# Copyright 2025 The llm-d Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 # Use the CONTAINER_RUNTIME from the environment, or default to docker if it's not set.
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 echo "Using container tool: ${CONTAINER_RUNTIME}"
@@ -7,14 +22,14 @@ echo "Using container tool: ${CONTAINER_RUNTIME}"
 # Set a default EPP_TAG if not provided
 EPP_TAG="${EPP_TAG:-dev}"
 # Set a default VLLM_SIMULATOR_TAG if not provided
-VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.10.2}"
+VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v1.0.0}"
 # Set the default routing side car image tag
 SIDECAR_TAG="${SIDECAR_TAG:-dev}"
 
 export EPP_IMAGE="${EPP_IMAGE:-ghcr.io/llm-d/llm-d-router-endpoint-picker:${EPP_TAG}}"
 export VLLM_IMAGE="${VLLM_IMAGE:-ghcr.io/llm-d/llm-d-inference-sim:${VLLM_SIMULATOR_TAG}}"
 export SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/llm-d/llm-d-router-disagg-sidecar:${SIDECAR_TAG}}"
-export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
+export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-${VLLM_IMAGE}}"
 # CI e2e jobs load image artifacts before invoking make. These toggles keep
 # image-pull from fetching runner-only images that are already loaded locally.
 PULL_EPP_IMAGE="${PULL_EPP_IMAGE:-true}"

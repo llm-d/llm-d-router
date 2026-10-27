@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,8 +49,9 @@ const (
 	LoraInfoWaitingAdaptersMetricName = "waiting_lora_adapters"
 	LoraInfoMaxAdaptersMetricName     = "max_lora"
 
-	CacheConfigBlockSizeInfoMetricName = "block_size"
-	CacheConfigNumGPUBlocksMetricName  = "num_gpu_blocks"
+	CacheConfigBlockSizeInfoMetricName   = "block_size"
+	CacheConfigNumGPUBlocksMetricName    = "num_gpu_blocks"
+	CacheConfigPrefixMatchUnitMetricName = "prefix_match_unit"
 )
 
 // Extractor implements the metrics extraction based on the model
@@ -109,6 +111,23 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	return produced
 }
 
+var _ sourcemetrics.FamilyReader = &Extractor{}
+
+// MetricFamilies lists the families of every registered engine mapping. An endpoint's engine
+// is known only at extraction time.
+func (ext *Extractor) MetricFamilies() []string {
+	var names []string
+	for _, mapping := range ext.registry.Mappings() {
+		names = append(names, mapping.MetricNames()...)
+		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks} {
+			if spec != nil {
+				names = append(names, spec.Name)
+			}
+		}
+	}
+	return names
+}
+
 // Extract transforms the typed metrics payload into endpoint attributes.
 func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]) error {
 	families := in.Payload
@@ -126,28 +145,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	updated := false
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.WaitingQueueSize = int(extractValue(metric))
+			clone.WaitingQueueSize = int(value)
 			updated = true
 		}
 	}
 
 	if spec := mapping.TotalRunningRequests; spec != nil { // extract running requests
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.RunningRequestsSize = int(extractValue(metric))
+			clone.RunningRequestsSize = int(value)
 			updated = true
 		}
 	}
 
 	if spec := mapping.KVCacheUtilization; spec != nil { // extract KV cache usage
-		if metric, err := spec.getLatestMetric(families); err != nil {
+		if value, err := spec.aggregateMetric(families, aggregateMax); err != nil {
 			errs = append(errs, err)
 		} else {
-			clone.KVCacheUsagePercent = extractValue(metric)
+			clone.KVCacheUsagePercent = value
 			updated = true
 		}
 	}
@@ -195,13 +214,28 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	trace := log.FromContext(ctx).V(logutil.TRACE)
 	for _, custom := range mapping.CustomMetrics {
-		metric, err := custom.Spec.getLatestMetric(families)
+		var value float64
+		var err error
+		if custom.Aggregation == metricAggregationSum {
+			value, err = custom.Spec.aggregateMetric(families, aggregateSum)
+		} else {
+			var metric *dto.Metric
+			metric, err = custom.Spec.getLatestMetric(families)
+			if err == nil {
+				value = extractValue(metric)
+			}
+		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", custom.AttributeKey, err))
+			if !custom.Optional {
+				errs = append(errs, fmt.Errorf("customMetrics entry %q: %w", custom.AttributeKey, err))
+			} else if trace.Enabled() {
+				trace.Info("Skipped optional customMetrics entry", "attributeKey", custom.AttributeKey, "reason", err.Error())
+			}
 			continue
 		}
-		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(extractValue(metric)))
+		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(value))
 		updated = true
 	}
 
@@ -210,7 +244,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		// Guarded: this runs per endpoint per scrape tick, and the logger
 		// construction, MetricNames slice, and boxed args all allocate even
 		// when TRACE is off.
-		if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+		if trace.Enabled() {
 			trace.Info("Refreshed metrics",
 				"endpoint", ep.GetMetadata().ID,
 				"metrics", mapping.MetricNames(),
@@ -235,10 +269,7 @@ func getEngineTypeFromEndpoint(ep fwkdl.Endpoint, labelKey string) string {
 
 	engineType, ok := meta.Labels[labelKey]
 	if !ok || engineType == "" {
-		engineType, ok = meta.Labels[legacyGAIEEngineTypeLabelKey]
-		if !ok || engineType == "" {
-			return DefaultEngineType
-		}
+		return DefaultEngineType
 	}
 
 	return engineType
@@ -268,10 +299,11 @@ func populateLoRAMetrics(clone *fwkdl.Metrics, metric *dto.Metric, errs *[]error
 }
 
 // populateCacheInfoMetrics updates the metrics with cache info from the metric labels.
-// blockSizeLabelName and numBlocksLabelName allow engines to use different label names
-// (e.g. SGLang uses "page_size" and "num_pages" instead of "block_size" and "num_gpu_blocks").
+// blockSizeLabelName and numBlocksLabelName allow engines to carry the values under
+// label names other than "block_size" and "num_gpu_blocks".
 func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSizeLabelName, numBlocksLabelName string, errs *[]error) {
 	clone.CacheBlockSize = 0
+	clone.CachePrefixMatchUnit = 0
 	for _, label := range metric.GetLabel() {
 		switch label.GetName() {
 		case blockSizeLabelName:
@@ -286,6 +318,14 @@ func populateCacheInfoMetrics(clone *fwkdl.Metrics, metric *dto.Metric, blockSiz
 			if label.GetValue() != "" {
 				if val, err := strconv.Atoi(label.GetValue()); err == nil {
 					clone.CacheNumBlocks = val
+				} else {
+					*errs = append(*errs, err)
+				}
+			}
+		case CacheConfigPrefixMatchUnitMetricName:
+			if label.GetValue() != "" && label.GetValue() != "None" {
+				if val, err := strconv.Atoi(label.GetValue()); err == nil {
+					clone.CachePrefixMatchUnit = val
 				} else {
 					*errs = append(*errs, err)
 				}

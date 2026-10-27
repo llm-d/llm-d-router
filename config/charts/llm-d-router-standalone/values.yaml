@@ -19,12 +19,43 @@ router:
     #             Service, reaching EPP over the EPP Service. Envoy only.
     mode: sidecar
 
-    # Replica count for the proxy Deployment when mode=service.
+    # Replica count for the proxy Deployment when mode=service. Ignored when autoscaling is enabled.
     replicas: 2
+
+    # Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s
+    # draining window time to complete and allows in-flight connections to drain.
+    terminationGracePeriodSeconds: 70
+
+    # Autoscaling configuration for the proxy Deployment (when mode=service).
+    # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the proxy Deployment.
+    # router.proxy.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+      # targetMemoryUtilizationPercentage: 80
+      # behavior: {}
+      # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
 
     # Whether the proxy passes traffic through (fail-open) when EPP is
     # unreachable, for active/passive resiliency.
     failOpen: true
+
+    # Priority Routing configuration for Envoy ext_proc cluster (only supported in mode: service).
+    priorityRouting:
+      enabled: false
+      primaryReplicas: 1
+      standbyReplicas: 1
+      connectTimeout: "0.250s"
+      dnsRefreshRate: "5s"
+      healthyPanicThreshold: 10.0
+
+    # Active gRPC health check configuration for the ext_proc cluster.
+    healthCheckInterval: "10s"
+    healthCheckTimeout: "2s"
+    healthCheckUnhealthyThreshold: 3
+    healthCheckHealthyThreshold: 2
 
     resources:
       requests:
@@ -43,6 +74,8 @@ router:
           name: envoy
           data:
             envoy.yaml: |
+              {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+              {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
               admin:
                 address:
                   socket_address:
@@ -122,6 +155,14 @@ router:
                             typed_config:
                               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                               stat_prefix: http-8081
+                              # Only EPP may set the destination header. Removing any client-supplied value
+                              # before route selection keeps clients from picking the backend themselves.
+                              early_header_mutation_extensions:
+                                - name: envoy.http.early_header_mutation.header_mutation
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+                                    mutations:
+                                      - remove: x-gateway-destination-endpoint
                               route_config:
                                 name: vllm
                                 virtual_hosts:
@@ -130,6 +171,13 @@ router:
                                     routes:
                                       - match:
                                           prefix: "/"
+                                          {{- if $fallback }}
+                                          # EPP sets this header and clears the route cache, so requests it
+                                          # scheduled re-match here and go to the endpoint it picked.
+                                          headers:
+                                            - name: x-gateway-destination-endpoint
+                                              present_match: true
+                                          {{- end }}
                                         route:
                                           cluster: original_destination_cluster
                                           timeout: 86400s
@@ -140,6 +188,35 @@ router:
                                           envoy.filters.http.ext_proc:
                                             "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
                                             config: {}
+                                      {{- if $fallback }}
+                                      # Fail-open: EPP was unreachable and set no destination, so load-balance
+                                      # across the model servers without endpoint picking.
+                                      - match:
+                                          prefix: "/"
+                                        route:
+                                          cluster: inference_pool_fallback
+                                          timeout: 86400s
+                                          idle_timeout: 86400s
+                                          upgrade_configs:
+                                            - upgrade_type: websocket
+                                        # Internal routing and screening headers (pkg/epp/util/request/headers.go).
+                                        # EPP removes client values on the scheduled route; this route skips EPP. The
+                                        # P/D sidecar connects to the worker addresses they carry. Removed here rather
+                                        # than before ext_proc because EPP screeners read x-llm-d-pin-host-port.
+                                        request_headers_to_remove:
+                                          - x-llm-d-prefiller-host-port
+                                          - x-prefiller-host-port
+                                          - x-llm-d-encoder-hosts-ports
+                                          - x-encoder-hosts-ports
+                                          - x-data-parallel-host-port
+                                          - x-llm-d-kv-cache-source-host-port
+                                          - x-kv-cache-source-host-port
+                                          - x-llm-d-pin-host-port
+                                        typed_per_filter_config:
+                                          envoy.filters.http.ext_proc:
+                                            "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                                            config: {}
+                                      {{- end }}
                               http_filters:
                                 - name: envoy.filters.http.ext_proc
                                   typed_config:
@@ -206,10 +283,65 @@ router:
                     original_dst_lb_config:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
+                  {{- if $fallback }}
+                  # Model servers behind the headless fallback Service, used only when fail-open
+                  # skips EPP. STRICT_DNS resolves every ready pod IP (refreshed every 5s by default).
+                  - name: inference_pool_fallback
+                    type: STRICT_DNS
+                    connect_timeout: 10s
+                    lb_policy: LEAST_REQUEST
+                    circuit_breakers:
+                      thresholds:
+                        - max_connections: 40000
+                          max_pending_requests: 40000
+                          max_requests: 40000
+                    outlier_detection:
+                      split_external_local_origin_errors: true
+                      consecutive_local_origin_failure: 5
+                      base_ejection_time: 30s
+                      max_ejection_percent: 50
+                    load_assignment:
+                      cluster_name: inference_pool_fallback
+                      endpoints:
+                        - lb_endpoints:
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s.%s.svc.%s" (include "llm-d-router.proxy.fallbackServiceName" .) .Release.Namespace (.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: {{ include "llm-d-router.proxy.fallbackPort" . }}
+                  {{- end }}
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
+                    {{- if $isPriorityRouting }}
+                    # Short connection timeout allows Envoy to quickly detect unreachable primary pods and trigger failover.
+                    connect_timeout: {{ .Values.router.proxy.priorityRouting.connectTimeout }}
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    # Refresh DNS for headless Service endpoints regularly to discover newly scheduled EPP pods.
+                    dns_refresh_rate: {{ .Values.router.proxy.priorityRouting.dnsRefreshRate }}
+                    common_lb_config:
+                      # Avoid routing traffic to newly started hosts until their first health check passes.
+                      ignore_new_hosts_until_first_hc: true
+                      # Prevent Envoy from entering panic mode (broadcasting to all priorities) during primary ejection.
+                      healthy_panic_threshold:
+                        value: {{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}
+                    outlier_detection:
+                      # Treat local origin (connection/TCP) failures separately from HTTP errors for immediate failover.
+                      split_external_local_origin_errors: true
+                      # Eject primary endpoint immediately on the first local connection failure (e.g. pod killed).
+                      consecutive_local_origin_failure: 1
+                      enforcing_consecutive_local_origin_failure: 100
+                      # Max percentage of hosts that can be ejected via outlier detection.
+                      max_ejection_percent: 50
+                      # Hold ejection for 30s to allow replacement pod startup and avoid flapping.
+                      base_ejection_time: 30s
+                    {{- else if include "llm-d-router.proxy.discoveryServiceName" . }}
+                    # Fail fast on EPP pod IPs that are gone but not yet removed by DNS refresh or health checks.
+                    connect_timeout: 1s
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    {{- else }}
                     connect_timeout: 86400s
-                    lb_policy: LEAST_REQUEST
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    {{- end }}
                     circuit_breakers:
                       thresholds:
                         - max_connections: 40000
@@ -217,10 +349,11 @@ router:
                           max_requests: 40000
                           max_retries: 1024
                     health_checks:
-                      - timeout: 2s
-                        interval: 10s
-                        unhealthy_threshold: 3
-                        healthy_threshold: 2
+                      # Active gRPC health checking for the ext_proc cluster.
+                      - timeout: {{ .Values.router.proxy.healthCheckTimeout }}
+                        interval: {{ .Values.router.proxy.healthCheckInterval }}
+                        unhealthy_threshold: {{ .Values.router.proxy.healthCheckUnhealthyThreshold }}
+                        healthy_threshold: {{ .Values.router.proxy.healthCheckHealthyThreshold }}
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
@@ -235,7 +368,46 @@ router:
                             initial_connection_window_size: 1048576
                     load_assignment:
                       cluster_name: ext_proc
+                      {{- if $isPriorityRouting }}
+                      {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                      # Overprovisioning factor scales traffic shifting between priority tiers.
+                      policy:
+                        overprovisioning_factor: {{ mul 100 $primaryReplicas }}
+                      {{- end }}
                       endpoints:
+                        {{- if $isPriorityRouting }}
+                        {{- $primaryReplicas := include "llm-d-router.priorityRouting.primaryReplicas" . | int }}
+                        {{- $standbyReplicas := include "llm-d-router.priorityRouting.standbyReplicas" . | int }}
+                        - locality:
+                            region: ext_proc/primary
+                          priority: 0
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $i := untilStep 0 (int $primaryReplicas) 1 }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        - locality:
+                            region: ext_proc/standby
+                          priority: 1
+                          load_balancing_weight:
+                            value: 1
+                          lb_endpoints:
+                            {{- range $j := untilStep 0 (int $standbyReplicas) 1 }}
+                            {{- $ord := add (int $primaryReplicas) (int $j) }}
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: 9002
+                              load_balancing_weight: 1
+                            {{- end }}
+                        {{- else }}
                         - locality:
                             region: ext_proc/e2e/0
                           lb_endpoints:
@@ -245,6 +417,7 @@ router:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
                               load_balancing_weight: 1
+                        {{- end }}
         name: envoy-proxy
         image: docker.io/envoyproxy/envoy:distroless-v1.33.2
         command: "envoy"
@@ -290,7 +463,7 @@ router:
         volumes:
           - name: config
             configMap:
-              name: envoy
+              name: '{{ .Values.router.proxy.presets.envoy.configMap.name }}'
               items:
                 - key: envoy.yaml
                   path: envoy.yaml

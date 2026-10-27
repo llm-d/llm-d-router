@@ -1,0 +1,46 @@
+{{- define "llm-d-epp.proxy-hpa" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- $autoscaling := dig "autoscaling" dict .Values.router.proxy -}}
+{{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") $autoscaling.enabled -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "llm-d-router.proxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.proxySelectorLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "llm-d-router.proxyName" . }}
+  minReplicas: {{ $autoscaling.minReplicas | default 1 }}
+  maxReplicas: {{ $autoscaling.maxReplicas | default 5 }}
+  {{- with $autoscaling.metrics }}
+  metrics:
+    {{- toYaml . | nindent 4 }}
+  {{- else }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $autoscaling.targetCPUUtilizationPercentage | default 80 }}
+  {{- if $autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $autoscaling.targetMemoryUtilizationPercentage }}
+  {{- end }}
+  {{- end }}
+  {{- with $autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+{{- end -}}
+{{- end -}}

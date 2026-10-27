@@ -84,7 +84,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 > [!NOTE]
 > You can pre-pull external images to avoid slow downloads:
 > ```
-> docker pull ghcr.io/llm-d/llm-d-inference-sim:v0.10.2
+> docker pull ghcr.io/llm-d/llm-d-inference-sim:v1.0.0
 > docker pull vllm/vllm-openai-cpu:v0.21.0
 > ```
 
@@ -520,7 +520,7 @@ a shared PVC (`ec-cache-pvc`) for encoder embeddings transfer.
 
 | Variable | Default | Description |
 |---|---|---|
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.0.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`). Defaults to the simulator image. |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. `echo` returns the input prompt as the response (useful for routing validation). `random` returns random sentences from a pre-defined bank. Only applies when using the simulator overlay. |
 
 ### Cleanup
@@ -614,10 +614,10 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_EXTRA_ARGS_E` | _(empty)_ | Additional flags for the Encoder vLLM container (e.g. `--mm-processor-kwargs={}`) |
 | `VLLM_EXTRA_ARGS_P` | _(empty)_ | Additional flags for the Prefill vLLM container (e.g. `--gpu-memory-utilization=0.9`) |
 | `VLLM_EXTRA_ARGS_D` | _(empty)_ | Additional flags for the Decode vLLM container (e.g. `--tensor-parallel-size=2`) |
-| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v0.10.2` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
+| `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.0.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
-| `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
+| `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster. The e2e targets set it to `VLLM_IMAGE`, since the simulator serves every `/render` route the token-producer plugin calls. Pass it on the make command line (`make test-e2e-run VLLM_RENDER_IMAGE=...`) to render against real vLLM; an environment variable does not override a target-specific assignment |
 
 ### Coverage
 
@@ -690,8 +690,8 @@ helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION \
   --set inferenceExtension.enabled=true
 ```
 
-For more details, see the Gateway API Inference Extension
-[getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+For more details, see the
+[Gateway API Inference Extension documentation](https://gateway-api-inference-extension.sigs.k8s.io/).
 
 ### RBAC and Permissions
 
@@ -870,8 +870,8 @@ helm uninstall kgateway -n kgateway-system
 helm uninstall kgateway-crds -n kgateway-system
 ```
 
-For more details, see the Gateway API Inference Extension
-[getting started guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+For more details, see the
+[Gateway API Inference Extension documentation](https://gateway-api-inference-extension.sigs.k8s.io/).
 
 ## Logging
 
@@ -980,7 +980,7 @@ N and N+1, providing users with a two release grace period to adjust before the 
 Please use the [template](.github/PULL_REQUEST_TEMPLATE.md) provided when creating a PR.
 If using coding agents, please ensure that the agent uses the PR template format as well.
 The template contains a `release-notes` section which must be filled for any change that has
-user facing impact.
+user facing impact; a required check validates it on the PR.
 
 For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
 

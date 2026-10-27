@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -30,6 +34,7 @@ var (
 	// We must extract these, then strip them so they don't leak to the backend.
 	InputControlHeaders = lowerHeaderNames(
 		metadata.FlowFairnessIDKey,
+		metadata.InferenceTTLHeaderKey,
 		metadata.ObjectiveKey,
 		metadata.ModelNameRewriteKey,
 		metadata.SubsetFilterKey,
@@ -38,6 +43,9 @@ var (
 		metadata.VideoFPSHeaderKey,
 		metadata.VideoDurationHeaderKey,
 		metadata.VideoResolutionHeaderKey,
+		metadata.AudioDurationHeaderKey,
+		metadata.AudioBytesPerSecondHeaderKey,
+		reqcommon.RevisionDecisionIDHeaderKey,
 	)
 
 	// OutputInjectionHeaders are headers EPP injects for the backend.
@@ -46,17 +54,54 @@ var (
 		lowerHeaderNames(
 			metadata.DestinationEndpointKey,
 			metadata.DestinationEndpointServedKey,
+			metadata.FlowQueueDurationHeaderKey,
 		),
 		errcommon.RequestDroppedReasonHeaderKey,
+		tracing.FairnessIDHandoffHeader,
+		tracing.FairnessSourceHandoffHeader,
+	)
+
+	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.
+	// Only EPP plugins may set them: client values are dropped on ingress and
+	// removed from the forwarded request when no plugin sets them. Deprecated
+	// aliases are included, so neither spelling can be supplied by a client.
+	InternalRoutingHeaders = routingHeaderNames(
+		routing.PrefillEndpointHeader,
+		routing.EncoderEndpointsHeader,
+		routing.DataParallelEndpointHeader,
+		routing.KVCacheSourceHeader,
+	)
+
+	// ScreeningHeaders are client headers that screener plugins read. They stay
+	// on the request on ingress, unlike InternalRoutingHeaders. EPP does not
+	// re-set them and removes them from the forwarded request, so the model
+	// server does not see them.
+	ScreeningHeaders = sets.New(
+		routing.EndpointPinHeader,
 	)
 
 	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
-	ProtocolHeaders = sets.New("content-length")
+	// W3C trace context headers are re-injected from the active span in
+	// generateHeaders and must not be forwarded from the client.
+	ProtocolHeaders = sets.New(
+		"content-length",
+		"traceparent",
+		"tracestate",
+		"baggage",
+	)
 )
 
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
-	return InputControlHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
+	return InputControlHeaders.Has(k) || ScreeningHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
+}
+
+func routingHeaderNames(keys ...string) sets.Set[string] {
+	headers := sets.New[string]()
+	for _, key := range keys {
+		headers.Insert(routing.HeaderNames(key)...)
+	}
+	return headers
 }
 
 func lowerHeaderNames(keys ...string) sets.Set[string] {

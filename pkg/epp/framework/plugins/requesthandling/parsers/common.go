@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +17,44 @@ limitations under the License.
 
 package parsers
 
+import (
+	"strings"
+
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
+)
+
 const (
 	// MethodPathKey is the header key for the request path.
 	MethodPathKey = ":path"
 )
+
+// RewritePriority strips any client-supplied priority from a JSON-map payload and
+// writes the EPP-resolved priority; it reports whether the payload changed.
+// Non-map payloads are returned unchanged. Callers decide whether priority
+// propagation is enabled (see requestHandler.propagatePriority); this helper
+// always injects when invoked. EPP priority follows SGLang semantics (higher =
+// more urgent), matching the InferenceObjective convention; vLLM's native
+// scheduler is the opposite (lower = more urgent), so the value is negated for
+// vLLM targets to keep the same relative ordering across backends.
+func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, false, nil
+	}
+	delete(m, "priority")
+	if isVLLMTarget(ctx) {
+		priority = -priority
+	}
+	m["priority"] = priority
+	return m, true, nil
+}
+
+// isVLLMTarget reports whether the scheduled endpoint is a vLLM backend.
+func isVLLMTarget(ctx fwkrh.PriorityRewriteContext) bool {
+	meta := ctx.TargetEndpoint
+	if meta == nil || meta.Labels == nil {
+		return false
+	}
+	return strings.EqualFold(meta.Labels[fwkplugins.EngineTypeLabelKey], "vllm")
+}

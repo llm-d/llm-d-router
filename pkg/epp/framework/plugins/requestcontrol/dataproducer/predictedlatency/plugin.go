@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,13 +30,13 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -79,6 +80,7 @@ type PredictedLatency struct {
 	inFlightLoadDataKey          plugin.DataKey
 	encoderCacheDataKey          plugin.DataKey
 	latencyPredictionInfoDataKey plugin.DataKey
+	failureLog                   rate.Sometimes
 }
 
 // endpointInFlightLoad reads the InFlightLoad attribute published by the
@@ -319,6 +321,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		encoderCacheDataKey:          attrmm.EncoderCacheMatchInfoKey.WithNonEmptyProducerName(config.EncoderCacheMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(name),
+		failureLog:                   rate.Sometimes{Interval: predictionFailureLogInterval},
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(
@@ -433,7 +436,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 }
 
 func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksched.InferenceRequest) (*predictedLatencyCtx, error) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	if item := pl.sloContextStore.Get(id); item != nil {
 		return item.Value(), nil
 	}
@@ -441,12 +444,12 @@ func (pl *PredictedLatency) getPredictedLatencyContextForRequest(request *fwksch
 }
 
 func (pl *PredictedLatency) setPredictedLatencyContextForRequest(request *fwksched.InferenceRequest, ctx *predictedLatencyCtx) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	pl.sloContextStore.Set(id, ctx, ttlcache.DefaultTTL)
 }
 
 func (pl *PredictedLatency) deletePredictedLatencyContextForRequest(request *fwksched.InferenceRequest) {
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 	pl.sloContextStore.Delete(id)
 }
 
@@ -460,10 +463,10 @@ func parseFloatHeader(request fwksched.InferenceRequest, headerName string) (flo
 		return 0, nil
 	}
 	parsedFloat, err := strconv.ParseFloat(headerValue, 64)
-	if err != nil {
+	if err != nil || !metadata.IsFiniteFloat(parsedFloat) {
 		return 0, errcommon.Error{
 			Code: errcommon.BadRequest,
-			Msg:  headerName + " must be a float",
+			Msg:  headerName + " must be a finite float",
 		}
 	}
 	return parsedFloat, nil

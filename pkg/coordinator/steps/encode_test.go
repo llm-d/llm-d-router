@@ -19,12 +19,24 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -37,8 +49,8 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
-			t.Errorf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhaseEncode {
+			t.Errorf("expected x-llm-d-epp-profile: encode, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 
 		body, _ := io.ReadAll(r.Body)
@@ -62,12 +74,12 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 			t.Errorf("expected features in encode request")
 		}
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 		if len(imageHashes) != 1 {
 			t.Errorf("expected 1 hash per encode request, got %d", len(imageHashes))
 		}
 		kwargsData, _ := features["kwargs_data"].(map[string]any)
-		imageKwargs, _ := kwargsData[ModalityImage].([]any)
+		imageKwargs, _ := kwargsData[string(reqcommon.ModalityImage)].([]any)
 		if len(imageKwargs) != 1 {
 			t.Errorf("expected 1 kwargs_data per encode request, got %d", len(imageKwargs))
 		}
@@ -103,9 +115,9 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 		Model:     testModelName,
 		TokenIDs:  []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
-			{Index: 2, Hash: "hash-c", KwargsData: "dGVuc29yLWM=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: "dGVuc29yLWI=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-c", KwargsData: "dGVuc29yLWM=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
 		},
 	}
 
@@ -144,6 +156,114 @@ func TestEncodeStep_ParallelFanOut(t *testing.T) {
 	}
 }
 
+func TestEncodeStep_ParallelFanOutSharesRevisionDecisionIDAndAggregatesResponseHeaders(t *testing.T) {
+	const (
+		imageCount         = 5
+		revisionDecisionID = "decision-id"
+	)
+	type routingValues struct {
+		slice string
+		zone  string
+	}
+	valuesByHash := map[string]routingValues{
+		"h1": {slice: "slice-01", zone: "zone-b"},
+		"h2": {slice: "slice-02", zone: "zone-a"},
+		"h3": {slice: "slice-01", zone: "zone-b"},
+		"h4": {slice: "slice-02", zone: "zone-a"},
+		"h5": {slice: "slice-01", zone: "zone-b"},
+	}
+
+	var requestCount atomic.Int32
+	allRequestsStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(reqcommon.RevisionDecisionIDHeaderKey); got != revisionDecisionID {
+			t.Errorf("revision decision ID = %q, want %q", got, revisionDecisionID)
+		}
+		for _, name := range []string{"X-Disagg-Slice", "X-Route-Zone"} {
+			if got := r.Header.Get(name); got != "" {
+				t.Errorf("parallel encode request carried %s=%q from a sibling response", name, got)
+			}
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read encode body: %v", err)
+			return
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("decode encode body: %v", err)
+			return
+		}
+		features, _ := parsed["features"].(map[string]any)
+		mmHashes, _ := features["mm_hashes"].(map[string]any)
+		imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
+		if len(imageHashes) != 1 {
+			t.Errorf("encode request has %d image hashes, want 1", len(imageHashes))
+			return
+		}
+		hash, _ := imageHashes[0].(string)
+		values, found := valuesByHash[hash]
+		if !found {
+			t.Errorf("unexpected image hash %q", hash)
+			return
+		}
+
+		if requestCount.Add(1) == imageCount {
+			close(allRequestsStarted)
+		}
+		select {
+		case <-allRequestsStarted:
+		case <-r.Context().Done():
+			return
+		}
+
+		w.Header().Set("X-Disagg-Slice", values.slice)
+		w.Header().Set("X-Route-Zone", values.zone)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		"max_parallel":      imageCount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:          "req-header-mode",
+		RevisionDecisionID: revisionDecisionID,
+		Model:              testModelName,
+		TokenIDs:           []int{1, 32000, 32000, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h4", KwargsData: "dDQ=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h5", KwargsData: "dDU=", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 1}},
+		},
+	}
+
+	p, err := pipeline.NewWithForwardResponseHeaders([]pipeline.Step{step}, []string{"X-Disagg-Slice", "X-Route-Zone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.Execute(ctx, reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	forwarded := reqCtx.ForwardedHeaders()
+	if got := forwarded["x-disagg-slice"]; got != "slice-01" {
+		t.Errorf("forwarded slice = %q, want %q", got, "slice-01")
+	}
+	if got := forwarded["x-route-zone"]; got != "zone-b" {
+		t.Errorf("forwarded zone = %q, want %q", got, "zone-b")
+	}
+}
+
 // TestEncodeStep_SkipsInvalidECTransferParams verifies that an encoder
 // response whose ec_transfer_params is present but unusable (non-object,
 // explicit null, or empty object) is skipped rather than failing the encode,
@@ -163,7 +283,7 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": tc.value})
 			}))
 			defer server.Close()
@@ -181,7 +301,7 @@ func TestEncodeStep_SkipsInvalidECTransferParams(t *testing.T) {
 				Model:     testModelName,
 				TokenIDs:  []int{1, 32000, 32000, 2345},
 				MultimodalEntries: []pipeline.MultimodalEntry{
-					{Index: 0, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+					{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 				},
 			}
 
@@ -209,7 +329,7 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 		_ = json.Unmarshal(body, &parsed)
 		features, _ := parsed["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -228,9 +348,9 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 		Model:     "test",
 		TokenIDs:  []int{1, 32000, 32000, 32000},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 2, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h3", KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 	}
 
@@ -240,26 +360,117 @@ func TestEncodeStep_PartialFailure(t *testing.T) {
 	}
 }
 
+func TestEncodeStep_FailureLogRecord(t *testing.T) {
+	const (
+		statusMsg  = `"msg"="encode fanout status"`
+		requestMsg = `"msg"="encode fanout request"`
+	)
+	tests := []struct {
+		name string
+		// status 0 is a transport failure: the server is closed before the request.
+		status  int
+		wantMsg string
+		wantKey string
+	}{
+		{name: "server error status", status: http.StatusServiceUnavailable, wantMsg: statusMsg, wantKey: `"status"=503`},
+		{name: "client error status", status: http.StatusBadRequest, wantMsg: statusMsg, wantKey: `"status"=400`},
+		{name: "success status other than 200", status: http.StatusAccepted, wantMsg: statusMsg, wantKey: `"status"=202`},
+		{name: "transport failure", wantMsg: requestMsg, wantKey: `"path"=`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+				}
+			}))
+			defer server.Close()
+			if tt.status == 0 {
+				server.Close()
+			}
+
+			step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger, records := captureLogger(logutil.DEFAULT)
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID: "req-1",
+				Model:     "test",
+				TokenIDs:  []int{1, 32000},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+				},
+			}
+			if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err == nil {
+				t.Fatal("expected an error from the failed sub-request")
+			}
+
+			notWantMsg := statusMsg
+			if tt.wantMsg == statusMsg {
+				notWantMsg = requestMsg
+			}
+			if got := countRecords(records(), tt.wantMsg, `"index"=0`, tt.wantKey); got != 1 {
+				t.Errorf("%d records contain %s with %s, want 1, records=%v", got, tt.wantMsg, tt.wantKey, records())
+			}
+			if got := countRecords(records(), notWantMsg); got != 0 {
+				t.Errorf("%d records contain %s, want 0, records=%v", got, notWantMsg, records())
+			}
+		})
+	}
+}
+
+func TestEncodeStep_DebugRequestRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{"use_openai_format": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger, records := captureLogger(logutil.DEBUG)
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+		TokenIDs:  []int{1, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h2", KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+	if err := step.Execute(log.IntoContext(context.Background(), logger), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for index := range reqCtx.MultimodalEntries {
+		want := []string{`"msg"="sub-request body"`, fmt.Sprintf(`"index"=%d`, index), `"bodyLen"=`}
+		if got := countRecords(records(), want...); got != 1 {
+			t.Errorf("%d records contain %v, want 1, records=%v", got, want, records())
+		}
+	}
+}
+
 func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(gateway.EPPProfileHeader) != gateway.PhaseEncode {
-			t.Fatalf("expected EPP-Profile: encode, got %q", r.Header.Get(gateway.EPPProfileHeader))
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhaseEncode {
+			t.Fatalf("expected x-llm-d-epp-profile: encode, got %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		}
 
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &receivedBody)
 
-		// Extract hash from tokens.features
-		tokens, _ := receivedBody["tokens"].(map[string]any)
-		features, _ := tokens["features"].(map[string]any)
-		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
-		hash, _ := imageHashes[0].(string)
+		// The chat/completions sub-request carries no per-image hash (that only
+		// travels through MultimodalEntries), so key the fake response off the
+		// single entry's known hash.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
-				hash: map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
 			},
 		})
 	}))
@@ -275,7 +486,7 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -286,13 +497,13 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 					"role": "user",
 					"content": []any{
 						map[string]any{"type": "text", "text": "describe"},
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": reqcommon.PartTypeImageURL, reqcommon.FieldImageURL: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},
 		},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 	}
 
@@ -317,29 +528,13 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 		t.Fatalf("expected 1 content part (image only), got %d", len(content))
 	}
 	part := content[0].(map[string]any)
-	if part["type"] != imageURLPartType {
-		t.Fatalf("expected %s content part, got %v", imageURLPartType, part["type"])
+	if part["type"] != reqcommon.PartTypeImageURL {
+		t.Fatalf("expected %s content part, got %v", reqcommon.PartTypeImageURL, part["type"])
 	}
 
-	// Verify tokens nested field
-	tokens, ok := receivedBody["tokens"].(map[string]any)
-	if !ok {
-		t.Fatal("expected tokens field in chat/completions format")
-	}
-	tokenIDs, _ := tokens["token_ids"].([]any)
-	if len(tokenIDs) != 4 { // BOS + 3 placeholders
-		t.Fatalf("expected 4 token_ids in tokens, got %d", len(tokenIDs))
-	}
-	tokensFeatures, ok := tokens["features"].(map[string]any)
-	if !ok {
-		t.Fatal("expected features in tokens field")
-	}
-	// tokens.features should NOT have kwargs_data
-	if _, ok := tokensFeatures["kwargs_data"]; ok {
-		t.Fatal("tokens.features should not have kwargs_data in chat format")
-	}
-	if _, ok := tokensFeatures["mm_hashes"]; !ok {
-		t.Fatal("tokens.features should have mm_hashes")
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("chat/completions format should not have a tokens field")
 	}
 
 	// Verify no top-level token_ids or features
@@ -351,11 +546,215 @@ func TestEncodeStep_ChatCompletionsFormat(t *testing.T) {
 	}
 }
 
-// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens is a
-// The encode chat sub-request is built fresh from the request context and does
-// not carry the client's sampling fields, so max_completion_tokens is not
-// propagated and is never injected: max_tokens=1 alone caps output.
-func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T) {
+// TestEncodeStep_ResponsesFormat verifies the encode sub-request for a
+// Responses-format request carries the image under "input" with an
+// input_image part whose image_url is a bare string, mirroring
+// TestEncodeStep_ChatCompletionsFormat for the "messages" shape.
+func TestEncodeStep_ResponsesFormat(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":             testModelName,
+			"max_output_tokens": 800,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedBody["model"] != testModelName {
+		t.Fatalf("expected model from body, got %v", receivedBody["model"])
+	}
+
+	input, ok := receivedBody["input"].([]any)
+	if !ok {
+		t.Fatal("expected input in responses format")
+	}
+	item := input[0].(map[string]any)
+	content := item["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 content part (image only), got %d", len(content))
+	}
+	part := content[0].(map[string]any)
+	if part["type"] != reqcommon.PartTypeInputImage {
+		t.Fatalf("expected %s content part, got %v", reqcommon.PartTypeInputImage, part["type"])
+	}
+	if _, ok := part["image_url"].(string); !ok {
+		t.Fatalf("expected image_url to be a bare string, got %T", part["image_url"])
+	}
+
+	// The encode probe is capped on the Responses output field, not max_tokens.
+	if receivedBody[reqcommon.FieldMaxOutputTokens] != float64(1) {
+		t.Fatalf("expected max_output_tokens capped to 1, got %v", receivedBody[reqcommon.FieldMaxOutputTokens])
+	}
+
+	// Verify no tokens field (dead field, never consumed downstream)
+	if _, ok := receivedBody["tokens"]; ok {
+		t.Fatal("responses format should not have a tokens field")
+	}
+	if _, ok := receivedBody["token_ids"]; ok {
+		t.Fatal("responses format should not have top-level token_ids")
+	}
+	if _, ok := receivedBody["features"]; ok {
+		t.Fatal("responses format should not have top-level features")
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_PreservesDetail verifies that a client's
+// optional detail field on an input_image part survives onto the synthetic
+// encode sub-request. It is a sibling of image_url on the Responses part
+// rather than nested inside it, so only forwarding the whole part unreshaped
+// carries it across.
+func TestEncodeStep_ResponsesFormat_PreservesDetail(t *testing.T) {
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-detail": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-detail",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc", "detail": "low"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-detail", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	input := receivedBody["input"].([]any)
+	part := input[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if part["detail"] != "low" {
+		t.Fatalf("expected detail=low preserved on the encode sub-request, got %v", part["detail"])
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL verifies that a
+// Responses input_image part whose image_url isn't a string (e.g. a
+// file_id-referenced image) fails the request rather than encoding a blank
+// image_url sub-request. This normally cannot reach encode because
+// replace-media-urls rejects the same shape first, but encode must reject it
+// too: it selects its part by entry.Index, so a pipeline without
+// replace-media-urls would otherwise prime the encoder with a blank image
+// under a real image's hash.
+func TestEncodeStep_ResponsesFormat_RejectsNonStringImageURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("encode worker should not be called for a malformed input_image part")
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-bad-image",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "file_id": "file-abc123"},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-bad", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for input_image part with no string image_url")
+	}
+	// Not ErrBadRequest: replace-media-urls rejects a part with no payload as
+	// it builds the entries, so reaching this guard is a coordinator bug.
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("a coordinator pairing bug is not a client error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "carries no media") {
+		t.Fatalf("expected the no-payload guard to reject, got %v", err)
+	}
+}
+
+// TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens verifies the
+// encode chat sub-request carries max_completion_tokens=1 unconditionally
+// (via reqcommon.CapSingleToken), even though the
+// sub-request is built fresh from the request context and never copies the
+// client's own max_completion_tokens value.
+func TestEncodeStep_ChatCompletionsFormat_CapsMaxCompletionTokens(t *testing.T) {
 	var receivedBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +776,7 @@ func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T)
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-chat-max-completion-tokens",
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        testModelName,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		Body: map[string]any{
@@ -387,13 +786,13 @@ func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T)
 				map[string]any{
 					"role": "user",
 					"content": []any{
-						map[string]any{"type": imageURLPartType, imageURLPartType: map[string]any{"url": "data:image/jpeg;base64,abc"}},
+						map[string]any{"type": reqcommon.PartTypeImageURL, reqcommon.FieldImageURL: map[string]any{"url": "data:image/jpeg;base64,abc"}},
 					},
 				},
 			},
 		},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 	}
 
@@ -404,8 +803,8 @@ func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T)
 	if receivedBody["max_tokens"] != float64(1) {
 		t.Fatalf("expected encode sub-request max_tokens capped to 1, got %v", receivedBody["max_tokens"])
 	}
-	if _, ok := receivedBody["max_completion_tokens"]; ok {
-		t.Fatalf("expected encode sub-request to omit max_completion_tokens, got %v", receivedBody["max_completion_tokens"])
+	if receivedBody["max_completion_tokens"] != float64(1) {
+		t.Fatalf("expected encode sub-request max_completion_tokens capped to 1, got %v", receivedBody["max_completion_tokens"])
 	}
 }
 
@@ -414,7 +813,7 @@ func TestEncodeStep_ChatCompletionsFormat_OmitsMaxCompletionTokens(t *testing.T)
 // must remain nil so the prefill step emits no ec_transfer_params field.
 func TestEncodeStep_TextOnly(t *testing.T) {
 	gatewayCallCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gatewayCallCount++
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -449,37 +848,44 @@ func TestEncodeStep_TextOnly(t *testing.T) {
 // multimodal entries are present: the prefill worker runs the vision encoder
 // inline, so the encode fan-out and EC handoff are skipped.
 func TestEncodeStep_SkipsForGenerate(t *testing.T) {
-	gatewayCallCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gatewayCallCount++
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	for name, path := range map[string]string{
+		"exact path":    reqcommon.PathVLLMGenerate,
+		"prefixed path": "/prefix" + reqcommon.PathVLLMGenerate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gatewayCallCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				gatewayCallCount++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
-	if err != nil {
-		t.Fatal(err)
-	}
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	reqCtx := &pipeline.RequestContext{
-		RequestID:    "req-generate",
-		Model:        "test-model",
-		OriginalPath: gateway.DefaultGeneratePath,
-		TokenIDs:     []int{1, 32000, 32000, 2},
-		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-		},
-	}
+			reqCtx := &pipeline.RequestContext{
+				RequestID:    "req-generate",
+				Model:        "test-model",
+				OriginalPath: path,
+				TokenIDs:     []int{1, 32000, 32000, 2},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+				},
+			}
 
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gatewayCallCount != 0 {
-		t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
-	}
-	if reqCtx.ECTransferParams != nil {
-		t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gatewayCallCount != 0 {
+				t.Fatalf("expected no gateway calls for generate request, got %d", gatewayCallCount)
+			}
+			if reqCtx.ECTransferParams != nil {
+				t.Fatalf("expected nil ECTransferParams for generate request, got %v", reqCtx.ECTransferParams)
+			}
+		})
 	}
 }
 
@@ -489,7 +895,7 @@ func TestEncodeStep_SkipsForGenerate(t *testing.T) {
 // the field. The encode step must not error -- missing metadata is warn-and-continue.
 func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 	var requestCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requestCount.Add(1)
 		// 2xx with no ec_transfer_params field.
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -512,8 +918,8 @@ func TestEncodeStep_EncoderReturnsNoECParams(t *testing.T) {
 		Model:     "test-model",
 		TokenIDs:  []int{1, 32000, 32000, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-			{Index: 1, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-b", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
 		},
 	}
 
@@ -538,7 +944,7 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 		receivedTokenIDs, _ = parsed["token_ids"].([]any)
 		features, _ := parsed["features"].(map[string]any)
 		mmHashes, _ := features["mm_hashes"].(map[string]any)
-		imageHashes, _ := mmHashes[ModalityImage].([]any)
+		imageHashes, _ := mmHashes[string(reqcommon.ModalityImage)].([]any)
 		hash, _ := imageHashes[0].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ec_transfer_params": map[string]any{
@@ -556,7 +962,7 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 		Model:     "test",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 2345, 6789},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 	}
 
@@ -580,9 +986,9 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 }
 
 // TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format
-// encoder sub-request caps output to a single token: sampling_params carries
-// max_tokens=1 and strips min_tokens (it defaults to 0, keeping min_tokens <=
-// max_tokens).
+// encoder sub-request carries sampling_params.max_tokens=1. The sub-request is
+// built from RequestContext, so the min_tokens check guards against the step
+// starting to forward client sampling_params.
 func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	var samplingParams map[string]any
 
@@ -605,7 +1011,7 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 		Model:     "test",
 		TokenIDs:  []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 	}
 
@@ -618,4 +1024,939 @@ func TestEncodeStep_GenerateFormat_CapsSingleToken(t *testing.T) {
 	if _, ok := samplingParams["min_tokens"]; ok {
 		t.Fatalf("expected sampling_params.min_tokens to be stripped, got %v", samplingParams["min_tokens"])
 	}
+}
+
+// ---- multimodal encoder fanout ---------------------------------------------
+
+// The walker returns media parts in request order; grouping by modality keeps
+// each modality's own discovery order.
+func TestCollectMediaParts_MixedModalities(t *testing.T) {
+	items := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": "describe"},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u1"}},
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u2"}},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u3"}},
+				map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u4"}},
+				map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d5", "format": "wav"}},
+			},
+		},
+	}
+	partsByMod := groupMediaPartsByModality(collectMediaParts(items, reqcommon.APITypeChatCompletions))
+	if got := len(partsByMod[reqcommon.ModalityImage]); got != 2 {
+		t.Errorf("image parts = %d, want 2", got)
+	}
+	if got := len(partsByMod[reqcommon.ModalityAudio]); got != 2 {
+		t.Errorf("audio parts = %d, want 2 (audio_url + input_audio)", got)
+	}
+	if got := len(partsByMod[reqcommon.ModalityVideo]); got != 1 {
+		t.Errorf("video parts = %d, want 1", got)
+	}
+	// audio_url comes before input_audio (walker order in request).
+	if url, _ := partsByMod[reqcommon.ModalityAudio][0].part["audio_url"].(map[string]any); url["url"] != "u2" {
+		t.Errorf("audio[0] not the audio_url part: %+v", partsByMod[reqcommon.ModalityAudio][0].part)
+	}
+	if data, _ := partsByMod[reqcommon.ModalityAudio][1].part["input_audio"].(map[string]any); data["data"] != "d5" {
+		t.Errorf("audio[1] not the input_audio part: %+v", partsByMod[reqcommon.ModalityAudio][1].part)
+	}
+}
+
+// A Responses request collects every media-typed part, the same set a chat
+// request does: the two walks differ only in which arrays an item holds.
+// input_text is the control -- it names no media on any API.
+func TestCollectMediaParts_ResponsesCollectsEveryMediaPart(t *testing.T) {
+	items := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": "describe"},
+				map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "u1"},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u2"}},
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u3"}},
+				map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u4"}},
+				map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d5", "format": "wav"}},
+			},
+		},
+	}
+	parts := collectMediaParts(items, reqcommon.APITypeResponses)
+	if len(parts) != 5 {
+		t.Fatalf("collected %d parts, want 5: %+v", len(parts), parts)
+	}
+	want := []reqcommon.Modality{
+		reqcommon.ModalityImage, // input_image
+		reqcommon.ModalityImage, // image_url
+		reqcommon.ModalityAudio, // audio_url
+		reqcommon.ModalityVideo, // video_url
+		reqcommon.ModalityAudio, // input_audio
+	}
+	for i, mod := range want {
+		if parts[i].modality != mod {
+			t.Errorf("part %d modality = %q, want %q", i, parts[i].modality, mod)
+		}
+	}
+	// Request order is what pairs entries with parts, so the walk must not
+	// reorder the two images around the audio between them.
+	if parts[0].part["image_url"] != "u1" {
+		t.Errorf("part 0 = %+v, want the input_image carrying u1", parts[0].part)
+	}
+}
+
+// Every part whose type names a modality is collected, whether or not it still
+// carries usable media: replace-media-urls already rejected the unusable ones
+// (see collectMediaRefs), so filtering here would drop a part that has an entry
+// and shift the pairing.
+func TestCollectMediaParts_KeepsEveryMediaTypedPart(t *testing.T) {
+	items := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				// No inner map.
+				map[string]any{"type": "image_url"},
+				// url is nil.
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": nil}},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-good"}},
+				// url is a number.
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": 42}},
+				map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "au-good"}},
+				// Empty data.
+				map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "", "format": "wav"}},
+				// No inner map.
+				map[string]any{"type": "input_audio"},
+				map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AA==", "format": "wav"}},
+				// Not a media type at all, so not collected.
+				map[string]any{"type": "text", "text": "hi"},
+			},
+		},
+	}
+	partsByMod := groupMediaPartsByModality(collectMediaParts(items, reqcommon.APITypeChatCompletions))
+	if got := len(partsByMod[reqcommon.ModalityImage]); got != 3 {
+		t.Fatalf("image parts = %d, want 3 (every image-typed part)", got)
+	}
+	if got := len(partsByMod[reqcommon.ModalityAudio]); got != 5 {
+		t.Fatalf("audio parts = %d, want 5 (every audio-typed part)", got)
+	}
+
+	// mediaPartCarriesPayload separates the usable parts, and has to agree with
+	// the rule replace-media-urls rejects on.
+	wantPayload := map[reqcommon.Modality][]bool{
+		reqcommon.ModalityImage: {false, false, true},
+		reqcommon.ModalityAudio: {false, true, false, false, true},
+	}
+	for mod, want := range wantPayload {
+		for i, w := range want {
+			if got := mediaPartCarriesPayload(partsByMod[mod][i].part); got != w {
+				t.Errorf("mediaPartCarriesPayload(%s[%d]) = %v, want %v: %+v",
+					mod, i, got, w, partsByMod[mod][i].part)
+			}
+		}
+	}
+}
+
+// Each modality's content part is forwarded to the encoder in its native
+// OpenAI shape, picked by the entry's position among the entries sharing its
+// modality.
+func TestBuildEncodeBody_PerModalityPart(t *testing.T) {
+	step := &EncodeStep{}
+	reqCtx := &pipeline.RequestContext{Model: testModelName, Body: map[string]any{"model": testModelName}}
+	partsByMod := map[reqcommon.Modality][]mediaPart{
+		reqcommon.ModalityImage: {
+			{part: map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,IMG"}}},
+		},
+		reqcommon.ModalityAudio: {
+			{part: map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,AUD"}}},
+			{part: map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "IA==", "format": "wav"}}},
+		},
+		reqcommon.ModalityVideo: {
+			{part: map[string]any{"type": "video_url", "video_url": map[string]any{"url": "data:video/mp4;base64,VID"}}},
+		},
+	}
+
+	for _, tc := range []struct {
+		name     string
+		modality reqcommon.Modality
+		localIdx int
+		wantType string
+	}{
+		{"image", reqcommon.ModalityImage, 0, "image_url"},
+		{"audio_url", reqcommon.ModalityAudio, 0, "audio_url"},
+		{"input_audio", reqcommon.ModalityAudio, 1, "input_audio"},
+		{"video_url", reqcommon.ModalityVideo, 0, "video_url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := pipeline.MultimodalEntry{Modality: tc.modality}
+			body, err := step.buildEncodeBody(reqCtx, entry, tc.localIdx, reqcommon.APITypeChatCompletions, partsByMod)
+			if err != nil {
+				t.Fatalf("in-range lookup returned error: %v", err)
+			}
+			messages, ok := body["messages"].([]map[string]any)
+			if !ok || len(messages) != 1 {
+				t.Fatalf("messages = %+v, want one synthetic turn", body["messages"])
+			}
+			content, ok := messages[0]["content"].([]map[string]any)
+			if !ok || len(content) != 1 {
+				t.Fatalf("content = %+v, want the single media part", messages[0]["content"])
+			}
+			if content[0]["type"] != tc.wantType {
+				t.Errorf("type = %v, want %q", content[0]["type"], tc.wantType)
+			}
+			if _, ok := content[0][tc.wantType]; !ok {
+				t.Errorf("inner key %q missing: %+v", tc.wantType, content[0])
+			}
+		})
+	}
+}
+
+// An out-of-range local index is an error rather than a stand-in content part:
+// it only happens when entries and parts got out of line upstream. The error
+// names the modality to keep the miss traceable.
+func TestBuildEncodeBody_OutOfRangeErrors(t *testing.T) {
+	step := &EncodeStep{}
+	reqCtx := &pipeline.RequestContext{Model: testModelName, Body: map[string]any{"model": testModelName}}
+	partsByMod := map[reqcommon.Modality][]mediaPart{
+		reqcommon.ModalityImage: {
+			{part: map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u0"}}},
+		},
+	}
+	for _, tc := range []struct {
+		name     string
+		modality reqcommon.Modality
+		localIdx int
+	}{
+		{"image past end", reqcommon.ModalityImage, 99},
+		{"audio absent", reqcommon.ModalityAudio, 0},
+		{"video absent", reqcommon.ModalityVideo, 0},
+		{"negative index", reqcommon.ModalityImage, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := pipeline.MultimodalEntry{Modality: tc.modality}
+			got, err := step.buildEncodeBody(reqCtx, entry, tc.localIdx, reqcommon.APITypeChatCompletions, partsByMod)
+			if err == nil {
+				t.Fatalf("expected error, got body %+v", got)
+			}
+			if got != nil {
+				t.Errorf("expected nil body alongside the error, got %+v", got)
+			}
+			if !strings.Contains(err.Error(), string(tc.modality)) {
+				t.Errorf("error %q should name the modality %q", err, tc.modality)
+			}
+		})
+	}
+}
+
+// One more entry than the request has media parts, the shape of an entry<->part
+// pairing bug: the fanout must fail rather than send the encoder a sub-request
+// with no media in it.
+func TestEncodeStep_MissingMediaPartFails(t *testing.T) {
+	// The well-formed entry may or may not reach the encoder before the
+	// broken one fails the group, so this only has to answer plausibly.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{"use_openai_format": true})
+	if err != nil {
+		t.Fatalf("NewEncodeStep: %v", err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "missing-part",
+		Model:        "llama-3",
+		OriginalPath: reqcommon.PathChatCompletions,
+		TokenIDs:     []int{1, 32000, 2345},
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,IMG"}},
+				}},
+			},
+		},
+		// Two entries, one part: the second has nothing to pair with.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h0", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "h1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected an error when an entry has no media part")
+	}
+	if !strings.Contains(err.Error(), "no image media part") {
+		t.Errorf("error should name the missing part, got %v", err)
+	}
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Error("a coordinator pairing bug is not a client error; expected no ErrBadRequest")
+	}
+}
+
+// fanoutPairing is what one encode sub-request says about the entry it was built
+// for: the content part's type and the payload it carries. A chat-completions
+// sub-request carries no mm_hashes, so its entry is identified by position in
+// the fanout -- captureFanout pins max_parallel to 1 so errgroup issues them one
+// at a time, in entry order.
+type fanoutPairing struct {
+	partType string
+	payload  string
+}
+
+// readFanoutPairing extracts the pairing a single encode sub-request asserts.
+// One entry per sub-request means exactly one message holding exactly one
+// content part; anything else is itself a failure.
+func readFanoutPairing(t *testing.T, body map[string]any) fanoutPairing {
+	t.Helper()
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("sub-request must carry exactly one message, got %v", msgs)
+	}
+	content, _ := msgs[0].(map[string]any)["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("sub-request must carry exactly one content part, got %v", content)
+	}
+	part, _ := content[0].(map[string]any)
+	var got fanoutPairing
+	got.partType, _ = part["type"].(string)
+	inner, _ := part[got.partType].(map[string]any)
+	// URL-based parts carry the payload under "url", input_audio under "data".
+	if url, ok := inner["url"].(string); ok {
+		got.payload = url
+	} else {
+		got.payload, _ = inner["data"].(string)
+	}
+	return got
+}
+
+// captureFanout runs the encode step against a recording backend and returns
+// each sub-request's pairing, in the order the fanout issued them.
+func captureFanout(t *testing.T, reqCtx *pipeline.RequestContext) []fanoutPairing {
+	t.Helper()
+	var mu sync.Mutex
+	var pairings []fanoutPairing
+	inFlight := 0
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Position identifies a sub-request's entry only while the fanout is
+		// serialized, so fail loudly if two overlap: raising max_parallel must
+		// not quietly turn the assertions below into claims about arrival order.
+		mu.Lock()
+		inFlight++
+		if inFlight > 1 {
+			t.Errorf("fanout sub-requests overlapped; position no longer identifies an entry")
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}()
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read encoder body: %v", err)
+		}
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		got := readFanoutPairing(t, parsed)
+		mu.Lock()
+		pairings = append(pairings, got)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
+	}))
+	defer encoderBackend.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: encoderBackend.URL})
+	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
+		"use_openai_format": true,
+		"max_parallel":      1,
+	})
+	if err != nil {
+		t.Fatalf("NewEncodeStep: %v", err)
+	}
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	return pairings
+}
+
+// assertPairings checks that each entry's sub-request carried that entry's own
+// part type and payload, and that nothing extra arrived.
+func assertPairings(t *testing.T, got, want []fanoutPairing) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d fanout sub-requests, got %d: %+v", len(want), len(got), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("entry %d paired with %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+// A mixed-modality request: each entry produces one fanout sub-request, and the
+// hash, the modality key it sits under, and the media bytes beside it must all
+// belong to the same entry. Asserting only that each appeared somewhere would
+// pass on any permutation of them.
+func TestEncodeStep_MixedModalityFanout(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "mixed-fanout",
+		Model:        "llama-3",
+		OriginalPath: reqcommon.PathChatCompletions,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":  "llama-3",
+			"stream": false,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,IMG"}},
+						map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,AUD"}},
+						map[string]any{"type": "video_url", "video_url": map[string]any{"url": "data:video/mp4;base64,VID"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "img-hash", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityAudio, Hash: "aud-hash", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityVideo, Hash: "vid-hash", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	// One per entry, in entry order: image, audio, video.
+	assertPairings(t, captureFanout(t, reqCtx), []fanoutPairing{
+		{partType: "image_url", payload: "data:image/jpeg;base64,IMG"},
+		{partType: "audio_url", payload: "data:audio/wav;base64,AUD"},
+		{partType: "video_url", payload: "data:video/mp4;base64,VID"},
+	})
+}
+
+// The pairing case a cross-modality test cannot reach: two audio entries, one
+// audio_url and one input_audio. They share the modality key, so only the local
+// index distinguishes them, and a regression there sends one entry's hash with
+// the other's bytes.
+func TestEncodeStep_WithinModalityFanoutPairing(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "within-modality-fanout",
+		Model:        "llama-3",
+		OriginalPath: reqcommon.PathChatCompletions,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":  "llama-3",
+			"stream": false,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						// Walker order: inline audio, then image, then audio URL.
+						// The audio entries are non-adjacent on purpose.
+						map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "INLINE-AUD", "format": "wav"}},
+						map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/jpeg;base64,IMG"}},
+						map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "data:audio/wav;base64,URL-AUD"}},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityAudio, Hash: "aud-inline-hash", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "img-hash", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityAudio, Hash: "aud-url-hash", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	// Entry order: the inline audio entry, the image entry, then the audio-URL
+	// entry. The two audio entries differ only by per-modality local index.
+	assertPairings(t, captureFanout(t, reqCtx), []fanoutPairing{
+		{partType: "input_audio", payload: "INLINE-AUD"},
+		{partType: "image_url", payload: "data:image/jpeg;base64,IMG"},
+		{partType: "audio_url", payload: "data:audio/wav;base64,URL-AUD"},
+	})
+}
+
+func TestEncodeStep_UnsupportedFormat(t *testing.T) {
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     "test",
+	}
+
+	body, err := step.(*EncodeStep).buildEncodeBody(reqCtx, pipeline.MultimodalEntry{}, 0, reqcommon.APIType(99), nil)
+	if err == nil {
+		t.Fatalf("expected error for unsupported format, got body %v", body)
+	}
+	if want := "unsupported request format APIType(99)"; err.Error() != want {
+		t.Fatalf("expected error %q, got %q", want, err.Error())
+	}
+}
+
+// TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage pins the
+// positional agreement between replace-media-urls' walk and this step's. An
+// image under a function_call_output's output gets a multimodal entry there,
+// so it has to be counted here too: otherwise that entry's index runs past the
+// collected parts and its sub-request primes the encoder with a blank
+// image_url under a hash the prefiller later looks up.
+func TestEncodeStep_ResponsesFormat_FansOutFunctionCallOutputImage(t *testing.T) {
+	const (
+		contentImage = "data:image/jpeg;base64,Y29udGVudA=="
+		outputImage  = "data:image/jpeg;base64,b3V0cHV0"
+	)
+
+	var mu sync.Mutex
+	var gotURLs []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Errorf("sub-request body did not parse: %v", err)
+			return
+		}
+		url := ""
+		if input, ok := parsed["input"].([]any); ok && len(input) == 1 {
+			if item, ok := input[0].(map[string]any); ok {
+				if content, ok := item["content"].([]any); ok && len(content) == 1 {
+					if part, ok := content[0].(map[string]any); ok {
+						url, _ = part["image_url"].(string)
+					}
+				}
+			}
+		}
+		mu.Lock()
+		gotURLs = append(gotURLs, url)
+		mu.Unlock()
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-output",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe"},
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": contentImage},
+					},
+				},
+				map[string]any{
+					"type":    "function_call_output",
+					"call_id": "call-1",
+					"output": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": outputImage},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-content", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-output", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotURLs) != 2 {
+		t.Fatalf("expected 2 encode sub-requests, got %d", len(gotURLs))
+	}
+	seen := map[string]bool{gotURLs[0]: true, gotURLs[1]: true}
+	for _, want := range []string{contentImage, outputImage} {
+		if !seen[want] {
+			t.Fatalf("no encode sub-request carried %s, got %v", want, gotURLs)
+		}
+	}
+}
+
+// TestEncodeStep_ForwardsPreprocessingKwargs pins the two client fields the
+// encode sub-request has to carry. Both change multimodal preprocessing and
+// feed vLLM's multimodal hash, and the prefill leg forwards them by cloning
+// the client body, so an encode leg that dropped them would prime the encoder
+// under a hash the prefiller never looks up. Covers both OpenAI formats,
+// since the fan-out builds them through one path.
+func TestEncodeStep_ForwardsPreprocessingKwargs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		path      string
+		promptKey string
+		item      map[string]any
+	}{
+		{
+			name:      "chat completions",
+			path:      reqcommon.PathChatCompletions,
+			promptKey: reqcommon.FieldMessages,
+			item: map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type":      reqcommon.PartTypeImageURL,
+						"image_url": map[string]any{"url": "data:image/jpeg;base64,abc"},
+					},
+				},
+			},
+		},
+		{
+			name:      "responses",
+			path:      reqcommon.PathResponses,
+			promptKey: reqcommon.FieldInput,
+			item: map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,abc"},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedBody map[string]any
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &receivedBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+			}))
+			defer server.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reqCtx := &pipeline.RequestContext{
+				RequestID:    "req-kwargs",
+				OriginalPath: tc.path,
+				Model:        testModelName,
+				TokenIDs:     []int{1, 32000, 2345},
+				Body: map[string]any{
+					"model":                          testModelName,
+					tc.promptKey:                     []any{tc.item},
+					reqcommon.FieldMMProcessorKwargs: map[string]any{"num_crops": 4},
+					reqcommon.FieldMediaIOKwargs:     map[string]any{"image": map[string]any{"mode": "RGB"}},
+					// A client field outside the allowlist must not reach the
+					// encoder, whose API may not define it.
+					"frequency_penalty": 0.5,
+				},
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Modality: reqcommon.ModalityImage, Hash: "hash-kwargs", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+				},
+			}
+
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			mm, ok := receivedBody[reqcommon.FieldMMProcessorKwargs].(map[string]any)
+			if !ok || mm["num_crops"] != float64(4) {
+				t.Fatalf("expected mm_processor_kwargs forwarded, got %v", receivedBody[reqcommon.FieldMMProcessorKwargs])
+			}
+			if _, ok := receivedBody[reqcommon.FieldMediaIOKwargs].(map[string]any); !ok {
+				t.Fatalf("expected media_io_kwargs forwarded, got %v", receivedBody[reqcommon.FieldMediaIOKwargs])
+			}
+			if _, ok := receivedBody["frequency_penalty"]; ok {
+				t.Fatal("a client field outside the allowlist reached the encoder")
+			}
+		})
+	}
+}
+
+// An entry whose Index falls outside the image-part walk fails the request.
+// The shared walk keeps the two counts equal, so this guards a future step
+// that appends an entry the walk cannot match, not a client shape: without it
+// the fan-out would prime the encoder from whatever part sat at that index.
+func TestEncodeStep_ResponsesFormat_RejectsEntryIndexBeyondImageParts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("encode worker must not be called when an entry has no image part")
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-index-gap",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,aGk="},
+					},
+				},
+			},
+		},
+		// Two image entries with a single image part in the body, so the
+		// second entry's local index is past the end of the image part list.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-have", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash-gap", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected error for an entry index past the end of the image parts")
+	}
+	// Not ErrBadRequest: replace-media-urls builds the entries from the same
+	// walk, so a mismatch is a coordinator pairing bug (see buildEncodeBody).
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("a coordinator pairing bug is not a client error, got %v", err)
+	}
+	// Asserted on the message, since the sibling no-payload guard fails the
+	// same way.
+	if !strings.Contains(err.Error(), "no image media part at index") {
+		t.Fatalf("expected the index guard to reject, got %v", err)
+	}
+}
+
+func TestEncodeStep_MessagesFormat(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{
+				"hash-x": map[string]any{"peer_host": "10.0.0.1", "peer_port": 5501},
+			},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-messages",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model":               testModelName,
+			"max_tokens":          800,
+			"mm_processor_kwargs": map[string]any{"num_crops": 4},
+			"thinking":            map[string]any{"type": "enabled", "budget_tokens": 512},
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "describe"},
+					map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/jpeg", "data": "abc"}},
+				}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-x", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedPath != reqcommon.PathMessages {
+		t.Fatalf("expected the sub-request on %s, got %s", reqcommon.PathMessages, receivedPath)
+	}
+	// The image block goes out unreshaped, so the encoder parses it through the
+	// same Messages conversion as the prefiller and both compute one hash.
+	want := map[string]any{
+		"model":      testModelName,
+		"max_tokens": float64(1),
+		"stream":     false,
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/jpeg", "data": "abc"}},
+		}}},
+	}
+	if !reflect.DeepEqual(receivedBody, want) {
+		t.Fatalf("encode body = %#v, want %#v", receivedBody, want)
+	}
+	if len(reqCtx.ECTransferParams) != 1 || reqCtx.ECTransferParams[0]["hash-x"] == nil {
+		t.Fatalf("expected the encoder's ec_transfer_params merged, got %v", reqCtx.ECTransferParams)
+	}
+}
+
+// With use_openai_format false a Messages request collapses to the tokens-in
+// generate format, the same as chat completions: the sub-request carries
+// token_ids and no messages array, and goes to the generate path rather than
+// the client's own /v1/messages.
+func TestEncodeStep_MessagesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-tok": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, "use_openai_format": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-messages-tokens-in",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/jpeg", "data": "aGk="}},
+				}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-tok", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedPath != reqcommon.PathVLLMGenerate {
+		t.Errorf("expected the sub-request on %s, got %s", reqcommon.PathVLLMGenerate, receivedPath)
+	}
+	if _, ok := receivedBody["token_ids"]; !ok {
+		t.Error("expected token_ids in the generate sub-request")
+	}
+	if _, ok := receivedBody["messages"]; ok {
+		t.Error("generate sub-request must not carry the client's messages array")
+	}
+}
+
+// With use_openai_format false a Responses request collapses to the tokens-in
+// generate format, the same as chat completions: the sub-request carries
+// token_ids and no input array, and goes to the generate path rather than the
+// client's own /v1/responses.
+func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *testing.T) {
+	var receivedPath string
+	var receivedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"hash-tok": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewEncodeStep(gwClient, map[string]any{ParamECConnector: ec.NIXL, "use_openai_format": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-responses-tokens-in",
+		OriginalPath: reqcommon.PathResponses,
+		Model:        testModelName,
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		Body: map[string]any{
+			"model": testModelName,
+			"input": []any{
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "data:image/jpeg;base64,aGk="},
+					},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-tok", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if receivedPath != reqcommon.PathVLLMGenerate {
+		t.Errorf("expected the sub-request on %s, got %s", reqcommon.PathVLLMGenerate, receivedPath)
+	}
+	if _, ok := receivedBody["token_ids"]; !ok {
+		t.Error("expected token_ids in the generate sub-request")
+	}
+	if _, ok := receivedBody["input"]; ok {
+		t.Error("generate sub-request must not carry the client's input array")
+	}
+}
+
+// The client leaves while the encoder is silent: the context error and no
+// error-level log.
+func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The encoder never answers; release lets server.Close finish.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     testModelName,
+		TokenIDs:  []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	err = step.Execute(log.IntoContext(ctx, logr.New(sink)), reqCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, sink.errors, "a cancelled fan-out must not log at error level")
 }

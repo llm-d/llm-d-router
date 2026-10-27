@@ -20,7 +20,6 @@ linters:
     - fatcontext
     - forbidigo
     - ginkgolinter
-    - goconst
     - gocritic
     - govet
     - ineffassign
@@ -29,6 +28,7 @@ linters:
     - misspell
     - nakedret
     - nilnil
+    - nolintlint
     - perfsprint
     - prealloc
     - revive
@@ -46,12 +46,19 @@ linters:
         text: "avoid meaningless package names"
       - linters: [revive]
         text: "avoid package names that conflict with Go standard library package names"
+      # This alias adds no clarity (v1 disambiguates nothing) but goimports
+      # always writes it: it computes v1's "assumed name" by skipping the
+      # version segment (landing on the parent directory name), sees that
+      # differs from the real package name, and pins an explicit alias to
+      # keep the two in sync. Excluded only because make format and make
+      # lint would otherwise fight forever, not because the alias helps.
+      - linters: [revive]
+        text: 'Import alias "v[0-9]+((alpha|beta)[0-9]+)?" is redundant'
       # Packages transferred verbatim from llm-d-kv-cache (#1862); style cleanup tracked separately
       - path: pkg/(kvcache|kvevents)/
         linters:
           - revive
           - perfsprint
-          - goconst
           - dupword
           - prealloc
       # The panic ban applies only to pkg/epp/flowcontrol (non-test files); see that package's doc.go.
@@ -103,6 +110,8 @@ linters:
           alias: fwkgaie
         - pkg: github.com/llm-d/llm-d-router/test/framework/epp
           alias: fwkepp
+    nolintlint:
+      require-specific: true
     revive: # see https://github.com/mgechev/revive#available-rules for all options
       rules:
         - name: blank-imports
@@ -119,6 +128,7 @@ linters:
         - name: package-comments
         - name: range
         - name: receiver-naming
+        - name: redundant-import-alias
         - name: time-naming
         - name: unexported-return
         - name: var-declaration

@@ -1,0 +1,18 @@
+# Frozen configuration surface of the fcfs-ordering-policy plugin.
+# See ../README.md: this file must not be edited to fix a failing test.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: single-profile-handler
+- type: max-score-picker
+- type: fcfs-ordering-policy
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: max-score-picker
+flowControl:
+  priorityBands:
+  - priority: 0
+    orderingPolicyRef: fcfs-ordering-policy

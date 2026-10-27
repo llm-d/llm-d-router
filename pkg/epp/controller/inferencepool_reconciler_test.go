@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -34,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -189,7 +192,7 @@ func TestInferencePoolReconciler(t *testing.T) {
 type diffStoreParams struct {
 	wantPool       *datalayer.EndpointPool
 	wantEndpoints  []string
-	wantObjectives []*v1alpha2.InferenceObjective
+	wantObjectives []*apixv1.InferenceObjective
 }
 
 func diffStore(store datastore.Datastore, params diffStoreParams) string {
@@ -212,12 +215,15 @@ func diffStore(store datastore.Datastore, params diffStoreParams) string {
 
 	// Default wantModels if not set because ModelGetAll returns an empty slice when empty.
 	if params.wantObjectives == nil {
-		params.wantObjectives = []*v1alpha2.InferenceObjective{}
+		params.wantObjectives = []*apixv1.InferenceObjective{}
 	}
 
-	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
+	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *apixv1.InferenceObjective) bool {
 		return a.Name < b.Name
-	})); diff != "" {
+	}),
+		// The fake client stamps ResourceVersion on stored objects. It is
+		// apiserver bookkeeping, not reconciled behavior.
+		cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")); diff != "" {
 		return "models:" + diff
 	}
 	return ""

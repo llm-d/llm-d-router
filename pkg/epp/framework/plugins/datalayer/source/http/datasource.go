@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime/debug"
 	"slices"
@@ -64,6 +66,8 @@ type HTTPDataSource[T any] struct {
 	useNodeAddress bool
 	// interval is the desired scrape period; zero means every base tick.
 	interval time.Duration
+	// onExtractor, when set, observes each extractor bound to the source.
+	onExtractor func(fwkplugin.Plugin)
 
 	client Client
 	// parser converts the response body to T. MUST NOT return (zero, nil) for nilable T;
@@ -76,14 +80,21 @@ type HTTPDataSource[T any] struct {
 
 // TLSOptions configures the https transport. The zero value verifies the target
 // against the system CA pool with no client certificate.
+//
+// SkipVerify is an operator opt-in for environments where the target presents a
+// certificate the operator trusts by other means (a private CA, a known
+// self-signed peer in dev/test). Enabling it asserts that the operator has
+// independently verified the target identity; do not use SkipVerify to talk to
+// endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
 	// SkipVerify disables verification of the target's server certificate.
+	// See the TLSOptions doc for the threat model this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
-	// system pool. Ignored when SkipVerify is set.
+	// system pool. Ignored when SkipVerify is set. Must be an absolute path.
 	CACertPath string
 	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
-	// Both must be set together.
+	// Both must be set together. Paths must be absolute.
 	ClientCertPath string
 	ClientKeyPath  string
 }
@@ -95,6 +106,7 @@ type options struct {
 	portOverride   int
 	useNodeAddress bool
 	interval       time.Duration
+	onExtractor    func(fwkplugin.Plugin)
 }
 
 // WithPortOverride makes the source scrape podIP:port instead of the
@@ -118,6 +130,12 @@ func WithInterval(d time.Duration) Option {
 	return func(o *options) { o.interval = d }
 }
 
+// WithExtractorObserver calls fn with each extractor bound to the source, so a source can
+// adapt its parser to what the extractors read. fn runs under the source's lock.
+func WithExtractorObserver(fn func(fwkplugin.Plugin)) Option {
+	return func(o *options) { o.onExtractor = fn }
+}
+
 // ParseIntervalOption parses a duration string from plugin parameters and
 // returns a WithInterval Option. An empty string returns a no-op Option
 // so callers can always append the result.
@@ -139,6 +157,15 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	opts ...Option) (*HTTPDataSource[T], error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
+	}
+	if tlsOpts.CACertPath != "" && !filepath.IsAbs(tlsOpts.CACertPath) {
+		return nil, fmt.Errorf("CACertPath must be an absolute filesystem path: %q", tlsOpts.CACertPath)
+	}
+	if tlsOpts.ClientCertPath != "" && !filepath.IsAbs(tlsOpts.ClientCertPath) {
+		return nil, fmt.Errorf("ClientCertPath must be an absolute filesystem path: %q", tlsOpts.ClientCertPath)
+	}
+	if tlsOpts.ClientKeyPath != "" && !filepath.IsAbs(tlsOpts.ClientKeyPath) {
+		return nil, fmt.Errorf("ClientKeyPath must be an absolute filesystem path: %q", tlsOpts.ClientKeyPath)
 	}
 
 	var cfg options
@@ -174,6 +201,7 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
 		interval:       cfg.interval,
+		onExtractor:    cfg.onExtractor,
 		client:         cl,
 		parser:         parser,
 	}, nil
@@ -186,8 +214,10 @@ var (
 )
 
 // caCertPool loads a PEM CA bundle for TLS verification.
+// Callers must validate that path is an absolute filesystem path (NewHTTPDataSource
+// enforces this on TLSOptions.CACertPath).
 func caCertPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
+	pem, err := os.ReadFile(path) //#nosec -- path is operator-configured and validated as absolute in NewHTTPDataSource
 	if err != nil {
 		return nil, fmt.Errorf("%w %s: %w", ErrReadCACert, path, err)
 	}
@@ -201,7 +231,7 @@ func caCertPool(path string) (*x509.CertPool, error) {
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
 // system pool), plus an mTLS client certificate when ClientCertPath is set.
 func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify}
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
 	if !opts.SkipVerify && opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
@@ -247,7 +277,7 @@ func (s *HTTPDataSource[T]) Poll(ctx context.Context, ep fwkdl.Endpoint) (T, err
 //
 // Return contract: a non-nil return indicates a poll-level failure (the
 // dispatcher could not produce data). Per-extractor failures are recorded
-// in DataLayerExtractErrorsTotal and do NOT surface as a returned error.
+// in LlmdDataLayerExtractErrorsTotal and do NOT surface as a returned error.
 // This keeps the collector's poll/extract counters cleanly separated.
 func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 	pollCtx, cancelPoll := context.WithTimeout(ctx, defaultStepTimeout)
@@ -271,7 +301,7 @@ func (s *HTTPDataSource[T]) Dispatch(ctx context.Context, ep fwkdl.Endpoint) err
 	return nil
 }
 
-// runExtractor invokes ext under panic recovery; both failures and panics increment DataLayerExtractErrorsTotal.
+// runExtractor invokes ext under panic recovery; both failures and panics increment LlmdDataLayerExtractErrorsTotal.
 func (s *HTTPDataSource[T]) runExtractor(ctx context.Context, ext fwkdl.PollingExtractor[T], in fwkdl.PollInput[T]) {
 	logger := log.FromContext(ctx)
 	srcType := s.typedName.Type
@@ -300,6 +330,9 @@ func (s *HTTPDataSource[T]) AppendExtractor(ext fwkplugin.Plugin) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.exts = append(s.exts, typed)
+	if s.onExtractor != nil {
+		s.onExtractor(ext)
+	}
 	return nil
 }
 

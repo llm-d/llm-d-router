@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epp-tracing-otel-collector
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      filter/drop-metrics-scraping:
+        error_mode: ignore
+        traces:
+          span:
+            - 'attributes["url.path"] == "/metrics"'
+            - 'attributes["http.route"] == "/metrics"'
+            - 'name == "GET /metrics"'
+            - 'name == "GET"'
+      batch:
+        send_batch_size: 1024
+        timeout: 1s
+    exporters:
+      otlp/jaeger:
+        endpoint: epp-tracing-jaeger:4317
+        tls:
+          insecure: true
+    service:
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [filter/drop-metrics-scraping, batch]
+          exporters: [otlp/jaeger]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-tracing-otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epp-tracing-otel-collector
+  template:
+    metadata:
+      labels:
+        app: epp-tracing-otel-collector
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8888"
+        prometheus.io/scrape: "true"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.120.0
+          args: [--config=/etc/otel/config.yaml]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: epp-tracing-otel-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-tracing-otel-collector
+spec:
+  selector:
+    app: epp-tracing-otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: metrics
+      port: 8888
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-tracing-jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epp-tracing-jaeger
+  template:
+    metadata:
+      labels:
+        app: epp-tracing-jaeger
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jaeger
+          image: jaegertracing/jaeger:2.15.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: query
+              containerPort: 16686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-tracing-jaeger
+spec:
+  selector:
+    app: epp-tracing-jaeger
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: query
+      port: 16686
+      targetPort: query

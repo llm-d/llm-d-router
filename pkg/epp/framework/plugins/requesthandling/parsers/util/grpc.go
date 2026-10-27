@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package grpcutil
+package parserutil
 
 import (
 	"encoding/binary"
@@ -49,4 +49,21 @@ func ParseGrpcPayload(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("incomplete gRPC payload: header indicates %d bytes, but only %d bytes are available", msgLen, len(data)-gRPCPayloadHeaderLen)
 	}
 	return data[gRPCPayloadHeaderLen : gRPCPayloadHeaderLen+msgLen], nil
+}
+
+// ParseGrpcPayloads extracts the message payload of every gRPC frame in data.
+// A streamed response can deliver several frames in one body chunk. When a
+// frame cannot be parsed, the payloads of the frames before it are returned
+// together with the error, so a caller can still read them.
+func ParseGrpcPayloads(data []byte) ([][]byte, error) {
+	var payloads [][]byte
+	for len(data) > 0 {
+		payload, err := ParseGrpcPayload(data)
+		if err != nil {
+			return payloads, err
+		}
+		payloads = append(payloads, payload)
+		data = data[gRPCPayloadHeaderLen+len(payload):]
+	}
+	return payloads, nil
 }

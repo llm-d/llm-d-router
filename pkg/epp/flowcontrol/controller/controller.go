@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,12 +36,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// registryClient defines the minimal interface that the FlowController needs to interact with the FlowRegistry.
-type registryClient interface {
-	contracts.FlowRegistryObserver
-	contracts.FlowRegistryDataPlane
-}
-
 // processor is the minimal internal interface that the FlowController requires from its worker.
 type processor interface {
 	Run(ctx context.Context)
@@ -56,6 +51,7 @@ type processorFactory func(
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 	clock clock.WithTicker,
 	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
@@ -80,17 +76,18 @@ var _ processor = &internal.Processor{}
 type FlowController struct {
 	// --- Immutable dependencies (set at construction) ---
 
-	config             *Config
-	registry           registryClient
-	flowRegistry       contracts.FlowRegistry
-	registryBackground contracts.FlowRegistryBackground
-	saturationDetector flowcontrol.SaturationDetector
-	endpointCandidates contracts.EndpointCandidates
-	usageLimitPolicy   flowcontrol.UsageLimitPolicy
-	clock              clock.WithTicker
-	logger             logr.Logger
-	processorFactory   processorFactory
-	processor          processor
+	config              *Config
+	registry            contracts.FlowRegistryDataPlane
+	flowRegistry        contracts.FlowRegistry
+	registryBackground  contracts.FlowRegistryBackground
+	saturationDetector  flowcontrol.SaturationDetector
+	endpointCandidates  contracts.EndpointCandidates
+	usageLimitPolicy    flowcontrol.UsageLimitPolicy
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy
+	clock               clock.WithTicker
+	logger              logr.Logger
+	processorFactory    processorFactory
+	processor           processor
 
 	// --- Lifecycle state ---
 
@@ -101,12 +98,13 @@ type FlowController struct {
 
 // Deps groups the external FlowController build dependencies to construct a FlowController.
 type Deps struct {
-	Registry           contracts.FlowRegistry
-	SaturationDetector flowcontrol.SaturationDetector
-	EndpointCandidates contracts.EndpointCandidates
-	UsageLimitPolicy   flowcontrol.UsageLimitPolicy
-	Clock              clock.WithTicker
-	ProcessorFactory   processorFactory
+	Registry            contracts.FlowRegistry
+	SaturationDetector  flowcontrol.SaturationDetector
+	EndpointCandidates  contracts.EndpointCandidates
+	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
+	BandSelectionPolicy flowcontrol.BandSelectionPolicy
+	Clock               clock.WithTicker
+	ProcessorFactory    processorFactory
 
 	// InFlightEvictor enables demand-driven in-flight eviction when Config.EnableEviction is set.
 	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
@@ -130,16 +128,17 @@ func NewFlowController(
 		registryBackground = bg
 	}
 	fc := &FlowController{
-		config:             config,
-		registry:           deps.Registry,
-		flowRegistry:       deps.Registry,
-		registryBackground: registryBackground,
-		saturationDetector: deps.SaturationDetector,
-		endpointCandidates: deps.EndpointCandidates,
-		usageLimitPolicy:   deps.UsageLimitPolicy,
-		clock:              deps.Clock,
-		logger:             log.FromContext(ctx).WithName("flow-controller"),
-		parentCtx:          ctx,
+		config:              config,
+		registry:            deps.Registry,
+		flowRegistry:        deps.Registry,
+		registryBackground:  registryBackground,
+		saturationDetector:  deps.SaturationDetector,
+		endpointCandidates:  deps.EndpointCandidates,
+		usageLimitPolicy:    deps.UsageLimitPolicy,
+		bandSelectionPolicy: deps.BandSelectionPolicy,
+		clock:               deps.Clock,
+		logger:              log.FromContext(ctx).WithName("flow-controller"),
+		parentCtx:           ctx,
 	}
 
 	if deps.ProcessorFactory == nil {
@@ -150,6 +149,7 @@ func NewFlowController(
 			saturationDetector flowcontrol.SaturationDetector,
 			endpointCandidates contracts.EndpointCandidates,
 			usageLimitPolicy flowcontrol.UsageLimitPolicy,
+			bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 			clock clock.WithTicker,
 			noEndpointRequestTTL time.Duration,
 			cleanupSweepInterval time.Duration,
@@ -165,6 +165,7 @@ func NewFlowController(
 				saturationDetector,
 				endpointCandidates,
 				usageLimitPolicy,
+				bandSelectionPolicy,
 				clock,
 				noEndpointRequestTTL,
 				cleanupSweepInterval,
@@ -208,6 +209,7 @@ func NewFlowController(
 		fc.saturationDetector,
 		fc.endpointCandidates,
 		fc.usageLimitPolicy,
+		fc.bandSelectionPolicy,
 		fc.clock,
 		fc.config.NoEndpointRequestTTL,
 		fc.config.ExpiryCleanupInterval,
@@ -225,6 +227,10 @@ func NewFlowController(
 
 // EnqueueAndWait is the primary, synchronous entry point to the Flow Control system. It submits a request and blocks
 // until the request reaches a terminal outcome (dispatched, rejected, or evicted).
+//
+// When the configured saturation detector implements DispatchReservationTracker, a dispatched request holds a
+// reservation on it. The caller must call ReleaseDispatchReservation once the request's in-flight load is published,
+// or the detector keeps counting the request.
 //
 // # Design Rationale: The Synchronous Model
 //
@@ -262,19 +268,21 @@ func (fc *FlowController) EnqueueAndWait(
 		req.InferencePoolName(),
 		req.ModelName(), req.TargetModelName(), reqBytes)
 
-	// 1. Create the derived context that governs this request's lifecycle (Parent Cancellation + TTL).
-	reqCtx, cancel, enqueueTime, saturationTTL := fc.createRequestContext(ctx, req)
-	defer cancel()
-
-	var finalOutcome types.QueueOutcome
+	// Capture the logical enqueue time before acquiring the flow. The band's TTL is only available
+	// from the acquired connection, but time spent acquiring it still counts against the queue budget.
+	enqueueTime := fc.clock.Now()
 
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
+		bandDefaultRequestTTL, bandDefaultRequestTTLSet := conn.DefaultRequestTTL()
+		reqCtx, cancel, saturationTTL := fc.createRequestContext(
+			ctx, effectiveReq, bandDefaultRequestTTL, bandDefaultRequestTTLSet, enqueueTime,
+		)
+		defer cancel()
 
 		select { // Non-blocking check on controller lifecycle.
 		case <-fc.parentCtx.Done():
-			finalOutcome = types.QueueOutcomeRejectedOther
 			return fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning)
 		default:
 		}
@@ -285,27 +293,21 @@ func (fc *FlowController) EnqueueAndWait(
 		item, err := fc.tryDistribution(reqCtx, effectiveReq, enqueueTime, saturationTTL, conn)
 		if err != nil {
 			// Distribution failed terminally (e.g., context cancelled during blocking submit).
-			// The item has already been finalized by tryDistribution.
-			finalState := item.FinalState()
-			finalOutcome = finalState.Outcome
-			return finalState.Err
+			// The item has already been finalized by tryDistribution, and err is its finalized error.
+			return err
 		}
 
 		// Distribution was successful; ownership of the item has been transferred to a processor.
 		// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
 		// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
-		outcome, err := fc.awaitFinalization(reqCtx, item)
-
-		// The outcome is terminal (Dispatched, Evicted, or another rejection).
-		finalOutcome = outcome
-		return err
+		return fc.awaitFinalization(reqCtx, item)
 	})
 
-	// If WithConnection returned an error (e.g. connection failure, context cancelled before lease), we must ensure we
-	// return a valid rejection outcome.
-	// In the success case (where the closure ran), finalOutcome is set inside the closure.
-	if err != nil && finalOutcome == types.QueueOutcomeNotYetFinalized {
-		finalOutcome = types.QueueOutcomeRejectedOther
+	// Every finalization path wraps a family sentinel. An error without one comes from the lease machinery
+	// (e.g. connection failure before the closure ran), which is pre-queue by definition; OutcomeFromError already
+	// classified it RejectedOther, so only the error needs the family wrap.
+	finalOutcome, ok := types.OutcomeFromError(err)
+	if !ok {
 		err = fmt.Errorf("%w: %w", types.ErrRejected, err)
 	}
 
@@ -317,6 +319,14 @@ func (fc *FlowController) EnqueueAndWait(
 	metrics.IncFlowControlRequestsTotal(finalOutcome.String(), priority, req.InferencePoolName())
 
 	return finalOutcome, err
+}
+
+// ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
+// publication by request lifecycle hooks.
+func (fc *FlowController) ReleaseDispatchReservation(requestID string) {
+	if tracker, ok := fc.saturationDetector.(flowcontrol.DispatchReservationTracker); ok {
+		tracker.ReleaseDispatch(requestID)
+	}
 }
 
 // fallbackRequest wraps a FlowControlRequest to override its flow key, so a request that falls back to a different
@@ -367,7 +377,8 @@ func (fc *FlowController) withConnectionWithFallback(
 
 // tryDistribution handles a single attempt to submit a request to the processor.
 // It uses the provided `conn` to access the registry data plane.
-// If this function returns an error, it guarantees that the provided `item` has been finalized.
+// If this function returns an error, it guarantees that the provided `item` has been finalized and that the
+// returned error is the item's finalized error.
 func (fc *FlowController) tryDistribution(
 	reqCtx context.Context,
 	req flowcontrol.FlowControlRequest,
@@ -375,17 +386,8 @@ func (fc *FlowController) tryDistribution(
 	saturationTTL time.Duration,
 	conn contracts.ActiveFlowConnection,
 ) (*internal.FlowItem, error) {
-	// The item carries the saturation-regime budget: it is the request's own queue-wait budget, and ordering policies
-	// read it as such. A caller deadline that falls inside it clamps it, since the request cannot outlive its caller.
-	effectiveTTL := saturationTTL
-	if deadline, ok := reqCtx.Deadline(); ok {
-		if ttl := deadline.Sub(enqueueTime); ttl > 0 && (effectiveTTL <= 0 || ttl < effectiveTTL) {
-			effectiveTTL = ttl
-		}
-	}
-
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
-	item := internal.NewItem(req, effectiveTTL, enqueueTime)
+	item := internal.NewItem(reqCtx, req, saturationTTL, enqueueTime, fc.logger)
 
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())
@@ -398,45 +400,39 @@ func (fc *FlowController) tryDistribution(
 		// flattened with %v because this finalized error is returned through the connection closure in
 		// EnqueueAndWait: a %w-preserved ErrPriorityBandNotFound would be misread by
 		// withConnectionWithFallback as a lease-acquisition failure and silently retried at priority 0.
-		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
+		item.FinalizeWithError(
 			fmt.Errorf("%w: failed to get ManagedQueue for leased flow: %v", types.ErrRejected, err))
-		return item, err
+		return item, item.FinalState().Err
 	}
 
 	// Distribution is bounded by the saturation budget, not by the request context's backstop. A request still waiting
 	// for handoff has not reached a queue, so it is not waiting on an endpoint to appear and the no-endpoint budget does
 	// not describe it; the regime-aware budget takes over once the processor owns the item.
 	distributeCtx := reqCtx
-	if effectiveTTL > 0 {
+	if saturationTTL > 0 {
 		var cancel context.CancelFunc
-		distributeCtx, cancel = context.WithDeadlineCause(reqCtx, enqueueTime.Add(effectiveTTL), types.ErrTTLExpired)
+		distributeCtx, cancel = context.WithDeadlineCause(reqCtx, enqueueTime.Add(saturationTTL), types.ErrTTLExpired)
 		defer cancel()
 	}
 
-	outcome, err := fc.distributeRequest(distributeCtx, item)
+	err = fc.distributeRequest(distributeCtx, item)
 	if err == nil {
 		// Success: Ownership of the item has been transferred to the processor.
 		return item, nil
 	}
 
 	// For any distribution error, the controller retains ownership and must finalize the item.
-	var finalErr error
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// We propagate the original context error here, EnqueueAndWait will rely on item.FinalState().Err.
-		finalErr = err
 		item.Finalize(context.Cause(distributeCtx))
-	} else { // e.g.,
-		finalErr = fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
-		item.FinalizeWithOutcome(outcome, finalErr)
+	} else {
+		item.FinalizeWithError(err)
 	}
-	return item, finalErr
+	return item, item.FinalState().Err
 }
 
-func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, error) {
+func finalizeOnControllerShutdown(item *internal.FlowItem) error {
 	item.Finalize(types.ErrFlowControllerNotRunning)
-
-	finalState := item.FinalState()
-	return finalState.Outcome, finalState.Err
+	return item.FinalState().Err
 }
 
 // awaitFinalization blocks until an item is finalized, either by the processor (synchronously) or by the controller
@@ -444,7 +440,7 @@ func finalizeOnControllerShutdown(item *internal.FlowItem) (types.QueueOutcome, 
 func (fc *FlowController) awaitFinalization(
 	reqCtx context.Context,
 	item *internal.FlowItem,
-) (types.QueueOutcome, error) {
+) error {
 	select {
 	case <-reqCtx.Done():
 		// Asynchronous Finalization (Controller-initiated):
@@ -457,8 +453,7 @@ func (fc *FlowController) awaitFinalization(
 		item.Finalize(cause)
 
 		// The processor will eventually discard this "zombie" item during its cleanup sweep.
-		finalState := item.FinalState()
-		return finalState.Outcome, finalState.Err
+		return item.FinalState().Err
 
 	case <-fc.parentCtx.Done():
 		return finalizeOnControllerShutdown(item)
@@ -466,7 +461,7 @@ func (fc *FlowController) awaitFinalization(
 	case finalState := <-item.Done():
 		// Synchronous Finalization (Processor-initiated):
 		// The processor finalized the item (Dispatch, Reject, Shutdown).
-		return finalState.Outcome, finalState.Err
+		return finalState.Err
 	}
 }
 
@@ -488,21 +483,37 @@ func (fc *FlowController) awaitFinalization(
 func (fc *FlowController) createRequestContext(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
-) (context.Context, context.CancelFunc, time.Time, time.Duration) {
-	enqueueTime := fc.clock.Now()
-	saturationTTL := req.InitialEffectiveTTL()
-	if saturationTTL <= 0 {
-		saturationTTL = fc.config.DefaultRequestTTL
+	bandDefaultRequestTTL time.Duration,
+	bandDefaultRequestTTLSet bool,
+	enqueueTime time.Time,
+) (context.Context, context.CancelFunc, time.Duration) {
+	saturationTTL := fc.config.DefaultRequestTTL
+	if bandDefaultRequestTTLSet {
+		saturationTTL = bandDefaultRequestTTL
+	}
+	// A request may make the selected operator bound stricter, but not extend it.
+	if requestTTL := req.InitialEffectiveTTL(); requestTTL > 0 && (saturationTTL <= 0 || requestTTL < saturationTTL) {
+		saturationTTL = requestTTL
 	}
 
 	// A zero budget in either regime disables eviction there, so no backstop can be derived.
+	var reqCtx context.Context
+	var cancel context.CancelFunc
 	if saturationTTL > 0 && fc.config.NoEndpointRequestTTL > 0 {
 		backstop := max(saturationTTL, fc.config.NoEndpointRequestTTL) + 2*fc.config.ExpiryCleanupInterval
-		reqCtx, cancel := context.WithDeadlineCause(ctx, enqueueTime.Add(backstop), types.ErrTTLExpired)
-		return reqCtx, cancel, enqueueTime, saturationTTL
+		reqCtx, cancel = context.WithDeadlineCause(ctx, enqueueTime.Add(backstop), types.ErrTTLExpired)
+	} else {
+		reqCtx, cancel = context.WithCancel(ctx)
 	}
-	reqCtx, cancel := context.WithCancel(ctx)
-	return reqCtx, cancel, enqueueTime, saturationTTL
+
+	// Ordering policies use the saturation budget, clamped to a caller deadline that fires sooner.
+	if deadline, ok := reqCtx.Deadline(); ok {
+		if lifecycleTTL := deadline.Sub(enqueueTime); lifecycleTTL > 0 &&
+			(saturationTTL <= 0 || lifecycleTTL < saturationTTL) {
+			saturationTTL = lifecycleTTL
+		}
+	}
+	return reqCtx, cancel, saturationTTL
 }
 
 // distributeRequest submits an item to the processor with graceful backpressure.
@@ -521,17 +532,23 @@ func (fc *FlowController) createRequestContext(
 func (fc *FlowController) distributeRequest(
 	ctx context.Context,
 	item *internal.FlowItem,
-) (types.QueueOutcome, error) {
+) error {
 	reqID := item.OriginalRequest().ID()
+	// Reject items that expire during lease acquisition because Submit does not check the context.
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, ctx.Err())
+	default:
+	}
 	if err := fc.processor.Submit(item); err == nil {
-		return types.QueueOutcomeNotYetFinalized, nil
+		return nil
 	}
 
 	// processor is busy. Attempt a single blocking submission to the candidate.
 	fc.logger.V(logutil.DEBUG).Info("Processor is busy, attempting blocking submit", "requestID", reqID)
 	err := fc.processor.SubmitOrBlock(ctx, item)
 	if err != nil {
-		return types.QueueOutcomeRejectedOther, fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
+		return fmt.Errorf("%w: request not accepted: %w", types.ErrRejected, err)
 	}
-	return types.QueueOutcomeNotYetFinalized, nil // Success, ownership transferred.
+	return nil // Success, ownership transferred.
 }

@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -17,13 +33,17 @@ import (
 
 // dataParallelHandler checks if Data Parallel handling is needed.
 // Returns true if Data Parallel processing was needed
-func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request, beforeDispatch func()) bool {
 	dataParallelPodHostPort := r.Header.Get(routing.DataParallelEndpointHeader)
 	if dataParallelPodHostPort != "" {
 		s.logger.Info("The use of the x-data-parallel-host-port is deprecated. Use Istio >= 1.28.1.")
 		handler := s.dataParallelProxies[dataParallelPodHostPort]
 		if handler != nil {
 			s.logger.V(logging.DEBUG).Info("Data parallel routing", "to", dataParallelPodHostPort)
+			// Missing replicas must not supply evidence of a dispatched request.
+			if beforeDispatch != nil {
+				beforeDispatch()
+			}
 			handler.ServeHTTP(w, r)
 		} else {
 			// Shouldn't happen, send to default server
@@ -75,12 +95,16 @@ func (s *Server) startDataParallel(ctx context.Context, grp *errgroup.Group) err
 		clone.config.Port = rankPort
 		clone.config.DecoderURL = decoderURL
 		clone.forwardDataParallel = false
+		if idx < len(s.DataParallelListeners) {
+			clone.HTTPListener = s.DataParallelListeners[idx]
+		}
 
 		grp.Go(func() error {
 			clone.logger = log.FromContext(ctx).WithName("proxy server on port " + rankPort)
-			// Configure handlers
+			// Configure handlers for this rank.
 			clone.handler = clone.createRoutes()
 			clone.setKVConnector()
+			clone.setECConnector()
 
 			return clone.startHTTP(ctx)
 		})

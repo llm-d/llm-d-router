@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -80,11 +81,16 @@ func (s *KVCacheUtilizationScorer) WithName(name string) *KVCacheUtilizationScor
 	return s
 }
 
-// Score returns the scoring result for the given list of endpoints based on context.
+// Score scores each endpoint as 1 minus its KV-cache usage.
+// Endpoints with no written metrics are left unscored.
 func (s *KVCacheUtilizationScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
 	for _, endpoint := range endpoints {
-		scores[endpoint] = 1 - endpoint.GetMetrics().KVCacheUsagePercent
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		scores[endpoint] = 1 - podMetrics.KVCacheUsagePercent
 	}
 	return scores
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -107,10 +108,11 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 		ExpiryCleanupInterval:    10 * time.Millisecond,
 		EnqueueChannelBufferSize: 100,
 	}, fccontroller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: candidates,
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  candidates,
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	return &realFlowControlHarness{
@@ -199,7 +201,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -221,7 +223,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
@@ -273,7 +275,7 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		admitCtx, admitCancel := context.WithCancel(ctx)
 		defer admitCancel()
 		result := admitAsync(admitCtx, h.ac, "cancel-req")
-		require.Eventually(t, func() bool { return h.reg.Stats().TotalLen == 1 },
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "request should be queued before cancelling")
 		admitCancel()
 

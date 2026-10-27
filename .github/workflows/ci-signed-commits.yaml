@@ -2,31 +2,103 @@ name: Check Signed Commits in PR
 
 on:
   pull_request_target:
+  merge_group:
+    types: [checks_requested]
 
 jobs:
-  check-signed-commits:
-    name: Check signed commits in PR
-    # Skip signed-commits enforcement for bot-authored release-notes branches:
-    # per-PR fragments under release-notes/pr-*, assembly under
-    # release-notes/assemble-*. The release-notes App can't sign commits;
-    # fragment content is sourced from already-reviewed PR bodies and
-    # assembly is a deterministic transform. Pin to the two specific prefixes
-    # so an unrelated bot pushing to release-notes/<other> doesn't bypass.
+  dco-check:
+    name: dco-check
+    # Skip the bot-authored release-notes assembly branch: assembly is a
+    # deterministic transform reviewed by a maintainer before merge. Pin to the
+    # specific prefix so an unrelated bot pushing to release-notes/<other>
+    # doesn't bypass. merge_group entries never originate from those bot
+    # branches directly, so the skip only needs to guard the PR side.
     if: |
-      !(
-        (startsWith(github.head_ref, 'release-notes/pr-') ||
-         startsWith(github.head_ref, 'release-notes/assemble-')) &&
-        endsWith(github.event.pull_request.user.login, '[bot]')
+      github.event_name == 'merge_group' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        !(
+          contains(fromJSON('["dependabot[bot]"]'), github.event.pull_request.user.login) ||
+          (
+            startsWith(github.head_ref, 'release-notes/assemble-') &&
+            endsWith(github.event.pull_request.user.login, '[bot]')
+          )
+        )
       )
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write # Required to post comments on PRs
+      pull-requests: read
     steps:
-      - name: Check signed commits in PR
-        uses: 1Password/check-signed-commits-action@v1 # Use the action
+      - uses: actions/checkout@v7
         with:
-          comment: |
-            🚨 Unsigned commits detected! Please sign your commits.
+          fetch-depth: 0
+      - name: Verify Signed-off-by trailer matches commit author email (DCO)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          is_merge_group=0
+          pr_author_login=""
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
+            head="${{ github.event.merge_group.head_sha }}"
+            is_merge_group=1
+            # The queue's branch ref is gh-readonly-queue/<base>/pr-<number>-<sha>;
+            # pull the PR number out of it to look up its real author login.
+            pr_number=$(echo "${{ github.event.merge_group.head_ref }}" | sed -E 's#.*/pr-([0-9]+)-[0-9a-f]+$#\1#')
+            pr_author_login=$(gh api "repos/${{ github.repository }}/pulls/$pr_number" --jq '.user.login')
+          else
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          fi
+          # GitHub Apps we allow to satisfy DCO by name instead of email:
+          # dependabot commits its own Signed-off-by trailer, but under the
+          # noreply author address rather than the support@github.com address
+          # in the trailer, so the exact-email match never succeeds.
+          bot_allowlist="dependabot[bot]"
 
-            For instructions on how to set up GPG/SSH signing and verify your commits, please see [GitHub Documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification).
+          fail=0
+          for c in $(git rev-list "$base..$head"); do
+            author_name=$(git show -s --format='%an' "$c")
+            author_email=$(git show -s --format='%ae' "$c")
+            trailers=$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$c")
+            if [ -z "$trailers" ]; then
+              echo "::error::commit $c is missing a Signed-off-by trailer (author email: $author_email)"
+              fail=1
+              continue
+            fi
+            match=0
+            # The merge queue squashes a PR into one commit authored as the
+            # PR's account; an account with "keep my email private" set gets
+            # a <id>+<login>@users.noreply.github.com author address there,
+            # which never equals the Signed-off-by email the original
+            # per-commit checks on the PR already verified under
+            # pull_request_target. Trust it only when the login embedded in
+            # that address matches the PR's actual author, so a forged
+            # noreply-shaped address for someone else's account still fails.
+            if [ "$is_merge_group" -eq 1 ] && [[ "$author_email" =~ ^[0-9]+\+(.+)@users\.noreply\.github\.com$ ]]; then
+              commit_login="${BASH_REMATCH[1]}"
+              if [ "$commit_login" = "$pr_author_login" ]; then
+                match=1
+              fi
+            fi
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              case "$line" in
+                *"<$author_email>"*) match=1 ;;
+              esac
+              case " $bot_allowlist " in
+                *" $author_name "*)
+                  case "$line" in
+                    "$author_name "*) match=1 ;;
+                  esac
+                  ;;
+              esac
+            done <<<"$trailers"
+            if [ "$match" -ne 1 ]; then
+              echo "::error::commit $c Signed-off-by email does not match commit author email. expected: $author_email, found: $trailers"
+              fail=1
+            fi
+          done
+          exit $fail

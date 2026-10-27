@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +30,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -46,7 +49,9 @@ import (
 
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -238,9 +243,13 @@ func CreateGrpcPayload(msg proto.Message) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(b) > math.MaxUint32 {
+		return nil, fmt.Errorf("marshaled message too large for gRPC length-prefixed framing: %d bytes", len(b))
+	}
+
 	payload := make([]byte, 5+len(b))
-	payload[0] = 0 // 0 = uncompressed
-	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b)))
+	payload[0] = 0                                           // 0 = uncompressed
+	binary.BigEndian.PutUint32(payload[1:5], uint32(len(b))) //#nosec G115 -- bounds-checked above
 	copy(payload[5:], b)
 	return payload, nil
 }
@@ -362,7 +371,8 @@ func NewRequestBufferedResponse(
 				Response: &extProcPb.CommonResponse{
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: setHeaders,
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaders,
 					},
 				},
 			},
@@ -665,6 +675,19 @@ func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan 
 // --- Internal Helpers ---
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
+// unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
+// is told to strip when no plugin set them, deprecated aliases included, plus
+// the screening headers it always strips and the attribution handoff EPP only
+// sends on sampled traces.
+var unsetRoutingHeaders = slices.Concat(
+	routing.HeaderNames(routing.PrefillEndpointHeader),
+	routing.HeaderNames(routing.EncoderEndpointsHeader),
+	routing.HeaderNames(routing.DataParallelEndpointHeader),
+	routing.HeaderNames(routing.KVCacheSourceHeader),
+	[]string{routing.EndpointPinHeader},
+	[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
+)
+
 func makeDestinationMetadata(endpoint string) *structpb.Struct {
 	return &structpb.Struct{
 		Fields: map[string]*structpb.Value{

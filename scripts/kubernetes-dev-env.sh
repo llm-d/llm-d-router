@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# Copyright 2025 The llm-d Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 # This shell script deploys a Kubernetes  cluster with an
 # KGateway-based Gateway API implementation fully configured. It deploys the
 # vllm, which it exposes with a Gateway -> HTTPRoute -> InferencePool.
@@ -83,7 +98,7 @@ export PD_ENABLED="\"${PD_ENABLED:-false}\""
 # Token length threshold to trigger P/D logic
 export PD_PROMPT_LEN_THRESHOLD="\"${PD_PROMPT_LEN_THRESHOLD:-10}\""
 
-export EPP_CONFIG="${EPP_CONFIG:-deploy/config/epp-prefix-cache-tracking-config.yaml}"
+export EPP_CONFIG="${EPP_CONFIG:-deploy/config/epp-precise-prefix-cache-config.yaml}"
 
 # Redis deployment name
 export REDIS_DEPLOYMENT_NAME="${REDIS_DEPLOYMENT_NAME:-lookup-server}"
@@ -134,6 +149,11 @@ export VLLM_DEPLOYMENT_NAME="${VLLM_HELM_RELEASE_NAME}-${MODEL_NAME_SAFE}"
 # ------------------------------------------------------------------------------
 # Deployment
 # ------------------------------------------------------------------------------
+
+if [[ "$CLEAN" != "true" && ( ! -f "${EPP_CONFIG}" || ! -r "${EPP_CONFIG}" ) ]]; then
+  echo "ERROR: EPP_CONFIG is not a readable file: ${EPP_CONFIG}" >&2
+  exit 1
+fi
 
 kubectl create namespace ${NAMESPACE} 2>/dev/null || true
 

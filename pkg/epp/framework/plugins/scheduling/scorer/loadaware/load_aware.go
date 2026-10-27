@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package loadaware
 
 import (
@@ -80,12 +96,17 @@ func (s *LoadAware) Category() scheduling.ScorerCategory {
 // Pod with empty waiting requests queue is scored with 0.5
 // Pod with requests in the queue will get score between 0.5 and 0.
 // Score 0 will get pod with number of requests in the queue equal to the threshold used in load-based filter
+// Pods with no written metrics are left unscored
 // In the future, pods with additional capacity will get score higher than 0.5
 func (s *LoadAware) Score(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
 
 	for _, endpoint := range endpoints {
-		waitingRequests := float64(endpoint.GetMetrics().WaitingQueueSize)
+		podMetrics := endpoint.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		waitingRequests := float64(podMetrics.WaitingQueueSize)
 
 		if waitingRequests == 0 {
 			scoredEndpoints[endpoint] = 0.5

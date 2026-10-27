@@ -25,16 +25,75 @@ import (
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
-// bytesPerToken matches the scorer's averageCharactersPerToken, so a block of N
-// pseudo-tokens covers the same input bytes as an N-token raw-byte block.
-const bytesPerToken = 4
+// Content-block types read by the estimate backend.
+const (
+	blockTypeText     = "text"
+	blockTypeImageURL = "image_url"
+	blockTypeThinking = "thinking"
+	blockTypeToolUse  = "tool_use"
+)
+
+const (
+	// Per-request billing hashes must not defeat prefix caching.
+	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
+)
+
+func anthropicSystemText(ac fwkrh.AnthropicContent) string {
+	if ac.Raw != "" {
+		return ac.Raw
+	}
+	var sb strings.Builder
+	for _, block := range ac.Structured {
+		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String()
+}
+
+func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.AnthropicImageSource) []tokenizerTypes.ContentBlock {
+	if url := anthropicImageToURL(src); url != "" {
+		blocks = append(blocks, tokenizerTypes.ContentBlock{
+			Type:     blockTypeImageURL,
+			ImageURL: tokenizerTypes.ImageBlock{URL: url},
+		})
+	}
+	return blocks
+}
+
+func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
+	content := b.ToolResultContent()
+	if content.Raw != "" {
+		return content.Raw, nil
+	}
+	var parts []string
+	var imageBlocks []tokenizerTypes.ContentBlock
+	for _, item := range content.Structured {
+		switch item.Type {
+		case blockTypeText:
+			parts = append(parts, item.Text)
+		case reqcommon.BlockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.ImageSource())
+		}
+	}
+	return strings.Join(parts, "\n"), imageBlocks
+}
+
+func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
+	if src == nil {
+		return ""
+	}
+	return reqcommon.AnthropicImageURL(src.Type, src.URL, src.Data, src.MediaType)
+}
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
@@ -42,12 +101,17 @@ const bytesPerToken = 4
 type estimateBackend struct {
 	img imageEstimator
 	vid videoEstimator
+	aud audioEstimator
 }
 
 // parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
-// Only video is populated today; image and audio parsing slot in here later.
+// Video and audio are populated from headers; image parsing follows the same
+// pattern when its headers are added.
 func parseMMMetadataHeaders(headers map[string]string) mmMetadata {
-	return mmMetadata{video: parseVideoMetadataHeaders(headers)}
+	return mmMetadata{
+		video: parseVideoMetadataHeaders(headers),
+		audio: parseAudioMetadataHeaders(headers),
+	}
 }
 
 // mmMetadataCtxKey keys the request-scoped mmMetadata on the context, carrying it
@@ -88,6 +152,25 @@ func parseVideoMetadataHeaders(headers map[string]string) videoMetadata {
 	return meta
 }
 
+// parseAudioMetadataHeaders reads the x-llm-d-audio- request headers into an
+// audioMetadata, using metadata.GetLowerCaseHeaderValue so aliases resolve the
+// same way as the SLO headers. Missing or malformed values leave their field zero
+// so the estimator falls back per field to config and then defaults.
+func parseAudioMetadataHeaders(headers map[string]string) audioMetadata {
+	var meta audioMetadata
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioDurationHeaderKey); ok {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
+			meta.duration = v
+		}
+	}
+	if s, ok := metadata.GetLowerCaseHeaderValue(headers, metadata.AudioBytesPerSecondHeaderKey); ok {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			meta.bytesPerSecond = v
+		}
+	}
+	return meta
+}
+
 // parseResolution splits a "WIDTHxHEIGHT" value into pixel dimensions, returning
 // zeros when the value is empty or malformed.
 func parseResolution(s string) (width, height int) {
@@ -111,15 +194,15 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	// rather than byte-estimating. Token-ID inputs are valid for generate,
 	// /v1/completions, and /v1/embeddings.
 	switch {
-	case body.Generate != nil:
+	case body.Generate != nil && len(body.Generate.TokenIDs) > 0:
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
 	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Completions.Prompt.TokenIDs}}}, nil
+		return fwkrh.NewTokenizedRequest(body.Completions.Prompt.TokenIDs), nil
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
-		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: body.Embeddings.Input.TokenIDs}}}, nil
+		return fwkrh.NewTokenizedRequest(body.Embeddings.Input.TokenIDs), nil
 	}
 
 	// Chat and Anthropic messages fold multimodal placeholders into the stream
@@ -143,6 +226,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 		)
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
 			TokenIDs:           tokens,
+			MultiModalFeatures: features,
+		}}}, nil
+	}
+	if body.Responses != nil {
+		raw, features := b.responsesBytes(body.Responses)
+		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
+			TokenIDs:           packBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
@@ -174,20 +264,12 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	switch {
 	case body.Conversations != nil:
 		return json.Marshal(body.Conversations.Items)
-	case body.Responses != nil:
-		var combined []map[string]any
-		if body.Responses.Instructions != nil {
-			combined = append(combined, map[string]any{"instructions": body.Responses.Instructions})
-		}
-		if body.Responses.Tools != nil {
-			combined = append(combined, map[string]any{"tools": body.Responses.Tools})
-		}
-		combined = append(combined, map[string]any{"input": body.Responses.Input})
-		return json.Marshal(combined)
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		return []byte(body.Embeddings.Input.PlainText()), nil
+	case body.Generate != nil && body.Generate.Text != "":
+		return []byte(body.Generate.Text), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
@@ -212,29 +294,63 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte
-// stream, recording multimodal placeholders on aligned boundaries.
+// stream, recording multimodal placeholders on aligned boundaries. Assistant
+// tool_calls follow the content, matching tool_use blocks in messagesBytes and
+// function_call items in appendResponsesItem.
 func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	if msg.Role != "" {
 		out = append(out, []byte(msg.Role)...)
 	}
 	if msg.Content.Raw != "" {
 		out = append(out, []byte(msg.Content.Raw)...)
-		return out, features
+		return appendChatToolCalls(out, msg.ToolCalls), features
 	}
 	for _, block := range msg.Content.Structured {
 		switch block.Type {
 		case blockTypeText:
 			out = append(out, []byte(block.Text)...)
 		case "image_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
-		case "input_audio", "audio_url":
+			out, features = appendMMAsset(out, features, reqcommon.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
+		case "audio_url":
+			// A clip carried by URL has no payload to read a duration from.
+			out, features = appendMMAsset(out, features, reqcommon.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount("", meta.audio))
+		case "input_audio":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, assetPlaceholderCount(len(data)))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityAudio, data, b.aud.placeholderCount(block.InputAudio.Data, meta.audio))
 		}
 	}
-	return out, features
+	return appendChatToolCalls(out, msg.ToolCalls), features
+}
+
+// appendChatToolCalls flattens an assistant message's tool_calls: the function
+// name and its arguments. Arguments are a JSON string on the wire; an object is
+// accepted too and contributes its JSON encoding. A call of any other shape
+// contributes nothing.
+func appendChatToolCalls(out []byte, toolCalls []any) []byte {
+	for _, call := range toolCalls {
+		c, ok := call.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := c["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := fn["name"].(string); ok {
+			out = append(out, []byte(name)...)
+		}
+		switch args := fn["arguments"].(type) {
+		case string:
+			out = append(out, []byte(args)...)
+		case map[string]any:
+			if raw, err := json.Marshal(args); err == nil {
+				out = append(out, raw...)
+			}
+		}
+	}
+	return out
 }
 
 // messagesBytes flattens an Anthropic /v1/messages request into pseudo-token
@@ -262,9 +378,9 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case blockTypeImage:
-				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
-					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
+			case reqcommon.BlockTypeImage:
+				if content, count := b.img.placeholderForAnthropicImage(block.ImageSource()); content != "" {
+					out, features = appendMMAsset(out, features, reqcommon.ModalityImage, content, count)
 				}
 			case blockTypeThinking:
 				out = append(out, []byte(block.Thinking)...)
@@ -272,14 +388,156 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 				out = append(out, []byte(block.ID)...)
 				out = append(out, []byte(block.Name)...)
 				out = append(out, block.Input...)
-			case blockTypeToolResult:
+			case reqcommon.BlockTypeToolResult:
 				text, imageBlocks := anthropicToolResultContent(block)
 				out = append(out, []byte(text)...)
 				for _, img := range imageBlocks {
 					url := img.ImageURL.URL
-					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
+					out, features = appendMMAsset(out, features, reqcommon.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
+		}
+	}
+	return out, features
+}
+
+// responsesBytes flattens a /v1/responses request into pseudo-token bytes,
+// folding multimodal placeholders in on aligned boundaries. Tools and a
+// string Instructions contribute their bytes ahead of Input, matching
+// messagesBytes. Input is a string or an array of items (see
+// appendResponsesItem for per-item coverage).
+func (b estimateBackend) responsesBytes(r *fwkrh.ResponsesRequest) ([]byte, []fwkrh.MultiModalFeature) {
+	var out []byte
+	var features []fwkrh.MultiModalFeature
+	if r.Tools != nil {
+		if raw, err := json.Marshal(r.Tools); err == nil {
+			out = append(out, raw...)
+		}
+	}
+	if sys, ok := r.Instructions.(string); ok && sys != "" {
+		out = append(out, []byte(sys)...)
+	}
+	return b.appendResponsesInput(out, features, r.Input)
+}
+
+// appendResponsesInput flattens the Responses Input field: a plain string, or
+// an array of items.
+func (b estimateBackend) appendResponsesInput(out []byte, features []fwkrh.MultiModalFeature, input any) ([]byte, []fwkrh.MultiModalFeature) {
+	switch v := input.(type) {
+	case string:
+		out = append(out, []byte(v)...)
+	case []any:
+		for _, item := range v {
+			out, features = b.appendResponsesItem(out, features, item)
+		}
+	}
+	return out, features
+}
+
+// appendResponsesItem flattens one Input item for the byte estimate. An item
+// shaped like a plain chat message ({"role": ..., "content": ...}, with an
+// optional "type": "message") flattens through content. function_call,
+// function_call_output, and reasoning items flatten their own text-bearing
+// fields rather than contributing nothing: an agentic Responses turn is
+// mostly these item types, and undercounting their length feeds a too-short
+// estimate into the P/D disaggregation decider, context-length admission,
+// and prefix-hash scoring, all of which read this backend's token count. An
+// item of any other type contributes nothing, since this code does not know
+// its shape.
+func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiModalFeature, item any) ([]byte, []fwkrh.MultiModalFeature) {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return out, features
+	}
+	switch t, _ := m["type"].(string); t {
+	case "", responsesItemTypeMessage:
+		if role, ok := m["role"].(string); ok {
+			out = append(out, []byte(role)...)
+		}
+		return b.appendResponsesContent(out, features, m["content"])
+	case responsesItemTypeFunctionCall:
+		if name, ok := m["name"].(string); ok {
+			out = append(out, []byte(name)...)
+		}
+		if args, ok := m["arguments"].(string); ok {
+			out = append(out, []byte(args)...)
+		}
+	case responsesItemTypeFunctionCallOutput:
+		out = appendResponsesOutputText(out, m["output"])
+	case responsesItemTypeReasoning:
+		out = appendResponsesSummaryText(out, m["summary"])
+	}
+	return out, features
+}
+
+// appendResponsesOutputText flattens a function_call_output item's "output"
+// field: a plain string, or an array of content parts shaped like
+// {"type": "output_text", "text": ...}.
+func appendResponsesOutputText(out []byte, output any) []byte {
+	switch v := output.(type) {
+	case string:
+		return append(out, []byte(v)...)
+	case []any:
+		for _, part := range v {
+			if p, ok := part.(map[string]any); ok {
+				if text, ok := p["text"].(string); ok {
+					out = append(out, []byte(text)...)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// appendResponsesSummaryText flattens a reasoning item's "summary" field: an
+// array of {"type": "summary_text", "text": ...} parts.
+func appendResponsesSummaryText(out []byte, summary any) []byte {
+	parts, ok := summary.([]any)
+	if !ok {
+		return out
+	}
+	for _, part := range parts {
+		if p, ok := part.(map[string]any); ok {
+			if text, ok := p["text"].(string); ok {
+				out = append(out, []byte(text)...)
+			}
+		}
+	}
+	return out
+}
+
+// appendResponsesContent flattens an Input item's "content" field: a plain
+// string, or an array of content parts.
+func (b estimateBackend) appendResponsesContent(out []byte, features []fwkrh.MultiModalFeature, content any) ([]byte, []fwkrh.MultiModalFeature) {
+	switch v := content.(type) {
+	case string:
+		out = append(out, []byte(v)...)
+	case []any:
+		for _, part := range v {
+			out, features = b.appendResponsesContentPart(out, features, part)
+		}
+	}
+	return out, features
+}
+
+// appendResponsesContentPart flattens one content part. input_image carries
+// its URL as a bare string field, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape. An input_audio part contributes
+// nothing: the Responses input content union does not define it, so the
+// model server refuses a request carrying one.
+func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh.MultiModalFeature, part any) ([]byte, []fwkrh.MultiModalFeature) {
+	p, ok := part.(map[string]any)
+	if !ok {
+		return out, features
+	}
+	switch p["type"] {
+	case "input_text", "output_text":
+		if text, ok := p["text"].(string); ok {
+			out = append(out, []byte(text)...)
+		}
+	case "input_image":
+		if url, ok := p["image_url"].(string); ok && url != "" {
+			out, features = appendMMAsset(out, features, reqcommon.ModalityImage, url, b.img.placeholderCount(url))
 		}
 	}
 	return out, features
@@ -288,13 +546,13 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 // appendMMAsset aligns out to a token boundary, appends count placeholder
 // pseudo-tokens derived from a stable content hash, and records the matching
 // feature under modality so labels agree with the vllm backend.
-func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkrh.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
+func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality reqcommon.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
 	out = align(out)
-	offset := len(out) / bytesPerToken
+	offset := len(out) / fwkrh.BytesPerToken
 
 	sum := xxhash.Sum64String(content)
-	token := make([]byte, bytesPerToken)
-	binary.LittleEndian.PutUint32(token, uint32(sum))
+	token := make([]byte, fwkrh.BytesPerToken)
+	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {
 		out = append(out, token...)
 	}
@@ -308,15 +566,6 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkr
 	return out, features
 }
 
-// assetPlaceholderCount derives a deterministic placeholder count (>= 1) from an
-// asset's byte length for modalities without a dedicated estimator.
-func assetPlaceholderCount(dataLen int) int {
-	if n := (dataLen + bytesPerToken - 1) / bytesPerToken; n > 0 {
-		return n
-	}
-	return 1
-}
-
 // packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
 // Reinterpreting them reproduces the input, so locality keys are unchanged.
 func packBytes(raw []byte) []uint32 {
@@ -324,17 +573,17 @@ func packBytes(raw []byte) []uint32 {
 		return nil
 	}
 	raw = align(raw)
-	out := make([]uint32, len(raw)/bytesPerToken)
+	out := make([]uint32, len(raw)/fwkrh.BytesPerToken)
 	for i := range out {
-		out[i] = binary.LittleEndian.Uint32(raw[i*bytesPerToken:])
+		out[i] = binary.LittleEndian.Uint32(raw[i*fwkrh.BytesPerToken:])
 	}
 	return out
 }
 
-// align zero-pads b up to a bytesPerToken boundary.
+// align zero-pads b up to a fwkrh.BytesPerToken boundary.
 func align(b []byte) []byte {
-	if r := len(b) % bytesPerToken; r != 0 {
-		b = append(b, make([]byte, bytesPerToken-r)...)
+	if r := len(b) % fwkrh.BytesPerToken; r != 0 {
+		b = append(b, make([]byte, fwkrh.BytesPerToken-r)...)
 	}
 	return b
 }

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package programaware
 
 import (
@@ -7,15 +23,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 func decoder(s string) *json.Decoder { return json.NewDecoder(strings.NewReader(s)) }
@@ -171,6 +189,23 @@ func TestPreRequest_RecordsDispatchAndWait(t *testing.T) {
 	assert.Greater(t, m.AverageWaitTime(), 0.0)
 }
 
+// The director hands PreRequest a request confined to the plugin's
+// declarations, so the enqueue time Pick stashed must be readable through it.
+func TestPreRequest_ReadsEnqueueTimeThroughScope(t *testing.T) {
+	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+	req.PutAttribute(enqueueTimeAttributeKey, time.Now().Add(-50*time.Millisecond))
+
+	p := &ProgramAwarePlugin{name: "scoped-program-aware"}
+	datalayer.RegisterScopeSpecs([]plugin.Plugin{p})
+	scoped, violations := datalayer.ScopeRequest(logr.Discard(), fwkrc.PreRequestExtensionPoint, p, req)
+	require.NoError(t, p.PreRequest(context.Background(), scoped, nil))
+	require.NoError(t, violations.Write())
+
+	m := p.getOrCreateMetrics("alpha")
+	assert.Equal(t, int64(1), m.WaitCount())
+	assert.Greater(t, m.AverageWaitTime(), 0.0)
+}
+
 func TestPreRequest_NoEnqueueAttribute_StillDispatches(t *testing.T) {
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
 	p := &ProgramAwarePlugin{}
@@ -187,7 +222,7 @@ func TestPreRequest_NoFairnessID_FallsBackToDefault(t *testing.T) {
 	p := &ProgramAwarePlugin{}
 	_ = p.PreRequest(context.Background(), req, nil)
 
-	got, ok := p.programMetrics.Load(metadata.DefaultFairnessID)
+	got, ok := p.programMetrics.Load(reqcommon.DefaultFairnessID)
 	require.True(t, ok, "default fairness ID entry should be created")
 	m, ok := got.(*ProgramMetrics)
 	require.True(t, ok)
@@ -350,4 +385,55 @@ func TestDumpStateEmpty(t *testing.T) {
 	assert.Equal(t, int64(0), state.TotalInFlight)
 	// With no programs the policy is trivially fair.
 	assert.Equal(t, 1.0, state.FairnessIndex)
+}
+
+func TestNewStrategy_TurnPriority(t *testing.T) {
+	strategy, err := newStrategy(Config{
+		Strategy:                      "turn-priority",
+		TurnPriorityTimeWeight:        0.25,
+		TurnPriorityInactivitySeconds: 120,
+	})
+	require.NoError(t, err)
+
+	tp, ok := strategy.(*turnPriorityStrategy)
+	require.True(t, ok)
+	assert.Equal(t, "turn-priority", tp.Name())
+	assert.Equal(t, 0.25, tp.timeWeight)
+	assert.Equal(t, 120.0, tp.inactivitySeconds)
+}
+
+func TestNewStrategy_UnknownRejected(t *testing.T) {
+	_, err := newStrategy(Config{Strategy: "nope"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "turn-priority")
+}
+
+func TestConfigValidate_TurnPriority(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"defaults", func(*Config) {}, ""},
+		{"weight zero", func(c *Config) { c.TurnPriorityTimeWeight = 0 }, ""},
+		{"weight one", func(c *Config) { c.TurnPriorityTimeWeight = 1 }, ""},
+		{"weight negative", func(c *Config) { c.TurnPriorityTimeWeight = -0.1 }, "turnPriorityTimeWeight"},
+		{"weight above one", func(c *Config) { c.TurnPriorityTimeWeight = 1.5 }, ""},
+		{"inactivity zero", func(c *Config) { c.TurnPriorityInactivitySeconds = 0 }, ""},
+		{"inactivity negative", func(c *Config) { c.TurnPriorityInactivitySeconds = -1 }, "turnPriorityInactivitySeconds"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tc.mutate(&cfg)
+			err := cfg.validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

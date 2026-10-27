@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -80,7 +81,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	}
 
 	predictions, err := pl.generatePredictions(ctx, predictedLatencyCtx, endpoints)
-	if err == nil && len(predictions) == len(endpoints) {
+	if err == nil {
 		pl.updateRequestContextWithPredictions(predictedLatencyCtx, predictions)
 
 		// Store predictions in endpoint attributes
@@ -106,6 +107,11 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 					"tpotHeadroom", pred.Headroom)
 			}
 		}
+	} else if reason := classifyPredictionError(err); reason != "" {
+		llmdRequestPredictionFailures.WithLabelValues(pl.typedName.Name, pl.typedName.Type, reason).Inc()
+		pl.failureLog.Do(func() {
+			logger.Error(err, "Latency prediction failed", "reason", reason, "endpoints", len(endpoints))
+		})
 	}
 
 	// Don't publish the SLO context after the director's Produce window has closed.

@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 func TestParseRequest(t *testing.T) {
@@ -97,6 +97,7 @@ func TestParseRequest(t *testing.T) {
 					},
 					Stream:  true,
 					Payload: fwkrh.PayloadProto{Message: reqMsg},
+					RawBody: reqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
 			},
@@ -114,6 +115,7 @@ func TestParseRequest(t *testing.T) {
 						Input: "Hello from stream raw predict",
 					},
 					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
+					RawBody: streamRawPredictReqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
 			},
@@ -131,6 +133,7 @@ func TestParseRequest(t *testing.T) {
 						Input: "Hello from raw predict",
 					},
 					Payload: fwkrh.PayloadProto{Message: rawPredictReqMsg},
+					RawBody: rawPredictReqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
 			},
@@ -221,6 +224,28 @@ func TestParseResponse(t *testing.T) {
 
 	invalidProtoBody, _ := createGrpcFrameRaw([]byte{0xFF})
 
+	contentBytes, err := proto.Marshal(&httpbody.HttpBody{Data: []byte(`{"choices":[{"delta":{"content":"Hi"}}]}`)})
+	if err != nil {
+		t.Fatalf("Failed to marshal HttpBody: %v", err)
+	}
+	contentFrame, err := createGrpcFrameRaw(contentBytes)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+	twoFrameBody := append(append([]byte{}, contentFrame...), validBody...)
+
+	eventStreamBytes, err := proto.Marshal(&httpbody.HttpBody{
+		ContentType: "text/event-stream",
+		Data:        []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n"),
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal HttpBody: %v", err)
+	}
+	eventStreamBody, err := createGrpcFrameRaw(eventStreamBytes)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+
 	tests := []struct {
 		name       string
 		body       []byte
@@ -238,6 +263,41 @@ func TestParseResponse(t *testing.T) {
 			name:    "Valid JSON response",
 			body:    validBody,
 			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Usage in a later frame of the chunk",
+			body:    twoFrameBody,
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Event stream HttpBody",
+			body:    eventStreamBody,
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage:          &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name:    "Usage read past an invalid frame",
+			body:    append(append([]byte{}, invalidProtoBody...), validBody...),
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantErr: "unmarshaling HttpBody response",
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Usage read before an incomplete trailing frame",
+			body:    append(append([]byte{}, validBody...), contentFrame[:8]...),
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantErr: "incomplete gRPC payload",
 			wantResult: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
@@ -266,9 +326,7 @@ func TestParseResponse(t *testing.T) {
 				if !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("Expected error containing %q, got %v", tc.wantErr, err)
 				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("ParseResponse failed: %v", err)
 			}
 
@@ -307,8 +365,8 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 
 func createGrpcFrameRaw(payload []byte) ([]byte, error) {
 	frame := make([]byte, 5+len(payload))
-	frame[0] = 0 // uncompressed
-	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload)))
+	frame[0] = 0                                                // uncompressed
+	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload))) //#nosec G115 -- test fixture, small gRPC frame payloads
 	copy(frame[5:], payload)
 	return frame, nil
 }

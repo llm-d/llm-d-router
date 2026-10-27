@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,14 +29,19 @@ import (
 	"math"
 	"math/rand"
 
+	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
 const (
@@ -133,8 +139,8 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 }
 
 func (c *Config) validate() error {
-	if c.AffinityThreshold > 1.0 {
-		return fmt.Errorf("affinityThreshold must be <= 1.0, got %f", c.AffinityThreshold)
+	if c.AffinityThreshold < 0 || c.AffinityThreshold > 1.0 {
+		return fmt.Errorf("affinityThreshold must be in [0, 1], got %f", c.AffinityThreshold)
 	}
 	if c.ExplorationProbability < 0 || c.ExplorationProbability > 1.0 {
 		return fmt.Errorf("explorationProbability must be in [0, 1], got %f", c.ExplorationProbability)
@@ -167,19 +173,39 @@ func (p *Plugin) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	logger := log.FromContext(ctx)
+
+	_, span := tracing.Tracer(schedplugins.TracerScope).Start(ctx, "filter_prefix_cache_affinity",
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	defer span.End()
+
+	span.SetAttributes(
+		semconv.LLMDEPPFilterCandidateEndpoints(len(endpoints)),
+		semconv.LLMDEPPFilterAffinityThreshold(p.config.AffinityThreshold),
+	)
+	if request != nil {
+		if request.TargetModel != "" {
+			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
+		}
+		if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+			span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+		}
+	}
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {
 		recordDecision(p.typedName.Name, outcomeNotApplicable)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNotApplicable))
 		return endpoints
 	}
 
 	// Exploration: skip the gate with configured probability.
-	if rand.Float64() < p.config.ExplorationProbability {
+	if rand.Float64() < p.config.ExplorationProbability { //#nosec G404 -- exploration sampling, not security-sensitive
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: exploration skip, keeping all",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
 		recordDecision(p.typedName.Name, outcomeExploration)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeExploration))
 		return endpoints
 	}
 
@@ -193,23 +219,36 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 		}
 	}
 
+	span.SetAttributes(semconv.LLMDEPPFilterStickyEndpoints(len(sticky)))
+
 	// No sticky endpoints found, keep all.
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
 		recordDecision(p.typedName.Name, outcomeNoMatch)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNoMatch))
 		return endpoints
 	}
 
 	// TTFT load gate: break stickiness if sticky endpoints are too slow.
 	if p.config.MaxTTFTPenaltyMs > 0 && len(nonSticky) > 0 {
-		bestStickyTTFT := p.bestTTFT(sticky)
-		bestNonStickyTTFT := p.bestTTFT(nonSticky)
-		if bestStickyTTFT-bestNonStickyTTFT > p.config.MaxTTFTPenaltyMs {
+		bestStickyTTFT, stickyOk := p.bestTTFT(sticky)
+		bestNonStickyTTFT, nonStickyOk := p.bestTTFT(nonSticky)
+		if !stickyOk || !nonStickyOk {
+			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate skipped, missing signal",
+				"stickyObserved", stickyOk, "nonStickyObserved", nonStickyOk)
+			recordDecision(p.typedName.Name, outcomeMissingSignal)
+			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeMissingSignal))
+			return endpoints
+		}
+		penalty := bestStickyTTFT - bestNonStickyTTFT
+		span.SetAttributes(semconv.LLMDEPPFilterTTFTPenaltyMs(penalty))
+		if penalty > p.config.MaxTTFTPenaltyMs {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
-				"penalty", bestStickyTTFT-bestNonStickyTTFT, "maxPenalty", p.config.MaxTTFTPenaltyMs)
+				"penalty", penalty, "maxPenalty", p.config.MaxTTFTPenaltyMs)
 			recordDecision(p.typedName.Name, outcomeLoadOverride)
+			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeLoadOverride))
 			return endpoints
 		}
 	}
@@ -217,6 +256,7 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
 	recordDecision(p.typedName.Name, outcomeSticky)
+	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeSticky))
 	return sticky
 }
 
@@ -248,39 +288,44 @@ func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
 }
 
 // bestTTFT returns the lowest per-endpoint TTFT (ms) across endpoints.
-func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) float64 {
+func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
 	best := math.MaxFloat64
+	found := false
 	for _, ep := range endpoints {
-		if ttft := p.endpointTTFT(ep); ttft < best {
+		if ttft, ok := p.endpointTTFT(ep); ok && ttft < best {
 			best = ttft
+			found = true
 		}
 	}
-	return best
+	return best, found
 }
 
 // endpointTTFT returns the predicted TTFT (ms) for an endpoint, either from the
 // latency predictor or estimated from in-flight tokens and peak prefill
 // throughput. Endpoints missing the required attribute contribute no signal:
-// MaxFloat64 on the predictor path (never the fastest), 0 in-flight tokens on
-// the throughput path (no observed load).
-func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) float64 {
+// the function returns false and the endpoint is excluded from the bestTTFT calculation.
+func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if p.config.usesLatencyPredictor() {
 		if raw, ok := ep.Get(p.latencyPredictionInfoDataKey); ok {
 			info := raw.(*attrlatency.LatencyPredictionInfo)
-			return info.TTFT()
+			return info.TTFT(), true
 		}
-		return math.MaxFloat64
+		return math.MaxFloat64, false
 	}
-	return float64(p.inFlightTokens(ep)) / p.config.PeakPrefillThroughput * 1000
+	tokens, ok := p.inFlightTokens(ep)
+	if !ok {
+		return 0, false
+	}
+	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
-// inFlightTokens returns an endpoint's in-flight token count, or 0 when the
-// attribute is absent (no observed load).
-func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) int64 {
+// inFlightTokens returns an endpoint's in-flight token count. If the attribute is
+// absent, it returns ok=false so the caller can treat the signal as missing.
+func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
-			return load.Tokens
+			return load.Tokens, true
 		}
 	}
-	return 0
+	return 0, false
 }

@@ -17,13 +17,28 @@ limitations under the License.
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -32,6 +47,14 @@ const testHash = "abc123"
 // testKwargs is a base64 tensor blob standing in for a real (non-cache-hit)
 // kwargs_data entry.
 const testKwargs = "dGVuc29y"
+
+// Per-image stand-ins used across prefill/render feature tests.
+const (
+	testKwargsA   = "dGVuc29yLWE="
+	testKwargsB   = "dGVuc29yLWI="
+	testMetadataA = "bWV0YS1h"
+	testMetadataB = "bWV0YS1i"
+)
 
 func TestReadErrorBody_CapsOversizedBody(t *testing.T) {
 	body := readErrorBody(strings.NewReader(strings.Repeat("a", maxErrorBodySize*4)))
@@ -47,99 +70,26 @@ func TestReadErrorBody_ReturnsSmallBodyVerbatim(t *testing.T) {
 	}
 }
 
-func TestCapSingleTokenOutput(t *testing.T) {
+func TestResolveFormat(t *testing.T) {
 	tests := []struct {
-		name   string
-		format gateway.RequestFormat
-		body   map[string]any
-		want   map[string]any
+		name            string
+		useOpenAIFormat bool
+		path            string
+		want            reqcommon.APIType
 	}{
-		{
-			name:   "chat completions caps output fields and forces non-streaming",
-			format: gateway.FormatChatCompletions,
-			body: map[string]any{
-				"model":                 "m",
-				"max_tokens":            100,
-				"min_tokens":            5,
-				"max_completion_tokens": 100,
-				"stream":                true,
-				"stream_options":        map[string]any{"include_usage": true},
-			},
-			want: map[string]any{
-				"model":                 "m",
-				"max_tokens":            1,
-				"max_completion_tokens": 1,
-				"stream":                false,
-			},
-		},
-		{
-			name:   "max_completion_tokens is not added when the client omitted it",
-			format: gateway.FormatChatCompletions,
-			body:   map[string]any{"model": "m"},
-			want: map[string]any{
-				"model":      "m",
-				"max_tokens": 1,
-				"stream":     false,
-			},
-		},
-		{
-			name:   "completions caps max_tokens, strips min_tokens, forces non-streaming",
-			format: gateway.FormatCompletions,
-			body:   map[string]any{"model": "m", "max_tokens": 100, "min_tokens": 5},
-			want:   map[string]any{"model": "m", "max_tokens": 1, "stream": false},
-		},
-		{
-			name:   "streaming is forced false and stream_options stripped",
-			format: gateway.FormatCompletions,
-			body:   map[string]any{"stream": true, "stream_options": map[string]any{"include_usage": true}},
-			want:   map[string]any{"stream": false, "max_tokens": 1},
-		},
-		{
-			name:   "generate caps max_tokens and strips min_tokens inside sampling_params",
-			format: gateway.FormatGenerate,
-			body: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 100, "min_tokens": 5},
-			},
-			want: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 1},
-				"stream":          false,
-			},
-		},
-		{
-			name:   "generate synthesizes sampling_params when absent",
-			format: gateway.FormatGenerate,
-			body:   map[string]any{"model": "m"},
-			want: map[string]any{
-				"model":           "m",
-				"sampling_params": map[string]any{"max_tokens": 1},
-				"stream":          false,
-			},
-		},
-		{
-			name:   "generate preserves other sampling_params entries",
-			format: gateway.FormatGenerate,
-			body: map[string]any{
-				"sampling_params": map[string]any{
-					"extra_args": map[string]any{"kv_transfer_params": "x"},
-				},
-			},
-			want: map[string]any{
-				"sampling_params": map[string]any{
-					"max_tokens": 1,
-					"extra_args": map[string]any{"kv_transfer_params": "x"},
-				},
-				"stream": false,
-			},
-		},
+		{name: "chat completions with openai format", useOpenAIFormat: true, path: reqcommon.PathChatCompletions, want: reqcommon.APITypeChatCompletions},
+		{name: "chat completions without openai format collapses to generate", path: reqcommon.PathChatCompletions, want: reqcommon.APITypeVLLMGenerate},
+		{name: "completions ignores openai format", path: reqcommon.PathCompletions, want: reqcommon.APITypeCompletions},
+		{name: "generate", useOpenAIFormat: true, path: reqcommon.PathVLLMGenerate, want: reqcommon.APITypeVLLMGenerate},
+		{name: "responses with openai format", useOpenAIFormat: true, path: reqcommon.PathResponses, want: reqcommon.APITypeResponses},
+		{name: "responses without openai format collapses to generate", path: reqcommon.PathResponses, want: reqcommon.APITypeVLLMGenerate},
+		{name: "messages with openai format", useOpenAIFormat: true, path: reqcommon.PathMessages, want: reqcommon.APITypeMessages},
+		{name: "messages without openai format collapses to generate", path: reqcommon.PathMessages, want: reqcommon.APITypeVLLMGenerate},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			capSingleTokenOutput(tt.body, tt.format)
-			if !reflect.DeepEqual(tt.body, tt.want) {
-				t.Fatalf("got %v, want %v", tt.body, tt.want)
+			if got := resolveFormat(tt.useOpenAIFormat, tt.path); got != tt.want {
+				t.Errorf("resolveFormat(%t, %q) = %v, want %v", tt.useOpenAIFormat, tt.path, got, tt.want)
 			}
 		})
 	}
@@ -235,9 +185,6 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		if e.KwargsData != "tensordata" {
 			t.Errorf("kwargs: expected tensordata, got %v", e.KwargsData)
 		}
-		if e.Index != 0 {
-			t.Errorf("index: expected 0, got %v", e.Index)
-		}
 	})
 
 	t.Run("valid_two_images", func(t *testing.T) {
@@ -257,8 +204,8 @@ func TestExtractMultimodalEntries(t *testing.T) {
 			t.Fatalf("expected 2 entries, got %d", len(entries))
 		}
 		want := []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "hash1", KwargsData: "d1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
-			{Index: 1, Hash: "hash2", KwargsData: "d2", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 2}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash1", KwargsData: "d1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "hash2", KwargsData: "d2", Placeholder: pipeline.PlaceholderRange{Offset: 5, Length: 2}},
 		}
 		for i, w := range want {
 			if entries[i] != w {
@@ -299,6 +246,33 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		}
 		if !errors.Is(err, pipeline.ErrBadRequest) {
 			t.Errorf("expected ErrBadRequest, got %v", err)
+		}
+	})
+
+	t.Run("mm_metadata_on_inbound_is_ignored", func(t *testing.T) {
+		// On the inbound generate leg this parser runs exactly when EncodeStep
+		// is skipped (both switch on the same DetectAPIType of the request
+		// path), so the client-supplied metadata has no consumer: ECTransferParams
+		// stays empty and prefill's per-entry choice falls back to kwargs_data.
+		// The field is therefore neither parsed nor rejected -- a client that
+		// sends it must not break, and must not gain anything either.
+		features := map[string]any{
+			"mm_hashes": map[string]any{"image": []any{"hash1", "hash2"}},
+			"mm_placeholders": map[string]any{"image": []any{
+				map[string]any{"offset": float64(1), "length": float64(3)},
+				map[string]any{"offset": float64(5), "length": float64(2)},
+			}},
+			"kwargs_data": map[string]any{"image": []any{"d1", "d2"}},
+			"mm_metadata": map[string]any{"image": []any{"m1", nil}},
+		}
+		entries, err := extractMultimodalEntries(features)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, e := range entries {
+			if e.MMMetadata != "" {
+				t.Fatalf("entry %d metadata: got %q, want empty: inbound metadata must stay unread", i, e.MMMetadata)
+			}
 		}
 	})
 
@@ -382,14 +356,13 @@ func TestExtractMultimodalEntries(t *testing.T) {
 		}
 	})
 
-	t.Run("mm_hashes_no_image_modality_returns_nil", func(t *testing.T) {
+	t.Run("mm_hashes_non_image_modality_requires_placeholders", func(t *testing.T) {
+		// The extractor walks every modality in mm_hashes, so a response
+		// carrying audio hashes must supply matching placeholders.
 		features := map[string]any{"mm_hashes": map[string]any{"audio": []any{testHash}}}
-		entries, err := extractMultimodalEntries(features)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if entries != nil {
-			t.Fatalf("expected nil, got %v", entries)
+		_, err := extractMultimodalEntries(features)
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Errorf("expected ErrBadRequest for audio hashes without placeholders, got %v", err)
 		}
 	})
 
@@ -481,44 +454,10 @@ func TestExtractMultimodalEntries(t *testing.T) {
 	}
 }
 
-func TestValidateSamplingParams(t *testing.T) {
-	obj := func(m map[string]any) map[string]any { return m }
-	tests := []struct {
-		name    string
-		body    map[string]any
-		wantErr bool
-	}{
-		{name: "absent", body: map[string]any{}},
-		{name: "null", body: map[string]any{"sampling_params": nil}},
-		{name: "valid_object", body: map[string]any{"sampling_params": obj(map[string]any{"max_tokens": float64(16)})}},
-		{name: "valid_with_extra_args", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": obj(map[string]any{})})}},
-		{name: "extra_args_null", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": nil})}},
-		{name: "sampling_params_array", body: map[string]any{"sampling_params": []any{float64(1), float64(2)}}, wantErr: true},
-		{name: "sampling_params_string", body: map[string]any{"sampling_params": "greedy"}, wantErr: true},
-		{name: "extra_args_array", body: map[string]any{"sampling_params": obj(map[string]any{"extra_args": []any{float64(1)}})}, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateSamplingParams(tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !errors.Is(err, pipeline.ErrBadRequest) {
-					t.Errorf("expected ErrBadRequest, got %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
 func TestValidatePlaceholderBounds(t *testing.T) {
 	entry := func(offset, length int) pipeline.MultimodalEntry {
 		return pipeline.MultimodalEntry{
+			Modality:    reqcommon.ModalityImage,
 			Placeholder: pipeline.PlaceholderRange{Offset: offset, Length: length},
 		}
 	}
@@ -571,19 +510,21 @@ func mmImageKwargs(t *testing.T, features map[string]any) []any {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal kwargs_data: %v", err)
 	}
-	return decoded[ModalityImage]
+	return decoded[string(reqcommon.ModalityImage)]
 }
 
-func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
+func TestBuildPrefillMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	// The empty-string KwargsData is the "resolve from cache" sentinel. On the
 	// wire it must be JSON null, not "": vLLM decodes "" as an inline tensor and
 	// fails with "Input data was truncated", while null means a cache-hit item.
 	entry := func(kwargs string) pipeline.MultimodalEntry {
-		return pipeline.MultimodalEntry{Hash: testHash, KwargsData: kwargs}
+		return pipeline.MultimodalEntry{Modality: reqcommon.ModalityImage, Hash: testHash, KwargsData: kwargs}
 	}
 
 	t.Run("all cache-hit -> all null", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry(""), entry("")}, true)
+		// nil ecTransferParams: every entry lacks an EC descriptor, so the
+		// per-entry decision keeps them on kwargs_data (as null sentinels).
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{entry(""), entry("")}, nil)
 		items := mmImageKwargs(t, features)
 		if len(items) != 2 {
 			t.Fatalf("expected 2 kwargs_data entries, got %d: %v", len(items), items)
@@ -601,17 +542,681 @@ func TestBuildMMFeatures_CacheHitSentinelSerializesAsNull(t *testing.T) {
 	})
 
 	t.Run("mixed batch keeps inline, nulls cache hits", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry(testKwargs), entry("")}, true)
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{entry(testKwargs), entry("")}, nil)
 		items := mmImageKwargs(t, features)
 		if len(items) != 2 || items[0] != testKwargs || items[1] != nil {
 			t.Fatalf("expected [\"dGVuc29y\", null], got %#v", items)
 		}
 	})
+}
 
-	t.Run("includeKwargs=false omits the field", func(t *testing.T) {
-		features := buildMMFeatures([]pipeline.MultimodalEntry{entry("")}, false)
-		if _, ok := features["kwargs_data"]; ok {
-			t.Errorf("expected kwargs_data absent when includeKwargs is false")
+func TestBuildPrefillMMFeatures_PerEntryDecision(t *testing.T) {
+	entry := func(hash, kwargs, metadata string) pipeline.MultimodalEntry {
+		return pipeline.MultimodalEntry{
+			Modality:    reqcommon.ModalityImage,
+			Hash:        hash,
+			KwargsData:  kwargs,
+			MMMetadata:  metadata,
+			Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3},
+		}
+	}
+	ec := func(hashes ...string) map[string]any {
+		m := make(map[string]any, len(hashes))
+		for _, h := range hashes {
+			m[h] = map[string]any{"peer_port": 5501}
+		}
+		return m
+	}
+
+	t.Run("empty entries returns nil", func(t *testing.T) {
+		if got := buildPrefillMMFeatures(nil, nil); got != nil {
+			t.Errorf("expected nil for empty entries, got %#v", got)
 		}
 	})
+
+	t.Run("all entries covered -> all metadata, all kwargs null", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != nil {
+			t.Errorf("expected kwargs_data=[null,null], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != testMetadataB {
+			t.Errorf("expected mm_metadata=[A,B], got %#v", md)
+		}
+	})
+
+	t.Run("no EC -> all kwargs, all metadata null", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, ""),
+		}, ec())
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != testKwargsA || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[A,B], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != nil || md[1] != nil {
+			t.Errorf("expected mm_metadata=[null,null], got %#v", md)
+		}
+	})
+
+	t.Run("partial EC -> per-entry split with complementary nulls", func(t *testing.T) {
+		// Regression for the partial-coverage case: one encode sub-request
+		// returned no descriptor (nixlEC.MergeEncodeResponse logs a warning
+		// and continues). The covered entry ships mm_metadata with a null
+		// kwargs_data slot; the uncovered entry ships kwargs_data with a
+		// null mm_metadata slot. vLLM's per-item merge reassembles each.
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[null,B], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != nil {
+			t.Errorf("expected mm_metadata=[A,null], got %#v", md)
+		}
+	})
+
+	t.Run("partial metadata -> covered-but-empty entry falls back to kwargs", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, ""),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != testKwargsB {
+			t.Errorf("expected kwargs_data=[null,B], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != testMetadataA || md[1] != nil {
+			t.Errorf("expected mm_metadata=[A,null], got %#v", md)
+		}
+	})
+
+	t.Run("both fields absent (cache-hit everywhere) -> all null in both arrays", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", "", ""),
+			entry("h2", "", ""),
+		}, ec("h1", "h2"))
+		kw := mmImageField(t, features, "kwargs_data")
+		md := mmImageField(t, features, "mm_metadata")
+		if len(kw) != 2 || kw[0] != nil || kw[1] != nil {
+			t.Errorf("expected kwargs_data=[null,null], got %#v", kw)
+		}
+		if len(md) != 2 || md[0] != nil || md[1] != nil {
+			t.Errorf("expected mm_metadata=[null,null], got %#v", md)
+		}
+	})
+
+	t.Run("mm_hashes and mm_placeholders parallel to per-entry arrays", func(t *testing.T) {
+		features := buildPrefillMMFeatures([]pipeline.MultimodalEntry{
+			entry("h1", testKwargsA, testMetadataA),
+			entry("h2", testKwargsB, testMetadataB),
+		}, ec("h1"))
+		hashes := features["mm_hashes"].(map[reqcommon.Modality][]string)[reqcommon.ModalityImage]
+		if len(hashes) != 2 || hashes[0] != "h1" || hashes[1] != "h2" {
+			t.Errorf("unexpected mm_hashes: %#v", hashes)
+		}
+		placeholders := features["mm_placeholders"].(map[reqcommon.Modality][]any)[reqcommon.ModalityImage]
+		if len(placeholders) != 2 {
+			t.Fatalf("expected 2 placeholders, got %d", len(placeholders))
+		}
+	})
+}
+
+// mmImageField reads features[field].image as []any after a JSON round-trip,
+// so the test sees the on-wire shape (the cache-hit sentinel must be null,
+// not ""). Reused across kwargs_data and mm_metadata assertions.
+func mmImageField(t *testing.T, features map[string]any, field string) []any {
+	t.Helper()
+	raw, err := json.Marshal(features[field])
+	if err != nil {
+		t.Fatalf("marshal %s: %v", field, err)
+	}
+	var decoded map[string][]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal %s: %v", field, err)
+	}
+	return decoded[string(reqcommon.ModalityImage)]
+}
+
+// The invariant guard render runs before the pipeline reads entries. An
+// untagged entry is an error rather than defaulted, because every reader keys
+// per-modality pairing on the field and a default would splice into another
+// modality's index sequence. Not ErrBadRequest: both producers set the field, so
+// reaching the guard means a coordinator bug.
+func TestValidateEntryModalities(t *testing.T) {
+	entries := []pipeline.MultimodalEntry{
+		{Modality: reqcommon.ModalityImage, Hash: "h1"},
+		{Hash: "h2"},
+	}
+	err := validateEntryModalities(entries)
+	if err == nil {
+		t.Fatal("expected an error for an entry with no modality")
+	}
+	if !strings.Contains(err.Error(), "h2") {
+		t.Errorf("error should name the offending entry, got %v", err)
+	}
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Error("an entry with no modality is a coordinator bug, not ErrBadRequest")
+	}
+
+	entries[1].Modality = reqcommon.ModalityAudio
+	if err := validateEntryModalities(entries); err != nil {
+		t.Errorf("expected no error for fully tagged entries, got %v", err)
+	}
+	if err := validateEntryModalities(nil); err != nil {
+		t.Errorf("expected no error for no entries, got %v", err)
+	}
+}
+
+// A synthetic response carrying both image and audio feature slices must come
+// back tagged with the right modality, in deterministic order (sorted by
+// modality key).
+func TestExtractMultimodalEntries_MultiModalityResponse(t *testing.T) {
+	features := map[string]any{
+		"mm_hashes": map[string]any{
+			string(reqcommon.ModalityImage): []any{"img-a", "img-b"},
+			string(reqcommon.ModalityAudio): []any{"aud-a"},
+		},
+		"mm_placeholders": map[string]any{
+			string(reqcommon.ModalityImage): []any{
+				map[string]any{"offset": float64(1), "length": float64(2)},
+				map[string]any{"offset": float64(4), "length": float64(2)},
+			},
+			string(reqcommon.ModalityAudio): []any{
+				map[string]any{"offset": float64(7), "length": float64(5)},
+			},
+		},
+		"kwargs_data": map[string]any{
+			string(reqcommon.ModalityImage): []any{"k-img-a", "k-img-b"},
+			string(reqcommon.ModalityAudio): []any{"k-aud-a"},
+		},
+	}
+	entries, err := extractMultimodalEntries(features)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (2 image + 1 audio), got %d", len(entries))
+	}
+	// Modalities sorted alphabetically -> audio before image.
+	if entries[0].Modality != reqcommon.ModalityAudio {
+		t.Errorf("entries[0].Modality = %q, want %q", entries[0].Modality, reqcommon.ModalityAudio)
+	}
+	if entries[0].Hash != "aud-a" {
+		t.Errorf("entries[0].Hash = %q, want aud-a", entries[0].Hash)
+	}
+	if entries[1].Modality != reqcommon.ModalityImage || entries[1].Hash != "img-a" {
+		t.Errorf("entries[1] = (%q, %q), want (image, img-a)", entries[1].Modality, entries[1].Hash)
+	}
+	if entries[2].Modality != reqcommon.ModalityImage || entries[2].Hash != "img-b" {
+		t.Errorf("entries[2] = (%q, %q), want (image, img-b)", entries[2].Modality, entries[2].Hash)
+	}
+}
+
+// A modality that mm_hashes leaves out: dropping it would strip the item from
+// the prefill and decode bodies while its placeholder tokens stay in token_ids.
+func TestExtractMultimodalEntries_UnhashedModalityRejected(t *testing.T) {
+	placeholder := func(offset, length int) any {
+		return map[string]any{"offset": float64(offset), "length": float64(length)}
+	}
+
+	tests := []struct {
+		name     string
+		features map[string]any
+	}{
+		{
+			name: "mm_placeholders_only",
+			features: map[string]any{
+				"mm_hashes": map[string]any{string(reqcommon.ModalityImage): []any{"img-a"}},
+				"mm_placeholders": map[string]any{
+					string(reqcommon.ModalityImage): []any{placeholder(1, 2)},
+					string(reqcommon.ModalityAudio): []any{placeholder(4, 2)},
+				},
+			},
+		},
+		{
+			name: "kwargs_data_only",
+			features: map[string]any{
+				"mm_hashes":       map[string]any{string(reqcommon.ModalityImage): []any{"img-a"}},
+				"mm_placeholders": map[string]any{string(reqcommon.ModalityImage): []any{placeholder(1, 2)}},
+				"kwargs_data": map[string]any{
+					string(reqcommon.ModalityImage): []any{"k-img-a"},
+					string(reqcommon.ModalityAudio): []any{"k-aud-a"},
+				},
+			},
+		},
+		{
+			name: "no_mm_hashes_at_all",
+			features: map[string]any{
+				"mm_placeholders": map[string]any{string(reqcommon.ModalityAudio): []any{placeholder(1, 2)}},
+			},
+		},
+		{
+			name: "empty_hash_list_with_placeholder",
+			features: map[string]any{
+				"mm_hashes":       map[string]any{string(reqcommon.ModalityAudio): []any{}},
+				"mm_placeholders": map[string]any{string(reqcommon.ModalityAudio): []any{placeholder(1, 2)}},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entries, err := extractMultimodalEntries(tc.features)
+			if err == nil {
+				t.Fatalf("expected an error, got entries %v", entries)
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Fatalf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+// A features map naming a modality with the empty string. The key becomes
+// MultimodalEntry.Modality and features is client-supplied on the generate path,
+// so this is the boundary that has to reject it, as a client error: otherwise a
+// client could manufacture the untagged entry every reader treats as a bug.
+//
+// The null cases pin the check's position. A null value is a skip for a named
+// modality, and while that skip ran first an empty key paired with null returned
+// before the key was judged, so {"": null} was accepted while {"": []} was
+// refused. The subtests cover both shapes in each field carrying modality keys.
+func TestExtractMultimodalEntries_EmptyModalityKeyRejected(t *testing.T) {
+	placeholder := func(offset, length int) any {
+		return map[string]any{"offset": float64(offset), "length": float64(length)}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		features map[string]any
+	}{
+		{
+			name: "mm_hashes",
+			features: map[string]any{
+				"mm_hashes":       map[string]any{"": []any{"img-a"}},
+				"mm_placeholders": map[string]any{"": []any{placeholder(1, 2)}},
+			},
+		},
+		{
+			name: "alongside_a_named_modality",
+			features: map[string]any{
+				"mm_hashes": map[string]any{
+					string(reqcommon.ModalityImage): []any{"img-a"},
+					"":                              []any{"ghost"},
+				},
+				"mm_placeholders": map[string]any{
+					string(reqcommon.ModalityImage): []any{placeholder(1, 2)},
+					"":                              []any{placeholder(4, 2)},
+				},
+			},
+		},
+		{
+			name:     "mm_hashes_null_value",
+			features: map[string]any{"mm_hashes": map[string]any{"": nil}},
+		},
+		{
+			// The named modality is fully formed in every field, so the empty
+			// key is the only thing left to object to. Otherwise the request
+			// fails for a missing mm_placeholders[image] and the subtest would
+			// pass whatever order the checks run in.
+			name: "mm_placeholders_null_value",
+			features: map[string]any{
+				"mm_hashes": map[string]any{string(reqcommon.ModalityImage): []any{"img-a"}},
+				"mm_placeholders": map[string]any{
+					string(reqcommon.ModalityImage): []any{placeholder(1, 2)},
+					"":                              nil,
+				},
+			},
+		},
+		{
+			name: "kwargs_data_null_value",
+			features: map[string]any{
+				"mm_hashes":       map[string]any{string(reqcommon.ModalityImage): []any{"img-a"}},
+				"mm_placeholders": map[string]any{string(reqcommon.ModalityImage): []any{placeholder(1, 2)}},
+				"kwargs_data":     map[string]any{"": nil},
+			},
+		},
+		{
+			name: "null_value_alongside_a_named_modality",
+			features: map[string]any{
+				"mm_hashes": map[string]any{
+					string(reqcommon.ModalityImage): []any{"img-a"},
+					"":                              nil,
+				},
+				"mm_placeholders": map[string]any{
+					string(reqcommon.ModalityImage): []any{placeholder(1, 2)},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries, err := extractMultimodalEntries(tc.features)
+			if err == nil {
+				t.Fatalf("expected an error, got entries %v", entries)
+			}
+			if !errors.Is(err, pipeline.ErrBadRequest) {
+				t.Fatalf("expected ErrBadRequest, got %v", err)
+			}
+		})
+	}
+}
+
+// The other half of the branch above: a null value under a NAMED modality means
+// the modality is absent, so it is skipped rather than refused and the keys
+// beside it still produce their entries.
+func TestExtractMultimodalEntries_NamedModalityWithNullValueSkipped(t *testing.T) {
+	entries, err := extractMultimodalEntries(map[string]any{
+		"mm_hashes": map[string]any{
+			string(reqcommon.ModalityImage): []any{"img-a"},
+			string(reqcommon.ModalityAudio): nil,
+		},
+		"mm_placeholders": map[string]any{
+			string(reqcommon.ModalityImage): []any{map[string]any{"offset": float64(1), "length": float64(2)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("a named modality with a null value must be skipped, not refused: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected the image entry alone, got %v", entries)
+	}
+	if entries[0].Modality != reqcommon.ModalityImage {
+		t.Errorf("entry modality = %q, want %q", entries[0].Modality, reqcommon.ModalityImage)
+	}
+}
+
+// A modality declared with no items: every field agrees on zero, so there is
+// nothing to drop and nothing to reject.
+func TestExtractMultimodalEntries_EmptyModalityListAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features map[string]any
+	}{
+		{
+			name:     "placeholders_absent",
+			features: map[string]any{"mm_hashes": map[string]any{string(reqcommon.ModalityAudio): []any{}}},
+		},
+		{
+			name: "placeholders_also_empty",
+			features: map[string]any{
+				"mm_hashes":       map[string]any{string(reqcommon.ModalityAudio): []any{}},
+				"mm_placeholders": map[string]any{string(reqcommon.ModalityAudio): []any{}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries, err := extractMultimodalEntries(tc.features)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("expected no entries, got %v", entries)
+			}
+		})
+	}
+}
+
+func TestGatewayHeaders(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		OriginalHeaders: http.Header{
+			"X-Custom":       {"v"},
+			"X-Request-Id":   {"client-id"},
+			"Content-Length": {"12"},
+		},
+	}
+
+	headers := gatewayHeaders(reqCtx, gateway.PhaseEncode)
+
+	want := map[string]string{
+		"x-custom":                    "v",
+		reqcommon.RequestIDHeaderKey:  "req-1",
+		reqcommon.EPPProfileHeaderKey: gateway.PhaseEncode,
+	}
+	if len(headers) != len(want) {
+		t.Errorf("headers = %v, want %v", headers, want)
+	}
+	for k, v := range want {
+		if headers[k] != v {
+			t.Errorf("%s = %q, want %q", k, headers[k], v)
+		}
+	}
+
+	headers["x-added"] = "1"
+	if _, present := gatewayHeaders(reqCtx, gateway.PhaseEncode)["x-added"]; present {
+		t.Error("a change to the returned map is visible in the next call")
+	}
+}
+
+func TestGatewayHeaders_NoClientHeaders(t *testing.T) {
+	headers := gatewayHeaders(&pipeline.RequestContext{RequestID: "req-1"}, gateway.PhasePrefill)
+	if headers[reqcommon.RequestIDHeaderKey] != "req-1" || headers[reqcommon.EPPProfileHeaderKey] != gateway.PhasePrefill {
+		t.Errorf("headers = %v, want the request id and the prefill profile", headers)
+	}
+}
+
+func TestCheckStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantBody string
+		wantErr  bool
+	}{
+		{name: "ok", status: http.StatusOK, body: "answer"},
+		{name: "client error", status: http.StatusBadRequest, body: "bad prompt", wantBody: "bad prompt", wantErr: true},
+		{name: "server error", status: http.StatusServiceUnavailable, body: "overloaded", wantBody: "overloaded", wantErr: true},
+		{name: "success status other than 200", status: http.StatusAccepted, wantErr: true},
+		{name: "empty error body", status: http.StatusBadGateway, wantErr: true},
+		{
+			name:     "oversized error body",
+			status:   http.StatusInternalServerError,
+			body:     strings.Repeat("a", maxErrorBodySize*2),
+			wantBody: strings.Repeat("a", maxErrorBodySize),
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: tt.status, Body: io.NopCloser(strings.NewReader(tt.body))}
+
+			err := checkStatus(RenderStepName, resp)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("checkStatus: %v", err)
+				}
+				// The body of a 200 response stays unread for the caller.
+				if body, _ := io.ReadAll(resp.Body); string(body) != tt.body {
+					t.Errorf("response body = %q, want %q", body, tt.body)
+				}
+				return
+			}
+			var upstream *pipeline.UpstreamError
+			if !errors.As(err, &upstream) {
+				t.Fatalf("error = %v, want a pipeline.UpstreamError", err)
+			}
+			if upstream.Step != RenderStepName || upstream.StatusCode != tt.status || upstream.Body != tt.wantBody {
+				t.Errorf("error = {Step: %q, StatusCode: %d, len(Body): %d}, want {%q, %d, %d}",
+					upstream.Step, upstream.StatusCode, len(upstream.Body), RenderStepName, tt.status, len(tt.wantBody))
+			}
+		})
+	}
+}
+
+// testGatewayRequest is the base request of the postToGateway tests.
+var testGatewayRequest = gatewayRequest{
+	step:     PrefillStepName,
+	upstream: coordmetrics.UpstreamPrefill,
+	path:     reqcommon.PathCompletions,
+	body:     []byte(`{}`),
+}
+
+// captureLogger returns a logger and a function that returns the lines that
+// the logger recorded. The lock permits the concurrent encode sub-requests.
+func captureLogger(verbosity int) (logr.Logger, func() []string) {
+	var mu sync.Mutex
+	var records []string
+	logger := funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		records = append(records, args)
+	}, funcr.Options{Verbosity: verbosity})
+	return logger, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(records)
+	}
+}
+
+func countRecords(records []string, substrs ...string) int {
+	n := 0
+	for _, record := range records {
+		missing := func(substr string) bool { return !strings.Contains(record, substr) }
+		if !slices.ContainsFunc(substrs, missing) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestPostToGateway_ReturnsResponse(t *testing.T) {
+	var gotPath, gotBody, gotHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotPath, gotBody, gotHeader = r.URL.Path, string(body), r.Header.Get("x-custom")
+		_, _ = w.Write([]byte("answer"))
+	}))
+	defer server.Close()
+
+	req := testGatewayRequest
+	req.body = []byte(`{"model":"m"}`)
+	req.headers = map[string]string{"x-custom": "v"}
+	resp, err := postToGateway(context.Background(), logr.Discard(), gateway.New(config.GatewayConfig{Address: server.URL}), req)
+	if err != nil {
+		t.Fatalf("postToGateway: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if gotPath != reqcommon.PathCompletions || gotBody != `{"model":"m"}` || gotHeader != "v" {
+		t.Errorf("gateway got path=%q body=%q x-custom=%q", gotPath, gotBody, gotHeader)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if string(body) != "answer" {
+		t.Errorf("response body = %q, want %q", body, "answer")
+	}
+}
+
+func TestPostToGateway_DebugRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+
+	tests := []struct {
+		name        string
+		verbosity   int
+		logMsg      string
+		body        []byte
+		headers     map[string]string
+		wantMsg     string
+		wantKeys    []string
+		wantRecords int
+	}{
+		{
+			name:        "message from the caller",
+			verbosity:   logutil.DEBUG,
+			logMsg:      "sub-request body",
+			body:        []byte(`{"model":"m"}`),
+			headers:     map[string]string{reqcommon.EPPProfileHeaderKey: gateway.PhaseEncode},
+			wantMsg:     "sub-request body",
+			wantKeys:    []string{`"index"=2`, `"path"="` + reqcommon.PathCompletions + `"`, `"bodyLen"=13`},
+			wantRecords: 1,
+		},
+		{name: "below debug", verbosity: logutil.VERBOSE, logMsg: "request body", wantMsg: "request body"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, records := captureLogger(tt.verbosity)
+
+			req := testGatewayRequest
+			req.logMsg, req.body, req.headers = tt.logMsg, tt.body, tt.headers
+			resp, err := postToGateway(context.Background(), logger.WithValues("index", 2), gwClient, req)
+			if err != nil {
+				t.Fatalf("postToGateway: %v", err)
+			}
+			resp.Body.Close()
+
+			want := append([]string{fmt.Sprintf(`"msg"=%q`, tt.wantMsg)}, tt.wantKeys...)
+			if got := countRecords(records(), want...); got != tt.wantRecords {
+				t.Errorf("%d records contain %v, want %d, records=%v", got, want, tt.wantRecords, records())
+			}
+		})
+	}
+}
+
+func TestPostToGateway_StatusIsUpstreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	req := testGatewayRequest
+	req.step = "encode[2]"
+	resp, err := postToGateway(context.Background(), logr.Discard(), gateway.New(config.GatewayConfig{Address: server.URL}), req)
+	if resp != nil {
+		resp.Body.Close()
+		t.Error("expected no response with an error")
+	}
+	var upstream *pipeline.UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("error = %v, want a pipeline.UpstreamError", err)
+	}
+	if upstream.Step != req.step || upstream.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("error = {Step: %q, StatusCode: %d}, want {%q, %d}",
+			upstream.Step, upstream.StatusCode, req.step, http.StatusServiceUnavailable)
+	}
+}
+
+func TestPostToGateway_TransportError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	server.Close()
+
+	tests := []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{name: "gateway unreachable", ctx: context.Background},
+		{name: "context cancelled", ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := postToGateway(tt.ctx(), logr.Discard(), gwClient, testGatewayRequest)
+			if resp != nil {
+				resp.Body.Close()
+				t.Error("expected no response with an error")
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), "prefill: request: ") {
+				t.Fatalf("error = %v, want the prefix %q", err, "prefill: request: ")
+			}
+			var upstream *pipeline.UpstreamError
+			if errors.As(err, &upstream) {
+				t.Errorf("a transport failure must not be a pipeline.UpstreamError: %v", err)
+			}
+		})
+	}
 }

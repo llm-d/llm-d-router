@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,11 +32,16 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
 	testclock "k8s.io/utils/clock/testing"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
@@ -43,7 +49,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // --- Test Harness & Fixtures ---
@@ -114,12 +122,13 @@ func newUnitHarness(
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              harnessOpts.clock,
-		ProcessorFactory:   mockProcessorFactory.new,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               harnessOpts.clock,
+		ProcessorFactory:    mockProcessorFactory.new,
 	})
 	h := &testHarness{
 		fc:                   fc,
@@ -153,11 +162,12 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 	}
 
 	fc := NewFlowController(ctx, "test-pool", cfg, Deps{
-		Registry:           registry,
-		SaturationDetector: mockDetector,
-		EndpointCandidates: mockEndpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
-		Clock:              mockClock,
+		Registry:            registry,
+		SaturationDetector:  mockDetector,
+		EndpointCandidates:  mockEndpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               mockClock,
 	})
 
 	h := &testHarness{
@@ -172,9 +182,11 @@ func newIntegrationHarness(ctx context.Context, t *testing.T, cfg *Config, regis
 
 // mockActiveFlowConnection is a local mock for the `contracts.ActiveFlowConnection` interface.
 type mockActiveFlowConnection struct {
-	RegistryV    contracts.FlowRegistry
-	RegistryFunc func() contracts.FlowRegistry
-	FlowKeyV     flowcontrol.FlowKey
+	RegistryV             contracts.FlowRegistry
+	RegistryFunc          func() contracts.FlowRegistry
+	FlowKeyV              flowcontrol.FlowKey
+	DefaultRequestTTLV    time.Duration
+	DefaultRequestTTLSetV bool
 }
 
 func (m *mockActiveFlowConnection) GetDataPlane() contracts.FlowRegistryDataPlane {
@@ -188,12 +200,14 @@ func (m *mockActiveFlowConnection) FlowKey() flowcontrol.FlowKey {
 	return m.FlowKeyV
 }
 
-// mockRegistryClient is a mock for the private `registryClient` interface.
+func (m *mockActiveFlowConnection) DefaultRequestTTL() (time.Duration, bool) {
+	return m.DefaultRequestTTLV, m.DefaultRequestTTLSetV
+}
+
+// mockRegistryClient is a mock for the controller's registry dependency.
 type mockRegistryClient struct {
-	contracts.FlowRegistryObserver
 	contracts.FlowRegistryDataPlane
 	WithConnectionFunc func(key flowcontrol.FlowKey, fn func(conn contracts.ActiveFlowConnection) error) error
-	StatsFunc          func() contracts.AggregateStats
 }
 
 func (m *mockRegistryClient) WithConnection(
@@ -204,13 +218,6 @@ func (m *mockRegistryClient) WithConnection(
 		return m.WithConnectionFunc(key, fn)
 	}
 	return fn(&mockActiveFlowConnection{RegistryV: m})
-}
-
-func (m *mockRegistryClient) Stats() contracts.AggregateStats {
-	if m.StatsFunc != nil {
-		return m.StatsFunc()
-	}
-	return contracts.AggregateStats{}
 }
 
 func (m *mockRegistryClient) SubmitDesiredPriorities(_ map[int]struct{}) {}
@@ -283,6 +290,7 @@ func (f *mockProcessorFactory) new(
 	_ flowcontrol.SaturationDetector,
 	_ contracts.EndpointCandidates,
 	_ flowcontrol.UsageLimitPolicy,
+	_ flowcontrol.BandSelectionPolicy,
 	_ clock.WithTicker,
 	_ time.Duration,
 	_ time.Duration,
@@ -307,6 +315,62 @@ func newTestRequest(key flowcontrol.FlowKey) *fwkfcmocks.MockFlowControlRequest 
 	}
 }
 
+func TestCreateRequestContextResolvesTTL(t *testing.T) {
+	t.Parallel()
+	enqueueTime := time.Now()
+
+	testCases := []struct {
+		name       string
+		globalTTL  time.Duration
+		bandTTL    time.Duration
+		bandSet    bool
+		requestTTL time.Duration
+		wantTTL    time.Duration
+	}{
+		{name: "global inherited", globalTTL: time.Minute, wantTTL: time.Minute},
+		{name: "shorter band replaces global", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, wantTTL: 5 * time.Second},
+		{name: "longer band replaces global", globalTTL: time.Minute, bandTTL: 5 * time.Minute, bandSet: true, wantTTL: 5 * time.Minute},
+		{name: "request shortens band", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, requestTTL: time.Second, wantTTL: time.Second},
+		{name: "request cannot extend band", globalTTL: time.Minute, bandTTL: 5 * time.Second, bandSet: true, requestTTL: time.Minute, wantTTL: 5 * time.Second},
+		{name: "unbounded band", globalTTL: time.Minute, bandSet: true},
+		{name: "request bounds unbounded band", globalTTL: time.Minute, bandSet: true, requestTTL: time.Second, wantTTL: time.Second},
+		{name: "unbounded global"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fc := &FlowController{config: &Config{DefaultRequestTTL: tc.globalTTL}}
+			req := newTestRequest(defaultFlowKey)
+			req.InitialEffectiveTTLV = tc.requestTTL
+
+			_, cancel, effectiveTTL := fc.createRequestContext(
+				context.Background(), req, tc.bandTTL, tc.bandSet, enqueueTime,
+			)
+			defer cancel()
+			assert.Equal(t, tc.wantTTL, effectiveTTL)
+		})
+	}
+}
+
+func TestCreateRequestContextPreservesEarlierParentDeadline(t *testing.T) {
+	t.Parallel()
+	enqueueTime := time.Now()
+	parentDeadline := enqueueTime.Add(time.Second)
+	parent, parentCancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer parentCancel()
+	fc := &FlowController{config: &Config{DefaultRequestTTL: time.Minute}}
+
+	ctx, cancel, effectiveTTL := fc.createRequestContext(
+		parent, newTestRequest(defaultFlowKey), 5*time.Second, true, enqueueTime,
+	)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, parentDeadline, deadline)
+	assert.Equal(t, time.Second, effectiveTTL)
+}
+
 // --- Test Cases ---
 
 // TestFlowController_EnqueueAndWait covers the primary API entry point, focusing on validation, distribution logic,
@@ -316,6 +380,39 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 
 	t.Run("Rejections", func(t *testing.T) {
 		t.Parallel()
+
+		t.Run("OnBandTTLExpiredDuringFlowAcquisition", func(t *testing.T) {
+			t.Parallel()
+			const bandTTL = 20 * time.Millisecond
+			submitted := make(chan struct{}, 1)
+			processor := &mockProcessor{
+				SubmitFunc: func(_ *internal.FlowItem) error {
+					submitted <- struct{}{}
+					return nil
+				},
+			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: time.Minute}, nil, processor,
+				withHarnessClock(clock.RealClock{}))
+			h.mockRegistry.WithConnectionFunc = func(
+				key flowcontrol.FlowKey,
+				fn func(contracts.ActiveFlowConnection) error,
+			) error {
+				time.Sleep(2 * bandTTL)
+				return fn(&mockActiveFlowConnection{
+					RegistryV:             h.mockRegistry,
+					FlowKeyV:              key,
+					DefaultRequestTTLV:    bandTTL,
+					DefaultRequestTTLSetV: true,
+				})
+			}
+
+			outcome, err := h.fc.EnqueueAndWait(context.Background(), newTestRequest(defaultFlowKey))
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, types.ErrTTLExpired)
+			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome)
+			assert.Empty(t, submitted, "expired request must not be submitted to the processor")
+		})
 
 		t.Run("OnReqCtxExpiredBeforeDistribution", func(t *testing.T) {
 			t.Parallel()
@@ -373,27 +470,20 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
-			result := make(chan struct {
-				outcome types.QueueOutcome
-				err     error
-			}, 1)
+			result := make(chan error, 1)
 			go func() {
-				outcome, err := h.fc.awaitFinalization(context.Background(), item)
-				result <- struct {
-					outcome types.QueueOutcome
-					err     error
-				}{outcome: outcome, err: err}
+				result <- h.fc.awaitFinalization(context.Background(), item)
 			}()
 
 			cancel()
 			select {
-			case r := <-result:
-				require.Error(t, r.err, "awaitFinalization must fail when controller shuts down")
-				assert.ErrorIs(t, r.err, types.ErrFlowControllerNotRunning,
+			case err := <-result:
+				require.Error(t, err, "awaitFinalization must fail when controller shuts down")
+				assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 					"error should wrap ErrFlowControllerNotRunning")
-				assert.Equal(t, types.QueueOutcomeRejectedOther, r.outcome,
+				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 					"outcome should be QueueOutcomeRejectedOther on shutdown")
 			case <-time.After(time.Second):
 				t.Fatal("awaitFinalization did not return after controller shutdown")
@@ -404,34 +494,34 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
 			reqCtx, reqCancel := context.WithCancel(context.Background())
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
 			reqCancel()
 			cancel()
 
-			outcome, err := h.fc.awaitFinalization(reqCtx, item)
+			err := h.fc.awaitFinalization(reqCtx, item)
 			require.Error(t, err, "awaitFinalization must fail when controller shuts down")
 			assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 				"controller shutdown should take precedence over request cancellation")
-			assert.Equal(t, types.QueueOutcomeRejectedOther, outcome,
+			assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 				"shutdown should return the rejected outcome")
 		})
 		t.Run("OnControllerShutdownPreservesQueuedOutcome", func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 			item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 
 			cancel()
 
-			outcome, err := h.fc.awaitFinalization(context.Background(), item)
+			err := h.fc.awaitFinalization(context.Background(), item)
 			require.Error(t, err, "awaitFinalization must fail when controller shuts down")
 			assert.ErrorIs(t, err, types.ErrEvicted,
 				"a queued item should be evicted, not rejected, during shutdown")
 			assert.ErrorIs(t, err, types.ErrFlowControllerNotRunning,
 				"queued shutdown should preserve the shutdown cause")
-			assert.Equal(t, types.QueueOutcomeEvictedOther, outcome,
+			assert.Equal(t, types.QueueOutcomeEvictedOther, item.FinalState().Outcome,
 				"a queued item should return the evicted outcome")
 		})
 
@@ -521,7 +611,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					return &mockProcessor{
 						SubmitFunc: func(item *internal.FlowItem) error {
 							// Simulate asynchronous processing and successful dispatch.
-							go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+							go item.FinalizeWithError(nil)
 							return nil
 						},
 					}
@@ -883,7 +973,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 					// Block until the test allows us to proceed.
 					select {
 					case <-unblockProcessor:
-						item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+						item.FinalizeWithError(nil)
 						return nil
 					case <-ctx.Done():
 						return ctx.Err()
@@ -940,10 +1030,7 @@ func TestFlowController_WorkerManagement(t *testing.T) {
 
 		mockRegistry := &mockRegistryClient{
 			FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{},
-			StatsFunc: func() contracts.AggregateStats {
-				// The current state of the world according to the registry.
-				return contracts.AggregateStats{}
-			}}
+		}
 
 		// Initialize the processor mock with the channel needed to synchronize startup.
 		processor := &mockProcessor{runStarted: make(chan struct{})}
@@ -994,19 +1081,20 @@ func setupRegistryForConcurrency(t *testing.T, flowKey flowcontrol.FlowKey) *moc
 				},
 			}, nil
 		},
-		// Configure stats reporting based on the live state of the mock queues.
-		StatsFunc: func() contracts.AggregateStats {
-			return contracts.AggregateStats{
-				TotalLen:      uint64(currentQueue.Len()),
-				TotalByteSize: currentQueue.ByteSize(),
-				PerPriorityBandStats: map[int]contracts.PriorityBandStats{
-					flowKey.Priority: {
-						Len:           uint64(currentQueue.Len()),
-						ByteSize:      currentQueue.ByteSize(),
-						CapacityBytes: 1e9, // Effectively unlimited capacity to ensure dispatch success.
-					},
+		// Configure capacity reporting based on the live state of the mock queues.
+		CapacitySnapshotFunc: func(int) (contracts.CapacitySnapshot, error) {
+			queueLen := clamp.Uint64(currentQueue.Len())
+			return contracts.CapacitySnapshot{
+				Global: contracts.CapacityDimension{
+					Len:      queueLen,
+					ByteSize: currentQueue.ByteSize(),
 				},
-			}
+				Band: contracts.CapacityDimension{
+					Len:           queueLen,
+					ByteSize:      currentQueue.ByteSize(),
+					CapacityBytes: 1e9, // Effectively unlimited capacity to ensure dispatch success.
+				},
+			}, nil
 		},
 	}
 
@@ -1016,9 +1104,6 @@ func setupRegistryForConcurrency(t *testing.T, flowKey flowcontrol.FlowKey) *moc
 			RegistryV: dataplane,
 			FlowKeyV:  key,
 		})
-	}
-	mockRegistry.StatsFunc = func() contracts.AggregateStats {
-		return dataplane.Stats()
 	}
 	mockRegistry.FlowRegistryDataPlane = dataplane
 	return mockRegistry
@@ -1169,7 +1254,7 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 	processor := &mockProcessor{
 		SubmitFunc: func(item *internal.FlowItem) error {
 			capturedKey = item.OriginalRequest().FlowKey()
-			go item.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
+			go item.FinalizeWithError(nil)
 			return nil
 		},
 	}
@@ -1192,4 +1277,113 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 	assert.Equal(t, 0, capturedKey.Priority,
 		"fallback request must be enqueued at priority 0, not its original unprovisioned priority")
 	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
+}
+
+// TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links
+// to the trace of the request passed to EnqueueAndWait, although the item is finalized on another goroutine.
+func TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar(t *testing.T) {
+	t.Parallel()
+	metrics.Register()
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	recordingCtx, span := tp.Tracer("queue-exemplar-test").Start(context.Background(), "request")
+	// The span must outlive the parallel subtests, which run after this function returns.
+	t.Cleanup(func() { span.End() })
+
+	callerSpan := func(flags trace.TraceFlags) context.Context {
+		return trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{1},
+			SpanID:     trace.SpanID{1},
+			TraceFlags: flags,
+		}))
+	}
+
+	testCases := []struct {
+		name string
+		ctx  context.Context
+		// wantLabels is nil when no exemplar is expected.
+		wantLabels map[string]string
+	}{
+		{
+			name: "recording span",
+			ctx:  recordingCtx,
+			wantLabels: map[string]string{
+				"trace_id": span.SpanContext().TraceID().String(),
+				"span_id":  span.SpanContext().SpanID().String(),
+			},
+		},
+		{
+			name:       "sampled caller span",
+			ctx:        callerSpan(trace.FlagsSampled),
+			wantLabels: map[string]string{"trace_id": trace.TraceID{1}.String()},
+		},
+		{
+			name: "unsampled caller span",
+			ctx:  callerSpan(0),
+		},
+		{
+			name: "no span",
+			ctx:  context.Background(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			processor := &mockProcessor{
+				SubmitFunc: func(item *internal.FlowItem) error {
+					go item.FinalizeWithError(nil)
+					return nil
+				},
+			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: time.Minute}, nil, processor)
+
+			// A flow ID per case keeps each case on its own series.
+			flowID := "queue-exemplar/" + tc.name
+			outcome, err := h.fc.EnqueueAndWait(tc.ctx, newTestRequest(flowcontrol.FlowKey{ID: flowID, Priority: 100}))
+			require.NoError(t, err)
+			require.Equal(t, types.QueueOutcomeDispatched, outcome)
+
+			hist := queueDurationHistogram(t, flowID)
+			require.Equal(t, uint64(1), hist.GetSampleCount())
+			var exemplars []map[string]string
+			for _, bucket := range hist.GetBucket() {
+				if bucket.GetExemplar() == nil {
+					continue
+				}
+				labels := map[string]string{}
+				for _, lp := range bucket.GetExemplar().GetLabel() {
+					labels[lp.GetName()] = lp.GetValue()
+				}
+				exemplars = append(exemplars, labels)
+			}
+			if tc.wantLabels == nil {
+				require.Empty(t, exemplars)
+				return
+			}
+			require.Equal(t, []map[string]string{tc.wantLabels}, exemplars)
+		})
+	}
+}
+
+// queueDurationHistogram returns the flow control queue duration series recorded for a flow ID.
+func queueDurationHistogram(t *testing.T, flowID string) *dto.Histogram {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_request_queue_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "fairness_id" && lp.GetValue() == flowID {
+					return m.GetHistogram()
+				}
+			}
+		}
+	}
+	require.FailNow(t, "no queue duration series recorded", "fairness_id %q", flowID)
+	return nil
 }

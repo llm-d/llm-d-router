@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +22,7 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -52,11 +54,43 @@ type Parser interface {
 	Claims() Claims
 }
 
+// RequestFieldError identifies the JSON field path responsible for a parser failure.
+// Err preserves the client-facing error message.
+type RequestFieldError struct {
+	Field string
+	Err   error
+}
+
+func (e *RequestFieldError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *RequestFieldError) Unwrap() error {
+	return e.Err
+}
+
 // ModelNameRewriter is implemented by parsers whose forwarded body can carry a model name.
 type ModelNameRewriter interface {
 	// RewriteModelName writes model into the payload and returns it. Taking and
 	// returning a MarshalablePayload guarantees the result is repackageable.
 	RewriteModelName(payload MarshalablePayload, model string) (MarshalablePayload, error)
+}
+
+// PriorityRewriteContext carries target-specific information a parser may need
+// when translating EPP priority semantics into backend wire fields.
+type PriorityRewriteContext struct {
+	TargetEndpoint *fwkdl.EndpointMetadata
+}
+
+// PriorityRewriter is implemented by parsers whose forwarded body can carry a
+// backend-native priority field.
+type PriorityRewriter interface {
+	// RewritePriority removes any client-supplied priority field and may write the
+	// EPP-resolved priority into the payload. Taking and returning a
+	// MarshalablePayload guarantees the result is repackageable. The returned bool
+	// reports whether the payload was changed, so callers can flag it for
+	// repackaging without re-inspecting the body.
+	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, bool, error)
 }
 
 // Claims defines the matching criteria for a parser.
@@ -69,6 +103,9 @@ type Claims struct {
 type ParseResult struct {
 	// Body contains the parsed inference request body.
 	Body *InferenceRequestBody
+	// JSONValidated reports that the original input bytes passed JSON syntax validation.
+	// Parsers accepting unvalidated or non-JSON input must leave it false.
+	JSONValidated bool
 	// SkipResponseProcessing indicates whether to skip EPP stream interception for this request.
 	// When set to true, the request will still go through the scheduling director
 	// (allowing routing decisions, profiles, and admission control to run),

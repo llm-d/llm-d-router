@@ -72,6 +72,56 @@ python3 test/perf/run_nightly_perf.py \
 - `--gcs-bucket`: (Optional) Target GCS bucket name or URI (e.g. `gs://llm-d-perf-results`) to sync and preserve test results and profiling artifacts without committing them to the Git repository.
 - `--no-cleanup`: (Optional) Skip namespace deletion on test completion (useful for debugging).
 
+### Tracing and latency metrics
+
+Set the boolean `router.tracing.enabled` in the router config to control
+benchmark tracing. If it is omitted or null, the runner uses
+`router.epp.flags.tracing`, accepting Go boolean flag spellings. If both are
+omitted or null, tracing is disabled. The runner sets the Chart switch and
+EPP flag to the same value and rejects invalid tracing values before invoking
+Helm. Sampling and exporter settings come from `router.tracing` in the same
+config. The optimized baseline disables tracing.
+
+P50, P95, and P99 are interpolated from the change in the EPP scheduler's
+duration histogram and reported in milliseconds. They measure scheduler
+latency, not client request latency. Missing metrics or no new events produce
+zero values. A quantile in the unbounded bucket uses the highest finite
+bucket boundary.
+
+When appending to a report with a different table header, the writer starts
+a new table and preserves the historical rows.
+
+### Tool-calling telemetry overhead
+
+Compare a baseline build without tool-calling telemetry against the candidate
+build using the same router configuration, simulator, resources, and load.
+Scheduler histogram quantiles exclude request parsing and response handling;
+they cannot establish the client-latency requirement for this instrumentation.
+
+- Use non-tool requests at representative body sizes, including prompt text that
+  mentions tool field names and text serialized with Unicode escapes.
+- Run JSON and SSE responses with tracing disabled, then enabled with identical
+  sampler and exporter settings on both builds.
+- After warm-up, collect client request p50/p99 latency, completed requests per
+  second, and errors from the load generator at identical offered load.
+- Alternate repeated baseline and candidate runs to distinguish overhead from
+  baseline variability. Missing measurements do not establish a passing result.
+
+The local field-capture benchmarks and OTLP tests validate individual code paths;
+they do not replace this gateway-to-model comparison.
+
+### Offline regression tests
+
+With Python and `pyyaml` installed, run from the repository root:
+
+```bash
+python3 -m unittest discover -s test/perf -p test_run_nightly_perf.py -v
+```
+
+These tests exercise configuration generation, histogram calculations, and
+report writing with cluster commands replaced by test doubles. They do not
+deploy workloads or measure tracing overhead.
+
 ---
 
 ## Nightly GitHub Actions Run
@@ -83,4 +133,3 @@ The benchmarking pipeline runs daily via GHA:
   1. Authenticates to GCP and configures `kubectl` to point to the GKE development cluster.
   2. Runs `run_nightly_perf.py` (specifying `--router-machine-family e2` and `--gcs-bucket`).
   3. Appends the metrics results and uploads profiling artifacts directly to the specified Google Cloud Storage bucket.
-

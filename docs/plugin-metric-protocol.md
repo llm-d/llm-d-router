@@ -25,6 +25,7 @@ The current total number of requests in the queue.
 | --- | --- |
 | vLLM | `vllm:num_requests_waiting` |
 | SGLang | `sglang:num_queue_reqs` |
+| ATOM | `atom:requests_waiting` |
 | Triton TensorRT-LLM | `nv_trt_llm_request_metrics{request_type=waiting}` |
 | trtllm-serve | `trtllm_num_requests_waiting` |
 
@@ -39,6 +40,7 @@ The current total number of requests actively being served on the model server.
 | --- | --- |
 | vLLM | `vllm:num_requests_running` |
 | SGLang | `sglang:num_running_reqs` |
+| ATOM | `atom:requests_running` |
 | Triton TensorRT-LLM | `nv_trt_llm_request_metrics{request_type=scheduled}` |
 | trtllm-serve | `trtllm_num_requests_running` |
 
@@ -53,6 +55,7 @@ The current KV cache utilization in percentage.
 | --- | --- |
 | vLLM | `vllm:kv_cache_usage_perc` |
 | SGLang | `sglang:token_usage` |
+| ATOM | `atom:kv_cache_usage_ratio` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=fraction}` |
 | trtllm-serve | `trtllm_kv_cache_utilization` |
 
@@ -67,7 +70,8 @@ If absent, the value is taken from the `approximate-prefix` plugin's `BlockSizeT
 | Model server | Metric | Label |
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `block_size` |
-| SGLang | `sglang:cache_config_info` | `page_size` |
+| SGLang | `sglang:page_size` | — |
+| ATOM | `atom:cache_config_info` | `block_size` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | — |
 | trtllm-serve | `trtllm_kv_cache_tokens_per_block` | — |
 
@@ -82,13 +86,14 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | Model server | Metric | Label |
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `num_gpu_blocks` |
-| SGLang | `sglang:cache_config_info` | `num_pages` |
+| SGLang | `sglang:num_pages` | — |
+| ATOM | `atom:cache_config_info` | `num_gpu_blocks` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 
 ## LoRA Adapter Serving
 
-**Required by:** `lora-affinity-scorer`
+**Required by:** `lora-affinity-scorer`; `lora-residency-scorer` reads only `max_lora` and `running_lora_adapters`
 
 Model servers that support dynamic LoRA serving can benefit from the LoRA affinity algorithm. Note
 the current LoRA affinity algorithm in this EPP is highly biased towards vLLM's current
@@ -108,8 +113,8 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
     requested adapter. Example: `"max_lora": "8"`.
   * `running_lora_adapters`: A comma separated list of adapters that are currently loaded in GPU
     memory and ready to serve requests. Example: `"running_lora_adapters": "adapter1, adapter2"`
-  * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served.
-    Example: `"waiting_lora_adapters": "adapter1, adapter2"`
+  * `waiting_lora_adapters` (required by `lora-affinity-scorer` only): A comma separated list of
+    adapters that are waiting to be served. Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
 ## Prefix Cache Reuse
 

@@ -1,0 +1,26 @@
+# Frozen configuration surface of the models-data-source plugin.
+# See ../README.md: this file must not be edited to fix a failing test.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: single-profile-handler
+- type: max-score-picker
+- type: models-data-source
+  parameters:
+    scheme: http
+    path: /v1/models
+    insecureSkipVerify: true
+    caCertPath: ""
+    clientCertPath: ""
+    clientKeyPath: ""
+    interval: 5s
+- type: models-data-extractor
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: max-score-picker
+dataLayer:
+  sources:
+  - pluginRef: models-data-source
+    extractors:
+    - pluginRef: models-data-extractor

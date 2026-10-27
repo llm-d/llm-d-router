@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +17,10 @@ limitations under the License.
 
 package metadata
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 const (
 	// SubsetFilterNamespace is the key for the outer namespace struct in the metadata field of the extproc request that is used to wrap the subset filter.
@@ -36,6 +40,8 @@ const (
 	DestinationEndpointServedKey = "x-gateway-destination-endpoint-served"
 	// FlowFairnessIDKey is the header key used to pass the fairness ID to be used in Flow Control.
 	FlowFairnessIDKey = "x-llm-d-inference-fairness-id"
+	// InferenceTTLHeaderKey is the header key used to set a request-specific flow control queue TTL.
+	InferenceTTLHeaderKey = "x-llm-d-inference-ttl"
 	// OldFlowFairnessIDKey is the deprecated alias for FlowFairnessIDKey.
 	OldFlowFairnessIDKey = "x-gateway-inference-fairness-id"
 	// ObjectiveKey is the header key used to specify the objective of an incoming request.
@@ -60,11 +66,14 @@ const (
 	VideoDurationHeaderKey = "x-llm-d-video-duration-seconds"
 	// VideoResolutionHeaderKey is the header key used to specify a request's video frame resolution as "WIDTHxHEIGHT".
 	VideoResolutionHeaderKey = "x-llm-d-video-resolution"
-
-	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
-	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
-	// system.
-	DefaultFairnessID = "default-flow"
+	// AudioDurationHeaderKey is the header key used to specify a request's audio length in seconds.
+	AudioDurationHeaderKey = "x-llm-d-audio-duration-seconds"
+	// AudioBytesPerSecondHeaderKey is the header key used to specify the byte rate of a request's
+	// audio payload, from which its length is derived when the payload does not declare one.
+	AudioBytesPerSecondHeaderKey = "x-llm-d-audio-bytes-per-second"
+	// FlowQueueDurationHeaderKey is the response header carrying the time a request spent in flow control admission,
+	// as integer milliseconds. It is absent when flow control did not process the request.
+	FlowQueueDurationHeaderKey = "x-llm-d-flow-queue-duration-ms"
 )
 
 // All headerAliases keys and values must be lower case.
@@ -98,4 +107,9 @@ func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, boo
 	}
 	value, ok := headers[key]
 	return value, ok
+}
+
+// IsFiniteFloat reports whether a value is neither NaN nor infinite.
+func IsFiniteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }

@@ -1,0 +1,26 @@
+{{/*
+Headless Service selecting the model-server pods. The standalone Envoy proxy
+resolves it as the inference_pool_fallback cluster, which serves requests when
+fail-open is on and EPP is unreachable.
+*/}}
+{{- define "llm-d-epp.proxy-fallback-service" -}}
+{{- if eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-router.proxy.fallbackServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- toYaml .Values.router.modelServers.matchLabels | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ include "llm-d-router.proxy.fallbackPort" . }}
+      targetPort: {{ include "llm-d-router.proxy.fallbackPort" . }}
+      protocol: TCP
+---
+{{- end -}}
+{{- end -}}

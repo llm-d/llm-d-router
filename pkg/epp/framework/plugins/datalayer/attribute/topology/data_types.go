@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ var TopologyAttributeKey = plugin.NewDataKey("Topology", TopologyExtractorType)
 
 // Topology carries the locality information for an endpoint.
 // Fields are populated from pod labels at endpoint creation time.
-// Hostname falls back to spec.hostname when the configured label is absent.
+// Hostname falls back to the pod's spec.nodeName when the configured label is absent.
 type Topology struct {
 	// Hostname identifies the node on which the endpoint runs.
 	Hostname string

@@ -16,10 +16,12 @@ limitations under the License.
 
 // Package outlenbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-length bin for a request from request-time signals
-// (enable_thinking, has_tools, thinking_budget) and publishes it as a request
-// attribute. Downstream consumers -- the in-flight token estimator today, and
-// flow-control queue ordering / KV-pressure gating in the future -- read it via
-// scheduling.ReadRequestAttribute to make output-length-aware decisions.
+// (enable_thinking, thinking_budget/reasoning_budget, has_tools, tool_choice,
+// continue_final_message, max_output_tokens) and
+// publishes it as a request attribute. Downstream consumers -- the in-flight
+// token estimator today, and flow-control queue ordering / KV-pressure gating
+// in the future -- read it via scheduling.ReadRequestAttribute to make
+// output-length-aware decisions.
 package outlenbucket
 
 import (
@@ -27,15 +29,17 @@ import (
 	"encoding/json"
 	"strconv"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-// AttributeKey is the request-attribute key under which this plugin
-// publishes the predicted output-length bin. Downstream consumers read it via
-// scheduling.ReadRequestAttribute[Bucket].
+// AttributeKey is the request-attribute key under which this plugin publishes
+// the predicted output-length bin. Downstream consumers read it via
+// scheduling.ReadRequestAttribute[Bucket]. It is a DataKey rather than a plain
+// string because #2190 keyed the per-request attribute store by DataKey.
 var AttributeKey = plugin.NewDataKey("outlen-bucket", "")
 
 const (
@@ -48,6 +52,11 @@ const (
 	// shortMaxOutputTokens is the max_output_tokens below which a request is
 	// classified SHORT on the strength of an explicit client cap alone.
 	shortMaxOutputTokens = 500
+	// longFloorTokens is the lower edge of the LONG bin. A client cap
+	// (max_output_tokens) strictly below this makes a >=2000-token generation
+	// physically impossible, so it vetoes a tentative LONG classification
+	// (the max_output_tokens "bin ceiling" — purely restrictive, high precision).
+	longFloorTokens = 2000
 )
 
 // Bucket is the predicted output-length category for a request,
@@ -76,8 +85,14 @@ func (b Bucket) String() string {
 	}
 }
 
-// EstimateOutlen predicts the output-length bin using request-time signals
-// (enable_thinking, thinking_budget, has_tools, max_output_tokens).
+// EstimateOutlen predicts the output-length bin using request-time signals.
+// Precedence (first match wins): LONG pushers (enable_thinking / reasoning.effort,
+// DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
+// are checked first; SHORT pushers (tool_choice, has_tools,
+// continue_final_message, max_output_tokens<500)
+// follow; everything else is UNKNOWN. A max_output_tokens cap below the LONG
+// floor downgrades LONG last. Input length is intentionally excluded -- it has
+// no correlation with output length.
 func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	if body == nil {
 		return Unknown
@@ -85,54 +100,129 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 
 	var enableThinking *bool
 	var thinkingBudget *int64
-	hasTools := requestHasTools(body)
-
-	// enable_thinking / thinking_budget are only carried in chat-completions
-	// chat_template_kwargs (vLLM populates them from the client's extra_body); the
-	// Claude messages and OpenAI responses shapes do not surface these signals.
+	hasTools := false
+	continueFinalMessage := false
+	// continue_final_message, thinking_budget, and vendor-specific DeepSeek/Nemotron
+	// signals are only carried on the chat-completions shape (vLLM populates them from
+	// the client's chat_template_kwargs / extra_body). Responses API carries tools
+	// on the typed body, and reasoning.effort on the raw payload.
 	if body.ChatCompletions != nil {
+		hasTools = len(body.ChatCompletions.Tools) > 0
+		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
-		if v, ok := kwArgs["enable_thinking"]; ok {
-			enableThinking = boolPtrFromAny(v)
+		enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+		// DeepSeek V4 activation: extra_body={"thinking":{"type":"enabled"|"disabled"}}.
+		if enableThinking == nil {
+			if m, ok := kwArgs["thinking"].(map[string]any); ok {
+				switch stringFromAny(m["type"]) {
+				case "enabled":
+					t := true
+					enableThinking = &t
+				case "disabled":
+					f := false
+					enableThinking = &f
+				}
+			}
 		}
-		if v, ok := kwArgs["thinking_budget"]; ok {
-			thinkingBudget = int64PtrFromAny(v)
+		thinkingBudget = int64PtrFromAny(kwArgs["thinking_budget"])
+		if thinkingBudget == nil {
+			// Nemotron uses reasoning_budget as the budget key.
+			thinkingBudget = int64PtrFromAny(kwArgs["reasoning_budget"])
+		}
+	} else if body.Responses != nil {
+		hasTools = hasResponsesTools(body.Responses.Tools)
+	}
+
+	// tool_choice is read from the raw payload for all shapes; reasoning.effort is
+	// scoped to /v1/responses.
+	var toolChoice string
+	if payload, ok := payloadMap(body); ok {
+		toolChoice = toolChoiceKind(payload["tool_choice"])
+		if body.Responses != nil {
+			enableThinking = responsesThinking(payload["reasoning"])
 		}
 	}
 
-	// Thinking mode -> always long (reasoning chains).
-	if enableThinking != nil && *enableThinking {
+	bucket := classifyOutlen(classifyInput{
+		enableThinking:       enableThinking,
+		thinkingBudget:       thinkingBudget,
+		hasTools:             hasTools,
+		continueFinalMessage: continueFinalMessage,
+		toolChoice:           toolChoice,
+		maxOutputTokens:      body.MaxOutputTokens,
+	})
+
+	// Bin ceiling (always last): a hard client cap below the LONG floor makes a
+	// LONG generation physically impossible, so downgrade. Purely restrictive.
+	return applyMaxOutputCeiling(bucket, body.MaxOutputTokens)
+}
+
+// classifyInput carries the request-time signals for the output-length classifier.
+type classifyInput struct {
+	enableThinking       *bool
+	thinkingBudget       *int64
+	hasTools             bool
+	continueFinalMessage bool
+	toolChoice           string
+	maxOutputTokens      *int64
+}
+
+// classifyOutlen applies the precedence cascade documented on EstimateOutlen.
+func classifyOutlen(in classifyInput) Bucket {
+	thinking := in.enableThinking != nil && *in.enableThinking
+
+	// --- LONG pushers (checked first; over-calling LONG is the cheap error) ---
+
+	// Thinking mode -> always long (reasoning chains, measured p50 = 3,848-16,530 tokens).
+	if thinking {
+		return Long
+	}
+	// Large thinking/reasoning budget, only when enable_thinking is not explicitly
+	// set -> treat as LONG. An explicit enable_thinking=false is the stronger signal
+	// and is respected: the request falls through rather than being forced to LONG.
+	if in.enableThinking == nil && in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
 		return Long
 	}
 
-	// Large thinking budget, only when enable_thinking is not explicitly set ->
-	// treat as LONG. An explicit enable_thinking=false is the stronger signal and
-	// is respected: the request falls through rather than being forced to LONG.
-	if enableThinking == nil && thinkingBudget != nil && *thinkingBudget > longBudgetThresholdTokens {
-		return Long
-	}
+	// --- SHORT pushers (must be high-precision) ---
 
-	// Tools without thinking -> short tool-call JSON. The enable_thinking guard
-	// matters: has_tools=true alone is not a SHORT signal when thinking is also on.
-	if hasTools && (enableThinking == nil || !*enableThinking) {
+	// Forced tool call -> short tool-call JSON.
+	if in.toolChoice == string(toolcalling.ToolChoiceRequired) || in.toolChoice == string(toolcalling.ToolChoiceNamed) {
 		return Short
 	}
-
+	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
+	// Guard: enable_thinking must be explicitly false or absent (Nemotron ARC-AGI proves
+	// has_tools alone is NOT a SHORT signal under thinking); and tool_choice="none" vetoes it
+	// (tools are advertised but the model is told not to call them, so the SHORT premise fails).
+	if in.hasTools && !thinking && in.toolChoice != string(toolcalling.ToolChoiceNone) {
+		return Short
+	}
+	// Continuing/completing a partially-written assistant turn -> short by construction.
+	if in.continueFinalMessage {
+		return Short
+	}
 	// Explicit short cap set by the client -> treat as short.
-	if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < shortMaxOutputTokens {
+	if in.maxOutputTokens != nil && *in.maxOutputTokens > 0 && *in.maxOutputTokens < shortMaxOutputTokens {
 		return Short
 	}
 
 	return Unknown
 }
 
-// requestHasTools reports whether the request carries tool definitions. Only the
-// chat-completions shape is inspected: the thinking signals (enable_thinking,
-// thinking_budget) that distinguish a SHORT tool-call from a LONG reasoning
-// request are only surfaced there, so classifying tools on a shape whose thinking
-// signals we cannot read would risk labeling a thinking request SHORT.
-func requestHasTools(body *fwkrh.InferenceRequestBody) bool {
-	return body.ChatCompletions != nil && len(body.ChatCompletions.Tools) > 0
+// applyMaxOutputCeiling downgrades a tentative LONG bin when the client's
+// max_output_tokens cap makes a LONG (>= longFloorTokens) generation impossible.
+// It only ever downgrades LONG, so it cannot lower precision on SHORT/UNKNOWN.
+func applyMaxOutputCeiling(bucket Bucket, maxOutputTokens *int64) Bucket {
+	if bucket != Long || maxOutputTokens == nil || *maxOutputTokens <= 0 {
+		return bucket
+	}
+	if *maxOutputTokens < shortMaxOutputTokens {
+		return Short
+	}
+	if *maxOutputTokens < longFloorTokens {
+		return Unknown
+	}
+	return bucket
 }
 
 // PluginFactory is the factory function for the outlen-bucket plugin.
@@ -142,8 +232,11 @@ func PluginFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin
 	}, nil
 }
 
-// compile-time interface assertion
-var _ requestcontrol.RequestHeaderProcessor = &Plugin{}
+// compile-time interface assertions
+var (
+	_ requestcontrol.RequestHeaderProcessor = &Plugin{}
+	_ plugin.ProducerPlugin                 = &Plugin{}
+)
 
 // Plugin predicts the output-length bin for a request and stores it as a request
 // attribute for output-length-aware scheduling.
@@ -155,6 +248,11 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
+// Produces declares the output-length bucket this plugin publishes.
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{AttributeKey: Bucket(0)}
+}
+
 // RequestHeader runs after the request body is parsed and attached, but before
 // admission control. It classifies the request into an output-length bin and
 // publishes the result as a request attribute.
@@ -164,6 +262,47 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	}
 	request.PutAttribute(AttributeKey, EstimateOutlen(request.Body))
 	return nil
+}
+
+// payloadMap returns the request's raw JSON payload as a map, if it was parsed
+// into one. tool_choice is not typed on the request body, so it is read here.
+func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
+	if body == nil || body.Payload == nil {
+		return nil, false
+	}
+	return body.Payload.AsMap()
+}
+
+// stringFromAny returns v as a string when it is one, else "" ("not set").
+func stringFromAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// toolChoiceKind normalizes the OpenAI tool_choice field. It is either a string
+// ("none" | "auto" | "required") or an object forcing a specific function
+// ({"type":"function","function":{"name":...}}), which we report as "named".
+// Anything else yields "" ("not set").
+func toolChoiceKind(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]any:
+		// A specific tool is forced -> a short tool-call JSON response.
+		return string(toolcalling.ToolChoiceNamed)
+	case json.RawMessage:
+		// UnmarshalEnvelope stores objects as json.RawMessage; object = named tool.
+		if len(t) > 0 && t[0] == '{' {
+			return string(toolcalling.ToolChoiceNamed)
+		}
+		var s string
+		if err := json.Unmarshal(t, &s); err == nil {
+			return s
+		}
+	}
+	return ""
 }
 
 // toJSONNumber normalizes float64 (from json.Unmarshal without UseNumber) and
@@ -221,4 +360,30 @@ func int64PtrFromAny(v any) *int64 {
 		}
 	}
 	return nil
+}
+
+// hasResponsesTools reports whether the Responses API's tools slice contains
+// at least one tool.
+func hasResponsesTools(v any) bool {
+	t, ok := v.([]any)
+	return ok && len(t) > 0
+}
+
+// responsesThinking maps the Responses API's reasoning.effort to an enable_thinking
+// boolean pointer. vLLM treats reasoning.effort != "none" as enable_thinking=true,
+// and "none" as enable_thinking=false.
+func responsesThinking(v any) *bool {
+	m, ok := v.(map[string]any)
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		ok = json.Unmarshal(raw, &m) == nil && m != nil
+	}
+	if !ok {
+		return nil
+	}
+	effort := stringFromAny(m["effort"])
+	if effort == "" {
+		return nil
+	}
+	t := effort != "none"
+	return &t
 }

@@ -2,6 +2,10 @@
 
 package v1alpha2
 
+import (
+	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+)
+
 // InferenceObjectiveSpecApplyConfiguration represents a declarative configuration of the InferenceObjectiveSpec type for use
 // with apply.
 //
@@ -14,6 +18,10 @@ package v1alpha2
 // performance and latency goals for the model. These workloads are
 // expected to operate within an InferencePool sharing compute capacity with other
 // InferenceObjectives, defined by the Inference Platform Admin.
+//
+// The schema accepts the v1 targeting fields so objects written through
+// either version store losslessly under None conversion; author new objects
+// in v1. poolRef is exclusive with poolRefs and poolSelector.
 type InferenceObjectiveSpecApplyConfiguration struct {
 	// Priority defines how important it is to serve the request compared to other requests in the same pool.
 	// Priority is an integer value that defines the priority of the request.
@@ -30,6 +38,15 @@ type InferenceObjectiveSpecApplyConfiguration struct {
 	Priority *int32 `json:"priority,omitempty"`
 	// PoolRef is a reference to the inference pool, the pool must exist in the same namespace.
 	PoolRef *PoolObjectReferenceApplyConfiguration `json:"poolRef,omitempty"`
+	// PoolRefs targets the inference pools in the same namespace that
+	// this objective applies to. An objective applies to a pool when any
+	// entry matches. Entries are unique by pool name.
+	PoolRefs []PoolObjectReferenceApplyConfiguration `json:"poolRefs,omitempty"`
+	// PoolSelector selects inference pools in the same namespace by
+	// label. An objective applies to a pool when the selector matches
+	// its labels. The selector must not be empty; targeting every pool
+	// in the namespace is not a supported objective.
+	PoolSelector *v1.LabelSelectorApplyConfiguration `json:"poolSelector,omitempty"`
 }
 
 // InferenceObjectiveSpecApplyConfiguration constructs a declarative configuration of the InferenceObjectiveSpec type for use with
@@ -51,5 +68,26 @@ func (b *InferenceObjectiveSpecApplyConfiguration) WithPriority(value int32) *In
 // If called multiple times, the PoolRef field is set to the value of the last call.
 func (b *InferenceObjectiveSpecApplyConfiguration) WithPoolRef(value *PoolObjectReferenceApplyConfiguration) *InferenceObjectiveSpecApplyConfiguration {
 	b.PoolRef = value
+	return b
+}
+
+// WithPoolRefs adds the given value to the PoolRefs field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the PoolRefs field.
+func (b *InferenceObjectiveSpecApplyConfiguration) WithPoolRefs(values ...*PoolObjectReferenceApplyConfiguration) *InferenceObjectiveSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithPoolRefs")
+		}
+		b.PoolRefs = append(b.PoolRefs, *values[i])
+	}
+	return b
+}
+
+// WithPoolSelector sets the PoolSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PoolSelector field is set to the value of the last call.
+func (b *InferenceObjectiveSpecApplyConfiguration) WithPoolSelector(value *v1.LabelSelectorApplyConfiguration) *InferenceObjectiveSpecApplyConfiguration {
+	b.PoolSelector = value
 	return b
 }

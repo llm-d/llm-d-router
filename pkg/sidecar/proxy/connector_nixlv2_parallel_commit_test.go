@@ -25,16 +25,18 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // parallelCommitEnv is a minimal proxy harness for the MoRI-IO parallel WRITE
 // dispatch commit-point tests. Unlike startMoRIProxy (which wires the shared
 // mock ChatCompletionHandler), it accepts arbitrary prefill/decode handlers so
-// a leg can fail, block, or stream on demand.
+// a request can fail, block, or stream on demand.
 type parallelCommitEnv struct {
 	proxy       *Server
 	baseAddr    string
@@ -57,7 +59,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 	cfg := Config{
 		Port:                       "0",
 		DecoderURL:                 decodeURL,
-		KVConnector:                KVConnectorNIXLV2,
+		KVConnector:                constants.KVConnectorNIXLV2,
 		MoRIIOWriteMode:            true,
 		MoRIIOParallelDispatch:     true,
 		MoRIIODecodePodIP:          decodeURL.Hostname(),
@@ -97,7 +99,7 @@ func startParallelCommitProxy(prefill, decode http.Handler, mutate func(cfg *Con
 // the proxy surfaces as a client error and fails the test deterministically
 // rather than blocking the suite forever.
 func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Header, string, error) {
-	req, err := http.NewRequest(http.MethodPost, env.baseAddr+ChatCompletionsPath, strings.NewReader(chatCompletionsRequestBody))
+	req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody))
 	Expect(err).ToNot(HaveOccurred())
 	req.Header.Add(routing.PrefillEndpointHeader, env.prefillHost)
 
@@ -107,7 +109,7 @@ func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Heade
 		return 0, nil, "", err
 	}
 	defer rp.Body.Close()
-	body, _ := io.ReadAll(rp.Body) //nolint:errcheck
+	body, _ := io.ReadAll(rp.Body)
 	return rp.StatusCode, rp.Header, string(body), nil
 }
 
@@ -136,7 +138,7 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 	})
 
 	It("does not hang when prefill and decode both block: the KV-wait backstop returns 504", func() {
-		// Both legs block (KV that never arrives) until either the sidecar
+		// Both requests block (KV that never arrives) until either the sidecar
 		// cancels their request context or the test tears down. The bounded
 		// backstop timeout plus the shared cancelable context must abort and
 		// return 504 rather than hang.
@@ -161,11 +163,12 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		start := time.Now()
 		// Client timeout is far larger than the backstop, so a 504 means the
 		// backstop fired; a client-side timeout error would mean it hung.
-		status, _, _, err := env.send(8 * time.Second)
+		status, hdr, _, err := env.send(8 * time.Second)
 		elapsed := time.Since(start)
 
 		Expect(err).ToNot(HaveOccurred(), "request must return via the backstop, not hang")
 		Expect(status).To(Equal(http.StatusGatewayTimeout))
+		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
 		Expect(elapsed).To(BeNumerically("<", 5*time.Second), "should return shortly after the 300ms backstop")
 	})
 

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,7 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-router/apix/v1alpha2"
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
@@ -196,21 +197,21 @@ func TestPool(t *testing.T) {
 func TestObjective(t *testing.T) {
 	chatModel := "chat"
 	tsModel := "food-review"
-	model1ts := testutil.MakeInferenceObjective("model1").ObjRef()
+	model1ts := testutil.MakeV1InferenceObjective("model1").ObjRef()
 	// Same model name as model1ts, different object name.
-	model2ts := testutil.MakeInferenceObjective("model2").ObjRef()
+	model2ts := testutil.MakeV1InferenceObjective("model2").ObjRef()
 	// Same model name as model1ts, newer timestamp
-	model1tsCritical := testutil.MakeInferenceObjective("model1").
+	model1tsCritical := testutil.MakeV1InferenceObjective("model1").
 		Priority(2).ObjRef()
 	// Same object name as model2ts, different model name.
-	model2chat := testutil.MakeInferenceObjective(model2ts.Name).ObjRef()
+	model2chat := testutil.MakeV1InferenceObjective(model2ts.Name).ObjRef()
 
 	tests := []struct {
 		name           string
-		existingModels []*v1alpha2.InferenceObjective
+		existingModels []*apixv1.InferenceObjective
 		op             func(ds Datastore) bool
 		wantOpResult   bool
-		wantModels     []*v1alpha2.InferenceObjective
+		wantModels     []*apixv1.InferenceObjective
 	}{
 		{
 			name: "Add model1 with food-review as modelName",
@@ -218,52 +219,52 @@ func TestObjective(t *testing.T) {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
-			wantModels:   []*v1alpha2.InferenceObjective{model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model1ts},
 			wantOpResult: true,
 		},
 		{
 			name:           "Set model1 with the same modelName, but with diff priority, should update.",
-			existingModels: []*v1alpha2.InferenceObjective{model1ts},
+			existingModels: []*apixv1.InferenceObjective{model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1tsCritical)
 				return cmp.Diff(ds.ObjectiveGet(model1tsCritical.Name), model1tsCritical) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model1tsCritical},
+			wantModels:   []*apixv1.InferenceObjective{model1tsCritical},
 		},
 		{
 			name:           "Set model1 with the food-review modelName, both models should exist",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat},
+			existingModels: []*apixv1.InferenceObjective{model2chat},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Set model1 with the food-review modelName, both models should exist",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveSet(model1ts)
 				return cmp.Diff(ds.ObjectiveGet(model1ts.Name), model1ts) == ""
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Getting by model name, chat -> model2",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				gotChat := ds.ObjectiveGet(chatModel)
 				return gotChat != nil && cmp.Diff(model2chat, gotChat) == ""
 			},
 			wantOpResult: false,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			wantModels:   []*apixv1.InferenceObjective{model2chat, model1ts},
 		},
 		{
 			name:           "Delete the model",
-			existingModels: []*v1alpha2.InferenceObjective{model2chat, model1ts},
+			existingModels: []*apixv1.InferenceObjective{model2chat, model1ts},
 			op: func(ds Datastore) bool {
 				ds.ObjectiveDelete(types.NamespacedName{Name: model1ts.Name, Namespace: model1ts.Namespace})
 				got := ds.ObjectiveGet(tsModel)
@@ -271,7 +272,7 @@ func TestObjective(t *testing.T) {
 
 			},
 			wantOpResult: true,
-			wantModels:   []*v1alpha2.InferenceObjective{model2chat},
+			wantModels:   []*apixv1.InferenceObjective{model2chat},
 		},
 	}
 	for _, test := range tests {
@@ -291,7 +292,7 @@ func TestObjective(t *testing.T) {
 					t.Errorf("Unexpected operation result, want: %v, got: %v", test.wantOpResult, gotOpResult)
 				}
 
-				if diff := cmp.Diff(test.wantModels, ds.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
+				if diff := cmp.Diff(test.wantModels, ds.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *apixv1.InferenceObjective) bool {
 					return a.Name < b.Name
 				})); diff != "" {
 					t.Errorf("Unexpected models diff: %s", diff)
@@ -1345,31 +1346,16 @@ func TestExtractActivePorts(t *testing.T) {
 			expectedPorts: sets.New(8000),
 		},
 		{
-			name: "Pod with legacy GAIE annotation key",
+			name: "Legacy GAIE annotation key is ignored",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-pod",
 					Namespace:   "default",
-					Annotations: map[string]string{legacyGAIEActivePortsAnnotation: "8000,8001"},
+					Annotations: map[string]string{"inference.networking.k8s.io/active-ports": "8000"},
 				},
 			},
 			validPorts:    []int{8000, 8001, 8002},
-			expectedPorts: sets.New(8000, 8001),
-		},
-		{
-			name: "New annotation key takes precedence over legacy GAIE key",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						activePortsAnnotation:           "8000",
-						legacyGAIEActivePortsAnnotation: "8001",
-					},
-				},
-			},
-			validPorts:    []int{8000, 8001, 8002},
-			expectedPorts: sets.New(8000),
+			expectedPorts: sets.New(8000, 8001, 8002),
 		},
 	}
 
@@ -1466,6 +1452,28 @@ func TestEndpointDelete_Existing(t *testing.T) {
 	assert.Empty(t, ds.PodList(AllPodsPredicate))
 }
 
+// TestPodsSnapshotCurrent_CachedBetweenMutations verifies that the pods snapshot backing
+// PodList is reused across calls that fall between mutations, and rebuilt once a mutation
+// (EndpointUpsert/EndpointDelete) changes the pods map (#3078).
+func TestPodsSnapshotCurrent_CachedBetweenMutations(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, &mockEndpointFactory{}).(*datastore)
+	id1 := types.NamespacedName{Name: "ep1", Namespace: "default"}
+	id2 := types.NamespacedName{Name: "ep2", Namespace: "default"}
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id1})
+
+	first := ds.podsSnapshotCurrent()
+	second := ds.podsSnapshotCurrent()
+	require.Len(t, first, 1)
+	assert.Same(t, &first[0], &second[0], "snapshot should be reused when the pods map has not changed")
+
+	ds.EndpointUpsert(ctx, &fwkdl.EndpointMetadata{ID: id2})
+
+	third := ds.podsSnapshotCurrent()
+	require.Len(t, third, 2, "snapshot should be rebuilt after a mutation")
+}
+
 func TestEndpointDelete_Missing(t *testing.T) {
 	ctx := context.Background()
 	ds := NewDatastore(ctx, &mockEndpointFactory{})
@@ -1536,6 +1544,7 @@ func TestUpsertEndpoint_ConcurrentStoreDuringNilAppliesMetadata(t *testing.T) {
 		NewEndpointFn: func(_ context.Context, _ *fwkdl.EndpointMetadata) fwkdl.Endpoint {
 			staleMeta := &fwkdl.EndpointMetadata{ID: id, Address: "10.0.0.1"}
 			ds.pods.Store(id, fwkdl.NewEndpoint(staleMeta, fwkdl.NewMetrics()))
+			ds.podsVersion.Add(1)
 			return nil
 		},
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -130,7 +132,7 @@ func TestScheduleNestsFilterSpansUnderNamedProfiles(t *testing.T) {
 	))
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	_, err := scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+	_, err := scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 	root.End()
 	if err != nil {
 		t.Fatalf("Schedule returned error: %v", err)
@@ -142,7 +144,7 @@ func TestScheduleNestsFilterSpansUnderNamedProfiles(t *testing.T) {
 	}
 	profileNameBySpanID := make(map[trace.SpanID]string, len(profileSpans))
 	for _, profileSpan := range profileSpans {
-		profileName := spanAttributes(profileSpan)["llm_d.epp.scheduling.profile.name"].AsString()
+		profileName := spanAttributes(profileSpan)[semconv.LLMDEPPProfileNameKey].AsString()
 		profileNameBySpanID[profileSpan.SpanContext().SpanID()] = profileName
 	}
 
@@ -182,7 +184,7 @@ func TestScheduleEndsProfileSpanWhenFilterPanics(t *testing.T) {
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
 	recovered := func() (value any) {
 		defer func() { value = recover() }()
-		_, _ = scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+		_, _ = scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 		return nil
 	}()
 	root.End()
@@ -202,7 +204,7 @@ func TestScheduleEndsProfileSpanWhenFilterPanics(t *testing.T) {
 		t.Errorf("filter_endpoints parent = %v, want profile span %v",
 			filterSpans[0].Parent().SpanID(), profileSpans[0].SpanContext().SpanID())
 	}
-	if got := spanAttributes(profileSpans[0])["llm_d.epp.scheduling.profile.name"].AsString(); got != "decode" {
+	if got := spanAttributes(profileSpans[0])[semconv.LLMDEPPProfileNameKey].AsString(); got != "decode" {
 		t.Errorf("profile name = %q, want decode", got)
 	}
 }
@@ -218,7 +220,7 @@ func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	endpoints := newTestEndpoints("pod1", "pod2", "pod3")
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	result := profile.runFilterPlugins(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+	result := profile.runFilterPlugins(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 	root.End()
 
 	if len(result) != 2 {
@@ -238,17 +240,17 @@ func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	}
 
 	attrs := spanAttributes(span)
-	if got := attrs["llm_d.epp.filter.candidate_endpoints"].AsInt64(); got != 3 {
+	if got := attrs[semconv.LLMDEPPFilterCandidateEndpointsKey].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
-	if got := attrs["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 2 {
+	if got := attrs[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 2 {
 		t.Errorf("filtered_endpoints = %d, want 2", got)
 	}
-	if got := attrs["gen_ai.request.model"].AsString(); got != "m1" {
-		t.Errorf("gen_ai.request.model = %q, want %q", got, "m1")
+	if got := attrs[semconv.GenAIRequestModelKey].AsString(); got != "m1" {
+		t.Errorf("%s = %q, want %q", semconv.GenAIRequestModelKey, got, "m1")
 	}
-	if got := attrs["gen_ai.request.id"].AsString(); got != "r1" {
-		t.Errorf("gen_ai.request.id = %q, want %q", got, "r1")
+	if got := attrs[semconv.GenAIRequestIDKey].AsString(); got != "r1" {
+		t.Errorf("%s = %q, want %q", semconv.GenAIRequestIDKey, got, "r1")
 	}
 }
 
@@ -280,10 +282,10 @@ func TestRunFilterPluginsChainEmitsOneSpan(t *testing.T) {
 		t.Fatalf("got %d filter_endpoints spans, want 1 for the whole chain", len(spans))
 	}
 	attrs := spanAttributes(spans[0])
-	if got := attrs["llm_d.epp.filter.candidate_endpoints"].AsInt64(); got != 3 {
+	if got := attrs[semconv.LLMDEPPFilterCandidateEndpointsKey].AsInt64(); got != 3 {
 		t.Errorf("candidate_endpoints = %d, want 3", got)
 	}
-	if got := attrs["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 1 {
+	if got := attrs[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 1 {
 		t.Errorf("filtered_endpoints = %d, want 1", got)
 	}
 }
@@ -313,7 +315,7 @@ func TestRunFilterPluginsDrainBreakStillEndsSpan(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("got %d filter_endpoints spans, want 1 (span must end on drain)", len(spans))
 	}
-	if got := spanAttributes(spans[0])["llm_d.epp.filter.filtered_endpoints"].AsInt64(); got != 0 {
+	if got := spanAttributes(spans[0])[semconv.LLMDEPPFilterFilteredEndpointsKey].AsInt64(); got != 0 {
 		t.Errorf("filtered_endpoints = %d, want 0", got)
 	}
 	if never.FilterCallCount != 0 {
@@ -374,10 +376,10 @@ func TestRunFilterPluginsOmitsEmptyGenAI(t *testing.T) {
 		t.Fatalf("got %d filter_endpoints spans, want 1", len(spans))
 	}
 	attrs := spanAttributes(spans[0])
-	if _, ok := attrs["gen_ai.request.model"]; ok {
-		t.Error("gen_ai.request.model set for empty TargetModel")
+	if _, ok := attrs[semconv.GenAIRequestModelKey]; ok {
+		t.Errorf("%s set for empty TargetModel", semconv.GenAIRequestModelKey)
 	}
-	if _, ok := attrs["gen_ai.request.id"]; ok {
-		t.Error("gen_ai.request.id set for empty RequestID")
+	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
+		t.Errorf("%s set without x-request-id", semconv.GenAIRequestIDKey)
 	}
 }

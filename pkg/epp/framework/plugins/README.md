@@ -1,6 +1,6 @@
 # Plugins
 
-This directory contains the available plugins. For detailed information on individual plugins, please refer to the README.md located within each plugin's respective directory. To understand how they integrate into the incoming request processing lifecycle, see the [Endpoint Picker (EPP) design](https://github.com/llm-d/llm-d/tree/main/docs/architecture/core/router/epp) document.
+This directory contains the available plugins. For detailed information on individual plugins, please refer to the README.md located within each plugin's respective directory. To understand how they integrate into the incoming request processing lifecycle, see the [Endpoint Picker (EPP) design](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/epp.md) document.
 
 ## Plugin Stability Levels
 
@@ -38,7 +38,7 @@ The metric scorers are not standalone. `multicluster-kv-cache-utilization-scorer
 ### Example
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: multicluster-file-discovery
@@ -62,7 +62,8 @@ plugins:
   - type: single-profile-handler
 dataLayer:
   discovery:
-    pluginRef: discovery
+    endpoints:
+      pluginRef: discovery
   sources:
     - pluginRef: metrics-source
       extractors:

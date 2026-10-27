@@ -24,16 +24,18 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != gateway.PathChatCompletions+"/render" {
+		if r.URL.Path != reqcommon.PathChatCompletions+"/render" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if r.Header.Get("Content-Type") != "application/json" {
@@ -50,9 +52,10 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
-				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {"dGVuc29yLWE=", "dGVuc29yLWI="}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {testKwargsA, testKwargsB}},
+				"mm_metadata":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {testMetadataA, testMetadataB}},
 			},
 		})
 	}))
@@ -65,12 +68,12 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body:         map[string]any{"model": "gpt-4o", "messages": []any{}},
 		Model:        "gpt-4o",
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0},
-			{Index: 1},
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityImage},
 		},
 	}
 
@@ -96,11 +99,14 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}
 
 	// Verify kwargs_data
-	if reqCtx.MultimodalEntries[0].KwargsData != "dGVuc29yLWE=" {
+	if reqCtx.MultimodalEntries[0].KwargsData != testKwargsA {
 		t.Fatalf("expected kwargs_data for entry 0, got %s", reqCtx.MultimodalEntries[0].KwargsData)
 	}
-	if reqCtx.MultimodalEntries[1].KwargsData != "dGVuc29yLWI=" {
+	if reqCtx.MultimodalEntries[1].KwargsData != testKwargsB {
 		t.Fatalf("expected kwargs_data for entry 1, got %s", reqCtx.MultimodalEntries[1].KwargsData)
+	}
+	if reqCtx.MultimodalEntries[0].MMMetadata != testMetadataA || reqCtx.MultimodalEntries[1].MMMetadata != testMetadataB {
+		t.Fatalf("unexpected mm_metadata: %q / %q", reqCtx.MultimodalEntries[0].MMMetadata, reqCtx.MultimodalEntries[1].MMMetadata)
 	}
 
 	// Verify placeholders
@@ -112,16 +118,19 @@ func TestRenderStep_ParsesFullResponse(t *testing.T) {
 	}
 }
 
-func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
-	var called bool
+func TestRenderStep_MismatchedMMMetadata_DegradesInsteadOfFailing(t *testing.T) {
+	// mm_metadata is an optimization-only field: the response already carries
+	// the kwargs_data fallback, so a renderer that emits a mismatched metadata
+	// array costs the optimization, not the request.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token_ids": []int{1, 2345, 6789},
+			"token_ids": []int{1, 32000, 2345, 6789},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {}},
-				"mm_placeholders": map[string][]any{ModalityImage: {}},
-				"kwargs_data":     map[string][]string{ModalityImage: {}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-a", "vllm-hash-b"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 1}, map[string]any{"offset": 2, "length": 1}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {testKwargsA, testKwargsB}},
+				// One metadata item for two entries: wrong shape, must degrade.
+				"mm_metadata": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {testMetadataA}},
 			},
 		})
 	}))
@@ -131,7 +140,392 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath:      gateway.PathChatCompletions,
+		OriginalPath:      reqcommon.PathChatCompletions,
+		Body:              map[string]any{"model": "gpt-4o", "messages": []any{}},
+		Model:             "gpt-4o",
+		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityImage}},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected the request to succeed with degraded mm_metadata, got %v", err)
+	}
+	// The degradation drops the whole metadata array: no entry may keep a
+	// half-populated metadata slot, since prefill's per-entry choice would
+	// then ship mm_metadata without a matching EC guarantee.
+	for i, e := range reqCtx.MultimodalEntries {
+		if e.MMMetadata != "" {
+			t.Fatalf("entry %d metadata: got %q, want empty after degradation", i, e.MMMetadata)
+		}
+		if e.KwargsData != testKwargsA && e.KwargsData != testKwargsB {
+			t.Fatalf("entry %d lost its kwargs_data fallback: %q", i, e.KwargsData)
+		}
+	}
+}
+
+// The chat-completions path with entries in three modalities: each must be
+// filled from the response slot matching its modality and per-modality
+// position. render.go's multi-modality walker has no other coverage here.
+func TestRenderStep_ChatCompletions_MultipleModalities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 51000, 51000, 71000, 71000, 71000},
+			"features": map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"img-hash"},
+					reqcommon.ModalityAudio: {"aud-hash"},
+					reqcommon.ModalityVideo: {"vid-hash"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}},
+					reqcommon.ModalityAudio: {map[string]any{"offset": 4, "length": 2}},
+					reqcommon.ModalityVideo: {map[string]any{"offset": 6, "length": 3}},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"aW1n"},
+					reqcommon.ModalityAudio: {"YXVk"},
+					reqcommon.ModalityVideo: {"dmlk"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	// Pre-populated in walker order (image, audio, video), as replace_media_urls
+	// would produce for a request mixing the three.
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body:         map[string]any{"model": "test-model", "messages": []any{}},
+		Model:        "test-model",
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityAudio},
+			{Modality: reqcommon.ModalityVideo},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []struct {
+		hash     string
+		kwargs   string
+		modality reqcommon.Modality
+		offset   int
+		length   int
+	}{
+		{"img-hash", "aW1n", reqcommon.ModalityImage, 1, 3},
+		{"aud-hash", "YXVk", reqcommon.ModalityAudio, 4, 2},
+		{"vid-hash", "dmlk", reqcommon.ModalityVideo, 6, 3},
+	}
+	for i, w := range want {
+		got := reqCtx.MultimodalEntries[i]
+		if got.Hash != w.hash || got.KwargsData != w.kwargs ||
+			got.Modality != w.modality ||
+			got.Placeholder.Offset != w.offset || got.Placeholder.Length != w.length {
+			t.Errorf("entry %d = %+v, want hash=%q kwargs=%q modality=%q offset=%d length=%d",
+				i, got, w.hash, w.kwargs, w.modality, w.offset, w.length)
+		}
+	}
+}
+
+// Covers the two response checks on this path and the difference between them:
+// the aggregate check sums the per-modality slices against the entry count, so
+// it catches a wrong total but not a right total sorted into the wrong
+// modalities, which is the per-entry guard's job.
+//
+// Every case but the last keeps all three totals equal to the entry count, so
+// only the per-entry guard can reject them, each misfiling a different field.
+// short_modality_slice pins the comparison itself: a guard weakened to test only
+// for an empty slice would answer it with the previous entry's hash. A malformed
+// render response is the service's fault, so these are plain errors.
+func TestRenderStep_ChatCompletions_RejectsWrongModalitySplit(t *testing.T) {
+	placeholder := func(offset, length int) any {
+		return map[string]any{"offset": offset, "length": length}
+	}
+	imageAudio := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityAudio}}
+
+	for _, tc := range []struct {
+		name     string
+		entries  []pipeline.MultimodalEntry
+		features map[string]any
+		wantMsg  string
+	}{
+		{
+			// Both hashes tagged audio. Totals are 2, so the aggregate check
+			// passes, but the image entry finds an absent (nil) image slice.
+			name:    "hashes_under_wrong_modality",
+			entries: imageAudio,
+			features: map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityAudio: {"aud-hash", "img-hash"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityAudio: {placeholder(1, 3), placeholder(4, 2)}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityAudio: {"YXVk", "aW1n"}},
+			},
+			wantMsg: string(reqcommon.ModalityImage),
+		},
+		{
+			// Two image entries but one image hash, and the audio slice absorbs
+			// the extra. Totals are 3, and the image slice is present and one
+			// short, so rejecting requires comparing idx against its length.
+			name: "short_modality_slice",
+			entries: []pipeline.MultimodalEntry{
+				{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityAudio},
+			},
+			features: map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"img-hash"},
+					reqcommon.ModalityAudio: {"aud-hash", "extra-hash"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {placeholder(1, 3)},
+					reqcommon.ModalityAudio: {placeholder(4, 2), placeholder(6, 2)},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"aW1n"},
+					reqcommon.ModalityAudio: {"YXVk", "ZXh0"},
+				},
+			},
+			wantMsg: string(reqcommon.ModalityImage),
+		},
+		{
+			// Hashes and placeholders split correctly; kwargs_data puts both
+			// items under image, so the audio entry runs out on kwargs alone.
+			name:    "kwargs_split_disagrees",
+			entries: imageAudio,
+			features: map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"img-hash"},
+					reqcommon.ModalityAudio: {"aud-hash"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {placeholder(1, 3)},
+					reqcommon.ModalityAudio: {placeholder(4, 2)},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"aW1n", "YXVk"}},
+			},
+			wantMsg: string(reqcommon.ModalityAudio),
+		},
+		{
+			// Three hashes for two entries: the aggregate check rejects this
+			// before the per-entry walk starts.
+			name:    "total_count_mismatch",
+			entries: imageAudio,
+			features: map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"img-hash", "extra-hash"},
+					reqcommon.ModalityAudio: {"aud-hash"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {placeholder(1, 3)},
+					reqcommon.ModalityAudio: {placeholder(4, 2)},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"aW1n"},
+					reqcommon.ModalityAudio: {"YXVk"},
+				},
+			},
+			wantMsg: "mm_hashes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token_ids": []int{1, 32000, 32000, 32000, 51000, 51000},
+					"features":  tc.features,
+				})
+			}))
+			defer server.Close()
+
+			step, err := NewRenderStep(nil, map[string]any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step.(*RenderStep).SetServiceAddress(server.URL)
+
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: reqcommon.PathChatCompletions,
+				Body:         map[string]any{"model": "test-model", "messages": []any{}},
+				Model:        "test-model",
+				// Cloned: Execute fills entries in place as it walks, and the
+				// two-entry fixture is shared between cases.
+				MultimodalEntries: slices.Clone(tc.entries),
+			}
+
+			err = step.Execute(context.Background(), reqCtx)
+			if err == nil {
+				t.Fatalf("expected an error, got entries %+v", reqCtx.MultimodalEntries)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q should name %q", err, tc.wantMsg)
+			}
+			if errors.Is(err, pipeline.ErrBadRequest) {
+				t.Errorf("a malformed render response is not a client error, got %v", err)
+			}
+		})
+	}
+}
+
+// mm_metadata degrades instead of failing, so this case cannot live in
+// TestRenderStep_ChatCompletions_RejectsWrongModalitySplit. Two image entries
+// and one audio entry, with all three metadata items filed under image: the
+// totals match, which is the shape the aggregate check does not catch. Pairing
+// must follow this modality's slice, and a length mismatch drops metadata
+// rather than attaching another modality's blob. The sibling fields stay on
+// their own modality slots.
+func TestRenderStep_ChatCompletions_MMMetadataWrongModalityDegrades(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 51000, 51000},
+			"features": map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{
+					reqcommon.ModalityImage: {"img-hash-0", "img-hash-1"},
+					reqcommon.ModalityAudio: {"aud-hash"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{
+					reqcommon.ModalityImage: {
+						map[string]any{"offset": 1, "length": 3},
+						map[string]any{"offset": 4, "length": 3},
+					},
+					reqcommon.ModalityAudio: {
+						map[string]any{"offset": 7, "length": 2},
+					},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{
+					reqcommon.ModalityImage: {"aW1nMA", "aW1nMQ"},
+					reqcommon.ModalityAudio: {"YXVk"},
+				},
+				"mm_metadata": map[reqcommon.Modality][]string{
+					reqcommon.ModalityImage: {"AUD-META", "img-meta0", "img-meta1"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body:         map[string]any{"model": "test-model", "messages": []any{}},
+		Model:        "test-model",
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityAudio},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected the request to succeed with degraded mm_metadata, got %v", err)
+	}
+
+	want := []struct {
+		hash       string
+		kwargs     string
+		modality   reqcommon.Modality
+		offset     int
+		length     int
+		mmMetadata string
+	}{
+		{hash: "img-hash-0", kwargs: "aW1nMA", modality: reqcommon.ModalityImage, offset: 1, length: 3, mmMetadata: ""},
+		{hash: "img-hash-1", kwargs: "aW1nMQ", modality: reqcommon.ModalityImage, offset: 4, length: 3, mmMetadata: ""},
+		{hash: "aud-hash", kwargs: "YXVk", modality: reqcommon.ModalityAudio, offset: 7, length: 2, mmMetadata: ""},
+	}
+	for i, w := range want {
+		got := reqCtx.MultimodalEntries[i]
+		if got.Hash != w.hash || got.KwargsData != w.kwargs || got.Modality != w.modality ||
+			got.Placeholder.Offset != w.offset || got.Placeholder.Length != w.length ||
+			got.MMMetadata != w.mmMetadata {
+			t.Errorf("entry %d = %+v, want hash=%q kwargs=%q modality=%q offset=%d length=%d mm_metadata=%q",
+				i, got, w.hash, w.kwargs, w.modality, w.offset, w.length, w.mmMetadata)
+		}
+	}
+}
+
+// One mispaired modality voids the whole mm_metadata map: the renderer broke
+// the field's contract, so a correctly-shaped sibling modality does not keep
+// its slice either. The aggregate length check passes here (the ghost video
+// key offsets audio's shortfall), so only the per-modality check catches it.
+func TestRenderStep_ChatCompletions_MMMetadataOneBadModalityVoidsAll(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 32000, 51000, 51000},
+			"features": map[string]any{
+				"mm_hashes": map[reqcommon.Modality][]string{
+					reqcommon.ModalityImage: {"img-hash"},
+					reqcommon.ModalityAudio: {"aud-hash-0", "aud-hash-1"},
+				},
+				"mm_placeholders": map[reqcommon.Modality][]any{
+					reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}},
+					reqcommon.ModalityAudio: {
+						map[string]any{"offset": 4, "length": 3},
+						map[string]any{"offset": 7, "length": 2},
+					},
+				},
+				"kwargs_data": map[reqcommon.Modality][]string{
+					reqcommon.ModalityImage: {"aW1n"},
+					reqcommon.ModalityAudio: {"YXVkMA", "YXVkMQ"},
+				},
+				"mm_metadata": map[reqcommon.Modality][]string{
+					// image pairs correctly, audio is short, the ghost video
+					// key keeps the aggregate total at 3 == len(entries).
+					reqcommon.ModalityImage: {"img-meta"},
+					reqcommon.ModalityAudio: {"aud-meta"},
+					reqcommon.ModalityVideo: {"vid-meta"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body:         map[string]any{"model": "test-model", "messages": []any{}},
+		Model:        "test-model",
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityAudio},
+			{Modality: reqcommon.ModalityAudio},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("expected the request to succeed with degraded mm_metadata, got %v", err)
+	}
+
+	for i, e := range reqCtx.MultimodalEntries {
+		if e.MMMetadata != "" {
+			t.Errorf("entry %d (modality %s) kept mm_metadata %q; one mispaired modality must void the whole map",
+				i, e.Modality, e.MMMetadata)
+		}
+	}
+}
+
+func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
+	var called bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 2345, 6789},
+			"features": map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath:      reqcommon.PathChatCompletions,
 		Body:              map[string]any{"model": "test"},
 		MultimodalEntries: nil,
 	}
@@ -148,8 +542,92 @@ func TestRenderStep_RunsEvenWithNoMultimodal(t *testing.T) {
 	}
 }
 
-func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
+func TestRenderStep_Responses_CallsRender(t *testing.T) {
+	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.URL.Path != reqcommon.PathResponses+"/render" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 2345, 6789},
+			"features": map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathResponses,
+		Body:         map[string]any{"model": "test", "input": "describe this"},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called {
+		t.Fatal("render should be called for a responses request")
+	}
+	if len(reqCtx.TokenIDs) != 3 {
+		t.Fatalf("expected 3 token_ids, got %d", len(reqCtx.TokenIDs))
+	}
+}
+
+func TestRenderStep_Messages_CallsRender(t *testing.T) {
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathMessages+"/render" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000, 32000, 2345},
+			"features": map[string]any{
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"vllm-hash-a"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 2}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"dGVuc29yLWE="}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{"model": "test", "max_tokens": 10, "messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aGk="}},
+			}},
+		}},
+		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if receivedBody["max_tokens"] != float64(10) {
+		t.Fatalf("expected the client's Messages body forwarded to render, got %v", receivedBody)
+	}
+	if len(reqCtx.TokenIDs) != 4 {
+		t.Fatalf("expected 4 token_ids, got %d", len(reqCtx.TokenIDs))
+	}
+	got := reqCtx.MultimodalEntries[0]
+	if got.Hash != "vllm-hash-a" || got.KwargsData != "dGVuc29yLWE=" || got.Placeholder.Offset != 1 || got.Placeholder.Length != 2 {
+		t.Fatalf("unexpected multimodal entry: %+v", got)
+	}
+}
+
+func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("render service should not be called for token array prompt")
 	}))
 	defer server.Close()
@@ -158,7 +636,7 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathCompletions,
+		OriginalPath: reqcommon.PathCompletions,
 		Body: map[string]any{
 			"model":  "test",
 			"prompt": []any{float64(1), float64(2345), float64(6789)},
@@ -177,6 +655,28 @@ func TestRenderStep_CompletionsTokenArray_SkipsRender(t *testing.T) {
 	}
 }
 
+func TestRenderStep_OtherAPIs_SkipRender(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Errorf("render service should not be called for %s", reqcommon.PathSGLangGenerate)
+	}))
+	defer server.Close()
+
+	step, _ := NewRenderStep(nil, map[string]any{})
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathSGLangGenerate,
+		Body:         map[string]any{"model": "test", "text": "hello"},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.TokenIDs) != 0 {
+		t.Fatalf("expected no token_ids, got %v", reqCtx.TokenIDs)
+	}
+}
+
 func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	var receivedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +691,7 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathCompletions,
+		OriginalPath: reqcommon.PathCompletions,
 		Body: map[string]any{
 			"model":  "test",
 			"prompt": "Hello, world!",
@@ -202,8 +702,8 @@ func TestRenderStep_CompletionsTextPrompt_CallsRender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedPath != gateway.PathCompletions+"/render" {
-		t.Fatalf("expected %s/render, got %s", gateway.PathCompletions, receivedPath)
+	if receivedPath != reqcommon.PathCompletions+"/render" {
+		t.Fatalf("expected %s/render, got %s", reqcommon.PathCompletions, receivedPath)
 	}
 	if len(reqCtx.TokenIDs) != 3 {
 		t.Fatalf("expected 3 token_ids, got %d", len(reqCtx.TokenIDs))
@@ -222,9 +722,9 @@ func TestRenderStep_RejectsTooManyTotalTokens_ChatCompletions(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {}},
-				"mm_placeholders": map[string][]any{ModalityImage: {}},
-				"kwargs_data":     map[string][]string{ModalityImage: {}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {}},
 			},
 		})
 	}))
@@ -234,7 +734,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_ChatCompletions(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body:         map[string]any{"model": "test"},
 	}
 
@@ -262,7 +762,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_CompletionsString(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathCompletions,
+		OriginalPath: reqcommon.PathCompletions,
 		Body:         map[string]any{"model": "test", "prompt": "some text"},
 	}
 
@@ -280,7 +780,7 @@ func TestRenderStep_RejectsTooManyTotalTokens_CompletionsTokenArray(t *testing.T
 	step.(*RenderStep).SetServiceAddress("http://unused")
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathCompletions,
+		OriginalPath: reqcommon.PathCompletions,
 		Body:         map[string]any{"model": "test", "prompt": []any{float64(1), float64(2), float64(3)}},
 	}
 
@@ -306,7 +806,7 @@ func TestRenderStep_UpstreamErrorCarriesStatus(t *testing.T) {
 		step.(*RenderStep).SetServiceAddress(server.URL)
 
 		reqCtx := &pipeline.RequestContext{
-			OriginalPath: gateway.PathChatCompletions,
+			OriginalPath: reqcommon.PathChatCompletions,
 			Body:         map[string]any{"model": "test"},
 		}
 
@@ -336,9 +836,9 @@ func TestRenderStep_RejectsTooManyPlaceholderTokens(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 100, 100, 100, 100, 100, 100, 100, 200},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {"h0", "h1"}},
-				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 4}, map[string]any{"offset": 5, "length": 3}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {"AAAA", "AAAA"}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"h0", "h1"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 4}, map[string]any{"offset": 5, "length": 3}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"AAAA", "AAAA"}},
 			},
 		})
 	}))
@@ -348,11 +848,11 @@ func TestRenderStep_RejectsTooManyPlaceholderTokens(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.PathChatCompletions,
+		OriginalPath: reqcommon.PathChatCompletions,
 		Body:         map[string]any{"model": "test"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0},
-			{Index: 1},
+			{Modality: reqcommon.ModalityImage},
+			{Modality: reqcommon.ModalityImage},
 		},
 	}
 
@@ -373,9 +873,9 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 100, 100, 100, 200},
 			"features": map[string]any{
-				"mm_hashes":       map[string][]string{ModalityImage: {"h0"}},
-				"mm_placeholders": map[string][]any{ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
-				"kwargs_data":     map[string][]string{ModalityImage: {"AAAA"}},
+				"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"h0"}},
+				"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: {map[string]any{"offset": 1, "length": 3}}},
+				"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: {"AAAA"}},
 			},
 		})
 	}))
@@ -385,9 +885,9 @@ func TestRenderStep_AllowsAtPlaceholderLimit(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath:      gateway.PathChatCompletions,
+		OriginalPath:      reqcommon.PathChatCompletions,
 		Body:              map[string]any{"model": "test"},
-		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0}},
+		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}},
 	}
 
 	if err := step.Execute(context.Background(), reqCtx); err != nil {
@@ -405,8 +905,8 @@ func TestRenderStep_PlaceholderLimitOverflow(t *testing.T) {
 	// Two lengths whose sum overflows int and wraps negative. Without the
 	// overflow guard, total > max is false and the limit is silently bypassed.
 	entries := []pipeline.MultimodalEntry{
-		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
-		{Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+		{Modality: reqcommon.ModalityImage, Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
+		{Modality: reqcommon.ModalityImage, Placeholder: pipeline.PlaceholderRange{Length: math.MaxInt}},
 	}
 	err = rs.checkPlaceholderLimit(entries)
 	if err == nil {
@@ -430,7 +930,7 @@ func TestRenderStep_RejectsNegativeLimits(t *testing.T) {
 }
 
 func TestRenderStep_ServiceError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal error"))
 	}))
@@ -440,9 +940,9 @@ func TestRenderStep_ServiceError(t *testing.T) {
 	step.(*RenderStep).SetServiceAddress(server.URL)
 
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath:      gateway.PathChatCompletions,
+		OriginalPath:      reqcommon.PathChatCompletions,
 		Body:              map[string]any{"model": "test"},
-		MultimodalEntries: []pipeline.MultimodalEntry{{Index: 0}},
+		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}},
 	}
 
 	err := step.Execute(context.Background(), reqCtx)
@@ -457,7 +957,7 @@ func TestRenderStep_GenerateFormat_TextOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathVLLMGenerate,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(2345), float64(6789)},
@@ -484,7 +984,7 @@ func TestRenderStep_GenerateFormat_Multimodal(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathVLLMGenerate,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(32000), float64(2)},
@@ -519,7 +1019,7 @@ func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathVLLMGenerate,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(32000), float64(32000), float64(3), float64(41000), float64(41000), float64(2)},
@@ -541,8 +1041,64 @@ func TestRenderStep_GenerateFormat_MultipleImages(t *testing.T) {
 		t.Fatalf("expected 2 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
 	}
 	want := []pipeline.MultimodalEntry{
-		{Index: 0, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
-		{Index: 1, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
+		{Modality: reqcommon.ModalityImage, Hash: "abc123", KwargsData: "dGVuc29yMA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		{Modality: reqcommon.ModalityImage, Hash: "def456", KwargsData: "dGVuc29yMQ==", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 2}},
+	}
+	for i, w := range want {
+		if reqCtx.MultimodalEntries[i] != w {
+			t.Errorf("entry %d: expected %+v, got %+v", i, w, reqCtx.MultimodalEntries[i])
+		}
+	}
+}
+
+// The generate path with image, audio, and video features in one request. The
+// render step walks modalities alphabetically (audio, image, video), so each
+// entry comes back tagged with the right modality and its slot's values.
+func TestRenderStep_GenerateFormat_MultipleModalities(t *testing.T) {
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathVLLMGenerate,
+		Body: map[string]any{
+			"model": "test-model",
+			// 10 tokens, three non-overlapping placeholder spans below.
+			"token_ids": []any{
+				float64(1), float64(51000), float64(51000),
+				float64(3), float64(32000), float64(32000), float64(32000),
+				float64(4), float64(71000), float64(71000),
+			},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{
+					"audio": []any{"aud-hash"},
+					"image": []any{"img-hash"},
+					"video": []any{"vid-hash"},
+				},
+				"mm_placeholders": map[string]any{
+					"audio": []any{map[string]any{"offset": float64(1), "length": float64(2)}},
+					"image": []any{map[string]any{"offset": float64(4), "length": float64(3)}},
+					"video": []any{map[string]any{"offset": float64(8), "length": float64(2)}},
+				},
+				"kwargs_data": map[string]any{
+					"audio": []any{"YXVkaW8="},
+					"image": []any{"aW1hZ2U="},
+					"video": []any{"dmlkZW8="},
+				},
+			},
+		},
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reqCtx.MultimodalEntries) != 3 {
+		t.Fatalf("expected 3 multimodal entries, got %d", len(reqCtx.MultimodalEntries))
+	}
+	want := []pipeline.MultimodalEntry{
+		{Modality: reqcommon.ModalityAudio, Hash: "aud-hash", KwargsData: "YXVkaW8=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 2}},
+		{Modality: reqcommon.ModalityImage, Hash: "img-hash", KwargsData: "aW1hZ2U=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 3}},
+		{Modality: reqcommon.ModalityVideo, Hash: "vid-hash", KwargsData: "dmlkZW8=", Placeholder: pipeline.PlaceholderRange{Offset: 8, Length: 2}},
 	}
 	for i, w := range want {
 		if reqCtx.MultimodalEntries[i] != w {
@@ -563,7 +1119,7 @@ func TestRenderStep_GenerateFormat_MalformedFeatures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: reqcommon.PathVLLMGenerate,
 				Body: map[string]any{
 					"model":     "test-model",
 					"token_ids": []any{float64(1), float64(2), float64(3)},
@@ -593,7 +1149,7 @@ func TestRenderStep_GenerateFormat_PlaceholderOutOfBounds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: reqcommon.PathVLLMGenerate,
 				Body: map[string]any{
 					"model":     "test-model",
 					"token_ids": []any{float64(1), float64(32000), float64(32000), float64(2)},
@@ -628,7 +1184,7 @@ func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step, _ := NewRenderStep(nil, map[string]any{})
 			reqCtx := &pipeline.RequestContext{
-				OriginalPath: gateway.DefaultGeneratePath,
+				OriginalPath: reqcommon.PathVLLMGenerate,
 				Body: map[string]any{
 					"model":           "test-model",
 					"token_ids":       []any{float64(1), float64(2), float64(3)},
@@ -649,7 +1205,7 @@ func TestRenderStep_GenerateFormat_InvalidSamplingParams(t *testing.T) {
 func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
 	step, _ := NewRenderStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathVLLMGenerate,
 		Body: map[string]any{
 			"model":     "test-model",
 			"token_ids": []any{float64(1), float64(2), float64(3)},
@@ -667,7 +1223,7 @@ func TestRenderStep_GenerateFormat_NullFeatures(t *testing.T) {
 func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 	step, _ := NewRenderStep(nil, map[string]any{})
 	reqCtx := &pipeline.RequestContext{
-		OriginalPath: gateway.DefaultGeneratePath,
+		OriginalPath: reqcommon.PathVLLMGenerate,
 		Body:         map[string]any{"model": "test-model"},
 	}
 	err := step.Execute(context.Background(), reqCtx)
@@ -676,5 +1232,104 @@ func TestRenderStep_GenerateFormat_MissingTokenIDs(t *testing.T) {
 	}
 	if !errors.Is(err, pipeline.ErrBadRequest) {
 		t.Errorf("expected ErrBadRequest, got %v", err)
+	}
+}
+
+// Covers validateEntryModalities at its one call site, not the guard itself
+// (utils_test.go does that). The chat-completions path is the one that matters:
+// its entries arrive from replace_media_urls and render fills each from the slot
+// for its Modality, so an untagged entry would look under the empty key. On the
+// generate path extractMultimodalEntries rejects that earlier. The render
+// service fails the test if called: the guard must reject first.
+func TestRenderStep_EntryWithoutModalityFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("render must not reach the rendering service with an untagged entry")
+	}))
+	defer server.Close()
+
+	step, err := NewRenderStep(nil, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.(*RenderStep).SetServiceAddress(server.URL)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "test-model",
+		Body:         map[string]any{"model": "test-model", "messages": []any{}},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage},
+			{},
+		},
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if err == nil {
+		t.Fatal("expected an error for an entry with no modality")
+	}
+	// A coordinator-side invariant break, so a 5xx rather than blaming the client.
+	if errors.Is(err, pipeline.ErrBadRequest) {
+		t.Errorf("expected a non-ErrBadRequest failure, got %v", err)
+	}
+}
+
+// A render response whose per-image feature arrays disagree with the entry
+// count fails the request. applyRenderResponse copies them onto entries by
+// index, so a short array would leave an entry carrying another image's hash
+// and kwargs. Each case shortens one array and leaves its siblings correct, so
+// all three guards are reached independently. Run on the Responses path
+// because applyRenderResponse is shared with chat completions.
+func TestRenderStep_RejectsFeatureCountMismatch(t *testing.T) {
+	const entries = 2
+	fullHashes := []string{"vllm-hash-a", "vllm-hash-b"}
+	fullPlaceholders := []any{map[string]any{"offset": 1, "length": 3}, map[string]any{"offset": 4, "length": 3}}
+	fullKwargs := []string{"dGVuc29yLWE=", "dGVuc29yLWI="}
+
+	for _, tc := range []struct {
+		name         string
+		hashes       []string
+		placeholders []any
+		kwargs       []string
+	}{
+		{name: "mm_hashes short", hashes: fullHashes[:1], placeholders: fullPlaceholders, kwargs: fullKwargs},
+		{name: "mm_placeholders short", hashes: fullHashes, placeholders: fullPlaceholders[:1], kwargs: fullKwargs},
+		{name: "kwargs_data short", hashes: fullHashes, placeholders: fullPlaceholders, kwargs: fullKwargs[:1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"token_ids": []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 2345},
+					"features": map[string]any{
+						"mm_hashes":       map[reqcommon.Modality][]string{reqcommon.ModalityImage: tc.hashes},
+						"mm_placeholders": map[reqcommon.Modality][]any{reqcommon.ModalityImage: tc.placeholders},
+						"kwargs_data":     map[reqcommon.Modality][]string{reqcommon.ModalityImage: tc.kwargs},
+					},
+				})
+			}))
+			defer server.Close()
+
+			step, err := NewRenderStep(nil, map[string]any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step.(*RenderStep).SetServiceAddress(server.URL)
+
+			// Tagged image entries, so the request reaches the count checks:
+			// validateEntryModalities rejects an untagged entry first, and
+			// would fail these cases for an unrelated reason.
+			mmEntries := make([]pipeline.MultimodalEntry, entries)
+			for i := range mmEntries {
+				mmEntries[i].Modality = reqcommon.ModalityImage
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      reqcommon.PathResponses,
+				Body:              map[string]any{"model": "test", "input": "describe these"},
+				MultimodalEntries: mmEntries,
+			}
+
+			if err := step.Execute(context.Background(), reqCtx); err == nil {
+				t.Fatal("expected an error for a feature array shorter than the entry count")
+			}
+		})
 	}
 }

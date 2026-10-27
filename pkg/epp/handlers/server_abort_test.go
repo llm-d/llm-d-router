@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +22,7 @@ import (
 	"errors"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
@@ -84,26 +86,25 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 				requestDroppedReason: tt.requestDroppedReason,
 			}
 
-			err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+			err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 			require.NoError(t, err)
 
 			require.Len(t, srv.sentResponses, 1, "Should send exactly one response")
 			ir := srv.sentResponses[0].GetImmediateResponse()
 			require.NotNil(t, ir, "Response should be an ImmediateResponse")
 			assert.Equal(t, envoyTypePb.StatusCode_TooManyRequests, ir.Status.Code)
-			assert.Equal(t, []byte("request evicted by flow control"), ir.Body)
+			assert.Equal(t, `{"error":{"message":"request evicted by flow control","type":"rate_limit_error","code":429}}`, string(ir.Body))
 
-			if tt.wantHeader {
-				require.NotNil(t, ir.Headers, "Should have HeaderMutation when eviction reason is set")
-				require.Len(t, ir.Headers.SetHeaders, 1)
-				gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
-				for _, header := range ir.Headers.SetHeaders {
-					gotHeaders[header.Header.Key] = string(header.Header.RawValue)
-				}
-				assert.Equal(t, map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(tt.requestDroppedReason)}, gotHeaders)
-			} else {
-				assert.Nil(t, ir.Headers, "Should not have HeaderMutation when eviction reason is empty")
+			require.NotNil(t, ir.Headers, "Should label the body as JSON")
+			gotHeaders := make(map[string]string, len(ir.Headers.SetHeaders))
+			for _, header := range ir.Headers.SetHeaders {
+				gotHeaders[header.Header.Key] = string(header.Header.RawValue)
 			}
+			wantHeaders := map[string]string{"content-type": "application/json"}
+			if tt.wantHeader {
+				wantHeaders[errcommon.RequestDroppedReasonHeaderKey] = string(tt.requestDroppedReason)
+			}
+			assert.Equal(t, wantHeaders, gotHeaders)
 		})
 	}
 }
@@ -118,7 +119,7 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 		requestState: requestReceived,
 	}
 
-	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+	err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 	require.NoError(t, err)
 	assert.Empty(t, srv.sentResponses, "Should not send any response for normal state without queued responses")
 }
@@ -161,6 +162,68 @@ func TestTerminationCause(t *testing.T) {
 			t.Parallel()
 			reqCtx := &RequestContext{requestState: tt.state}
 			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
+		})
+	}
+}
+
+func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		useValue bool
+		want     fwkrc.TerminationCause
+	}{
+		{
+			name:   "OK",
+			status: "0",
+			want:   "",
+		},
+		{
+			name:   "internal error",
+			status: "13",
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name:   "cancelled",
+			status: "1",
+			want:   fwkrc.TerminationCauseError,
+		},
+		{
+			name: "missing grpc status",
+			want: "",
+		},
+		{
+			name:     "internal error from value",
+			status:   "13",
+			useValue: true,
+			want:     fwkrc.TerminationCauseError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trailers := &extProcPb.HttpTrailers{
+				Trailers: &corev3.HeaderMap{},
+			}
+
+			if tt.status != "" {
+				header := &corev3.HeaderValue{
+					Key: "grpc-status",
+				}
+				if tt.useValue {
+					header.Value = tt.status
+				} else {
+					header.RawValue = []byte(tt.status)
+				}
+
+				trailers.Trailers.Headers = []*corev3.HeaderValue{header}
+			}
+
+			assert.Equal(
+				t,
+				tt.want,
+				terminationCauseFromGRPCTrailers(trailers),
+			)
 		})
 	}
 }

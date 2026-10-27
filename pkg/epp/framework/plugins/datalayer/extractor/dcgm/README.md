@@ -43,7 +43,7 @@ to consume the produced attribute. Their `attribute`/`attributeKey` and
 core metrics extractor, so it must be set explicitly here.
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: dcgm-data-source

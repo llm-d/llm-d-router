@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -129,4 +130,34 @@ type Admitter interface {
 type RequestHeaderProcessor interface {
 	plugin.Plugin
 	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error
+}
+
+// RequestLine identifies a request before any endpoint has been selected. It carries what
+// the ext-proc request headers phase provides, which is all a Responder can rely on: a
+// request answered here may have no body.
+type RequestLine struct {
+	Method string
+	// Path excludes the query string.
+	Path string
+}
+
+// LocalResponse is a complete HTTP response produced by a Responder.
+type LocalResponse struct {
+	// StatusCode is the HTTP status code. Zero means http.StatusOK.
+	StatusCode int
+	Headers    map[string]string
+	Body       []byte
+}
+
+// Responder answers a request before it is matched to a model server. The first non-nil
+// response wins. Responders are asked in the order of the slice supplied to the handler.
+// The order in which plugins are discovered is not guaranteed. The handler offers only GET
+// requests to responders.
+type Responder interface {
+	plugin.Plugin
+	// Respond returns a non-nil LocalResponse to answer the request directly; the request
+	// is never routed and no endpoint is selected. Return nil to decline, deferring to the
+	// remaining Responders and to normal routing once all decline. A non-nil error fails
+	// the request through the standard error path.
+	Respond(ctx context.Context, request *RequestLine, endpoints []datalayer.Endpoint) (*LocalResponse, error)
 }

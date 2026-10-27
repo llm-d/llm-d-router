@@ -19,13 +19,14 @@ package coordinate2e
 import "strings"
 
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
-// ${NAMESPACE} and ${VLLM_RENDER_PORT} are substituted by createCoordinator before the ConfigMap is built.
+// ${NAMESPACE}, ${RENDER_NAMESPACE}, and ${VLLM_RENDER_PORT} are substituted by
+// createCoordinator before the ConfigMap is built.
 const coordinatorConfigNIXL = `log_level: 5
 server:
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
-  # Recreated per spec behind a suite-lived Envoy; drain fast so a deleted
+  # Recreated per spec behind a group-lived Envoy; drain fast so a deleted
   # coordinator stops serving immediately instead of lingering on a stale
   # endpoint the gateway may still route to. 0s is avoided: it makes the
   # server Shutdown context expire instantly and the process exit non-zero.
@@ -48,7 +49,7 @@ pipeline:
         max_concurrent_downloads: 10
     - type: render
       params:
-        address: "http://vllm-render.${NAMESPACE}.svc:${VLLM_RENDER_PORT}"
+        address: "http://vllm-render.${RENDER_NAMESPACE}.svc:${VLLM_RENDER_PORT}"
         timeout: 60s
     - type: encode
       params:
@@ -59,7 +60,7 @@ pipeline:
 
 // coordinatorConfigNIXLGenerate is coordinatorConfigNIXL with OpenAI passthrough
 // disabled. With use_openai_format: false a chat/completions request collapses to
-// the native generate wire format on the encode and prefill legs, which build a
+// the native generate wire format on the encode and prefill steps, which build a
 // fresh sampling_params carrying only max_tokens: 1. This exercises a different
 // min_tokens-stripping path than the OpenAI clone-and-cap path.
 var coordinatorConfigNIXLGenerate = strings.Replace(
@@ -67,7 +68,7 @@ var coordinatorConfigNIXLGenerate = strings.Replace(
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its
-// EPP-Profile header value (see header-profile-handler); the role filters
+// x-llm-d-epp-profile header value (see header-profile-handler); the role filters
 // narrow the combined encode+prefill+decode pod pool down to the profile's own
 // role, since the InferencePool now selects across all three roles at once.
 //
@@ -78,7 +79,7 @@ var coordinatorConfigNIXLGenerate = strings.Replace(
 // the InferencePool selects across all three roles, so an unlabeled or
 // mislabeled encode/prefill pod would otherwise be accepted as a decode
 // candidate; label-selector-filter's matchExpressions has no such exception.
-const eppConfig = `apiVersion: llm-d.ai/v1alpha1
+const eppConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
@@ -91,7 +92,7 @@ plugins:
     matchExpressions:
     - key: llm-d.ai/role
       operator: In
-      values: ["decode", "prefill-decode", "both", "encode-prefill-decode"]
+      values: ["decode", "prefill-decode", "encode-prefill-decode"]
 - type: queue-scorer
 - type: max-score-picker
 - type: header-profile-handler
@@ -122,7 +123,7 @@ schedulingProfiles:
 // each backing its own role-scoped InferencePool. Because a role-scoped EPP only
 // ever sees its own role's pods, it needs no role filter and no profile-selection
 // plugin: single-profile-handler picks the one "default" profile, and the Envoy
-// route (envoy-3-epp.yaml) is what dispatches each EPP-Profile value to the right
+// route (envoy-3-epp.yaml) is what dispatches each x-llm-d-epp-profile value to the right
 // EPP. The openai-parser/vllmhttp-parser request handler matches the single-EPP
 // config so the generate path (vllm-http wire format) is parsed the same way.
 
@@ -131,7 +132,7 @@ schedulingProfiles:
 // affinity to exploit, and decode is bound by concurrent in-flight requests,
 // not prefill throughput, so neither needs the prefill config's cache-affinity
 // filter or token-load scorer.
-const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1alpha1
+const eppConfigLeastBusy = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser
@@ -154,7 +155,7 @@ schedulingProfiles:
 // eppConfigPrefill keeps prefix groups on cache-warm pods
 // (prefix-cache-affinity-filter), then picks by queued prefill token load
 // (token-load-scorer).
-const eppConfigPrefill = `apiVersion: llm-d.ai/v1alpha1
+const eppConfigPrefill = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: openai-parser

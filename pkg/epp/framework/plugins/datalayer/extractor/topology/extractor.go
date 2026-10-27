@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ limitations under the License.
 // Label names for each field are resolved from plugin parameters, defaulting to
 // the standard Kubernetes topology labels. Labels are read from the endpoint's
 // pod metadata at endpoint event time. When the hostname label is absent from
-// the pod, the plugin falls back to spec.hostname from Pod notification events.
+// the pod, the plugin falls back to spec.nodeName from Pod notification events.
 // Zone and region have no fallback.
 package topology
 
@@ -42,6 +42,7 @@ import (
 
 var (
 	_ fwkplugin.Plugin            = (*TopologyExtractor)(nil)
+	_ fwkplugin.ProducerPlugin    = (*TopologyExtractor)(nil)
 	_ fwkdl.Registrant            = (*TopologyExtractor)(nil)
 	_ fwkdl.EndpointExtractor     = (*endpointHandler)(nil)
 	_ fwkdl.NotificationExtractor = (*podNotificationHandler)(nil)
@@ -60,7 +61,7 @@ const (
 // params holds the user-facing configuration for the topology extractor.
 // Each field names the pod label used to read the corresponding topology value.
 // When a field is empty, the corresponding default Kubernetes topology label is used.
-// When the hostname label is absent on a pod, spec.hostname is used as a fallback.
+// When the hostname label is absent on a pod, spec.nodeName is used as a fallback.
 // Zone, rack, and region have no fallback.
 type params struct {
 	// Hostname is the pod label name whose value is used as the topology hostname.
@@ -86,6 +87,10 @@ type TopologyExtractor struct {
 	zoneLabel     string
 	regionLabel   string
 	dk            fwkplugin.DataKey
+	// slot pins the Topology value type at construction so a future change
+	// to the declared type surfaces at the assignment boundary, not in
+	// downstream readers.
+	slot *fwkdl.Slot[*attrtopology.Topology]
 
 	// mu guards endpoints and hostnames.
 	mu sync.Mutex
@@ -94,7 +99,7 @@ type TopologyExtractor struct {
 	// One pod may have N rank endpoints, each with a distinct inner key.
 	// Only endpoints whose hostname label was absent are tracked here.
 	endpoints map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint
-	// hostnames caches spec.hostname per pod (ready pods only).
+	// hostnames caches spec.nodeName per pod (ready pods only).
 	// Populated by Pod notifications; cleared on pod delete.
 	hostnames map[types.NamespacedName]string
 }
@@ -129,6 +134,7 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 		zoneLabel:     p.Zone,
 		regionLabel:   p.Region,
 		dk:            attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name),
+		slot:          fwkdl.NewSlot[*attrtopology.Topology](attrtopology.TopologyAttributeKey.WithNonEmptyProducerName(name)),
 		endpoints:     make(map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint),
 		hostnames:     make(map[types.NamespacedName]string),
 	}, nil
@@ -138,8 +144,6 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 func (e *TopologyExtractor) TypedName() fwkplugin.TypedName {
 	return e.typedName
 }
-
-var _ fwkplugin.ProducerPlugin = &TopologyExtractor{}
 
 // Produces declares the Topology attribute both of this extractor's handlers
 // publish.
@@ -211,7 +215,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	region := meta.Labels[h.ext.regionLabel]
 
 	if hn == "" {
-		// Hostname label absent: track endpoint for spec.hostname fallback via pod notification.
+		// Hostname label absent: track endpoint for spec.nodeName fallback via pod notification.
 		key := podKey(meta)
 		epKey := meta.GetID()
 		h.ext.mu.Lock()
@@ -226,7 +230,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	if hn == "" && rack == "" && zone == "" && region == "" {
 		return nil
 	}
-	event.Endpoint.GetAttributes().Put(h.ext.dk, &attrtopology.Topology{
+	h.ext.slot.Put(event.Endpoint.GetAttributes(), &attrtopology.Topology{
 		Hostname: hn,
 		Rack:     rack,
 		Zone:     zone,
@@ -252,7 +256,7 @@ func (h *endpointHandler) removeEndpoint(meta *fwkdl.EndpointMetadata, _ fwkdl.E
 // podNotificationHandler handles Pod k8s notification events.
 //
 // With hostnameLabel set: no-op.
-// Without hostnameLabel: caches spec.hostname for ready pods and stamps all
+// Without hostnameLabel: caches spec.nodeName for ready pods and stamps all
 // current endpoints for that pod. Evicts the cache entry when the pod is
 // deleted or becomes not-ready.
 type podNotificationHandler struct {
@@ -280,7 +284,7 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 		return nil
 	}
 
-	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
+	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "nodeName")
 	if hostname == "" {
 		return nil
 	}
@@ -303,7 +307,7 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 				topo.Region = existing.Region
 			}
 		}
-		ep.GetAttributes().Put(h.ext.dk, topo)
+		h.ext.slot.Put(ep.GetAttributes(), topo)
 	}
 	return nil
 }

@@ -3,8 +3,65 @@ extraServicePorts: []
 # Kubernetes cluster DNS domain, used to build in-cluster Service FQDNs.
 clusterDomain: cluster.local
 
+# Secrets holding credentials for pulling images from private registries
+imagePullSecrets: []
+
 epp:
   replicas: 1
+  # Empty preserves automatic leader election for fixed replica counts > 1.
+  # Explicit modes: leader-elected or all-active.
+  haMode: ""
+
+  # Alpha: share in-flight load between active EPP replicas using external Redis 7.4+.
+  # Enabling this selects all-active mode and allows experimental plugins.
+  crossReplica:
+    enabled: false
+    syncInterval: 200ms
+    publishTimeout: 1s
+    redis:
+      address: ""
+      db: 0
+      stateTTL: 2s
+      coordinationTTL: 180s
+      # Existing Secret in the release namespace, exposed through passwordEnv.
+      # passwordSecretRef:
+      #   name: redis-auth
+      #   key: password
+      passwordSecretRef: {}
+
+  # Pod-level securityContext, inherited by every container in the EPP pod. The
+  # latency predictor images declare no user and run as root unless runAsUser is
+  # set here.
+  podSecurityContext: {}
+  # Container-level securityContext for the EPP container.
+  securityContext: {}
+
+  # Overrides the EPP Deployment's spec.strategy. All-active mode and autoscaling
+  # default to RollingUpdate (maxUnavailable: 0, maxSurge: 1); otherwise Recreate.
+  #
+  # With replicas > 1 the chart enables leader election, and standby replicas stay
+  # NotReady by design, so a `Recreate` Deployment never reports Available=True and
+  # `helm --wait` blocks until it times out. Setting a RollingUpdate strategy whose
+  # maxUnavailable covers the standbys lets Helm consider the release ready while
+  # keeping standbys out of the Service (they are still NotReady, so they are not
+  # Endpoints). See "Multi-replica EPP and Helm --wait" in the chart README.
+  #
+  # deploymentStrategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  #     maxSurge: 0
+
+  # PodDisruptionBudget for the EPP Deployment. Disabled while unset; enabling it without a
+  # disruption field, or with both, fails the render, and minAvailable >= 1 with fewer than 2
+  # effective replicas (replicas, or autoscaling.minReplicas when autoscaled) also fails: a
+  # single-replica Deployment with minAvailable: 1 can never satisfy its budget, so every
+  # voluntary disruption -- node drains above all -- blocks until the timeout. The EPP pod in
+  # sidecar proxy mode is governed by THIS budget alone; the proxy needs no separate one.
+  #
+  # podDisruptionBudget:
+  #   enabled: true
+  #   minAvailable: 1
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
@@ -37,6 +94,10 @@ epp:
   env: []
   
   pluginsConfigFile: "default-plugins.yaml"
+  # Structured EPP configuration rendered into pluginsConfigFile. Maps merge
+  # across values files; lists are replaced according to Helm's merge rules.
+  pluginsConfig: {}
+  # Additional raw ConfigMap entries keyed by file name.
   pluginsCustomConfig: {}
   
   # Define additional container ports
@@ -45,7 +106,7 @@ epp:
   # Example defining a custom EPP config file
   # pluginsCustomConfig:
   #   custom-plugins.yaml: |
-  #     apiVersion: inference.networking.x-k8s.io/v1alpha1
+  #     apiVersion: llm-d.ai/v1
   #     kind: EndpointPickerConfig
   #     plugins:
   #     - type: custom-scorer
@@ -64,6 +125,20 @@ epp:
     limits:
       memory: 16Gi
 
+  # Autoscaling configuration for the EPP Deployment.
+  # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the EPP Deployment.
+  # Note: EPP autoscaling requires Active-Active mode (ha-enable-leader-election must not be true)
+  # and is incompatible with StatefulSet deployments (such as priority routing or GKE preferred backends).
+  # router.epp.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+    # behavior: {}
+    # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
+
   affinity: {}
   tolerations: []
 
@@ -74,14 +149,27 @@ epp:
 
 # By default no proxy is configured
 proxy:
-  enabled: false    
+  enabled: false
+  # PodDisruptionBudget for the service-mode proxy Deployment. Ignored in sidecar mode (the
+  # proxy shares the EPP pod, so router.epp.podDisruptionBudget governs it). Same validation
+  # rules as the EPP budget: exactly one of minAvailable / maxUnavailable, and minAvailable
+  # requires at least 2 effective replicas (replicas, or autoscaling.minReplicas when
+  # autoscaled).
+  #
+  # podDisruptionBudget:
+  #   enabled: true
+  #   minAvailable: 1
 
-# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` and exposes
-# `/render` over loopback HTTP to EPP. modelName is passed as the first
+# Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
+# `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
+# `/v1/chat/completions/render` over loopback HTTP to EPP. modelName is passed as the first
 # positional arg to the render command (required when enabled). EPP is wired to
 # the sidecar via `router.epp.pluginsCustomConfig`.
+# When flavor is "rust", router.tokenizer.image must be set to an image containing the vllm-rs binary.
 tokenizer:
   enabled: false
+  # Backend renderer flavor: "python" (default, runs vllm launch render) or "rust" (runs vllm-rs render; requires an image that includes vllm-rs).
+  flavor: "python"
   modelName: ""
   image:
     registry: docker.io
@@ -135,6 +223,7 @@ monitoring:
     auth:
       # Set to false to allow unauthenticated /metrics access. Required for annotation-based
       # Prometheus scraping and Istio metrics-merging, which do not send Bearer tokens.
+      # When true, the chart creates cluster-scoped RBAC for the EPP. See docs/metrics.md.
       enabled: true
       # Service account token secret for authentication
       secretName: inference-gateway-sa-metrics-reader-secret
@@ -168,13 +257,31 @@ modelServers:
 
 latencyPredictor:
   enabled: false
+  # Deployment mode. `sidecar` runs the training and prediction servers as
+  # containers in the EPP pod. `service` runs the training server as a
+  # single-replica Deployment and the prediction servers as a Deployment with
+  # `predictionServers.count` replicas. Each Deployment has one Service, so all
+  # prediction replicas share a single Service, and EPP points at the two
+  # Service URLs.
+  mode: sidecar
+  # Pod-level securityContext for the training and prediction pods in service
+  # mode. The images declare no user and run as root unless runAsUser is set.
+  # In sidecar mode router.epp.podSecurityContext applies instead.
+  podSecurityContext: {}
+  # Affinity and tolerations for the training and prediction pods in service
+  # mode. Empty uses router.epp.affinity and router.epp.tolerations.
+  affinity: {}
+  tolerations: []
   # Training Server Configuration
   trainingServer:
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-training-server-dev
-      tag: latest
+      repository: llm-d-latency-predictor-training-server
+      tag: "0.9.0"
       pullPolicy: Always
+    command: []
+    args: []
     port: 8000
     resources:
       requests:
@@ -209,13 +316,20 @@ latencyPredictor:
 
   # Prediction Server Configuration
   predictionServers:
+    # Number of prediction servers: containers in the EPP pod in sidecar mode,
+    # pods in the prediction Deployment in service mode.
     count: 1
+    # Listen port of the first prediction server. Sidecar containers take
+    # consecutive ports from here; service mode uses only this port.
     startPort: 8001
+    securityContext: {}
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-latency-predictor-prediction-server-dev
-      tag: latest
+      repository: llm-d-latency-predictor-prediction-server
+      tag: "0.9.0"
       pullPolicy: Always
+    command: ["uvicorn"]
+    args: ["prediction.prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]
     resources:
       requests:
         cpu: "8000m"
@@ -245,6 +359,8 @@ latencyPredictor:
       LOCAL_TPOT_MODEL_PATH: "/server_models/tpot.joblib"
       LOCAL_TTFT_SCALER_PATH: "/server_models/ttft_scaler.joblib"
       LOCAL_TPOT_SCALER_PATH: "/server_models/tpot_scaler.joblib"
+      LOCAL_TTFT_GATED_MODEL_PATH: "/server_models/ttft_gated.joblib"
+      LOCAL_TPOT_GATED_MODEL_PATH: "/server_models/tpot_gated.joblib"
       UVICORN_WORKERS: "28"
       OMP_NUM_THREADS: "1"
       MODEL_SYNC_INTERVAL_SEC: "30"
@@ -255,4 +371,3 @@ latencyPredictor:
     LATENCY_MAX_SAMPLE_SIZE: "10000"
     LATENCY_MAX_CONCURRENT_DISPATCHES: "36"
     LATENCY_COALESCE_WINDOW_MS: "1"
-

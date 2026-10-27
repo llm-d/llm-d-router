@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The Kubernetes Authors.
+Copyright 2025 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package metadata
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,4 +57,28 @@ func TestGetLowerCaseHeaderValuePrefersCurrentName(t *testing.T) {
 	got, ok = GetLowerCaseHeaderValue(headers, "X-User-Header")
 	assert.True(t, ok)
 	assert.Equal(t, "user-value", got)
+}
+
+func TestIsFiniteFloat(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		value float64
+		want  bool
+	}{
+		{"zero", 0, true},
+		{"positive", 12.5, true},
+		{"negative", -1, true},
+		{"maximum", math.MaxFloat64, true},
+		{"NaN", math.NaN(), false},
+		{"positive infinity", math.Inf(1), false},
+		{"negative infinity", math.Inf(-1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, IsFiniteFloat(tc.value))
+		})
+	}
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,10 +30,6 @@ import (
 
 const nilString = "<nil>"
 
-type Modality = fwkrh.Modality
-
-const ModalityImage = fwkrh.ModalityImage
-
 type TokenizedRequest = fwkrh.TokenizedRequest
 
 type MultiModalFeature = fwkrh.MultiModalFeature
@@ -44,7 +41,7 @@ type RequestObjectives struct {
 
 // InferenceRequest is a structured representation of the fields we parse out of the InferenceRequest body.
 type InferenceRequest struct {
-	// RequestID is the Envoy generated Id for the request being processed
+	// RequestID is assigned by the EPP and unique per request. Use it to key per-request state.
 	RequestID string
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
@@ -65,6 +62,11 @@ type InferenceRequest struct {
 	// Access via PutAttribute, GetAttribute, AttributeKeys, and ReadRequestAttribute.
 	// A nil pointer is valid; the store is lazily allocated on first write.
 	attributes *sync.Map
+
+	// scope confines attribute access to the keys one plugin declares. Nil on
+	// the request the framework owns, which reaches the store unconfined; set
+	// on the shallow copy WithAttributeScope hands to a plugin.
+	scope AttributeScope
 }
 
 func (r *InferenceRequest) String() string {
@@ -77,6 +79,9 @@ func (r *InferenceRequest) String() string {
 }
 
 type Endpoint interface {
+	// GetMetadata and GetMetrics return snapshots that may be shared with the
+	// datastore and with concurrent requests. Callers must treat them as
+	// read-only and Clone before modifying.
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics
 	String() string
@@ -106,20 +111,44 @@ func (ep *endpoint) Clone() fwkdl.AttributeMap {
 	return ep.AttributeMap.Clone()
 }
 
+// Peek returns an uncloned attribute view when the embedded map supports it.
+// Callers must not mutate the result. Falls back to Get otherwise.
+func (ep *endpoint) Peek(key fwkplugin.DataKey) (fwkdl.Cloneable, bool) {
+	type peeker interface {
+		Peek(fwkplugin.DataKey) (fwkdl.Cloneable, bool)
+	}
+	if p, ok := ep.AttributeMap.(peeker); ok {
+		return p.Peek(key)
+	}
+	return ep.Get(key)
+}
+
 type endpoint struct {
 	*fwkdl.EndpointMetadata
 	*fwkdl.Metrics
 	fwkdl.AttributeMap
 }
 
+// NewEndpoint builds a scheduling endpoint that copies its inputs, so later
+// mutations of meta or metrics do not affect the endpoint.
 func NewEndpoint(meta *fwkdl.EndpointMetadata, metrics *fwkdl.Metrics, attr fwkdl.AttributeMap) Endpoint {
+	return NewEndpointFromSnapshot(meta.Clone(), metrics.Clone(), attr)
+}
+
+// NewEndpointFromSnapshot builds a scheduling endpoint that shares meta and
+// metrics with the caller. The caller must pass immutable snapshots and must
+// not mutate them after the call. The datastore replaces both wholesale, so
+// request-path callers use this to avoid a per-request copy. Attributes are
+// cloned because data producers write per-request values into the scheduling
+// endpoint.
+func NewEndpointFromSnapshot(meta *fwkdl.EndpointMetadata, metrics *fwkdl.Metrics, attr fwkdl.AttributeMap) Endpoint {
 	if attr == nil {
 		attr = fwkdl.NewAttributes()
 	}
 
 	return &endpoint{
-		EndpointMetadata: meta.Clone(),
-		Metrics:          metrics.Clone(),
+		EndpointMetadata: meta,
+		Metrics:          metrics,
 		AttributeMap:     attr.Clone(),
 	}
 }
@@ -176,6 +205,25 @@ type ProfileRunResult struct {
 type SchedulingResult struct {
 	ProfileResults     map[string]*ProfileRunResult
 	PrimaryProfileName string
+}
+
+// PrimaryEndpoint returns the first endpoint the primary profile picked, as
+// stored, or nil when the result is nil, has no primary profile name, or the
+// primary profile picked none.
+func (r *SchedulingResult) PrimaryEndpoint() Endpoint {
+	if r == nil || r.PrimaryProfileName == "" {
+		return nil
+	}
+	return r.ProfileResults[r.PrimaryProfileName].FirstEndpoint()
+}
+
+// FirstEndpoint returns the first endpoint the profile picked, as stored, or
+// nil when the result is nil or the profile picked none.
+func (r *ProfileRunResult) FirstEndpoint() Endpoint {
+	if r == nil || len(r.TargetEndpoints) == 0 {
+		return nil
+	}
+	return r.TargetEndpoints[0]
 }
 
 type SchedulerProfile interface {

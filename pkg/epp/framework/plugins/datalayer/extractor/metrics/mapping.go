@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +31,7 @@ type Mapping struct {
 	KVCacheUtilization   *Spec
 	LoraRequestInfo      *LoRASpec
 	// CacheInfo is used for info-style gauge metrics where block_size and
-	// num_gpu_blocks are exposed as label values (e.g. vLLM, trtllm-serve, SGLang).
+	// num_gpu_blocks are exposed as label values.
 	CacheInfo *Spec
 	// CacheBlockSizeLabel and CacheNumBlocksLabel allow engines to use different
 	// label names for the CacheInfo metric. If empty, defaults to "block_size"
@@ -38,8 +39,7 @@ type Mapping struct {
 	CacheBlockSizeLabel string
 	CacheNumBlocksLabel string
 	// CacheBlockSize and CacheNumBlocks are used for engines that expose cache
-	// config as separate gauge values rather than labels on an info metric
-	// (e.g. Triton TRT-LLM).
+	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
 	CustomMetrics  []CustomMetric
@@ -59,9 +59,18 @@ type MappingConfig struct {
 	CustomMetrics       []CustomMetric
 }
 
+type metricAggregation string
+
+const (
+	metricAggregationSum metricAggregation = "sum"
+)
+
+// CustomMetric pairs a metric spec with the endpoint attribute key where its extracted value is stored.
 type CustomMetric struct {
 	AttributeKey string
 	Spec         *Spec
+	Aggregation  metricAggregation
+	Optional     bool
 }
 
 type namedSpec struct {
@@ -187,21 +196,32 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 	seenKeys := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
-			errs = append(errs, errors.New("custom metric attributeKey cannot be empty"))
+			errs = append(errs, errors.New("customMetrics entry attributeKey cannot be empty"))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {
-			errs = append(errs, fmt.Errorf("custom metric attributeKey %q is duplicated", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry attributeKey %q is duplicated", cfg.AttributeKey))
 			continue
 		}
 		seenKeys[cfg.AttributeKey] = struct{}{}
 		if cfg.Spec == nil {
-			errs = append(errs, fmt.Errorf("custom metric %q spec cannot be empty", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry %q metricSpec cannot be empty", cfg.AttributeKey))
+			continue
+		}
+		if cfg.Aggregation != "" && cfg.Aggregation != metricAggregationSum {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry %q has unsupported aggregation %q; use %q or omit aggregation",
+				cfg.AttributeKey,
+				cfg.Aggregation,
+				metricAggregationSum,
+			))
 			continue
 		}
 		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
+			Aggregation:  cfg.Aggregation,
+			Optional:     cfg.Optional,
 		})
 	}
 	return metrics, errs

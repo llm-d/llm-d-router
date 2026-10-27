@@ -1,0 +1,66 @@
+name: Validate Release Note
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, edited, synchronize, reopened]
+  pull_request_target:
+    branches:
+      - main
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  validate:
+    # pull_request_target fires even when the default GITHUB_TOKEN creates the
+    # PR. We register pull_request_target so such bot-created PRs get a
+    # "skipped" conclusion that satisfies branch protection, but skip all
+    # real work there: pull_request already covers human PRs, and running
+    # both would double-report. The release-notes assembly bot uses its own
+    # GitHub App token, so pull_request fires for it too; it is exempted by
+    # login below, same as dependabot.
+    if: |
+      github.event_name != 'pull_request_target' &&
+      !contains(fromJSON('["dependabot[bot]", "llm-d-router-release-notes[bot]"]'), github.event.pull_request.user.login)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # Removes HTML comments from the body so text hidden in the rendered view
+      # is not parsed. Fenced code blocks are kept.
+      STRIP_HTML_COMMENTS: |
+        s{
+          ( ^[ ]{0,3}(`{3,}|~{3,}) .*? (?:\n[ ]{0,3}\2|\z) )  # fenced code block: keep
+          | ^[ ]{0,3}<!-- (?:-?>|.*?(?:-->|\z))               # comment block: ends at --> or end of body
+          | <!-- (?:-?>|(?:(?!\n[ \t]*\n|<!--).)*?-->)       # inline comment: must close before a blank line
+        }{$1 // ""}gmsex
+    steps:
+      - name: Validate release-note block
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          # Avoid `xargs` here: with no command it runs `echo` which interprets
+          # quotes, so notes containing apostrophes (e.g. "Don't ...") would
+          # error and the note would be silently dropped.
+          NOTE=$(printf '%s' "$PR_BODY" | tr -d '\r' | perl -0777 -pe "$STRIP_HTML_COMMENTS" | \
+            sed -n '/^```release-note/,/^```/p' | sed '1d;$d' | \
+            tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')
+
+          if [[ -z "$NOTE" ]]; then
+            if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
+              echo "Dependabot PR body has no release-note block; treating as NONE."
+              exit 0
+            fi
+            echo "::error::No release-note block found in the PR body. Add a \`\`\`release-note\`\`\` block (write NONE if there is no user-facing change)."
+            exit 1
+          fi
+
+          if [[ "${NOTE,,}" == "none" ]]; then
+            echo "No user-facing change declared."
+            exit 0
+          fi
+
+          echo "Release note: ${NOTE}"

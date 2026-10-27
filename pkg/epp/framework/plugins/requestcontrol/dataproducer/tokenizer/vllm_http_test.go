@@ -18,10 +18,20 @@ package tokenizer
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,11 +39,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -42,32 +54,110 @@ import (
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
-const testHTTPModel = "test-model"
-
 func newHTTPRenderer(t *testing.T, srv *httptest.Server) *vllmHTTPRenderer {
 	t.Helper()
-	r, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL}, testHTTPModel)
+	r, err := newVLLMHTTPRenderer(&vllmConfig{URL: srv.URL})
 	require.NoError(t, err)
 	return r
 }
 
-// httpFixture mimics vLLM's /render endpoints and captures request bodies.
+func TestVLLMHTTPRenderer_TimeoutBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		cfg                       vllmConfig
+		completions, conversation time.Duration
+		parent                    time.Duration
+	}{
+		{"defaults", vllmConfig{}, 5 * time.Second, 30 * time.Second, 0},
+		{"short budget", vllmConfig{Timeout: "5s", MMTimeout: "5s"}, 5 * time.Second, 5 * time.Second, 0},
+		{"timeout exceeds mmTimeout", vllmConfig{Timeout: "45s", MMTimeout: "30s"}, 45 * time.Second, 45 * time.Second, 0},
+		{"parent deadline", vllmConfig{}, 5 * time.Second, 30 * time.Second, 2 * time.Second},
+	} {
+		for _, req := range []struct {
+			path, raw string
+		}{
+			{completionsRenderPath, `{"model":"m","prompt":"text"}`},
+			{chatRenderPath, `{"model":"m","messages":[{"role":"user","content":"text"}]}`},
+			{chatRenderPath, `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}`},
+			{messagesRenderPath, `{"model":"m","messages":[{"role":"user","content":"text"}]}`},
+			{messagesRenderPath, `{"model":"m","messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}`},
+		} {
+			t.Run(tc.name+req.path, func(t *testing.T) {
+				r, err := newVLLMHTTPRenderer(&tc.cfg)
+				require.NoError(t, err)
+				ctx := context.Background()
+				if tc.parent > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tc.parent)
+					defer cancel()
+				}
+				want := tc.conversation
+				if req.path == completionsRenderPath {
+					want = tc.completions
+				}
+				start := time.Now()
+				called := false
+				r.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					called = true
+					deadline, ok := request.Context().Deadline()
+					require.True(t, ok)
+					if parentDeadline, ok := ctx.Deadline(); ok {
+						require.Equal(t, parentDeadline, deadline)
+					} else {
+						require.False(t, deadline.Before(start.Add(want)))
+						require.False(t, deadline.After(time.Now().Add(want)))
+					}
+					body, err := io.ReadAll(request.Body)
+					require.NoError(t, err)
+					require.Equal(t, req.raw, string(body))
+					response := `{"token_ids":[1]}`
+					if req.path == completionsRenderPath {
+						response = "[" + response + "]"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header)}, nil
+				})
+				switch req.path {
+				case completionsRenderPath:
+					_, _, err = r.Render(ctx, fwkrh.RawPayload(req.raw))
+				case chatRenderPath:
+					_, _, err = r.RenderChat(ctx, fwkrh.RawPayload(req.raw))
+				case messagesRenderPath:
+					_, _, err = r.RenderMessages(ctx, fwkrh.RawPayload(req.raw))
+				}
+				require.NoError(t, err)
+				require.True(t, called)
+			})
+		}
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// httpFixture mimics vLLM's /render endpoints and captures request bodies
+// and Authorization headers.
 func httpFixture(t *testing.T, completionsResp []renderResponse, chatResp renderResponse) (*httptest.Server, *httpCaptured) {
 	t.Helper()
 	cap := &httpCaptured{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.completions, _ = io.ReadAll(r.Body)
+		cap.completionsAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(completionsResp)
 	})
 	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, r *http.Request) {
 		cap.chat, _ = io.ReadAll(r.Body)
+		cap.chatAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(chatResp)
 	})
 	return httptest.NewServer(mux), cap
 }
 
-type httpCaptured struct{ completions, chat []byte }
+type httpCaptured struct {
+	completions, chat         []byte
+	completionsAuth, chatAuth string
+}
 
 func TestVLLMHTTPRenderer_Render(t *testing.T) {
 	srv, cap := httpFixture(t,
@@ -82,7 +172,7 @@ func TestVLLMHTTPRenderer_Render(t *testing.T) {
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
-	assert.Equal(t, testHTTPModel, sent["model"])
+	assert.NotContains(t, sent, "model")
 	assert.Equal(t, "hello", sent["prompt"])
 }
 
@@ -111,7 +201,7 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.completions, &sent))
 	assert.Equal(t, "kept", sent["dummy_field"])
-	assert.Equal(t, testHTTPModel, sent["model"])
+	assert.NotContains(t, sent, "model")
 }
 
 // TestVLLMHTTPRenderer_RenderChat_Multimodal covers the chat endpoint: the raw
@@ -153,7 +243,7 @@ func TestVLLMHTTPRenderer_RenderChat_Multimodal(t *testing.T) {
 
 	var sent map[string]any
 	require.NoError(t, json.Unmarshal(cap.chat, &sent))
-	assert.Equal(t, testHTTPModel, sent["model"])
+	assert.NotContains(t, sent, "model")
 	assert.Equal(t, true, sent["add_generation_prompt"])
 	msgs, ok := sent["messages"].([]any)
 	require.True(t, ok)
@@ -245,81 +335,98 @@ func TestProduce_ChatCompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	require.NoError(t, json.Unmarshal(cap.chat, &sent))
 	assert.Equal(t, "kept", sent["dummy"])
 	assert.Equal(t, map[string]any{"effort": "high"}, sent["reasoning"])
-	assert.Equal(t, testHTTPModel, sent["model"])
+	assert.Equal(t, "caller-supplied-model", sent["model"])
 }
 
-// TestProduce_MessagesVLLMHTTPFullAgenticTurn covers the complete production
-// path from a parsed Anthropic request through the rebuilt OpenAI-shaped
-// payload sent to vLLM's chat render endpoint.
-func TestProduce_MessagesVLLMHTTPFullAgenticTurn(t *testing.T) {
-	srv, captured := httpFixture(t, nil, renderResponse{TokenIDs: []uint32{11, 12, 13}})
+func TestProduce_VLLMHTTPForwardsAuthorization(t *testing.T) {
+	t.Setenv(vllmAPIKeyEnvVar, "warmup-secret")
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
 	defer srv.Close()
 
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Messages: &fwkrh.MessagesRequest{
-				System: fwkrh.AnthropicContent{Raw: "You can use tools."},
-				Tools: []fwkrh.AnthropicTool{{
-					Name:        "get_weather",
-					Description: "Get the weather",
-					InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
-				}},
-				Messages: []fwkrh.AnthropicMessage{
-					{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Weather in Zurich?"}},
-					{Role: "assistant", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
-						{Type: "thinking", Thinking: "I should check."},
-						{Type: "tool_use", ID: "toolu_01", Name: "get_weather", Input: json.RawMessage(`{"city":"Zurich"}`)},
-					}}},
-					{Role: "user", Content: fwkrh.AnthropicContent{Structured: []fwkrh.AnthropicContentBlock{
-						{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"}},
-					}}},
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+
+	authReq := func() *scheduling.InferenceRequest {
+		return &scheduling.InferenceRequest{
+			Headers: map[string]string{"authorization": "Bearer secret-token"},
+			Body: &fwkrh.InferenceRequestBody{
+				RawBody: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+				ChatCompletions: &fwkrh.ChatCompletionsRequest{
+					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
 				},
 			},
+		}
+	}
+
+	require.NoError(t, p.Produce(context.Background(), authReq(), nil))
+	assert.Equal(t, "Bearer secret-token", cap.chatAuth)
+
+	completions := authReq()
+	completions.Body = &fwkrh.InferenceRequestBody{
+		RawBody:     []byte(`{"prompt":"hello"}`),
+		Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: "hello"}},
+	}
+	require.NoError(t, p.Produce(context.Background(), completions, nil))
+	assert.Equal(t, "Bearer secret-token", cap.completionsAuth)
+
+	cap.chatAuth = ""
+	require.NoError(t, p.Produce(context.Background(), &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			RawBody: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+			ChatCompletions: &fwkrh.ChatCompletionsRequest{
+				Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hi"}}},
+			},
 		},
+	}, nil))
+	assert.Empty(t, cap.chatAuth, "request without Authorization must not send one")
+}
+
+func TestRenderBackend_WarmupStopsOnAuthRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantsRetry bool
+	}{
+		{name: "401 gives up", status: http.StatusUnauthorized},
+		{name: "403 gives up", status: http.StatusForbidden},
+		{name: "503 retries", status: http.StatusServiceUnavailable, wantsRetry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), warmupRetryInterval/2)
+			defer cancel()
+			renderBackend{tk: newHTTPRenderer(t, srv)}.warmup(ctx)
+
+			assert.Equal(t, 1, calls)
+			if tc.wantsRetry {
+				assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "non-auth failure must keep retrying until ctx ends")
+			} else {
+				assert.NoError(t, ctx.Err(), "auth failure must return before the retry interval")
+			}
+		})
 	}
+}
 
-	p := newTestPlugin(newHTTPRenderer(t, srv))
-	require.NoError(t, p.Produce(context.Background(), req, nil))
-	require.NotNil(t, req.Body.TokenizedRequest)
-	assert.Equal(t, []uint32{11, 12, 13}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+func TestRenderBackend_WarmupUsesAPIKeyEnv(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{1}}}, renderResponse{TokenIDs: []uint32{2}})
+	defer srv.Close()
 
-	var sent struct {
-		Model    string           `json:"model"`
-		Messages []map[string]any `json:"messages"`
-		Tools    []map[string]any `json:"tools"`
-	}
-	require.NoError(t, json.Unmarshal(captured.chat, &sent))
-	assert.Equal(t, testHTTPModel, sent.Model)
-	require.Len(t, sent.Tools, 1)
-	assert.Equal(t, "function", sent.Tools[0]["type"])
-	function, ok := sent.Tools[0]["function"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "get_weather", function["name"])
-	parameters, ok := function["parameters"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "object", parameters["type"])
+	t.Setenv(vllmAPIKeyEnvVar, "warmup-secret")
+	r := newHTTPRenderer(t, srv)
 
-	require.Len(t, sent.Messages, 4)
-	assert.Equal(t, "system", sent.Messages[0]["role"])
-	assert.Equal(t, "user", sent.Messages[1]["role"])
-	assistant := sent.Messages[2]
-	assert.Equal(t, "assistant", assistant["role"])
-	assert.NotContains(t, assistant, "content")
-	assert.Equal(t, "I should check.", assistant["reasoning"])
-	toolCalls, ok := assistant["tool_calls"].([]any)
-	require.True(t, ok)
-	require.Len(t, toolCalls, 1)
-	toolCall, ok := toolCalls[0].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "toolu_01", toolCall["id"])
-	toolFunction, ok := toolCall["function"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, `{"city": "Zurich"}`, toolFunction["arguments"])
+	ctx, cancel := context.WithTimeout(context.Background(), warmupRetryInterval/2)
+	defer cancel()
+	renderBackend{tk: r, warmupAuth: vllmWarmupAuthHeader()}.warmup(ctx) // wired as in NewPlugin
 
-	toolResult := sent.Messages[3]
-	assert.Equal(t, "tool", toolResult["role"])
-	assert.Equal(t, "toolu_01", toolResult["tool_call_id"])
-	assert.Equal(t, "Sunny, 22C", toolResult["content"])
+	assert.Equal(t, "Bearer warmup-secret", cap.chatAuth)
+	assert.NoError(t, ctx.Err(), "warmup must succeed and return before the retry interval")
 }
 
 func TestVLLMHTTPRenderer_RenderMultiPrompt(t *testing.T) {
@@ -349,10 +456,40 @@ func TestVLLMHTTPRenderer_HTTPError(t *testing.T) {
 	assert.Contains(t, err.Error(), "500")
 }
 
+func TestVLLMHTTPRenderer_DecodeErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		cause  error
+		result string
+		reason string
+	}{
+		{context.DeadlineExceeded, renderResultTimeout, renderReasonTimeout},
+		{context.Canceled, renderResultCanceled, ""},
+		{io.EOF, renderResultError, renderReasonDecode},
+		{io.ErrUnexpectedEOF, renderResultError, renderReasonDecode},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			renderer := &vllmHTTPRenderer{
+				client: &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: failingRenderBody{err: tc.cause}}, nil
+				})},
+			}
+			var out renderResponse
+			retryable, err := renderer.postJSONAttempt(t.Context(), defaultHTTPRenderURL, chatRenderPath, []byte(`{}`), &out)
+			require.ErrorIs(t, err, errRenderDecode)
+			require.ErrorIs(t, err, tc.cause)
+			assert.Equal(t, tc.cause == io.EOF || tc.cause == io.ErrUnexpectedEOF || tc.cause == context.DeadlineExceeded, retryable)
+			result, reason := classifyRenderError(err)
+			assert.Equal(t, tc.result, result)
+			assert.Equal(t, tc.reason, reason)
+			assert.Equal(t, errRenderDecode.Error(), err.Error())
+		})
+	}
+}
+
 func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	params := `{
 		"modelName": "m",
-		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"},
+		"estimate": {},
 		"vllm": {"url": "http://localhost:8000"}
 	}`
 	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
@@ -360,6 +497,20 @@ func TestPluginFactory_RejectsBothBackends(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, p)
 	assert.Contains(t, err.Error(), "only one of")
+}
+
+// The plugin has no UDS backend, so a config still carrying its parameter is
+// rejected by strict decoding rather than silently ignored.
+func TestPluginFactory_RejectsUDSTokenizerConfig(t *testing.T) {
+	params := `{
+		"modelName": "m",
+		"udsTokenizerConfig": {"socketFile": "/tmp/foo.sock"}
+	}`
+	handle := plugin.NewEppHandle(utils.NewTestContext(t), nil)
+	p, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(params)), handle)
+	require.Error(t, err)
+	assert.Nil(t, p)
+	assert.Contains(t, err.Error(), `unknown field "udsTokenizerConfig"`)
 }
 
 func TestPluginFactory_HTTPBackend_BadTimeout(t *testing.T) {
@@ -416,22 +567,117 @@ func TestVLLMHTTPRenderer_RenderPropagatesTraceContext(t *testing.T) {
 	}
 }
 
-// TestVLLMHTTPRenderer_ChatTimeoutRawMessages asserts that pre-marshaled
-// (Anthropic-rebuilt) messages with array content still select the multimodal
-// timeout.
-func TestVLLMHTTPRenderer_ChatTimeoutRawMessages(t *testing.T) {
-	r := &vllmHTTPRenderer{timeout: 5 * time.Second, mmTimeout: 30 * time.Second}
+func TestVLLMHTTPRenderer_TLSInsecureSkipVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{1, 2}}})
+	}))
+	defer srv.Close()
 
-	textOnly := fwkrh.PayloadMap{"messages": []any{
-		json.RawMessage(`{"role":"user","content":"hi"}`),
-	}}
-	assert.Equal(t, 5*time.Second, r.chatTimeout(textOnly))
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+	})
+	require.NoError(t, err)
 
-	multimodal := fwkrh.PayloadMap{"messages": []any{
-		json.RawMessage(`{"role":"user","content":"hi"}`),
-		json.RawMessage(`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}`),
-	}}
-	assert.Equal(t, 30*time.Second, r.chatTimeout(multimodal))
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{1, 2}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithCACert(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{3, 4}}})
+	}))
+	defer srv.Close()
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, encodeCertPEM(srv.Certificate()), 0o600))
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        srv.URL,
+		CACertPath: caFile,
+	})
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{3, 4}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSWithMTLS(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]renderResponse{{TokenIDs: []uint32{5, 6}}})
+	}))
+	srv.TLS = &tls.Config{
+		ClientAuth: tls.RequireAnyClientCert,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	dir := t.TempDir()
+	clientCert, clientKey := generateTestCert(t, dir)
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:                srv.URL,
+		InsecureSkipVerify: true,
+		ClientCertPath:     clientCert,
+		ClientKeyPath:      clientKey,
+	})
+	require.NoError(t, err)
+
+	tokenIDs, _, err := r.Render(context.Background(), fwkrh.PayloadMap{"prompt": "hello"})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{5, 6}}, tokenIDs)
+}
+
+func TestVLLMHTTPRenderer_TLSBadCACertPath(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:        "https://localhost:9999",
+		CACertPath: "/nonexistent/ca.pem",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading render CA cert")
+}
+
+func TestVLLMHTTPRenderer_TLSBadClientCert(t *testing.T) {
+	_, err := newVLLMHTTPRenderer(&vllmConfig{
+		URL:            "https://localhost:9999",
+		ClientCertPath: "/nonexistent/client.pem",
+		ClientKeyPath:  "/nonexistent/client.key",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading render client cert")
+}
+
+// encodeCertPEM encodes an x509 certificate as PEM.
+func encodeCertPEM(cert *x509.Certificate) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+}
+
+// generateTestCert creates a self-signed cert/key pair for mTLS testing.
+func generateTestCert(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	certPath = filepath.Join(dir, "client.pem")
+	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600))
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	require.NoError(t, err)
+	keyPath = filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600))
+	return certPath, keyPath
 }
 
 // TestBuildChatRenderRequest_MessageFields asserts the wire shape of rebuilt
@@ -477,8 +723,115 @@ func TestBuildChatRenderRequest_MessageFields(t *testing.T) {
 	assert.Equal(t, "out", msgs[1]["content"])
 }
 
-// TestVLLMHTTPRenderer_RenderSpanName asserts the outbound render span is
-// named after the render route instead of the transport default "HTTP POST".
+// TestBuildChatRenderRequest_AudioBlocks asserts the render fallback path
+// preserves audio_url and input_audio parts so non-PayloadMap callers
+// (e.g. Vertex AI gRPC) still reach vLLM with audio intact.
+func TestBuildChatRenderRequest_AudioBlocks(t *testing.T) {
+	req := &tokenizerTypes.RenderChatRequest{
+		Conversation: []tokenizerTypes.Conversation{
+			{Role: "user", Content: &tokenizerTypes.Content{Structured: []tokenizerTypes.ContentBlock{
+				{Type: "text", Text: "transcribe this"},
+				{Type: "audio_url", AudioURL: tokenizerTypes.AudioURLBlock{URL: "https://example.test/speech.wav"}},
+				{Type: "input_audio", InputAudio: tokenizerTypes.AudioBlock{Data: "AAAA", Format: "wav"}},
+			}}},
+		},
+	}
+
+	data, err := json.Marshal(buildChatRenderRequest(req))
+	require.NoError(t, err)
+
+	var msgs []map[string]any
+	require.NoError(t, json.Unmarshal(data, &struct {
+		Messages *[]map[string]any `json:"messages"`
+	}{&msgs}))
+	require.Len(t, msgs, 1)
+	parts, ok := msgs[0]["content"].([]any)
+	require.True(t, ok, "structured content must be forwarded as an array of parts")
+	require.Len(t, parts, 3)
+
+	assert.Equal(t, "text", parts[0].(map[string]any)["type"])
+
+	audioURL, ok := parts[1].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "audio_url", audioURL["type"])
+	require.Equal(t, map[string]any{"url": "https://example.test/speech.wav"}, audioURL["audio_url"])
+
+	inputAudio, ok := parts[2].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "input_audio", inputAudio["type"])
+	require.Equal(t, map[string]any{"data": "AAAA", "format": "wav"}, inputAudio["input_audio"])
+}
+
+func BenchmarkHTTPRenderToolTelemetry(b *testing.B) {
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	b.Cleanup(func() { otel.SetTextMapPropagator(originalPropagator) })
+	for _, recording := range []bool{false, true} {
+		b.Run(fmt.Sprintf("tracing_%t", recording), func(b *testing.B) {
+			originalProvider := otel.GetTracerProvider()
+			var provider trace.TracerProvider = noop.NewTracerProvider()
+			if recording {
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+				provider = tp
+				b.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+			}
+			otel.SetTracerProvider(provider)
+			b.Cleanup(func() { otel.SetTracerProvider(originalProvider) })
+			tracer := provider.Tracer("benchmark")
+			for _, size := range []int{1024, 1024 * 1024} {
+				for _, tools := range []bool{false, true} {
+					fields := ""
+					if tools {
+						fields = `,"tools":[{"type":"function","function":{"name":"benchmark_tool","parameters":{"type":"object"}}}],"tool_choice":"auto"`
+					}
+					body := fwkrh.RawPayload(fmt.Sprintf(`{"model":"benchmark","messages":[{"role":"user","content":"%s"}],"max_tokens":64%s}`, strings.Repeat("x", size), fields))
+					for _, transformed := range []bool{false, true} {
+						for _, observed := range []bool{false, true} {
+							b.Run(fmt.Sprintf("bytes_%d/tools_%t/transformed_%t/observed_%t", size, tools, transformed, observed), func(b *testing.B) {
+								renderer, err := newVLLMHTTPRenderer(&vllmConfig{PrefillOnly: transformed, OmitMMKwargs: transformed})
+								if err != nil {
+									b.Fatal(err)
+								}
+								renderer.pluginName = "benchmark"
+								renderer.client.Transport = otelhttp.NewTransport(&renderTraceTransport{base: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+									_, err := io.Copy(io.Discard, req.Body)
+									_ = req.Body.Close()
+									if err != nil {
+										return nil, err
+									}
+									return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"token_ids":[1]}`))}, nil
+								})})
+								baseCtx := context.Background()
+								if !observed {
+									baseCtx = withUnobservedRender(baseCtx)
+								}
+								b.ReportAllocs()
+								b.SetBytes(int64(len(body)))
+								b.ResetTimer()
+								for range b.N {
+									ctx, span := tracer.Start(baseCtx, "tokenize")
+									start := time.Now()
+									var out renderResponse
+									err := renderer.postJSON(ctx, chatRenderPath, body, time.Second, &out)
+									if !observed {
+										// Retain existing render metrics in the observation-disabled baseline.
+										renderer.observeRender(context.Background(), chatRenderPath, time.Second, time.Since(start), err)
+									}
+									span.End()
+									if err != nil || len(out.TokenIDs) != 1 {
+										b.Fatalf("render failed: %v", err)
+									}
+								}
+							})
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// Route-specific span names make render calls identifiable in traces.
 func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
 	prevTP := otel.GetTracerProvider()
 	exporter := tracetest.NewInMemoryExporter()
@@ -513,4 +866,35 @@ func TestVLLMHTTPRenderer_RenderSpanName(t *testing.T) {
 	for _, s := range clientSpans {
 		assert.Equal(t, "tokenize_render /v1/completions/render", s.Name)
 	}
+}
+
+// TestVLLMHTTPRenderer_RustStandaloneRenderer verifies compatibility with the
+// response shapes produced by the standalone Rust renderer (`vllm-rs render`).
+// The Rust renderer returns {"token_ids": [...]} without multimodal features.
+func TestVLLMHTTPRenderer_RustStandaloneRenderer(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(chatRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}`))
+	})
+	mux.HandleFunc(completionsRenderPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"token_ids":[101, 2054, 2003, 1037, 3231, 102]}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := newHTTPRenderer(t, srv)
+
+	chatTokens, features, err := r.RenderChat(context.Background(), fwkrh.PayloadMap{
+		"messages": []any{map[string]any{"role": "user", "content": "hello world"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{101, 2054, 2003, 1037, 3231, 102}, chatTokens)
+	assert.Nil(t, features)
+
+	compTokens, offsets, err := r.Render(context.Background(), fwkrh.PayloadMap{
+		"prompt": "hello world",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, [][]uint32{{101, 2054, 2003, 1037, 3231, 102}}, compTokens)
+	assert.Nil(t, offsets)
 }

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package disagg
 
 import (
@@ -7,16 +23,23 @@ import (
 	"net"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -87,15 +110,15 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 	var features []fwkrh.MultiModalFeature
 	if hasImage {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasVideo {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasAudio {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	body := &fwkrh.InferenceRequestBody{
 		ChatCompletions: &fwkrh.ChatCompletionsRequest{
@@ -157,6 +180,32 @@ func (m *mockEncodeDecider) disaggregate(_ context.Context, _ *scheduling.Infere
 	return m.allow
 }
 
+type mockPDDecider struct {
+	allow bool
+}
+
+func (m *mockPDDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (m *mockPDDecider) disaggregate(_ context.Context, _ *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	return m.allow
+}
+
+// consumingDecider declares its own data dependencies and disaggregates when
+// the request attribute under read is true.
+type consumingDecider struct {
+	deps plugin.DataDependencies
+	read plugin.DataKey
+}
+
+func (d *consumingDecider) TypedName() plugin.TypedName { return plugin.TypedName{} }
+
+func (d *consumingDecider) Consumes() plugin.DataDependencies { return d.deps }
+
+func (d *consumingDecider) disaggregate(_ context.Context, request *scheduling.InferenceRequest, _ scheduling.Endpoint) bool {
+	allow, _ := scheduling.ReadRequestAttribute[bool](request, d.read)
+	return allow
+}
+
 // ── Helper function tests ────────────────────────────────────────────────────
 
 func TestHasMultimodalContent(t *testing.T) {
@@ -178,7 +227,7 @@ func TestHasMultimodalContent(t *testing.T) {
 		{"feature present", &scheduling.InferenceRequest{
 			Body: &fwkrh.InferenceRequestBody{
 				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}}}},
+					Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage}}}},
 				},
 			},
 		}, true},
@@ -255,55 +304,10 @@ func TestHandlerFactory(t *testing.T) {
 		{"unknown encodeDecider", map[string]any{
 			"deciders": map[string]any{"encode": "INVALID"},
 		}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
-			}
-		})
-	}
-}
-
-func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
-
-	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
-	}{
-		{"deprecated prefillDeciderPluginName", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"deprecated encodeDeciderPluginName", map[string]any{
-			"encodeDeciderPluginName": AlwaysDisaggMulimodalPluginType,
-		}, false},
-		{"deprecated custom profile names", map[string]any{
-			"decodeProfile":            "my-decode",
-			"prefillProfile":           "my-prefill",
-			"encodeProfile":            "my-encode",
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"nested format with unknown extra fields is rejected", map[string]any{
+		{"unknown field is rejected", map[string]any{
 			"profiles":     map[string]any{"decode": "decode"},
 			"unknownField": "ignored",
 		}, true},
-		{"mixing deprecated and nested fields is an error", map[string]any{
-			"decodeProfile": "my-decode",
-			"profiles":      map[string]any{"decode": "other-decode"},
-		}, true},
-		{"mixing deprecated decider and nested deciders is an error", map[string]any{
-			"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
-			"deciders":                 map[string]any{"prefill": AlwaysDisaggPDDeciderPluginType},
-		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,47 +324,123 @@ func TestHandlerFactory_DeprecatedFlatParams(t *testing.T) {
 	}
 }
 
-// TestHandlerFactory_PdProfileHandlerParams verifies that
-// Handler accepts the exact parameter format of the deprecated
-// pd-profile-handler, enabling a zero-change migration between the two types.
-func TestHandlerFactory_PdProfileHandlerParams(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	handle := handleWithDeciders(ctx)
+func TestHandler_Consumes_PrefixMatchInfoProducerName(t *testing.T) {
+	const preciseName = "precise-prefix-cache-producer"
+
+	prefixDecider := func(t *testing.T, producerName string) deciderPlugin {
+		t.Helper()
+		decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{
+			NonCachedTokens:             4,
+			PrefixMatchInfoProducerName: producerName,
+		})
+		require.NoError(t, err)
+		return decider
+	}
 
 	tests := []struct {
-		name      string
-		params    map[string]any
-		expectErr bool
+		name        string
+		pdDecider   func(t *testing.T) deciderPlugin
+		expectedKey plugin.DataKey
 	}{
-		{"pd-profile-handler defaults (no params)", map[string]any{}, false},
-		{"pd-profile-handler with deciderPluginName", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-		}, false},
-		{"pd-profile-handler with unknown fields is rejected", map[string]any{
-			"decodeProfile":     "decode",
-			"prefillProfile":    "prefill",
-			"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			"prefixPluginType":  "prefix-cache-scorer", // unknown to both schemas (#1068)
-			"prefixPluginName":  "prefix-cache-scorer",
-			"primaryPort":       8080,
-		}, true},
-		{"pd-profile-handler unknown deciderPluginName", map[string]any{
-			"deciderPluginName": "INVALID",
-		}, true},
+		{
+			name:        "nil pd decider",
+			pdDecider:   func(*testing.T) deciderPlugin { return nil },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "decider that does not select a prefix producer",
+			pdDecider:   func(*testing.T) deciderPlugin { return newAlwaysDisaggPDDecider() },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "empty prefixMatchInfoProducerName",
+			pdDecider:   func(t *testing.T) deciderPlugin { return prefixDecider(t, "") },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey,
+		},
+		{
+			name:        "named prefixMatchInfoProducerName",
+			pdDecider:   func(t *testing.T) deciderPlugin { return prefixDecider(t, preciseName) },
+			expectedKey: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(preciseName),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b, _ := json.Marshal(tt.params)
-			p, err := HandlerFactory("h", plugin.StrictDecoder(b), handle)
-			if tt.expectErr {
-				assert.Error(t, err)
-				assert.Nil(t, p)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, p)
+			handler := NewDisaggProfileHandler(
+				defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+				tt.pdDecider(t), nil,
+			)
+
+			consumed := handler.Consumes()
+			assert.Contains(t, consumed.Required, tt.expectedKey)
+			assert.Contains(t, consumed.Required, tokenproducer.TokenizedPromptDataKey)
+			if tt.expectedKey != attrprefix.PrefixCacheMatchInfoDataKey {
+				assert.NotContains(t, consumed.Required, attrprefix.PrefixCacheMatchInfoDataKey)
 			}
+		})
+	}
+}
+
+func TestHandler_Consumes_MergesDeciderDeclarations(t *testing.T) {
+	pdRequired := plugin.NewDataKey("pd-required", "")
+	pdOptional := plugin.NewDataKey("pd-optional", "")
+	encodeRequired := plugin.NewDataKey("encode-required", "")
+	encodeOptional := plugin.NewDataKey("encode-optional", "")
+	// Optional for the prefill decider, required by the encode decider.
+	shared := plugin.NewDataKey("shared", "")
+
+	handler := NewDisaggProfileHandler(
+		defaultDecodeProfile, defaultPrefillProfile, defaultEncodeProfile,
+		&consumingDecider{deps: plugin.DataDependencies{
+			Required: map[plugin.DataKey]any{pdRequired: false},
+			Optional: map[plugin.DataKey]any{pdOptional: false, shared: false},
+		}},
+		&consumingDecider{deps: plugin.DataDependencies{
+			Required: map[plugin.DataKey]any{encodeRequired: false, shared: false},
+			Optional: map[plugin.DataKey]any{encodeOptional: false},
+		}},
+	)
+
+	consumed := handler.Consumes()
+	for _, key := range []plugin.DataKey{pdRequired, encodeRequired, shared} {
+		assert.Contains(t, consumed.Required, key)
+	}
+	for _, key := range []plugin.DataKey{pdOptional, encodeOptional} {
+		assert.Contains(t, consumed.Optional, key)
+	}
+	assert.NotContains(t, consumed.Optional, shared, "a key one decider requires is required")
+}
+
+// The scheduler hands Pick a request confined to the handler's declarations,
+// so an attribute a decider declares must be readable through it.
+func TestHandler_Pick_DeciderReadsDeclaredAttributeThroughScope(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	gate := plugin.NewDataKey("prefill-gate", "")
+
+	for _, tt := range []struct {
+		name string
+		deps plugin.DataDependencies
+	}{
+		{name: "required", deps: plugin.DataDependencies{Required: map[plugin.DataKey]any{gate: false}}},
+		{name: "optional", deps: plugin.DataDependencies{Optional: map[plugin.DataKey]any{gate: false}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+				&consumingDecider{deps: tt.deps, read: gate}, nil).WithName("scoped-handler-" + tt.name)
+			datalayer.RegisterScopeSpecs([]plugin.Plugin{h})
+
+			req := completionsRequest(testLongPrompt)
+			req.PutAttribute(gate, true)
+			scoped, violations := datalayer.ScopeRequest(logr.Discard(), "ProfilePicker", h, req)
+
+			got := h.Pick(ctx, scoped,
+				map[string]scheduling.SchedulerProfile{
+					defaultDecodeProfile:  &mockProfile{},
+					defaultPrefillProfile: &mockProfile{},
+				},
+				map[string]*scheduling.ProfileRunResult{defaultDecodeProfile: makeProfileRunResult("pod1")})
+
+			assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got))
+			require.NoError(t, violations.Write())
 		})
 	}
 }
@@ -602,6 +682,95 @@ func TestHandler_ProcessResults_PD(t *testing.T) {
 			tt.check(t, res)
 		})
 	}
+}
+
+// TestHandler_PD_PrefillRequiredButUnavailable exercises the real Pick ->
+// ProcessResults sequence (as the scheduler runs them) for the two ways a
+// picked prefill profile can end up nil in profileResults: the PD decider
+// declining to run it (safe to complete decode-only) versus the profile
+// having been picked and run, but finding no endpoint (must fail the
+// request rather than silently complete decode-only). Regression test for
+// https://github.com/llm-d/llm-d-router/issues/2427: with an always-disagg
+// decider and no ready prefill endpoints, requests were completing on
+// decode alone instead of failing.
+func TestHandler_PD_PrefillRequiredButUnavailable(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+	newDecodeResults := func() map[string]*scheduling.ProfileRunResult {
+		return map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile: makeProfileRunResult("pod1"),
+		}
+	}
+
+	t.Run("decider declines prefill -> decode-only, no error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			&mockPDDecider{allow: false}, nil)
+
+		LlmdDisaggDecisionCount.Reset()
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{}, profileNames(got), "decider should decline prefill")
+		assert.InDelta(t, 1, testutil.ToFloat64(LlmdDisaggDecisionCount.WithLabelValues(
+			"", DisaggProfileHandlerType, "unknown", metricsutil.DisaggPathDecodeOnly)), 0)
+
+		res, err := h.ProcessResults(ctx, req, decodeResults)
+		assert.NoError(t, err, "a declined prefill stage must not fail the request")
+		assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
+		assert.NotContains(t, res.ProfileResults, defaultPrefillProfile)
+	})
+
+	t.Run("decider requires prefill, none available -> error", func(t *testing.T) {
+		req := completionsRequest(testLongPrompt)
+		decodeResults := newDecodeResults()
+		h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "",
+			newAlwaysDisaggPDDecider(), nil)
+
+		got := h.Pick(ctx, req, profiles, decodeResults)
+		assert.ElementsMatch(t, []string{defaultPrefillProfile}, profileNames(got), "decider should pick prefill")
+
+		// Simulate the scheduler running the picked prefill profile and finding
+		// no endpoint: it records a nil result, exactly like a declined stage.
+		failedResults := map[string]*scheduling.ProfileRunResult{
+			defaultDecodeProfile:  decodeResults[defaultDecodeProfile],
+			defaultPrefillProfile: nil,
+		}
+		LlmdDisaggDecisionCount.Reset()
+		got = h.Pick(ctx, req, profiles, failedResults)
+		assert.ElementsMatch(t, []string{}, profileNames(got), "all stages should be done")
+		assert.Equal(t, 0, testutil.CollectAndCount(LlmdDisaggDecisionCount),
+			"a request rejected for no prefill endpoint must not be counted as a routing decision")
+
+		_, err := h.ProcessResults(ctx, req, failedResults)
+		assert.Error(t, err, "a required prefill stage that found no endpoint must fail the request")
+	})
+}
+
+func TestHandler_PrefillFirst_PrefillUnavailableNotCounted(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	req := completionsRequest(testLongPrompt)
+	profiles := map[string]scheduling.SchedulerProfile{
+		defaultDecodeProfile:  &mockProfile{},
+		defaultPrefillProfile: &mockProfile{},
+	}
+	h := NewDisaggProfileHandler(defaultDecodeProfile, defaultPrefillProfile, "", nil, nil).
+		WithStageOrder(StageOrderPrefillFirst)
+	results := map[string]*scheduling.ProfileRunResult{
+		defaultPrefillProfile: nil,
+		defaultDecodeProfile:  makeProfileRunResult("pod1"),
+	}
+
+	LlmdDisaggDecisionCount.Reset()
+	got := h.Pick(ctx, req, profiles, results)
+	assert.ElementsMatch(t, []string{}, profileNames(got), "all stages should be done")
+	assert.Equal(t, 0, testutil.CollectAndCount(LlmdDisaggDecisionCount),
+		"a request rejected for no prefill endpoint must not be counted as a routing decision")
+
+	_, err := h.ProcessResults(ctx, req, results)
+	assert.Error(t, err)
 }
 
 func TestHandler_ProcessResults_NilRequest(t *testing.T) {
@@ -1348,47 +1517,6 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 	}
 }
 
-// TestBothProfileAndHeadersHandlerPreRequest verifies that when both
-// disagg-profile-handler and the deprecated disagg-headers-handler are
-// active, both PreRequest hooks run without error. The result is redundant
-// (same header written twice) but not conflicting.
-func TestBothProfileAndHeadersHandlerPreRequest(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-
-	profileHandler := NewDisaggProfileHandler("decode", "prefill", "encode", nil, nil).WithName("profile")
-	headersHandler := NewHeadersHandler("prefill", "encode").WithName("headers") //nolint:staticcheck // intentional: testing deprecated path
-
-	podAddr := "10.0.0.5"
-	podPort := "8080"
-	ep := scheduling.NewEndpoint(
-		&fwkdl.EndpointMetadata{
-			ID:      k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
-			Address: podAddr,
-			Port:    podPort,
-		},
-		&fwkdl.Metrics{},
-		nil,
-	)
-
-	request := &scheduling.InferenceRequest{
-		RequestID: "req-both",
-		Headers:   map[string]string{},
-	}
-	result := &scheduling.SchedulingResult{
-		PrimaryProfileName: "decode",
-		ProfileResults: map[string]*scheduling.ProfileRunResult{
-			"prefill": {TargetEndpoints: []scheduling.Endpoint{ep}},
-		},
-	}
-
-	_ = profileHandler.PreRequest(ctx, request, result)
-	_ = headersHandler.PreRequest(ctx, request, result)
-
-	expected := net.JoinHostPort(podAddr, podPort)
-	assert.Equal(t, expected, request.Headers[routing.PrefillEndpointHeader],
-		"both handlers set the same prefill header — redundant but no conflict")
-}
-
 func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	h := NewDisaggProfileHandler("decode", "", "encode", nil, nil)
@@ -1519,39 +1647,12 @@ func TestHandler_Factory_StageOrder(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "legacy flat format with stageOrder",
-			params: map[string]any{
-				"decodeProfile": "decode",
-				"stageOrder":    "prefill-first",
-			},
-			expectErr:   false,
-			expectOrder: StageOrderPrefillFirst,
-		},
-		{
 			name: "prefill-first with deciders.prefill returns error",
 			params: map[string]any{
 				"stageOrder": "prefill-first",
 				"deciders": map[string]any{
 					"prefill": PrefixBasedPDDeciderPluginType,
 				},
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy deciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":        "prefill-first",
-				"decodeProfile":     "decode",
-				"deciderPluginName": PrefixBasedPDDeciderPluginType,
-			},
-			expectErr: true,
-		},
-		{
-			name: "prefill-first with legacy prefillDeciderPluginName returns error",
-			params: map[string]any{
-				"stageOrder":               "prefill-first",
-				"decodeProfile":            "decode",
-				"prefillDeciderPluginName": PrefixBasedPDDeciderPluginType,
 			},
 			expectErr: true,
 		},

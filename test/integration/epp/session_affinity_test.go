@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // TestSessionAffinityFilter_RequestFlow validates the end-to-end session
@@ -41,13 +41,14 @@ import (
 // the second request (carrying that token) is pinned to the same endpoint.
 func TestSessionAffinityFilter_RequestFlow(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
   - type: queue-scorer
   - type: session-affinity-filter
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 schedulingProfiles:
   - name: default
     plugins:
@@ -57,6 +58,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -90,7 +92,7 @@ dataLayer:
 // that token, pins to the same endpoint.
 func TestSessionAffinityScorer_RequestFlow(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -106,6 +108,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -169,7 +172,7 @@ func sendSessionRequest(t *testing.T, h *TestHarness, sessionToken string) (endp
 // pdConfigBase is the shared EPP config skeleton for PD session-affinity tests.
 // The caller must supply the disagg-profile-handler parameters block (%s).
 const pdConfigBase = `
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -190,10 +193,12 @@ plugins:
       encodedEndpointHeaderConfig:
         header: x-session-token-prefill
   - type: mock-metrics-source
+  - type: core-metrics-extractor
 requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 schedulingProfiles:
@@ -360,7 +365,7 @@ func headerValue(setHeaders []*configPb.HeaderValueOption, key string) string {
 // over the attribute when both are present.
 func TestSessionAffinityFilter_SessionIDHeaderStrategy(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -381,6 +386,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -392,7 +398,7 @@ dataLayer:
 // rather than hard-narrowing candidates.
 func TestSessionAffinityScorer_SessionIDHeaderStrategy(t *testing.T) {
 	configText := `
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
@@ -415,6 +421,7 @@ requestHandler:
   parsers:
   - pluginRef: openai-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 `
@@ -483,6 +490,18 @@ var routedRequestSeq int64
 func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]string) string {
 	t.Helper()
 
+	requests := append(newRoutedRequest(extraHeaders), ReqResponseOnly(
+		map[string]string{"content-type": "application/json", "status": "200"},
+		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
+	)...)
+	responses := streamRequests(t, h, requests, 4)
+
+	endpoint := headerValue(responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+	require.NotEmpty(t, endpoint, "request headers response must set the destination endpoint")
+	return endpoint
+}
+
+func newRoutedRequest(extraHeaders map[string]string) []*extProcPb.ProcessingRequest {
 	// Unique per call: the Choose->PreRequest boundPodPresence handoff is keyed by
 	// RequestID, so reusing one across sequential requests would couple their state.
 	reqHeaders := map[string]string{
@@ -493,21 +512,17 @@ func sendRoutedRequest(t *testing.T, h *TestHarness, extraHeaders map[string]str
 	for k, v := range extraHeaders {
 		reqHeaders[k] = v
 	}
+	return integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
+}
 
-	requests := integration.ReqRaw(reqHeaders, `{"model":"`+modelMyModel+`","prompt":"hello","max_tokens":10,"temperature":0}`)
-	requests = append(requests, ReqResponseOnly(
-		map[string]string{"content-type": "application/json", "status": "200"},
-		`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"hi","role":"assistant"}}],"model":"`+modelMyModelTarget+`","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":3,"total_tokens":5}}`,
-	)...)
+func streamRequests(t *testing.T, h *TestHarness, requests []*extProcPb.ProcessingRequest, expected int) []*extProcPb.ProcessingResponse {
+	t.Helper()
 
 	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(t.Context())
 	require.NoError(t, err)
 
-	responses, err := integration.StreamedRequest(t, client, requests, 4)
+	responses, err := integration.StreamedRequest(t, client, requests, expected)
 	require.NoError(t, err)
-	require.Len(t, responses, 4)
-
-	endpoint := headerValue(responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
-	require.NotEmpty(t, endpoint, "request headers response must set the destination endpoint")
-	return endpoint
+	require.Len(t, responses, expected)
+	return responses
 }

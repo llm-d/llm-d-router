@@ -17,6 +17,9 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,8 +75,13 @@ func TestInMemoryIndexSize(t *testing.T) {
 	err = index.Add(ctx, []BlockHash{engineKey3}, []BlockHash{requestKey3}, []PodEntry{{PodIdentifier: "pod3", DeviceTier: "cpu"}})
 	require.NoError(t, err)
 
-	// Lookup should only return the last two keys
-	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	// Verify requestKey1 was evicted
+	evicted, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, evicted)
+
+	// Lookup should return the remaining keys
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey2, requestKey3}, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, podsPerKey, 2) // Only key2 and key3 should be present
@@ -114,6 +122,77 @@ func TestInMemoryIndexPodCacheSize(t *testing.T) {
 	assert.Len(t, podsPerKey[requestKey], 2, "Should only have 2 pods due to PodCacheSize limit")
 	assert.Contains(t, podsPerKey[requestKey], PodEntry{PodIdentifier: "pod2", DeviceTier: "gpu"})
 	assert.Contains(t, podsPerKey[requestKey], PodEntry{PodIdentifier: "pod3", DeviceTier: "cpu"})
+}
+
+func TestInMemoryIndexDefaultPodCacheSize(t *testing.T) {
+	ctx := t.Context()
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1})
+	require.NoError(t, err)
+	capacity := DefaultInMemoryIndexConfig().PodCacheSize
+	entries := make([]PodEntry, capacity+1)
+	for i := range entries {
+		entries[i] = PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", i), DeviceTier: "gpu"}
+	}
+	keys := []BlockHash{1}
+	require.NoError(t, index.Add(ctx, nil, keys, entries))
+
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, entries[1:], found[keys[0]])
+}
+
+func TestInMemoryIndexClearIgnoresCancellation(t *testing.T) {
+	ctx := t.Context()
+	const numKeys = 600
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: numKeys, PodCacheSize: 3})
+	require.NoError(t, err)
+	keys := make([]BlockHash, numKeys)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
+	}
+	retained := PodEntry{PodIdentifier: "pod-b", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{
+		{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+		{PodIdentifier: "pod-a", DeviceTier: "cpu"},
+		retained,
+	}))
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	require.NoError(t, index.Clear(cancelled, "pod-a"))
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, found, numKeys)
+	for _, key := range keys {
+		assert.Equal(t, []PodEntry{retained}, found[key], "key %v", key)
+	}
+}
+
+// cancelAfterFirstErrCheck reports no error on its first Err call and
+// context.Canceled afterwards, so a lookup sees the cancellation only after
+// its first cancellation checkpoint.
+type cancelAfterFirstErrCheck struct {
+	context.Context
+	calls atomic.Int32
+}
+
+func (c *cancelAfterFirstErrCheck) Err() error {
+	if c.calls.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+// A lookup cancelled between a checkpoint and a missing key reports the
+// cancellation instead of the partial prefix read before the miss.
+func TestInMemoryIndexLookupCancelledBeforeMiss(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index := createInMemoryIndexForTesting(t)
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}))
+
+	found, err := index.Lookup(&cancelAfterFirstErrCheck{Context: ctx}, []BlockHash{1, 2}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, found)
 }
 
 // TestSpeculativeAnnotation tests that speculative and confirmed PodEntries
@@ -157,7 +236,7 @@ func TestSpeculativeAnnotation(t *testing.T) {
 	t.Run("SpeculativeEvictPreservesConfirmed", func(t *testing.T) {
 		// Evict the speculative entry using requestKey directly (no engineKey mapping exists).
 		speculativePod := PodEntry{PodIdentifier: "10.0.0.1:8080", Speculative: true}
-		err := index.Evict(ctx, requestKey, RequestKey, []PodEntry{speculativePod})
+		err := index.Evict(ctx, RequestKey, []BlockHash{requestKey}, []PodEntry{speculativePod})
 		require.NoError(t, err)
 
 		// Confirmed entry should remain
@@ -190,7 +269,7 @@ func TestSpeculativeEvictThenEmpty(t *testing.T) {
 	assert.Len(t, podsPerKey[requestKey], 1)
 
 	// Evict speculative entry using requestKey directly
-	err = index.Evict(ctx, requestKey, RequestKey, []PodEntry{speculativePod})
+	err = index.Evict(ctx, RequestKey, []BlockHash{requestKey}, []PodEntry{speculativePod})
 	require.NoError(t, err)
 
 	// Lookup should return empty
@@ -221,4 +300,107 @@ func TestAddWithNilEngineKeys(t *testing.T) {
 	// GetRequestKey should NOT find a mapping (no engineKey was stored)
 	_, err = index.GetRequestKey(ctx, requestKey)
 	assert.Error(t, err, "GetRequestKey should fail since no engineKey mapping was created")
+}
+
+func TestInMemoryIndexRecencyPromotion(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	requestKey1 := BlockHash(79215516)
+	requestKey2 := BlockHash(12871930)
+	requestKey3 := BlockHash(69914638)
+	engineKey1 := BlockHash(72735753)
+	engineKey2 := BlockHash(41341092)
+	engineKey3 := BlockHash(34012886)
+
+	tests := []struct {
+		name       string
+		engineKeys bool
+		touch      func(t *testing.T, index Index)
+		wantKey1   bool
+		wantKey2   bool
+	}{
+		{
+			name:       "request-key evict does not promote recency",
+			engineKeys: false,
+			touch: func(t *testing.T, index Index) {
+				require.NoError(t, index.Evict(ctx, RequestKey,
+					[]BlockHash{requestKey1}, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+			},
+			wantKey1: false,
+			wantKey2: true,
+		},
+		{
+			name:       "engine-key evict does not promote recency",
+			engineKeys: true,
+			touch: func(t *testing.T, index Index) {
+				require.NoError(t, index.Evict(ctx, EngineKey,
+					[]BlockHash{engineKey1}, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}}))
+			},
+			wantKey1: false,
+			wantKey2: true,
+		},
+		{
+			name:       "lookup still promotes recency",
+			engineKeys: false,
+			touch: func(t *testing.T, index Index) {
+				podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+				require.NoError(t, err)
+				assert.Contains(t, podsPerKey, requestKey1)
+			},
+			wantKey1: true,
+			wantKey2: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &InMemoryIndexConfig{
+				Size:         2,
+				PodCacheSize: 2,
+			}
+			index, err := NewInMemoryIndex(cfg)
+			require.NoError(t, err)
+
+			add := func(engineKey BlockHash, requestKey BlockHash, entries []PodEntry) {
+				engineKeys := []BlockHash(nil)
+				if tc.engineKeys {
+					engineKeys = []BlockHash{engineKey}
+				}
+				require.NoError(t, index.Add(ctx, engineKeys, []BlockHash{requestKey}, entries))
+			}
+
+			add(engineKey1, requestKey1, []PodEntry{
+				{PodIdentifier: "pod1", DeviceTier: "gpu"},
+				{PodIdentifier: "pod2", DeviceTier: "gpu"},
+			})
+			add(engineKey2, requestKey2, []PodEntry{
+				{PodIdentifier: "pod3", DeviceTier: "gpu"},
+			})
+
+			tc.touch(t, index)
+
+			add(engineKey3, requestKey3, []PodEntry{
+				{PodIdentifier: "pod4", DeviceTier: "gpu"},
+			})
+
+			// A lookup stops at the first missing key, so each key is looked
+			// up on its own.
+			present := func(key BlockHash) bool {
+				podsPerKey, err := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, err)
+				_, ok := podsPerKey[key]
+				return ok
+			}
+			assert.Equal(t, tc.wantKey1, present(requestKey1), "requestKey1")
+			assert.Equal(t, tc.wantKey2, present(requestKey2), "requestKey2")
+			assert.True(t, present(requestKey3), "requestKey3")
+
+			if tc.engineKeys {
+				_, err := index.GetRequestKey(ctx, engineKey1)
+				assert.Error(t, err, "engineKey1's mapping should have been evicted as the oldest, not promoted by the evict")
+				_, err = index.GetRequestKey(ctx, engineKey2)
+				assert.NoError(t, err, "engineKey2's mapping should remain")
+			}
+		})
+	}
 }

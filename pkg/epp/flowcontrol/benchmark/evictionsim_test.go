@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
 	evictordering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/ordering"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
@@ -82,7 +83,7 @@ type evictionScenario struct {
 	grace    time.Duration
 	maxRevoc int
 	burst    burstShape
-	// evictionOff disables reclamation for baseline arms.
+	// evictionOff disables reclamation for baseline variants.
 	evictionOff bool
 	// churnMean, when non-zero, gives sheddable leases a natural completion time drawn
 	// deterministically from a truncated exponential-like ladder with this mean.
@@ -387,10 +388,11 @@ func setupEvictionBenchHarness(
 	}
 
 	deps := controller.Deps{
-		Registry:           reg,
-		SaturationDetector: pool,
-		EndpointCandidates: &mocks.MockEndpointCandidates{},
-		UsageLimitPolicy:   usagelimits.NewConstPolicy("evict-bench", sc.hpCeiling),
+		Registry:            reg,
+		SaturationDetector:  pool,
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.NewConstPolicy("evict-bench", sc.hpCeiling),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	}
 	if !sc.evictionOff {
 		deps.InFlightEvictor = requestEvictor

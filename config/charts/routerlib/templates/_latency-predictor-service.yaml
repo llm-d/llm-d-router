@@ -1,0 +1,41 @@
+{{- define "llm-d-epp.latency-predictor-service" -}}
+{{- $lp := .Values.router.latencyPredictor -}}
+{{- if and $lp.enabled (eq (include "llm-d-router.latencyPredictor.mode" .) "service") -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-router.latencyPredictor.trainingName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.latencyPredictor.trainingSelectorLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-d-router.latencyPredictor.trainingSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ $lp.trainingServer.port }}
+      targetPort: training-port
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-d-router.latencyPredictor.predictionName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.latencyPredictor.predictionSelectorLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "llm-d-router.latencyPredictor.predictionSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ $lp.predictionServers.startPort }}
+      targetPort: predict-port-1
+  type: ClusterIP
+---
+{{- end -}}
+{{- end -}}

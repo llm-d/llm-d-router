@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package programaware implements a flow-control fairness policy that
 // schedules per-program queues using a swappable scoring strategy.
 package programaware
@@ -9,12 +25,12 @@ import (
 	"sync"
 	"time"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const ProgramAwarePluginType = "program-aware-fairness"
@@ -31,6 +47,9 @@ type Config struct {
 	LASWeightService   float64 `json:"lasWeightService,omitempty"`
 	LASWeightHeadWait  float64 `json:"lasWeightHeadWait,omitempty"`
 	LASHalfLifeSeconds float64 `json:"lasHalfLifeSeconds,omitempty"`
+
+	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
+	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -41,6 +60,9 @@ func DefaultConfig() Config {
 		LASWeightService:     0.8,
 		LASWeightHeadWait:    0.2,
 		LASHalfLifeSeconds:   60,
+
+		TurnPriorityTimeWeight:        0.05,
+		TurnPriorityInactivitySeconds: 120,
 	}
 }
 
@@ -60,6 +82,12 @@ func (c Config) validate() error {
 	if c.LASHalfLifeSeconds < 0 {
 		return fmt.Errorf("lasHalfLifeSeconds must be >= 0, got %v", c.LASHalfLifeSeconds)
 	}
+	if c.TurnPriorityTimeWeight < 0 {
+		return fmt.Errorf("turnPriorityTimeWeight must be >= 0, got %v", c.TurnPriorityTimeWeight)
+	}
+	if c.TurnPriorityInactivitySeconds < 0 {
+		return fmt.Errorf("turnPriorityInactivitySeconds must be >= 0, got %v", c.TurnPriorityInactivitySeconds)
+	}
 	return nil
 }
 
@@ -68,9 +96,9 @@ var (
 	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
 	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
+	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
 )
 
-//nolint:revive // factory name matches sibling fairness plugins.
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := DefaultConfig()
 	if parameters != nil {
@@ -104,7 +132,6 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	return p, nil
 }
 
-//nolint:revive
 type ProgramAwarePlugin struct {
 	name     string
 	strategy Strategy
@@ -114,6 +141,12 @@ type ProgramAwarePlugin struct {
 
 func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: ProgramAwarePluginType, Name: p.name}
+}
+
+// Produces declares the enqueue time Pick stashes on the request for this
+// plugin's own PreRequest to read back.
+func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
@@ -184,7 +217,7 @@ func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetric
 
 func programIDFor(req *fwksched.InferenceRequest) string {
 	if req == nil || req.FairnessID == "" {
-		return metadata.DefaultFairnessID
+		return reqcommon.DefaultFairnessID
 	}
 	return req.FairnessID
 }

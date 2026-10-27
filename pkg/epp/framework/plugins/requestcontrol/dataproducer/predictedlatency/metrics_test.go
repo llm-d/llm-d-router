@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ limitations under the License.
 package predictedlatency
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,6 +34,34 @@ func TestRegisterMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, registerMetrics(registry))
 	require.NoError(t, registerMetrics(registry))
+	require.True(t, recordRequestTTFT(t.Context(), "test-plugin", "test-type", "model", "target", 0.5))
+	require.True(t, recordRequestPredictedTTFT(t.Context(), "test-plugin", "test-type", "model", "target", 0.4))
+	require.True(t, recordRequestTTFTPredictionDuration(t.Context(), "test-plugin", "test-type", "model", "target", 0.1))
+	require.True(t, recordRequestTTFTWithSLO(t.Context(), "test-plugin", "test-type", "model", "target", 2, 1))
+	require.True(t, recordRequestTPOT(t.Context(), "test-plugin", "test-type", "model", "target", 0.05))
+	require.True(t, recordRequestPredictedTPOT(t.Context(), "test-plugin", "test-type", "model", "target", 0.04))
+	require.True(t, recordRequestTPOTPredictionDuration(t.Context(), "test-plugin", "test-type", "model", "target", 0.2))
+	require.True(t, recordRequestTPOTWithSLO(t.Context(), "test-plugin", "test-type", "model", "target", 3, 1))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	wantFamilies := map[string]bool{
+		"llm_d_epp_inference_request_metric":                 false,
+		"llm_d_epp_request_predicted_ttft_seconds":           false,
+		"llm_d_epp_request_ttft_prediction_duration_seconds": false,
+		"llm_d_epp_request_predicted_tpot_seconds":           false,
+		"llm_d_epp_request_tpot_prediction_duration_seconds": false,
+		"llm_d_epp_request_slo_violation_total":              false,
+	}
+	for _, family := range families {
+		require.NotContains(t, family.GetName(), "inference_objective_")
+		if _, found := wantFamilies[family.GetName()]; found {
+			wantFamilies[family.GetName()] = true
+		}
+	}
+	for family, found := range wantFamilies {
+		require.Truef(t, found, "current metric family %q must be registered", family)
+	}
 }
 
 func TestRecordRequestLatencyMetrics(t *testing.T) {
@@ -47,16 +77,6 @@ func TestRecordRequestLatencyMetrics(t *testing.T) {
 	require.True(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", "model", "target", 0.04))
 	require.True(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", 0.2))
 	require.True(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", 3, 1))
-
-	ttft, err := getHistogram(requestTTFT, "model", "target")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), ttft.GetSampleCount())
-	require.Equal(t, 0.5, ttft.GetSampleSum())
-
-	tpot, err := getHistogram(requestTPOT, "model", "target")
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), tpot.GetSampleCount())
-	require.Equal(t, 0.05, tpot.GetSampleSum())
 
 	llmdPredictedTtft, err := getHistogram(llmdRequestPredictedTTFT, "test-plugin", "test-type", "model", "target")
 	require.NoError(t, err)
@@ -77,11 +97,6 @@ func TestRecordRequestLatencyMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), llmdTpotDuration.GetSampleCount())
 	require.Equal(t, 0.2, llmdTpotDuration.GetSampleSum())
-
-	require.Equal(t, 0.5, testutil.ToFloat64(inferenceGauges.WithLabelValues("model", "target", typeTTFT)))
-	require.Equal(t, 0.05, testutil.ToFloat64(inferenceGauges.WithLabelValues("model", "target", typeTPOT)))
-	require.Equal(t, float64(1), testutil.ToFloat64(sloViolationCounter.WithLabelValues("model", "target", typeTTFT)))
-	require.Equal(t, float64(1), testutil.ToFloat64(sloViolationCounter.WithLabelValues("model", "target", typeTPOT)))
 
 	require.Equal(t, 0.5, testutil.ToFloat64(llmdInferenceGauges.WithLabelValues("test-plugin", "test-type", "model", "target", typeTTFT)))
 	require.Equal(t, 0.05, testutil.ToFloat64(llmdInferenceGauges.WithLabelValues("test-plugin", "test-type", "model", "target", typeTPOT)))
@@ -108,6 +123,43 @@ func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
 	require.False(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))
 }
 
+const (
+	tpotRangeLoSeconds = 0.005
+	tpotRangeHiSeconds = 0.05
+	tpotMaxGapSeconds  = 0.005
+	tpotFloatSlack     = 1e-9
+)
+
+// checkTPOTBucketSpacing validates edge ordering and that no bucket overlapping
+// the 5-50 ms range is wider than 5 ms.
+func checkTPOTBucketSpacing(edges []float64) error {
+	for i, e := range edges {
+		if math.IsNaN(e) || math.IsInf(e, 0) || e <= 0 {
+			return fmt.Errorf("edge %d (%v) must be finite and positive", i, e)
+		}
+		if i > 0 && e <= edges[i-1] {
+			return fmt.Errorf("edge %d (%v) must be greater than edge %d (%v)", i, e, i-1, edges[i-1])
+		}
+	}
+	for i := 1; i < len(edges); i++ {
+		lo, hi := edges[i-1], edges[i]
+		overlaps := lo < tpotRangeHiSeconds-tpotFloatSlack && hi > tpotRangeLoSeconds+tpotFloatSlack
+		if overlaps && hi-lo > tpotMaxGapSeconds+tpotFloatSlack {
+			return fmt.Errorf("bucket (%v, %v] is wider than %v inside the 5-50 ms range", lo, hi, tpotMaxGapSeconds)
+		}
+	}
+	return nil
+}
+
+func TestTPOTBucketsSpacing(t *testing.T) {
+	require.NoError(t, checkTPOTBucketSpacing(tpotBuckets))
+}
+
+func TestTPOTBucketsSpacingRejectsCoarseEdges(t *testing.T) {
+	coarse := []float64{0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1}
+	require.Error(t, checkTPOTBucketSpacing(coarse))
+}
+
 func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*dto.Histogram, error) {
 	metric, err := histogram.GetMetricWithLabelValues(labelValues...)
 	if err != nil {
@@ -121,18 +173,11 @@ func getHistogram(histogram *prometheus.HistogramVec, labelValues ...string) (*d
 }
 
 func resetMetrics() {
-	inferenceGauges.Reset()
 	llmdInferenceGauges.Reset()
-	requestTTFT.Reset()
-	requestPredictedTTFT.Reset()
 	llmdRequestPredictedTTFT.Reset()
-	requestTTFTPredictionDuration.Reset()
 	llmdRequestTTFTPredictionDuration.Reset()
-	requestTPOT.Reset()
-	requestPredictedTPOT.Reset()
 	llmdRequestPredictedTPOT.Reset()
-	requestTPOTPredictionDuration.Reset()
 	llmdRequestTPOTPredictionDuration.Reset()
-	sloViolationCounter.Reset()
 	llmdSloViolationCounter.Reset()
+	llmdRequestPredictionFailures.Reset()
 }

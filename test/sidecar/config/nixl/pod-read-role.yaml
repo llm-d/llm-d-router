@@ -4,14 +4,6 @@ metadata:
   name: pod-read
 rules:
   - apiGroups:
-      - inference.networking.x-k8s.io
-    resources:
-      - inferencemodels
-    verbs:
-      - get
-      - watch
-      - list
-  - apiGroups:
       - ""
     resources:
       - pods
@@ -20,7 +12,7 @@ rules:
       - watch
       - list
   - apiGroups:
-      - inference.networking.x-k8s.io
+      - inference.networking.k8s.io
     resources:
       - inferencepools
     verbs:

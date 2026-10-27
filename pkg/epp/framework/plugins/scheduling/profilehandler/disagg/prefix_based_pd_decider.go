@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package disagg
 
 import (
@@ -32,6 +48,11 @@ type PrefixBasedPDDeciderConfig struct {
 	// as character-count / AverageCharactersPerToken) required before applying
 	// prefix-cache-based disaggregation logic. Zero disables this prompt-length gate.
 	PromptTokens int `json:"promptTokens"`
+
+	// PrefixMatchInfoProducerName selects which prefix-cache producer's
+	// PrefixCacheMatchInfo to read on the decode endpoint. Empty defaults to the
+	// approximate-prefix producer.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
 }
 
 func (p PrefixBasedPDDeciderConfig) validate() error {
@@ -48,9 +69,11 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 
 // compile-time type assertions
 var (
-	_ deciderPlugin         = &PrefixBasedPDDecider{}
-	_ fwkrc.PreRequest      = &PrefixBasedPDDecider{}
-	_ plugin.ConsumerPlugin = &PrefixBasedPDDecider{}
+	_ deciderPlugin           = &PrefixBasedPDDecider{}
+	_ fwkrc.PreRequest        = &PrefixBasedPDDecider{}
+	_ plugin.ConsumerPlugin   = &PrefixBasedPDDecider{}
+	_ plugin.ProducerPlugin   = &PrefixBasedPDDecider{}
+	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
 )
 
 // errCondDecodeCacheMiss is the 412 returned by the conditional-decode gate
@@ -72,8 +95,9 @@ type remotePrefillDecision struct {
 
 // PrefixBasedPDDecider is a PD decider plugin which decision is based prefix aware
 type PrefixBasedPDDecider struct {
-	typedName plugin.TypedName
-	config    PrefixBasedPDDeciderConfig
+	typedName         plugin.TypedName
+	config            PrefixBasedPDDeciderConfig
+	prefixMatchInfoDK plugin.DataKey
 }
 
 // PrefixBasedPDDeciderPluginFactory defines the factory function for creating
@@ -113,7 +137,14 @@ func NewPrefixBasedPDDecider(config PrefixBasedPDDeciderConfig) (*PrefixBasedPDD
 	return &PrefixBasedPDDecider{
 		typedName: plugin.TypedName{Type: PrefixBasedPDDeciderPluginType},
 		config:    config,
+		prefixMatchInfoDK: attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(
+			config.PrefixMatchInfoProducerName,
+		),
 	}, nil
+}
+
+func (d *PrefixBasedPDDecider) prefixMatchInfoDataKey() plugin.DataKey {
+	return d.prefixMatchInfoDK
 }
 
 // TypedName returns the typed name of the plugin.
@@ -127,6 +158,17 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	return d
 }
 
+// Produces declares the request attributes the plugin writes: the
+// conditional-decode ownership marker the director reads to decide whether the
+// "Prefer: if-available" header was evaluated, and the memoized remote-prefill
+// outcome this plugin reads back in PreRequest.
+func (d *PrefixBasedPDDecider) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		fwkrc.ConditionalDecodeHandledAttributeKey: false,
+		remotePrefillDecisionAttributeKey:          remotePrefillDecision{},
+	}
+}
+
 // Consumes declares the request- and endpoint-scoped data the plugin reads
 // when evaluating the gate. Required so operators opting into the plugin
 // standalone (not just as a disagg-profile-handler decider) get startup
@@ -135,8 +177,8 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
-			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
+			d.prefixMatchInfoDK:                  attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
 	}
 }
@@ -162,7 +204,7 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	logger := log.FromContext(ctx)
 	debugLogger := logger.V(logging.DEBUG)
-	endpoint := primaryDecodeEndpoint(schedulingResult)
+	endpoint := schedulingResult.PrimaryEndpoint()
 	if endpoint == nil {
 		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
 		return errCondDecodeCacheMiss
@@ -178,20 +220,6 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	debugLogger.Info("conditional-decode: forwarding")
 	return nil
-}
-
-// primaryDecodeEndpoint returns the first endpoint chosen by the primary
-// profile, or nil when the scheduling result is missing, malformed, or the
-// primary profile produced no endpoint.
-func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpoint {
-	if result == nil || result.PrimaryProfileName == "" || result.ProfileResults == nil {
-		return nil
-	}
-	primary := result.ProfileResults[result.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return nil
-	}
-	return primary.TargetEndpoints[0]
 }
 
 // disaggregate reports whether remote prefill should run for this request.
@@ -255,13 +283,14 @@ func (d *PrefixBasedPDDecider) computeNeedsRemotePrefill(ctx context.Context, re
 			"inputTokens", inputTokens, "threshold", d.config.NonCachedTokens)
 		return false, nil
 	}
-	prefixInfoRaw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
+	prefixInfoRaw, ok := endpoint.Get(d.prefixMatchInfoDK)
 	if !ok || prefixInfoRaw == nil {
-		return false, errors.New("unable to read prefix cache state")
+		return false, fmt.Errorf("unable to read prefix cache state for %s", d.prefixMatchInfoDK)
 	}
 	info, ok := prefixInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok {
-		return false, fmt.Errorf("prefix cache match info has unexpected type: %T", prefixInfoRaw)
+		return false, fmt.Errorf("prefix cache match info from %s has unexpected type: %T",
+			d.prefixMatchInfoDK, prefixInfoRaw)
 	}
 	hitPrefixTokens := info.CachedBlockCount() * info.BlockSizeTokens()
 	nonCachedTokens := inputTokens - hitPrefixTokens

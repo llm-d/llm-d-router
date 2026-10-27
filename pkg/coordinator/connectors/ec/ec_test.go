@@ -194,24 +194,96 @@ func TestNIXL_MergeEncodeResponse_NilInnerValue(t *testing.T) {
 	}
 }
 
-// TestNIXL_PreparePrefillECParams_NonMapDescriptor pins copyDescriptor's
-// non-map fallthrough: the descriptor is opaque, so a non-nil scalar value
-// (not a map[string]any) carries no aliasing risk and must pass through to the
-// prefill params unchanged rather than being dropped or mangled.
-func TestNIXL_PreparePrefillECParams_NonMapDescriptor(t *testing.T) {
-	c, err := Build(NIXL)
-	if err != nil {
-		t.Fatal(err)
+// TestNIXL_PreparePrefillECParams_UnusableDescriptors verifies that empty hash
+// keys and descriptors that are not non-empty map[string]any values are dropped
+// rather than forwarded, while valid descriptors are preserved.
+func TestNIXL_PreparePrefillECParams_UnusableDescriptors(t *testing.T) {
+	tests := []struct {
+		name       string
+		encResp    map[string]any
+		wantParams map[string]any
+	}{
+		{
+			name:       "nil descriptor",
+			encResp:    map[string]any{"bad": nil},
+			wantParams: map[string]any{},
+		},
+		{
+			name:       "empty map descriptor",
+			encResp:    map[string]any{"bad": map[string]any{}},
+			wantParams: map[string]any{},
+		},
+		{
+			name:       "string descriptor",
+			encResp:    map[string]any{"bad": "garbage"},
+			wantParams: map[string]any{},
+		},
+		{
+			name:       "number descriptor",
+			encResp:    map[string]any{"bad": 123},
+			wantParams: map[string]any{},
+		},
+		{
+			name:       "empty array descriptor",
+			encResp:    map[string]any{"bad": []any{}},
+			wantParams: map[string]any{},
+		},
+		{
+			name:       "empty hash key",
+			encResp:    map[string]any{"": map[string]any{"peer_port": 5501}},
+			wantParams: map[string]any{},
+		},
+		{
+			name: "unusable descriptors dropped while valid descriptor preserved",
+			encResp: map[string]any{
+				"bad-nil":   nil,
+				"bad-empty": map[string]any{},
+				"bad-str":   "garbage",
+				"bad-num":   42,
+				"bad-arr":   []any{},
+				"":          map[string]any{"peer_port": 5501},
+				"valid":     map[string]any{"peer_port": 5502, "size_bytes": 1024},
+			},
+			wantParams: map[string]any{
+				"valid": map[string]any{"peer_port": 5502, "size_bytes": 1024},
+			},
+		},
+		{
+			name: "valid descriptor with unusual nested values preserved",
+			encResp: map[string]any{
+				"valid-unusual": map[string]any{
+					"nested_slice": []any{"a", 1},
+					"nested_nil":   nil,
+					"nested_empty": map[string]any{},
+				},
+			},
+			wantParams: map[string]any{
+				"valid-unusual": map[string]any{
+					"nested_slice": []any{"a", 1},
+					"nested_nil":   nil,
+					"nested_empty": map[string]any{},
+				},
+			},
+		},
 	}
-	reqCtx := &pipeline.RequestContext{}
-	c.MergeEncodeResponse(context.Background(), reqCtx, map[string]any{"hash-x": "opaque-scalar"})
 
-	got, err := c.PreparePrefillECParams(context.Background(), reqCtx)
-	if err != nil {
-		t.Fatalf("PreparePrefillECParams: %v", err)
-	}
-	if got["hash-x"] != "opaque-scalar" {
-		t.Errorf("non-map descriptor should pass through unchanged, got %v", got["hash-x"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Build(NIXL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{}
+			c.MergeEncodeResponse(context.Background(), reqCtx, tt.encResp)
+
+			got, err := c.PreparePrefillECParams(context.Background(), reqCtx)
+			if err != nil {
+				t.Fatalf("PreparePrefillECParams: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.wantParams) {
+				t.Errorf("got %v, want %v", got, tt.wantParams)
+			}
+		})
 	}
 }
 

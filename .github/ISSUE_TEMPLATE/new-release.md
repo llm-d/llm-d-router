@@ -46,6 +46,13 @@ This document defines the process for releasing llm-d-router.
    ```shell
    export LATENCY_PREDICTOR_TAG=v0.8.0-rc.1
    ```
+
+1. Set the llm-d-async release the coordinator's async-broker step should embed (refer to the [llm-d-async releases]; normally the release the llm-d guides pin for this llm-d version):
+
+   ```shell
+   export LLM_D_ASYNC_TAG=v0.11.0
+   ```
+
 1. If needed, clone the llm-d-router [repo].
 
    ```shell
@@ -82,6 +89,15 @@ This document defines the process for releasing llm-d-router.
     git commit -a -s -m "release: set LATENCY_PREDICTOR_TAG to ${LATENCY_PREDICTOR_TAG}"
     ```
 
+1. Check that `go.mod` pins the `github.com/llm-d/llm-d-async/api` and `/producer` modules at `${LLM_D_ASYNC_TAG}`. If not, bump them, read the release's `RELEASE-NOTES.md` section in llm-d-async for entries marked Breaking (the async-broker step builds `api.RequestMessage` and calls the producer directly), and run the coordinator tests before committing:
+
+    ```shell
+    go get github.com/llm-d/llm-d-async/api@${LLM_D_ASYNC_TAG} github.com/llm-d/llm-d-async/producer@${LLM_D_ASYNC_TAG}
+    go mod tidy
+    go test ./pkg/coordinator/...
+    git commit -a -s -m "release: bump llm-d-async api and producer to ${LLM_D_ASYNC_TAG}"
+    ```
+
 1. Push your release branch to the llm-d-router remote.
 
     ```shell
@@ -103,16 +119,22 @@ This document defines the process for releasing llm-d-router.
      ```
 
 1. Pushing the tag triggers CI action to build and publish the EPP image (`ghcr.io/llm-d/llm-d-router-endpoint-picker`) and sidecar image (`ghcr.io/llm-d/llm-d-router-disagg-sidecar`) to the [ghcr registry].
+   Official `v*` tags receive `:latest`.
+   Release-candidate tags (`-rc`, for example `v0.9.0-rc.1`) do not.
 1. Verify the [CI release workflow] completed successfully before proceeding.
 1. Test the steps in the tagged quickstart guide after the PR merges.
 
 ### Create the release!
 
+Publishing the GitHub release sets the title, notes, and GitHub's pre-release listing.
+It does not start the image pipeline or change image tags.
+The tag push already built and published the images and uploaded the artifacts.
+
 1. Create a [new release]:
     1. Choose the tag that you created for the release.
     1. Use the tag as the release title, e.g. `v0.1.0`.
     1. Click "Generate release notes" to auto-populate the list of PRs and contributors.
-    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` (or the unreleased fragments in `release-notes.d/unreleased/`) with the following prompt:
+    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT). Provide the newly compiled release notes block from `RELEASE-NOTES.md` with the following prompt:
 
        ```text
        Please summarize these release notes into three clear sections:
@@ -122,7 +144,8 @@ This document defines the process for releasing llm-d-router.
        ```
 
        Review the generated content, edit it if necessary to ensure accuracy, and then copy and prepend this summary at the very top of the release description box on GitHub.
-    1. If this is a release candidate, select the "This is a pre-release" checkbox.
+    1. If this is a release candidate, select the "This is a pre-release" checkbox so GitHub lists the release as a pre-release.
+       This does not affect image tags.
 1. If you find any bugs in this process, create an [issue].
 
 ## Announce the Release
@@ -164,3 +187,4 @@ Use the following steps to announce the release.
 [issue]: https://github.com/llm-d/llm-d-router/issues/new/choose
 [CI release workflow]: https://github.com/llm-d/llm-d-router/actions/workflows/ci-release.yaml
 [latency predictor releases]: https://github.com/orgs/llm-d/packages?repo_name=llm-d-latency-predictor
+[llm-d-async releases]: https://github.com/llm-d/llm-d-async/releases

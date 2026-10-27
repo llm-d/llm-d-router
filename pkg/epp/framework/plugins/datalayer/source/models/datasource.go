@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package models
 
 import (
@@ -6,6 +22,7 @@ import (
 	"io"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
@@ -15,7 +32,6 @@ const ModelsDataSourceType = "models-data-source"
 // Default values for the models data source configuration.
 const (
 	defaultModelsScheme             = "http"
-	defaultModelsPath               = "/v1/models"
 	defaultModelsInsecureSkipVerify = true
 )
 
@@ -40,11 +56,16 @@ type modelsDatasourceParams struct {
 }
 
 // NewHTTPModelsDataSource constructs a ModelsDataSource with the given scheme and path.
-// InsecureSkipVerify defaults to true (matching the factory default).
-// Use this function directly in tests to bypass JSON parameter marshaling.
+// InsecureSkipVerify defaults to true, matching the factory default.
 func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
-	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
+	return http.NewHTTPDataSource(scheme, path,
+		http.TLSOptions{SkipVerify: defaultModelsInsecureSkipVerify},
 		ModelsDataSourceType, name, parseModels)
+}
+
+// NewDefaultHTTPModelsDataSource constructs the default source used by models-responder.
+func NewDefaultHTTPModelsDataSource(name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
+	return NewHTTPModelsDataSource(defaultModelsScheme, attrmodels.OpenAIModelsPath, name)
 }
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
@@ -82,7 +103,7 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 func defaultDataSourceConfigParams() *modelsDatasourceParams {
 	return &modelsDatasourceParams{
 		Scheme:             defaultModelsScheme,
-		Path:               defaultModelsPath,
+		Path:               attrmodels.OpenAIModelsPath,
 		InsecureSkipVerify: defaultModelsInsecureSkipVerify,
 	}
 }

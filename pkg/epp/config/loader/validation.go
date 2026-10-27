@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +25,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configapi "github.com/llm-d/llm-d-router/apix/config/v1alpha1"
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // validatePlugins validates the plugins section of the configuration file.
-func validatePlugins(configuredPlugins []configapi.PluginSpec) error {
+func validatePlugins(configuredPlugins []configapiv1.PluginSpec) error {
 	pluginNames := sets.New[string]()
 	for _, spec := range configuredPlugins {
 		if spec.Type == "" {
@@ -50,7 +52,7 @@ func validatePlugins(configuredPlugins []configapi.PluginSpec) error {
 
 // validateConfig performs a deep validation of the configuration integrity.
 // It checks relationships between profiles, plugins, and feature gates.
-func validateConfig(cfg *configapi.EndpointPickerConfig) error {
+func validateConfig(cfg *configapiv1.EndpointPickerConfig) error {
 	if err := validateFeatureGates(cfg.FeatureGates); err != nil {
 		return fmt.Errorf("feature gate validation failed: %w", err)
 	}
@@ -63,10 +65,38 @@ func validateConfig(cfg *configapi.EndpointPickerConfig) error {
 	if err := validateParsers(cfg); err != nil {
 		return fmt.Errorf("parser validation failed: %w", err)
 	}
+	if err := validateMetrics(cfg); err != nil {
+		return fmt.Errorf("metrics validation failed: %w", err)
+	}
 	return nil
 }
 
-func validateParsers(cfg *configapi.EndpointPickerConfig) error {
+// validateMetrics validates the metrics section of the configuration file. A
+// nil ladder was left out of the file and keeps its built-in edges; a present
+// one is checked. The ladders are walked in a fixed order so a file with two
+// invalid ladders always names the same one.
+func validateMetrics(cfg *configapiv1.EndpointPickerConfig) error {
+	if cfg.Metrics == nil {
+		return nil
+	}
+	for _, ladder := range []struct {
+		field string
+		edges []float64
+	}{
+		{"requestTPOTBuckets", cfg.Metrics.RequestTPOTBuckets},
+		{"requestITLBuckets", cfg.Metrics.RequestITLBuckets},
+	} {
+		if ladder.edges == nil {
+			continue
+		}
+		if err := eppmetrics.ValidateHistogramBuckets(ladder.edges); err != nil {
+			return fmt.Errorf("metrics.%s: %w", ladder.field, err)
+		}
+	}
+	return nil
+}
+
+func validateParsers(cfg *configapiv1.EndpointPickerConfig) error {
 	if cfg.RequestHandler == nil || len(cfg.RequestHandler.Parsers) == 0 {
 		return nil
 	}
@@ -85,7 +115,7 @@ func validateParsers(cfg *configapi.EndpointPickerConfig) error {
 	return nil
 }
 
-func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
+func validateSaturationDetector(cfg *configapiv1.EndpointPickerConfig) error {
 	if cfg.FlowControl == nil || cfg.FlowControl.SaturationDetector == nil {
 		return nil
 	}
@@ -105,7 +135,7 @@ func validateSaturationDetector(cfg *configapi.EndpointPickerConfig) error {
 	return nil
 }
 
-func validateSchedulingProfiles(cfg *configapi.EndpointPickerConfig) error {
+func validateSchedulingProfiles(cfg *configapiv1.EndpointPickerConfig) error {
 	definedPlugins := sets.New[string]()
 	for _, p := range cfg.Plugins {
 		definedPlugins.Insert(p.Name)
@@ -135,7 +165,7 @@ func validateSchedulingProfiles(cfg *configapi.EndpointPickerConfig) error {
 	return nil
 }
 
-func validateFeatureGates(gates configapi.FeatureGates) error {
+func validateFeatureGates(gates configapiv1.FeatureGates) error {
 	if gates == nil {
 		return nil
 	}

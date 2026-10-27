@@ -1,5 +1,6 @@
 /*
 Copyright 2024 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +19,7 @@ package utils
 
 import (
 	"context"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,7 +31,8 @@ import (
 type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
-	metricsRecorder plugin.MetricsRecorder
+	metricsRecorder    plugin.MetricsRecorder
+	crossReplicaSyncer plugin.Plugin
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -43,6 +46,18 @@ func (h *testHandle) PodList() []types.NamespacedName {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
+}
+
+func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
+	return h.crossReplicaSyncer
+}
+
+func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
+	h.crossReplicaSyncer = syncer
+}
+
+func (h *testHandle) RefreshMetricsInterval() time.Duration {
+	return 0
 }
 
 type testHandlePlugins struct {

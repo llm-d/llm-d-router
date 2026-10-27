@@ -18,14 +18,121 @@ package steps
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+	"github.com/stretchr/testify/require"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
+
+// TestNewDecodeProxyRequest_ForwardsPeerTopology verifies that a non-empty
+// reqCtx.PeerTopology, captured by PrefillStep from the prefill response, is
+// set on the outgoing decode request's x-llm-d-peer-topology header.
+func TestNewDecodeProxyRequest_ForwardsPeerTopology(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+		PeerTopology: "host=node12,zone=us-east1-a",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got, want := req.Header.Get(reqcommon.PeerTopologyHeaderKey), "host=node12,zone=us-east1-a"; got != want {
+		t.Fatalf("x-llm-d-peer-topology header = %q, want %q", got, want)
+	}
+}
+
+// TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty verifies that no
+// x-llm-d-peer-topology header is set on the decode request when the prefill
+// response carried none (single-EPP-in-coordinator or no topology-stamp-handler).
+func TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-1",
+		OriginalPath: "/inference/v1/generate",
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got := req.Header.Get(reqcommon.PeerTopologyHeaderKey); got != "" {
+		t.Fatalf("expected no x-llm-d-peer-topology header, got %q", got)
+	}
+}
+
+// TestNewDecodeProxyRequest_PreferComesFromTheStepOnly verifies that a
+// client-supplied Prefer header is not forwarded on a decode-phase request,
+// while the conditional cache probe still sets its own.
+func TestNewDecodeProxyRequest_PreferComesFromTheStepOnly(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://example.invalid"})
+	reqCtx := &pipeline.RequestContext{
+		RequestID:       "req-1",
+		OriginalPath:    "/v1/chat/completions",
+		OriginalHeaders: http.Header{"Prefer": {"if-available"}},
+	}
+
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got := req.Header.Get("Prefer"); got != "" {
+		t.Fatalf("client-supplied Prefer reached the decode request: %q", got)
+	}
+
+	probe, err := newDecodeProxyRequest(context.Background(), logr.Discard(), ConditionalDecodeStepName, reqCtx, gwClient, map[string]any{}, map[string]string{"Prefer": "if-available"})
+	if err != nil {
+		t.Fatalf("newDecodeProxyRequest: %v", err)
+	}
+	if got := probe.Header.Get("Prefer"); got != "if-available" {
+		t.Fatalf("conditional probe Prefer = %q, want if-available", got)
+	}
+}
+
+// TestNewDecodeProxy_StripsPeerTopologyFromClientResponse verifies that
+// x-llm-d-peer-topology never reaches the client, even if a decode profile's
+// response carries it (e.g. topology-stamp-handler misconfigured on decode
+// rather than prefill). The header is meaningful only between the prefill and
+// decode legs; ModifyResponse must strip it before ReverseProxy copies
+// upstream response headers to the client.
+func TestNewDecodeProxy_StripsPeerTopologyFromClientResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(reqcommon.PeerTopologyHeaderKey, "host=node12,zone=us-east1-a")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	proxy, _ := newDecodeProxy(logr.Discard(), http.DefaultTransport, nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get(reqcommon.PeerTopologyHeaderKey); got != "" {
+		t.Fatalf("x-llm-d-peer-topology leaked to client response, got %q", got)
+	}
+}
 
 // TestNewDecodeProxy_MidStreamTruncationLogged drives the proxy against an
 // upstream that promises a large Content-Length, writes a few bytes, then drops
@@ -63,7 +170,7 @@ func TestNewDecodeProxy_MidStreamTruncationLogged(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	proxy := newDecodeProxy(logger, http.DefaultTransport, nil)
+	proxy, _ := newDecodeProxy(logger, http.DefaultTransport, nil)
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
 
 	mu.Lock()
@@ -74,4 +181,342 @@ func TestNewDecodeProxy_MidStreamTruncationLogged(t *testing.T) {
 		}
 	}
 	t.Fatalf("expected a partial-response error log, got %v", msgs)
+}
+
+// TestTimedRoundTripper_ExcludesStreamingBody drives the full decode proxy
+// against an upstream that writes headers, flushes, then delays before the
+// body. ServeHTTP wall-clock covers the body delay, but the wrapper's recorded
+// duration must not: that is what keeps upstream_request_duration_seconds
+// comparable to the non-streaming steps, which time only up to headers.
+func TestTimedRoundTripper_ExcludesStreamingBody(t *testing.T) {
+	const bodyDelay = 200 * time.Millisecond
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(bodyDelay)
+		_, _ = w.Write([]byte("done"))
+	}))
+	defer upstream.Close()
+
+	var recorded time.Duration
+	rt := &timedRoundTripper{
+		inner:  http.DefaultTransport,
+		record: func(d time.Duration) { recorded = d },
+	}
+	logger := funcr.New(func(_, _ string) {}, funcr.Options{})
+	proxy, _ := newDecodeProxy(logger, rt, nil)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, upstream.URL, nil)
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	proxy.ServeHTTP(rec, req)
+	total := time.Since(start)
+
+	require.GreaterOrEqual(t, total, bodyDelay, "ServeHTTP must cover the full body write")
+	require.Less(t, recorded, bodyDelay, "recorded must exclude body streaming; got %v", recorded)
+}
+
+func TestTimedRoundTripper_RecordsOnTransportError(t *testing.T) {
+	called := false
+	rt := &timedRoundTripper{
+		inner:  roundTripperFunc(func(_ *http.Request) (*http.Response, error) { return nil, http.ErrHandlerTimeout }),
+		record: func(_ time.Duration) { called = true },
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid/", nil)
+	require.NoError(t, err)
+	resp, err := rt.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.Error(t, err)
+	require.True(t, called, "record must fire on transport error to match gwClient.Post semantics")
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// logCaptureSink is a logr.LogSink that records every Info and Error call.
+// Tests use it to assert which log level a code path takes.
+type logCaptureSink struct {
+	infos  []capturedLog
+	errors []capturedLog
+}
+
+type capturedLog struct {
+	level int
+	msg   string
+	err   error
+}
+
+func (s *logCaptureSink) Init(_ logr.RuntimeInfo) {}
+func (s *logCaptureSink) Enabled(_ int) bool      { return true }
+func (s *logCaptureSink) Info(level int, msg string, _ ...any) {
+	s.infos = append(s.infos, capturedLog{level: level, msg: msg})
+}
+func (s *logCaptureSink) Error(err error, msg string, _ ...any) {
+	s.errors = append(s.errors, capturedLog{msg: msg, err: err})
+}
+func (s *logCaptureSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s *logCaptureSink) WithName(_ string) logr.LogSink   { return s }
+
+// backendTimeoutErr fakes net/http's errTimeout: a transport-level timeout
+// whose Is method matches context.DeadlineExceeded even though the client's
+// request context is not done. The ErrorHandler must not misclassify it as
+// a client cancellation.
+type backendTimeoutErr struct{}
+
+func (backendTimeoutErr) Error() string     { return "net/http: timeout awaiting response headers" }
+func (backendTimeoutErr) Is(err error) bool { return err == context.DeadlineExceeded }
+
+// writeRecorder reports whether the handler under test wrote any part of a
+// response, which httptest.ResponseRecorder alone cannot distinguish from its
+// default 200.
+type writeRecorder struct {
+	*httptest.ResponseRecorder
+	wrote bool
+}
+
+func (w *writeRecorder) WriteHeader(code int) {
+	w.wrote = true
+	w.ResponseRecorder.WriteHeader(code)
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseRecorder.Write(p)
+}
+
+// brokenPipeWriter fails every body write, as a connection the client has
+// closed does.
+type brokenPipeWriter struct{ header http.Header }
+
+func (w *brokenPipeWriter) Header() http.Header       { return w.header }
+func (w *brokenPipeWriter) WriteHeader(int)           {}
+func (w *brokenPipeWriter) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
+
+// With http.ServerContextKey in the context, ReverseProxy panics
+// http.ErrAbortHandler when the body copy fails, as under a real server.
+func TestServeDecode_BodyCopyFailure(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		clientGone bool
+		wantPanic  bool
+		wantStatus int // status on the UpstreamStreamedError; 0 means no error
+	}{
+		{name: "served stream, client gone", status: http.StatusOK, clientGone: true},
+		{name: "error stream, client gone", status: http.StatusInternalServerError, clientGone: true, wantStatus: http.StatusInternalServerError},
+		{name: "write failed, client present", status: http.StatusOK, wantPanic: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), http.ServerContextKey, &http.Server{}))
+			defer cancel()
+			transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				if tc.clientGone {
+					cancel()
+				}
+				return &http.Response{StatusCode: tc.status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("chunk")), Request: r}, nil
+			})
+			req := httptest.NewRequest(http.MethodPost, "http://gateway/v1/chat/completions", nil).WithContext(ctx)
+			w := &brokenPipeWriter{header: http.Header{}}
+
+			var out *decodeOutcome
+			run := func() { out = serveDecode(logr.Discard(), transport, w, req, coordmetrics.UpstreamDecode, nil) }
+			if tc.wantPanic {
+				require.PanicsWithValue(t, http.ErrAbortHandler, run)
+				return
+			}
+			run()
+			require.Equal(t, tc.status, out.Status)
+			err := out.streamedError(DecodeStepName)
+			if tc.wantStatus == 0 {
+				require.NoError(t, err)
+				return
+			}
+			var streamed *pipeline.UpstreamStreamedError
+			require.ErrorAs(t, err, &streamed)
+			require.Equal(t, tc.wantStatus, streamed.StatusCode)
+		})
+	}
+}
+
+func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
+	// Classification is driven by the request context's state, not by the
+	// error argument: a request whose context is done is a client-side
+	// lifecycle event (disconnect or client deadline), anything else is a
+	// backend fault. A done context writes nothing and records the context
+	// error on the outcome. A transport-level timeout whose Is method
+	// matches context.DeadlineExceeded (net/http's errTimeout, fired by
+	// ResponseHeaderTimeout) must stay in the error log. errCacheMiss stays
+	// swallowed (no log, no response) so the miss can fall through to the
+	// rest of the pipeline.
+	pastDeadline := time.Now().Add(-time.Second)
+
+	cases := []struct {
+		name   string
+		reqCtx func() (context.Context, context.CancelFunc)
+		err    error
+		// wantStatus 0 means no response header is written.
+		wantStatus    int
+		wantErrorLogs int
+	}{
+		{
+			name: "client cancelled",
+			reqCtx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			err:           errors.New("connection reset by peer"),
+			wantErrorLogs: 0,
+		},
+		{
+			name: "client deadline exceeded",
+			reqCtx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), pastDeadline)
+			},
+			err:           errors.New("connection reset by peer"),
+			wantErrorLogs: 0,
+		},
+		{
+			name: "backend response header timeout stays an error",
+			reqCtx: func() (context.Context, context.CancelFunc) {
+				return context.Background(), func() {}
+			},
+			err:           backendTimeoutErr{},
+			wantStatus:    http.StatusBadGateway,
+			wantErrorLogs: 1,
+		},
+		{
+			name: "transport failure",
+			reqCtx: func() (context.Context, context.CancelFunc) {
+				return context.Background(), func() {}
+			},
+			err:           errors.New("boom"),
+			wantStatus:    http.StatusBadGateway,
+			wantErrorLogs: 1,
+		},
+		{
+			name: "cache miss falls through",
+			reqCtx: func() (context.Context, context.CancelFunc) {
+				return context.Background(), func() {}
+			},
+			err:           errCacheMiss,
+			wantErrorLogs: 0,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &logCaptureSink{}
+			proxy, out := newDecodeProxy(logr.New(sink), http.DefaultTransport, nil)
+
+			ctx, cancel := tt.reqCtx()
+			defer cancel()
+			rec := &writeRecorder{ResponseRecorder: httptest.NewRecorder()}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+			proxy.ErrorHandler(rec, req, tt.err)
+
+			if tt.wantStatus == 0 {
+				require.False(t, rec.wrote, "no response header must be written")
+			} else {
+				require.True(t, rec.wrote)
+				require.Equal(t, tt.wantStatus, rec.Code)
+			}
+			require.Equal(t, ctx.Err(), out.Cancelled, "Cancelled must mirror the request context's error")
+			if got := len(sink.errors); got != tt.wantErrorLogs {
+				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
+			}
+		})
+	}
+}
+
+func TestDecodeOutcome_StreamedError(t *testing.T) {
+	transportErr := errors.New("connection refused")
+
+	tests := []struct {
+		name       string
+		outcome    decodeOutcome
+		step       string
+		wantStatus int
+		wantCause  error
+		// wantCancelled expects the context error itself, not an
+		// UpstreamStreamedError.
+		wantCancelled bool
+	}{
+		{name: "no response and no error", outcome: decodeOutcome{}, step: DecodeStepName},
+		{name: "200", outcome: decodeOutcome{Status: http.StatusOK}, step: DecodeStepName},
+		{name: "399, the last status below the error range", outcome: decodeOutcome{Status: 399}, step: DecodeStepName},
+		{
+			name:       "400, the first error status",
+			outcome:    decodeOutcome{Status: http.StatusBadRequest},
+			step:       DecodeStepName,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "500",
+			outcome:    decodeOutcome{Status: http.StatusInternalServerError},
+			step:       DecodeStepName,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "500 from the conditional decode step carries that step's name",
+			outcome:    decodeOutcome{Status: http.StatusInternalServerError},
+			step:       ConditionalDecodeStepName,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{name: "transport failure", outcome: decodeOutcome{TransportErr: transportErr}, step: DecodeStepName, wantCause: transportErr},
+		{
+			name:      "transport failure from the conditional decode step carries that step's name",
+			outcome:   decodeOutcome{TransportErr: transportErr},
+			step:      ConditionalDecodeStepName,
+			wantCause: transportErr,
+		},
+		{
+			name:      "transport failure takes precedence over an error status",
+			outcome:   decodeOutcome{Status: http.StatusBadGateway, TransportErr: transportErr},
+			step:      DecodeStepName,
+			wantCause: transportErr,
+		},
+		{
+			name:          "client cancellation returns the context error",
+			outcome:       decodeOutcome{Cancelled: context.Canceled},
+			step:          ConditionalDecodeStepName,
+			wantCancelled: true,
+		},
+		{
+			name:          "client cancellation takes precedence over a transport failure",
+			outcome:       decodeOutcome{Cancelled: context.Canceled, TransportErr: transportErr},
+			step:          DecodeStepName,
+			wantCancelled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.outcome.streamedError(tt.step)
+			if tt.wantCancelled {
+				require.ErrorIs(t, err, context.Canceled)
+				var streamed *pipeline.UpstreamStreamedError
+				require.False(t, errors.As(err, &streamed), "a cancellation is not an upstream error")
+				require.Contains(t, err.Error(), tt.step)
+				return
+			}
+			if tt.wantStatus == 0 && tt.wantCause == nil {
+				require.NoError(t, err)
+				return
+			}
+			var streamed *pipeline.UpstreamStreamedError
+			require.ErrorAs(t, err, &streamed)
+			require.Equal(t, tt.step, streamed.Step)
+			require.Equal(t, tt.wantStatus, streamed.StatusCode)
+			if tt.wantCause == nil {
+				require.NoError(t, streamed.Cause)
+			} else {
+				require.ErrorIs(t, streamed.Cause, tt.wantCause)
+			}
+		})
+	}
 }

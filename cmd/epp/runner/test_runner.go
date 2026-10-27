@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +39,7 @@ import (
 // opts.GRPCPort is ignored.
 func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.Options, mockDataSource fwkdl.DataSource, grpcListener net.Listener) (*Runner, ctrl.Manager, datastore.Datastore, error) {
 	runner := NewRunner()
+	runner.servingCtx, runner.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
 
 	if mockDataSource != nil {
 		mockType := mockDataSource.TypedName().Type
@@ -62,10 +64,12 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 		},
 	}
 
-	manager, ds, err := runner.setup(ctx, cfg, opts, managerOverrides)
+	manager, ds, err := runner.setup(ctx, runner.servingCtx, cfg, opts, managerOverrides)
 	if err != nil {
+		runner.stopServing()
 		return runner, manager, ds, err
 	}
+	context.AfterFunc(ctx, runner.stopServing)
 	runner.serverRunner.GrpcListener = grpcListener
 
 	// Production runs the ext_proc and health servers on a context that outlives
@@ -74,10 +78,12 @@ func NewTestRunnerSetup(ctx context.Context, cfg *rest.Config, opts *runserver.O
 	// with the manager and stop immediately when the test cancels its context,
 	// with no drain window.
 	if err := manager.Add(runner.serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc"))); err != nil {
+		runner.stopServing()
 		return runner, manager, ds, err
 	}
 	health := runnable.NoLeaderElection(runnable.GRPCServer("health", runner.healthGRPCServer, runner.healthGRPCPort))
 	if err := manager.Add(health); err != nil {
+		runner.stopServing()
 		return runner, manager, ds, err
 	}
 

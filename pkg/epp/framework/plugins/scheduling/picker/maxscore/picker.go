@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,10 +22,12 @@ limitations under the License.
 package maxscore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -85,21 +88,37 @@ func (p *MaxScorePicker) TypedName() fwkplugin.TypedName {
 
 // Pick selects the endpoint(s) with the highest score calculated during the scoring phase.
 func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
-		"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	logger := log.FromContext(ctx)
+	if logger.V(logutil.DEBUG).Enabled() {
+		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+	}
 
-	// Shuffle in-place - needed for random tie break when scores are equal
-	picker.ShuffleScoredEndpoints(scoredEndpoints)
-
-	slices.SortStableFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first
+	slices.SortFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first, ties by name
 		if i.Score > j.Score {
 			return -1
 		}
 		if i.Score < j.Score {
 			return 1
 		}
-		return 0
+		a, b := i.GetMetadata().GetNamespacedName(), j.GetMetadata().GetNamespacedName()
+		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.Name, b.Name))
 	})
+
+	// RotateScoredEndpoints provides deterministic round-robin tie-breaking
+	// for equal-score candidates. Rotating within each equal-score tier ensures
+	// traffic is distributed evenly without distortion from lower-scoring endpoints.
+	counter := picker.PickerRand.NextCounter(picker.PoolKey(scoredEndpoints))
+	for start := 0; start < len(scoredEndpoints) && start < p.maxNumOfEndpoints; {
+		end := start + 1
+		for end < len(scoredEndpoints) && scoredEndpoints[end].Score == scoredEndpoints[start].Score {
+			end++
+		}
+		if end-start > 1 {
+			picker.RotateScoredEndpoints(scoredEndpoints[start:end], counter)
+		}
+		start = end
+	}
 
 	// if we have enough endpoints to return keep only the "maxNumOfEndpoints" highest scored endpoints
 	if p.maxNumOfEndpoints < len(scoredEndpoints) {

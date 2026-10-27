@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -136,6 +136,26 @@ type SessionIDHeader struct {
 	mu          sync.Mutex
 	bindings    sync.Map // session identifier -> binding
 	pluginState *plugin.PluginState
+}
+
+// Consumes declares the request attributes the configured sources read. They
+// are optional: a source whose producer is absent leaves the identifier
+// unresolved and the next source, or the header, answers instead.
+//
+// The value witness is nil because attributeString accepts any value of string
+// kind, so no single concrete type describes the key.
+func (s *SessionIDHeader) Consumes() plugin.DataDependencies {
+	optional := map[plugin.DataKey]any{}
+	for _, source := range s.sources {
+		if source.Attribute == "" {
+			continue
+		}
+		optional[plugin.NewDataKey(source.Attribute, "").WithNonEmptyProducerName(source.Producer)] = nil
+	}
+	if len(optional) == 0 {
+		return plugin.DataDependencies{}
+	}
+	return plugin.DataDependencies{Optional: optional}
 }
 
 // boundPodPresence records, for one request, whether the session's bound pod

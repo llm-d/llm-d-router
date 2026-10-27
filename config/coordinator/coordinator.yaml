@@ -17,12 +17,65 @@
 # A compromised log store would expose them.
 log_level: 2
 
-# ---------------------------------------------------------------------------
-# server: HTTP listener for incoming OpenAI-compatible requests.
-# ---------------------------------------------------------------------------
+# tracing exports the coordinator's own OpenTelemetry spans: one per request,
+# one for the pipeline, one per step, and one per outbound gateway call.
+# Health and readiness probes are never traced. Default false.
+# Trace context is extracted from incoming requests and injected into gateway
+# calls either way, so leaving this off keeps client and EPP spans in one trace
+# and only omits the coordinator's spans from it.
+# The exporter, sampler, and collector endpoint come from the standard OTEL_*
+# environment variables. Set OTEL_EXPORTER_OTLP_ENDPOINT to the collector; the
+# default is localhost:4317. Without OTEL_TRACES_SAMPLER, 10% of root traces
+# are sampled (parentbased_traceidratio, 0.1).
+# The --tracing CLI flag overrides this field.
+# env: COORDINATOR_TRACING
+# tracing: false
+
+# -------------------------------------------------------------------------------
+# server: listener for incoming OpenAI-compatible requests. Serves TLS unless
+# secure_serving is false.
+# -------------------------------------------------------------------------------
 server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
+
+  # metrics_port is the port for the Prometheus /metrics endpoint. Default 9090.
+  # Non-positive disables the endpoint entirely. The --metrics-port CLI flag
+  # overrides this.
+  # env: COORDINATOR_SERVER_METRICS_PORT
+  # metrics_port: 9090
+
+  # metrics_cert_dir is the directory containing tls.crt and tls.key for the
+  # metrics endpoint. Empty serves metrics over HTTP. If set, missing or invalid
+  # files stop the coordinator. The metrics listener does not fall back to HTTP.
+  # The --metrics-cert-dir CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_METRICS_CERT_DIR
+  # metrics_cert_dir: ""
+
+  # secure_serving serves the inference listener over TLS. Default true.
+  # The --secure-serving CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_SECURE_SERVING
+  # secure_serving: true
+
+  # cert_path is the directory containing tls.crt and tls.key for the inference
+  # listener. Empty generates a self-signed certificate, which is only suitable
+  # for testing. Certificate changes are picked up without a restart.
+  # The --cert-path CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_CERT_PATH
+  # cert_path: ""
+
+  # tls_min_version is the minimum TLS version the inference listener accepts,
+  # for example VersionTLS12 or VersionTLS13. Empty uses VersionTLS12.
+  # The --tls-min-version CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_MIN_VERSION
+  # tls_min_version: ""
+
+  # tls_cipher_suites are the cipher suites the inference listener accepts, by
+  # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # The --tls-cipher-suites CLI flag overrides this field.
+  # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
+  # tls_cipher_suites: []
 
   # read_timeout caps how long the server waits for the full request body.
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
@@ -39,6 +92,8 @@ server:
   # max_request_body_size caps the request body in megabytes. The default is
   # sized for multimodal requests that inline images as data: URIs, which land
   # in the body verbatim and are not subject to replace-media-urls.max_download_size.
+  # Deployments that also accept inline audio or video need much more: base64
+  # inflates by 4/3, so a 100 MB video inlines as ~133 MB in the body.
   # A text-only deployment can set a much smaller value. Megabytes; default 64.
   # env: COORDINATOR_SERVER_MAX_REQUEST_BODY_SIZE
   # max_request_body_size: 64
@@ -83,8 +138,9 @@ pipeline:
   ec_connector: ec-shared-storage
 
   # use_openai_format selects the wire format for the encode and prefill steps.
-  #   true (default) - forward on the client's original OpenAI path
-  #                    (/v1/chat/completions, /v1/completions).
+  #   true (default) - forward on the client's original path
+  #                    (/v1/chat/completions, /v1/completions, /v1/responses,
+  #                    /v1/messages).
   #   false          - rewrite to the internal /inference/v1/generate
   #                    token-array (tokens-in) format.
   # false requires a render step in the pipeline (render produces the token
@@ -93,38 +149,205 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # Carries selected response headers from each upstream phase into every
+  # later phase. Only listed headers are forwarded. This allows EPP-stamped
+  # scheduling metadata to constrain later roles in a disaggregated pipeline.
+  # Client-supplied values for listed headers are discarded until an upstream
+  # phase returns a replacement value. When this setting is omitted, it
+  # defaults to x-llm-d-disagg-revision. Declaring the setting replaces that
+  # default; use an empty list to disable response-header forwarding.
+  # forward_response_headers:
+  #   - x-llm-d-disagg-revision
+  #   - x-disagg-slice
+
   steps:
     # -------------------------------------------------------------------
-    # replace-media-urls: first step. Downloads any http(s) image_url
-    # references, base64-inlines them as data: URIs, and seeds
-    # MultimodalEntries on the request context.
+    # async-broker: optional, and when enabled it must run first. Bridges
+    # the coordinator to the llm-d-async broker. A request that carries the
+    # mode header (default x-llm-d-async-mode: passthrough | enqueue | wait) opts
+    # into async serving: passthrough labels it (quota classification,
+    # objective and fairness headers) and lets the pipeline continue;
+    # enqueue answers 202 with the request id; wait holds the connection
+    # until the result lands or the wait cap expires. Without the mode
+    # header the step is a no-op. It also serves GET/DELETE
+    # /v1/requests/{id}.
+    # All params and their defaults are documented in
+    # pkg/coordinator/steps/asyncbroker/config.go.
+    # -------------------------------------------------------------------
+    # - type: async-broker
+    #   params:
+    #     # The Redis holding the async processor's queues. Required.
+    #     redis_url: "redis://redis:6379"
+    #     # Routes select the broker queue and tier per (model, tenant);
+    #     # first match wins, empty fields match anything.
+    #     routes:
+    #       - model: "my-model"
+    #         queue: "team-a-queue"
+    #         tier: "interactive"
+    #     # Objectives stamped on passthrough requests by tier, selected
+    #     # by quota classification (reserved vs overflow).
+    #     objectives:
+    #       interactive:
+    #         reserved: "interactive-reserved"
+    #         overflow: "interactive-overflow"
+    #     # Reserved concurrency per tenant; tenants without an entry are
+    #     # always classified reserved. Counters are shared with the AP's
+    #     # redis-quota gate.
+    #     quota:
+    #       limits:
+    #         team-a: 8
+    #     # wait_cap_seconds bounds held wait connections, ending the hold
+    #     # with the 202 response. Holds otherwise run to the request
+    #     # deadline.
+    #     # wait_cap_seconds: 55
+    #     # fetch_grace_seconds is the mailbox TTL applied after a delivered
+    #     # fetch. Zero deletes the result on delivery.
+    #     # fetch_grace_seconds: 60
+
+    # -------------------------------------------------------------------
+    # replace-media-urls: an optional step executed prior to request
+    # content processing. Downloads http(s) URLs from image_url, audio_url and
+    # video_url content parts (base64-inlining them as data: URIs), validates
+    # inline input_audio items, and seeds MultimodalEntries for every recognized
+    # media part. All modalities feed the encode step's fanout, so the encoder
+    # pod must accept audio/video content-part types.
     # -------------------------------------------------------------------
     - type: replace-media-urls
       params:
-        # download_timeout caps each individual image download.
+        # download_timeout caps each individual media download.
         download_timeout: 10s
 
         # max_concurrent_downloads bounds the errgroup that fans out
-        # downloads. Useful when a single request references many images.
+        # downloads. Useful when a single request references many media items.
         max_concurrent_downloads: 10
 
-        # max_multimodal_entries rejects requests with more than N image_url
-        # parts BEFORE any download happens. Cheapest admission gate.
-        # 0 (or omitted) = unlimited.
+        # max_multimodal_entries rejects requests with more than N media parts
+        # (image_url + audio_url + video_url + input_audio combined) BEFORE any
+        # download happens. Cheapest admission gate, and the only thing bounding
+        # how many bytes one request can pull into memory, so raise a
+        # per-modality cap below only together with this.
+        #
+        # 0 (or omitted) = unlimited, which lets a request body of a few KB name
+        # hundreds of URLs and turn each one into a download.
         # max_multimodal_entries: 8
 
-        # max_download_size caps the megabytes read per image download. A response
+        # max_download_size caps the megabytes read per media download. A response
         # whose Content-Length or body exceeds the cap is rejected as a client
-        # error (4xx). Bounds peak memory together with the two limits above:
-        # roughly max_concurrent_downloads x max_download_size x ~2.3 MB.
-        # data: URIs do not hit the network and are unaffected. Default 10 MB.
+        # error (4xx). This is the global default; each modality below may
+        # override it. Default 10 MB.
+        #
+        # Peak memory is per REQUEST, not per concurrent download: every payload
+        # is retained until the step returns, and max_concurrent_downloads
+        # throttles how fast bytes arrive, not how many are held. Base64 inflates
+        # by 4/3, so this step holds (media parts) x (that modality's cap) x 4/3,
+        # plus up to max_concurrent_downloads x cap x 7/3 for in-flight downloads
+        # holding the raw bytes and their encoded copy at once. That is only a
+        # floor for the pod: the payloads stay on the request body, and render,
+        # prefill, decode and each concurrent encode sub-request serialize their
+        # own copy. So 8 parts x 10 MB is ~107 MB here, while 8 parts at
+        # max_video_download_size: 200 is ~2.1 GB here and multiples of that
+        # across the pipeline.
+        #
+        # What each cap covers differs by modality:
+        #
+        #   image  http(s) downloads only; an image data: URI is bounded by
+        #          server.max_request_body_size instead, unless
+        #          max_image_download_size is set.
+        #   audio  http(s) downloads, audio_url data: URIs, and input_audio
+        #          inline payloads.
+        #   video  http(s) downloads and video_url data: URIs.
+        #
+        # Inline payloads are bounded on base64 length, before any decode, so an
+        # oversized item is rejected without being allocated. For those,
+        # server.max_request_body_size usually binds lower: its 64 MB default
+        # stops a raw payload at 48 MB whatever these caps say, so raising a cap
+        # for inline media means raising it to the encoded size too (60 MB of
+        # audio needs 80 MB of body; 200 MB of video needs 267 MB).
         # max_download_size: 10
+
+        # max_image_download_size overrides max_download_size for image_url
+        # items. Same units (MB), same overflow validation. Setting it also
+        # bounds image data: URIs, which the global max_download_size never does;
+        # leaving it unset is what keeps a config that sets only
+        # max_download_size accepting the bodies it accepts today.
+        # max_image_download_size: 10
+
+        # max_audio_download_size overrides max_download_size for audio_url
+        # items. Audio codec decoders historically carry more CVEs than image
+        # decoders, so keep this tight until the audio decode path has had an
+        # end-to-end security review. Inline audio also needs
+        # server.max_request_body_size raised; see max_download_size.
+        # max_audio_download_size: 60
+
+        # max_video_download_size overrides max_download_size for video_url
+        # items. Videos routinely need 100+ MB per clip, so leave it commented
+        # out only if the deployment does not accept video. The codec-CVE caveat
+        # on max_audio_download_size applies here too.
+        # max_video_download_size: 200
+
+        # allowed_{image,audio,video}_content_types below each REPLACE the
+        # built-in allowlist for that modality when set to a non-empty list; an
+        # empty list accepts any content type, matching allowed_domains's
+        # "empty means unrestricted" convention.
+        #
+        # Write the key with a value or leave it out entirely. A bare key is a
+        # null value, not an empty list (the shape a template renders from an
+        # unset variable), and so is an ENTRY naming no type -- empty,
+        # whitespace, or only MIME parameters. Both are refused at startup:
+        # either would otherwise reject every request, the opposite of the empty
+        # list above.
+
+        # allowed_image_content_types overrides the built-in image MIME
+        # allowlist. A non-empty list accepts ONLY these types, for image_url
+        # data URIs AND for the Content-Type an http(s) image_url origin
+        # returns; an empty list accepts any type.
+        #
+        # Leaving it unset differs from listing the defaults: the built-in
+        # default is enforced on data URIs only, since plenty of origins serve a
+        # valid image unlabeled, while setting the param reads as a deliberate
+        # lockdown and covers both paths.
+        # Default: image/jpeg, image/png, image/gif, image/webp.
+        # allowed_image_content_types:
+        #   - image/jpeg
+        #   - image/png
+
+        # allowed_audio_content_types overrides the built-in audio MIME
+        # allowlist. Applies to audio_url data URIs, to the Content-Type an
+        # http(s) audio_url origin returns, and to input_audio parts. Unlike
+        # image, the download path is checked whether or not this param is set.
+        #
+        # While unset, an unlabeled download is accepted: S3, GCS and presigned
+        # URLs serve every object as application/octet-stream unless its type was
+        # set at upload, and refusing those buys nothing against an origin that
+        # is lying. What the check still refuses is an origin that honestly
+        # returns something else, such as an HTML error page. Setting the param
+        # is read literally, so add application/octet-stream to keep taking
+        # unlabeled origins, or set an empty list to accept anything.
+        # Default: audio/wav, audio/x-wav, audio/mpeg, audio/mp3, audio/flac,
+        # audio/x-flac, audio/ogg, audio/opus, audio/webm.
+        #
+        # An input_audio part names a format, checked against one canonical MIME
+        # per format (audioFormatMIME in
+        # pkg/coordinator/steps/replace_media_urls.go), so a list omitting that
+        # MIME rejects the format: audio/mp3 alone does not admit "mp3",
+        # audio/mpeg does. The aliases (audio/x-wav, audio/mp3, audio/x-flac)
+        # only ever match a data URI or a download's Content-Type.
+        # allowed_audio_content_types:
+        #   - audio/wav
+        #   - audio/mpeg
+
+        # allowed_video_content_types overrides the built-in video MIME
+        # allowlist. Applies to video_url data URIs and to the Content-Type an
+        # http(s) video_url origin returns, on the same terms as audio above.
+        # Default: video/mp4, video/webm, video/quicktime, video/mpeg, video/ogg.
+        # allowed_video_content_types:
+        #   - video/mp4
 
         # allow_private_networks permits downloads whose resolved IP falls in
         # an RFC1918 private range (10/8, 172.16/12, 192.168/16). Loopback,
         # link-local (including the 169.254.169.254 cloud metadata endpoint),
         # CGNAT, and unique-local addresses stay blocked regardless. Enable
-        # only when image origins are inside the cluster network.
+        # only when media origins are inside the cluster network.
         # Default false.
         # allow_private_networks: false
 
@@ -134,6 +357,10 @@ pipeline:
         # this list is still subject to the IP blocks, so listing "localhost"
         # or an internal hostname does NOT make it reachable unless the
         # resolved IP is also permitted (see allow_private_networks).
+        #
+        # An empty entry is refused at startup, as for the content-type
+        # allowlists above: the list would be non-empty and match no host, so
+        # every download would be refused by a line written to permit one.
         # allowed_domains:
         #   - images.example.com
 
@@ -160,26 +387,25 @@ pipeline:
 
         # max_total_tokens rejects requests whose tokenized prompt exceeds
         # the limit. Counts both text and image-placeholder tokens. Enforced
-        # in chat-completions, completions string, and completions
-        # token-array paths. 0 (or omitted) = unlimited.
+        # in the chat-completions, responses, messages, completions string,
+        # and completions token-array paths. 0 (or omitted) = unlimited.
         # max_total_tokens: 32768
 
         # max_total_placeholder_tokens rejects requests whose summed image
         # placeholder length exceeds the limit. Only meaningful for
-        # multimodal chat-completions. 0 (or omitted) = unlimited.
+        # multimodal chat-completions, responses, and messages requests.
+        # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 
     # -------------------------------------------------------------------
-    # conditional-decode: optional shortcut. When the request has no
-    # multimodal entries, runs decode directly and skips encode/prefill
-    # (saves a round-trip for text-only chats). Uncomment to enable.
+    # conditional-decode: optional shortcut for text-only chats. When
+    # the request has no multimodal entries, the coordinator probes the
+    # decode worker first. If the worker has the prompt cached, it
+    # answers inline and encode/prefill are skipped. If not, the worker
+    # returns HTTP 412 and the pipeline continues through encode/prefill/
+    # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
-    #   params:
-    #     # use_openai_format mirrors gateway.use_openai_format but lets the
-    #     # step override per-pipeline if you want a different wire format
-    #     # for the text-only fast path.
-    #     use_openai_format: true
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -211,7 +437,10 @@ pipeline:
     # -------------------------------------------------------------------
     - type: prefill
       # params:
-      #   use_openai_format: true   # see notes above
+      #   use_openai_format mirrors gateway.use_openai_format but lets the
+      #   step override per-pipeline if you want a different wire format
+      #   for the text-only fast path.
+      #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
 
@@ -220,5 +449,4 @@ pipeline:
     # -------------------------------------------------------------------
     - type: decode
       # params:
-      #   use_openai_format: true   # see notes above
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector

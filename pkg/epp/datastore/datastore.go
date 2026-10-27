@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -34,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -56,11 +59,6 @@ const (
 	// as active for inference traffic. The value should be a comma-separated list of port numbers.
 	// Example: "8000,8001,8002"
 	activePortsAnnotation = "llm-d.ai/active-ports"
-
-	// legacyGAIEActivePortsAnnotation is the legacy GAIE active ports annotation key, kept for backward compatibility.
-	//
-	// Deprecated: use activePortsAnnotation instead; this may be removed in a future release.
-	legacyGAIEActivePortsAnnotation = "inference.networking.k8s.io/active-ports"
 )
 
 // The datastore is a local cache of relevant data for the given InferencePool (currently all pulled from k8s-api)
@@ -76,10 +74,12 @@ type Datastore interface {
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
 
 	// InferenceObjective operations
-	ObjectiveSet(infObjective *v1alpha2.InferenceObjective)
-	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
+	ObjectiveSet(infObjective *apixv1.InferenceObjective)
+	// ObjectiveGet and ObjectiveGetAll return the stored objectives, which are
+	// shared with concurrent readers and must not be modified.
+	ObjectiveGet(objectiveName string) *apixv1.InferenceObjective
 	ObjectiveDelete(namespacedName types.NamespacedName)
-	ObjectiveGetAll() []*v1alpha2.InferenceObjective
+	ObjectiveGetAll() []*apixv1.InferenceObjective
 
 	// InferenceModelRewrite operations
 	ModelRewriteSet(infModelRewrite *v1alpha2.InferenceModelRewrite)
@@ -119,7 +119,7 @@ func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory
 		parentCtx:     parentCtx,
 		pool:          nil,
 		mu:            sync.RWMutex{},
-		objectives:    make(map[string]*v1alpha2.InferenceObjective),
+		objectives:    make(map[string]*apixv1.InferenceObjective),
 		modelRewrites: newModelRewriteStore(),
 		pods:          &sync.Map{},
 		epf:           epFactory,
@@ -133,12 +133,20 @@ type datastore struct {
 	mu   sync.RWMutex
 	pool *datalayer.EndpointPool
 	// key: InferenceObjective name, value: *InferenceObjective
-	objectives map[string]*v1alpha2.InferenceObjective
+	objectives map[string]*apixv1.InferenceObjective
 	// modelRewrites store for InferenceModelRewrite objects.
 	modelRewrites *modelRewriteStore
 	// key: types.NamespacedName, value: fwkdl.Endpoint
 	pods *sync.Map
 	epf  datalayer.EndpointFactory
+	// podsVersion is bumped on every pods mutation. PodList compares it against
+	// snapshotVersion to decide whether podsSnapshot must be rebuilt, so concurrent
+	// readers between mutations share one rebuild instead of each re-ranging pods.
+	podsVersion atomic.Uint64
+	// snapshotMu guards podsSnapshot and snapshotVersion.
+	snapshotMu      sync.RWMutex
+	snapshotVersion uint64
+	podsSnapshot    []fwkdl.Endpoint
 	// needsResync forces the next PoolSet to run podResyncAll even when the pool is unchanged.
 	// PoolSet stores the pool before resyncing, so without this flag a PoolSet retried after a
 	// resync failure would compare the incoming pool against the already-stored identical pool
@@ -155,7 +163,7 @@ func (ds *datastore) Clear() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.pool = nil
-	ds.objectives = make(map[string]*v1alpha2.InferenceObjective)
+	ds.objectives = make(map[string]*apixv1.InferenceObjective)
 	ds.modelRewrites = newModelRewriteStore()
 	// stop all pods go routines before clearing the pods map.
 	ds.pods.Range(func(_, v any) bool {
@@ -163,6 +171,7 @@ func (ds *datastore) Clear() {
 		return true
 	})
 	ds.pods.Clear()
+	ds.podsVersion.Add(1)
 }
 
 // /// Pool APIs ///
@@ -226,13 +235,13 @@ func (ds *datastore) PoolLabelsMatch(podLabels map[string]string) bool {
 }
 
 // /// InferenceObjective APIs ///
-func (ds *datastore) ObjectiveSet(infObjective *v1alpha2.InferenceObjective) {
+func (ds *datastore) ObjectiveSet(infObjective *apixv1.InferenceObjective) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.objectives[infObjective.Name] = infObjective
 }
 
-func (ds *datastore) ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective {
+func (ds *datastore) ObjectiveGet(objectiveName string) *apixv1.InferenceObjective {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	return ds.objectives[objectiveName]
@@ -244,10 +253,10 @@ func (ds *datastore) ObjectiveDelete(namespacedName types.NamespacedName) {
 	delete(ds.objectives, namespacedName.Name)
 }
 
-func (ds *datastore) ObjectiveGetAll() []*v1alpha2.InferenceObjective {
+func (ds *datastore) ObjectiveGetAll() []*apixv1.InferenceObjective {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
-	res := make([]*v1alpha2.InferenceObjective, 0, len(ds.objectives))
+	res := make([]*apixv1.InferenceObjective, 0, len(ds.objectives))
 	for _, v := range ds.objectives {
 		res = append(res, v)
 	}
@@ -285,17 +294,43 @@ func (ds *datastore) ModelRewriteGetAll() []*v1alpha2.InferenceModelRewrite {
 // TODO: add a flag for callers to specify the staleness threshold for metrics.
 // ref: https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/1046#discussion_r2246351694
 func (ds *datastore) PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint {
-	res := []fwkdl.Endpoint{}
-
-	ds.pods.Range(func(k, v any) bool {
-		ep := v.(fwkdl.Endpoint)
+	snapshot := ds.podsSnapshotCurrent()
+	res := make([]fwkdl.Endpoint, 0, len(snapshot))
+	for _, ep := range snapshot {
 		if predicate(ep) {
 			res = append(res, ep)
 		}
+	}
+	return res
+}
+
+// podsSnapshotCurrent returns a slice of all tracked endpoints, rebuilding it from
+// ds.pods only when a mutation has happened since the last rebuild. The returned
+// slice is shared with concurrent callers and must not be modified.
+func (ds *datastore) podsSnapshotCurrent() []fwkdl.Endpoint {
+	ds.snapshotMu.RLock()
+	if ds.snapshotVersion == ds.podsVersion.Load() {
+		snapshot := ds.podsSnapshot
+		ds.snapshotMu.RUnlock()
+		return snapshot
+	}
+	ds.snapshotMu.RUnlock()
+
+	ds.snapshotMu.Lock()
+	defer ds.snapshotMu.Unlock()
+	version := ds.podsVersion.Load()
+	if ds.snapshotVersion == version {
+		return ds.podsSnapshot
+	}
+
+	snapshot := []fwkdl.Endpoint{}
+	ds.pods.Range(func(_, v any) bool {
+		snapshot = append(snapshot, v.(fwkdl.Endpoint))
 		return true
 	})
-
-	return res
+	ds.podsSnapshot = snapshot
+	ds.snapshotVersion = version
+	return snapshot
 }
 
 func (ds *datastore) PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod) error {
@@ -384,6 +419,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		namespacedName := createEndpointNamespacedName(pod, idx)
 		if ep, ok := ds.pods.Load(namespacedName); ok {
 			ds.pods.Delete(namespacedName)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
 		}
 	}
@@ -396,6 +432,7 @@ func (ds *datastore) PodDelete(podName string) {
 		ep := v.(fwkdl.Endpoint)
 		if ep.GetMetadata().Name == podName {
 			ds.pods.Delete(k)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep)
 		}
 		return true
@@ -410,6 +447,7 @@ func (ds *datastore) EndpointUpsert(ctx context.Context, meta *fwkdl.EndpointMet
 
 func (ds *datastore) EndpointDelete(id types.NamespacedName) {
 	if v, ok := ds.pods.LoadAndDelete(id); ok {
+		ds.podsVersion.Add(1)
 		ds.epf.ReleaseEndpoint(v.(fwkdl.Endpoint))
 	}
 }
@@ -445,6 +483,7 @@ func (ds *datastore) upsertEndpoint(ctx context.Context, meta *fwkdl.EndpointMet
 			return false, fmt.Errorf("endpoint %s: %w", meta.ID, errRegistrationDropped)
 		}
 		ds.pods.Store(meta.ID, ep)
+		ds.podsVersion.Add(1)
 		return true, nil
 	}
 }
@@ -484,6 +523,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 		if !activeEndpoints.Has(endpointName) {
 			logger.V(logutil.VERBOSE).Info("Removing endpoint", "endpoint", endpointName)
 			ds.pods.Delete(k)
+			ds.podsVersion.Add(1)
 			ds.epf.ReleaseEndpoint(ep)
 		}
 		return true
@@ -498,10 +538,7 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 	annotations := pod.GetAnnotations()
 	portsAnnotation, ok := annotations[activePortsAnnotation]
 	if !ok {
-		portsAnnotation, ok = annotations[legacyGAIEActivePortsAnnotation]
-		if !ok {
-			return allPorts
-		}
+		return allPorts
 	}
 
 	activePorts := sets.New[int]()

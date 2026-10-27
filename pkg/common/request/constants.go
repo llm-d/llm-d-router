@@ -18,13 +18,55 @@ package request
 
 const (
 	RequestIDHeaderKey = "x-request-id"
+	// EPPProfileHeaderKey names the scheduling profile the EPP must run for a
+	// request. The coordinator sets it on every phase call, Envoy routes on it,
+	// and the header-profile-handler reads it.
+	EPPProfileHeaderKey = "x-llm-d-epp-profile"
+	// DisaggregatedRevisionHeaderKey carries the selected rollout revision
+	// between phases of a disaggregated request.
+	DisaggregatedRevisionHeaderKey = "x-llm-d-disagg-revision"
+	// RevisionDecisionIDHeaderKey identifies requests that belong to the same
+	// rollout decision. This is needed only for roles such as encode that create
+	// several parallel subrequests from one user request (for example, one per
+	// image). The coordinator must give every subrequest the same value so they
+	// use the same revision.
+	RevisionDecisionIDHeaderKey = "x-llm-d-revision-decision-id"
+	// PeerTopologyHeaderKey carries the prefill endpoint's encoded topology
+	// from the prefill EPP's response, through the coordinator, to the decode
+	// EPP's request, for topology-affinity-filter and topology-affinity-scorer
+	// running in coordinator deployments.
+	PeerTopologyHeaderKey = "x-llm-d-peer-topology"
+
+	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
+	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
+	// system.
+	DefaultFairnessID = "default-flow"
+
+	// HeaderContentType names the HTTP header that carries the media type of a body.
+	HeaderContentType = "content-type"
+	// ContentTypeJSON is the media type of JSON bodies.
+	ContentTypeJSON = "application/json"
+	// HeaderContentTypeOptions names the HTTP header that controls MIME sniffing of a body.
+	HeaderContentTypeOptions = "x-content-type-options"
+	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
+	ContentTypeOptionsNoSniff = "nosniff"
+	// PseudoHeaderStatus names the pseudo-header Envoy reports a response's
+	// status in. HeaderStatus is the bare name, which the EPP also accepts.
+	PseudoHeaderStatus = ":status"
+	HeaderStatus       = "status"
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldMaxTokens            = "max_tokens"
+	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldStream               = "stream"
+	FieldStreamOptions        = "stream_options"
+	FieldEcho                 = "echo"
+	FieldTools                = "tools"
+	FieldToolChoice           = "tool_choice"
 	FieldSamplingParams       = "sampling_params"
-	FieldExtraArgs            = "extra_args"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -34,4 +76,104 @@ const (
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
+	FieldPreviousResponseID   = "previous_response_id"
+	FieldConversation         = "conversation"
+	FieldBackground           = "background"
+	FieldInput                = "input"
+	FieldInstructions         = "instructions"
+	FieldContent              = "content"
+	FieldFileID               = "file_id"
+	FieldMessages             = "messages"
+	FieldModel                = "model"
+	FieldRole                 = "role"
+	FieldType                 = "type"
+	FieldURL                  = "url"
+	FieldImageURL             = "image_url"
+	FieldStore                = "store"
+	FieldMMProcessorKwargs    = "mm_processor_kwargs"
+	FieldMediaIOKwargs        = "media_io_kwargs"
+	FieldOutput               = "output"
+
+	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
+	// The prefill pod echoes them back so the decode pod can open the bootstrap
+	// channel to it.
+	FieldBootstrapHost = "bootstrap_host"
+	FieldBootstrapPort = "bootstrap_port"
+	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Usage fields in a response body. Chat Completions and Completions report
+// prompt_tokens and completion_tokens with details under prompt_tokens_details;
+// Responses and Conversations report input_tokens and output_tokens with details
+// under input_tokens_details. total_tokens is named the same in every API.
+const (
+	FieldUsage               = "usage"
+	FieldPromptTokens        = "prompt_tokens"
+	FieldCompletionTokens    = "completion_tokens"
+	FieldInputTokens         = "input_tokens"
+	FieldOutputTokens        = "output_tokens"
+	FieldTotalTokens         = "total_tokens"
+	FieldPromptTokensDetails = "prompt_tokens_details" //#nosec G101 -- JSON field name, not a credential
+	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
+	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
+)
+
+// Server-sent event framing for streamed responses. SGLang sends the bare
+// marker as an event payload, the OpenAI APIs send the framed line.
+const (
+	SSEDataPrefix = "data: "
+	SSEDoneMarker = "[DONE]"
+	SSEDone       = SSEDataPrefix + SSEDoneMarker
+)
+
+// ToolChoiceNone is the tool_choice value that forbids the model from calling a tool.
+const ToolChoiceNone = "none"
+
+// Content part types, the values a content part's FieldType takes. A
+// chat-completions *_url part nests its URL and options under one object keyed
+// by the part type, so PartTypeImageURL and FieldImageURL hold the same string
+// in different roles; a Responses input_image instead carries a bare image_url
+// string with its options as siblings.
+//
+// The Responses input content union is input_text / input_image / input_file, so
+// a Responses request carrying one of the others is refused by the model server.
+// PartModality does not pre-empt that: it answers by part type alone, so such a
+// part is still collected and primed. FieldFileID on an input_image, input_file
+// or computer_screenshot names a Files API upload the serving engine must fetch.
+const (
+	PartTypeImageURL           = "image_url"
+	PartTypeAudioURL           = "audio_url"
+	PartTypeVideoURL           = "video_url"
+	PartTypeInputAudio         = "input_audio"
+	PartTypeInputImage         = "input_image"
+	PartTypeInputFile          = "input_file"
+	PartTypeComputerScreenshot = "computer_screenshot"
+)
+
+// Anthropic Messages block types. An image block holds its image in a
+// FieldSource object; a tool_result block holds the tool's output under
+// FieldContent, as a string or as an array of blocks.
+const (
+	BlockTypeImage      = "image"
+	BlockTypeToolResult = "tool_result"
+)
+
+// DefaultImageMediaType is vLLM's fallback when an Anthropic base64 image
+// source omits media_type.
+const DefaultImageMediaType = "image/jpeg"
+
+// Fields of an Anthropic Messages image source. A source of type
+// ImageSourceTypeURL names its image by FieldURL; any other source carries
+// base64 FieldData and an optional FieldMediaType.
+const (
+	FieldSource        = "source"
+	FieldData          = "data"
+	FieldMediaType     = "media_type"
+	ImageSourceTypeURL = "url"
+)
+
+// Message roles a content walk tells apart.
+const (
+	RoleUser   = "user"
+	RoleSystem = "system"
 )

@@ -1,186 +1,554 @@
 # Metrics
 
-The `llm-d-router` Endpoint Picker (EPP) exposes Prometheus metrics to monitor its behavior and
-performance. These are in addition to the Inference Gateway metrics. For how to reach the EPP's
-metrics endpoint and what it serves, see [Scrape topology](#scrape-topology) below.
+The router deployment has three metric sources:
 
-## Subsystems and naming
+- The router pod runs the EPP. Its registry contains EPP metrics, plugin metrics, and KV-cache
+  metrics.
+- Model server pods expose engine metrics at `/metrics`. The EPP's `metrics-data-source` plugin
+  fetches and parses each endpoint's metrics directly. The `core-metrics-extractor` selects the
+  values used by routing plugins.
+- The P/D sidecar coordinates disaggregated inference.
 
-A metric's full Prometheus name is `<subsystem>_<name>`. The EPP uses the canonical subsystem:
+## Component overview
 
-| Prefix | Scope |
-|---|---|
-| `llm_d_epp_` | Canonical, EPP-wide: request/latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, program-aware fairness, predicted latency, and embedded KV-cache metrics. |
+| Component | Metrics | Endpoint |
+|---|---|---|
+| EPP / router pod | EPP metrics, plugin metrics, and KV-cache metrics | EPP `/metrics`, default port `9090` |
+| Model server / engine pods | vLLM or other engine metrics | Each model server's `/metrics` |
+| P/D sidecar | Disaggregation request, stage latency/error, tool-field outcome, and MoRI-IO DNS metrics | Sidecar `/metrics` on `--metrics-port`, disabled by default |
 
-Earlier releases emitted metrics under `llm_d_inference_scheduler_`, `inference_objective_`,
-`inference_pool_`, `inference_extension_`, `llm_d_router_epp_`, and `kvcache_`. Those prefixes are **deprecated** but
-still emitted: each recorder that has a deprecated predecessor writes both the legacy series and its
-current twin (dual emission), so existing dashboards keep working during migration. See [Deprecated series](#deprecated-series).
+The EPP sends HTTP or HTTPS requests directly to each model server endpoint, per the
+`metrics-data-source` plugin's `scheme` parameter (default `http`).
 
-## Scrape topology
+## Metric naming
 
-### EPP metrics endpoint
+The tables in this document show complete metric names.
 
-The EPP serves its metrics from the controller-runtime metrics registry at `/metrics` on the metrics
-port (default `9090`, configurable with `--metrics-port`). Every metric on this page is exposed on
-this single endpoint. Metric authentication and TLS are configurable via `--metrics-endpoint-auth`.
+| Component | Metric prefix | Scope |
+|---|---|---|
+| EPP / router pod | `llm_d_epp_` | EPP request and latency, in-flight load, pool, scheduler, plugin, data layer, flow control, disaggregation, ext_proc, prefix indexer, multimodal, fairness, predicted latency, model rewrite, and KV-cache metrics. |
+| Model server / engine | Engine-specific | Metrics exposed by the model server implementation. |
+| P/D sidecar | `llm_d_disagg_sidecar_`, `moriio_dns_` | Disaggregation request, stage latency/error, tool-calling request-field outcome, and MoRI-IO peer DNS re-resolution metrics. |
 
-### Model-server metrics (data layer)
+The model server and sidecar metrics use separate registries and prefixes. See [Deprecated series](#deprecated-series)
+for the legacy EPP names that remain available.
 
-The `metrics-data-source` plugin scrapes each model-server pod's own `/metrics` endpoint (path
-configurable) and feeds the results into the data layer for scorers. These are the model server's
-metrics, distinct from the EPP metrics above; scrape the pods directly to collect them.
+## Metric endpoints and flow
 
-### Embedded llm-d-kv-cache metrics
+### Router pod / EPP
 
-When the precise prefix cache is enabled (`precise-prefix-cache-producer` /
-`precise-prefix-cache-scorer`) with `indexerConfig.kvBlockIndexConfig.enableMetrics: true`, the
-embedded llm-d-kv-cache index registers its `llm_d_epp_kv_cache_*` metrics on the **same**
-controller-runtime registry the EPP `/metrics` endpoint already serves. No separate kv-cache HTTP
-endpoint or scrape target is required.
+The EPP serves its controller-runtime registry at `/metrics` on the metrics port (default `9090`,
+configurable with `--metrics-port`). This endpoint contains the EPP metrics and all collectors
+registered by EPP plugins, including the embedded KV-cache collectors. Metric authentication is
+configurable via `--metrics-endpoint-auth` (default `true`). TLS is a separate setting, configurable
+via `--metrics-cert-dir`; mutual TLS additionally requires `--metrics-client-ca-file`.
 
-`enableMetrics` defaults to `false`, and shipped sample configs (e.g.
-`deploy/config/sim-epp-kvcache-config.yaml`) leave it off, so these series are absent until an
-operator opts in.
+With authentication enabled, the EPP validates scrapes with a TokenReview and a
+SubjectAccessReview. The Helm charts grant the EPP ServiceAccount `create` on both resources through
+a ClusterRole when `router.monitoring.prometheus.auth.enabled` is `true`, so installing with that
+setting requires permission to create cluster-scoped RBAC. Setting it to `false` serves `/metrics`
+without authentication and renders no cluster-scoped RBAC.
 
-## Deprecated series
+A scraper must send a bearer token for an identity that is allowed `get` on the `/metrics`
+non-resource URL. To grant that to a scraper ServiceAccount:
 
-All deprecated series are still emitted as back-compat aliases alongside their current twins. Prefer
-the current `llm_d_epp_*` names in new dashboards and alerts.
+```bash
+kubectl create clusterrole <release>-metrics-reader --verb=get --non-resource-url=/metrics
+kubectl create clusterrolebinding <release>-metrics-reader \
+    --clusterrole=<release>-metrics-reader \
+    --serviceaccount=<namespace>:<scraper-sa>
+```
 
-| Deprecated prefix | Current replacement |
-|---|---|
-| `llm_d_inference_scheduler_*` (disagg, data-layer errors) | `llm_d_epp_*` |
-| `inference_objective_*` (request/latency, predicted latency) | `llm_d_epp_*` |
-| `inference_pool_*` (pool averages, queue size) | `llm_d_epp_*` |
-| `inference_extension_*` (scheduler, plugin, info, flow control, prefix indexer) | `llm_d_epp_*` |
-| `kvcache_index_*`, `kvcache_kvevents_*` | `llm_d_epp_kv_cache_*` |
+The charts create this grant themselves for the ServiceMonitor and GMP PodMonitoring they render
+when `router.monitoring.prometheus.enabled` is `true`.
+
+### Model server / engine
+
+The `metrics-data-source` plugin sends an HTTP or HTTPS request (`scheme`, default `http`; TLS
+options include `caCertPath` and `clientCertPath`/`clientKeyPath` for mTLS) to each model server
+endpoint's `/metrics` path (configurable) and parses the response. The `core-metrics-extractor`
+selects configured values and stores them on the endpoint for scorers. These are model server
+metrics, not EPP metrics. The raw engine metrics remain available at the model server endpoint.
+
+### P/D sidecar
+
+The sidecar serves its controller-runtime registry at `/metrics` on a dedicated port, separate from
+the data-plane proxy port, so the model server's own `/metrics` stays reachable through the proxy.
+This registry is separate from the router pod's EPP registry and contains the
+[P/D sidecar request and stage](#pd-sidecar-request-and-stage-metrics),
+[tool-calling request-field](#sidecar-tool-calling-request-fields), and
+[MoRI-IO DNS re-resolution](#mori-io-dns-re-resolution) metrics.
+
+The endpoint is disabled by default. Pass `--metrics-port` (e.g. `--metrics-port=9090`) to the
+sidecar to enable it; `0` (the default) disables it. The `MORIIO_METRICS_ADDR` env var
+(e.g. `:9090`) is a backward-compatible fallback, consulted only when `--metrics-port` is unset.
+
+The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a directory containing
+`tls.crt` and `tls.key` to serve it over TLS instead. Missing or invalid files stop the sidecar; the
+metrics listener does not fall back to HTTP. The metrics TLS setting is independent of
+`--secure-serving` and `--cert-path`, which apply to the sidecar data-plane listener.
+
+Configuring the metrics listener controls scraping; field checks and trace attributes do not
+require that listener.
 
 ## Metrics catalog
 
-Names below omit the subsystem prefix. Unless a section states otherwise, the prefix is `llm_d_epp_`
-and the release stage is ALPHA. Request and latency metrics share the label set
-`{model_name, target_model_name, fairness_id, priority}`.
+Names below include the full subsystem prefix. EPP metrics use `llm_d_epp_` and the release stage is
+ALPHA. Labels are listed in each metric table.
 
-Client-derived label values are cardinality-bounded: `model_name` and `target_model_name` (from the
-request body) share a cap of 1000 distinct values, and `fairness_id` (from the
-`x-llm-d-inference-fairness-id` header) is capped at 1000 distinct values. Caps apply over the
-lifetime of the process; once a cap is reached, new values are reported as `other`. Model names
-configured through InferenceModelRewrite rules never fold to `other`. Flow control series for a
-`fairness_id` are removed when its flow is garbage collected.
+Client-derived label values are cardinality-bounded on EPP metrics that use them. `model_name` and
+`target_model_name` from the request body share a cap of 1000 distinct values. Model names configured
+through InferenceModelRewrite rules never fold to `other`.
+
+The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header or an agent
+identity, has a cap that defaults to 1000 distinct values. Configure it with
+`--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
+apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
+enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
 
 ### Request and latency
 
-| Name | Type | Notes |
-|---|---|---|
-| `request_total` | Counter | Total requests. |
-| `request_error_total` | Counter | Errored requests; adds label `error_code`. |
-| `request_duration_seconds` | Histogram | End-to-end request latency. |
-| `request_size_bytes` | Histogram | Request body size. |
-| `response_size_bytes` | Histogram | Response body size. |
-| `request_input_tokens` | Histogram | Input token count. |
-| `request_output_tokens` | Histogram | Output token count. |
-| `request_cached_tokens` | Histogram | Prompt tokens served from cache. |
-| `request_running` | Gauge | Requests currently in flight. |
-| `request_ntpot_seconds` | Histogram | Normalized time per output token. |
-| `request_ttft_seconds` | Histogram | Time to first token; adds label `streaming`. |
-| `request_streaming_tpot_seconds` | Histogram | Time per output token (streaming). |
-| `request_streaming_itl_seconds` | Histogram | Inter-token latency (streaming). |
+These metrics are owned by EPP request and response instrumentation. They record the request
+lifecycle handled by the router.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority` | Total requests. |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `error_code` | Errored requests. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
+| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
+| `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
+| `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
+| `llm_d_epp_request_output_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Output token count. |
+| `llm_d_epp_request_cached_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Prompt tokens served from cache. |
+| `llm_d_epp_request_running` | Gauge | `model_name`, `target_model_name`, `fairness_id`, `priority` | Requests currently in flight. |
+| `llm_d_epp_request_ntpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Normalized time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+
+Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
+`llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
+`llm_d_epp_request_error_total` with empty `model_name` and `target_model_name` labels.
+
+#### Streaming latency buckets
+
+`llm_d_epp_request_streaming_tpot_seconds` and `llm_d_epp_request_streaming_itl_seconds` use
+5 ms bucket spacing from 5 ms through 50 ms, the range interactive decoding falls in, and keep
+the original edges outside it.
+
+Either ladder can be replaced independently, in the `metrics` section of the EPP
+configuration file:
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+metrics:
+  requestTPOTBuckets: [0.005, 0.01, 0.02]
+  requestITLBuckets: [0.005, 0.01]
+plugins:
+  # ...
+schedulingProfiles:
+  # ...
+```
+
+Both histograms are process-wide and are built once during metric registration, which happens
+after the configuration file is parsed, so this is a global setting rather than a plugin
+parameter. Edges are in seconds and must be finite, positive and strictly increasing, and a
+ladder is limited to 64 edges; the `+Inf` bucket is implicit, and an invalid list fails startup
+rather than falling back silently. **A histogram whose key is omitted uses the refined default
+edges described above**, and setting one key does not change the other. An explicitly empty
+list is rejected, so a typo cannot silently restore the defaults.
+
+Longer ladders increase series cardinality and can affect rolling-upgrade query windows:
+
+- **Cardinality.** Every edge is one more series per label combination, on top of `_sum` and
+  `_count`, so the cost scales with the number of distinct
+  `model_name`/`target_model_name`/`fairness_id`/`priority` combinations a deployment produces.
+  The 64-edge limit bounds that growth; it leaves room above both default ladders, which have
+  25 and 21 edges.
+- **Rolling upgrades.** Pods on the old and new layouts expose different `le` sets at the same
+  time, so a query window spanning both can combine two bucket layouts until the rollout
+  finishes.
+
+#### Exemplars
+
+Latency histograms whose notes say they carry a trace exemplar attach the request's
+trace context to each observation as a Prometheus exemplar, so a point on a latency
+graph can be opened as the trace behind it.
+
+| Exemplar label | Present when |
+|---|---|
+| `trace_id` | The request's trace is sampled. |
+| `span_id` | EPP tracing is on. With it off, only `trace_id` is attached. |
+
+Two things are needed to see them:
+
+- **Prometheus must store exemplars.** They are dropped unless it runs with
+  `--enable-feature=exemplar-storage`.
+- **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
+  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
+  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
+  ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
+  which only matters to queries matching `le` exactly. Scrapers that do not ask for
+  OpenMetrics keep receiving the classic format.
+
+Grafana turns the exemplar into a link to the trace when the Prometheus data source has
+an exemplar link configured to a traces backend.
+
+### Tool-calling request integrity
+
+EPP collects tool-calling telemetry when `--enable-tool-calling-telemetry` is set. The
+flag defaults to false. Trace export also requires tracing to be enabled.
+
+This counter records observed outcomes for supported tool-calling request fields. It does not
+include field values or request content.
+
+Request checks cover Chat Completions (`tools`, `tool_choice`, `parallel_tool_calls`,
+`response_format`), Messages (`tools`, `tool_choice`), and Responses (`tools`, `tool_choice`,
+`parallel_tool_calls`). Provider-prefixed inference endpoints are supported. For
+`component="epp"`, render, count-token, and response-management subpaths are excluded.
+Responses structured output (`text.format`) is outside these field checks.
+
+The `component` label distinguishes the EPP inference-request boundary (`epp`) from the
+EPP-side HTTP tokenizer client (`tokenizer_http`). The tokenizer compares the serialized
+input with the render copy after render-only transformations, once per call across retries.
+For HTTP Messages compatibility conversion, the comparison baseline is the original
+tool fields translated to Chat Completions format. Tool-choice modes and
+`disable_parallel_tool_use` are translated, and spans retain the Messages API summary.
+Its counters check local request-field preservation, not render success or template intent.
+Warmup calls, absent fields, unavailable endpoints, and failed telemetry capture are excluded.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field preservation, change, drop, or rejection outcomes. |
+
+The `llm_d.tool_calling.present` trace attribute indicates that a supported `tools`,
+`tool_choice`, or `parallel_tool_calls` field was supplied, including empty or null values.
+Chat Completions `response_format` is compared separately for integrity. Requests containing
+only `response_format` report its field status and `present=false`, without tool-choice or
+tool-count attributes.
+
+At the EPP inference-request boundary, errors unrelated to tool fields, scheduling failures,
+and failures to read fields for telemetry produce no field-status metrics. The trace retains summary metadata, such as tool presence,
+tool-choice mode, and a tool-count bucket, when it can be read from the incoming request.
+EPP reports `rejected` only for a supported field identified by the parser as causing the
+request to fail. This covers invalid JSON types in `tools` for Chat Completions and Messages,
+including typed fields within Messages tool definitions. EPP does not add validation rules
+for fields the parsers accept.
+
+### Tool-calling response traces
+
+When EPP processes a Chat Completions or Messages response, including provider-prefixed
+endpoints, recording request spans receive four boolean attributes if the incoming request
+has `llm_d.tool_calling.present=true`. Inspection supports JSON and SSE responses. Presence
+covers non-empty Chat Completions `tool_calls` or legacy `function_call` fields and Messages
+`tool_use` blocks.
+
+| Trace attribute | Meaning |
+|---|---|
+| `llm_d.tool_calling.response.upstream_present` | Tool call observed in a completed JSON body or SSE event received by EPP. |
+| `llm_d.tool_calling.response.forwarded_present` | Tool call observed in a completed JSON body or SSE event whose body bytes were successfully sent to Envoy. |
+| `llm_d.tool_calling.response.upstream_detection_incomplete` | Upstream response interrupted or received content could not be fully inspected. |
+| `llm_d.tool_calling.response.forwarded_detection_incomplete` | Forwarding interrupted or sent content could not be fully inspected. |
+
+During inspection, malformed JSON, unfinished SSE data events, and SSE events exceeding the
+1 MiB buffer limit set the corresponding incomplete flag. SSE events require a terminating blank line.
+A `*_present=false` value with `*_detection_incomplete=true` leaves tool-call presence unknown.
+Presence can remain `true` alongside an incomplete flag after an observed event and a later
+interruption. Each direction stops inspecting events after detecting presence, so these flags
+do not validate all later SSE events or tool arguments.
+
+Forwarded observations confirm successful ext-proc sends to Envoy; application receipt and semantic
+preservation of tool calls remain unverified. These attributes contain no response bodies,
+tool names, or tool arguments, and do not measure model-server tool-parser quality.
 
 ### Inference pool
 
-Label `{name}` (the pool name).
+These metrics are owned by EPP pool aggregation. They summarize model-server endpoint metrics for
+an `InferencePool`.
 
-| Name | Type | Notes |
-|---|---|---|
-| `average_kv_cache_utilization` | Gauge | Mean KV-cache utilization across the pool. |
-| `average_queue_size` | Gauge | Mean queue depth. |
-| `average_running_requests` | Gauge | Mean in-flight requests. |
-| `std_dev_kv_cache_utilization` | Gauge | Spread of KV-cache utilization. |
-| `std_dev_queue_size` | Gauge | Spread of queue depth. |
-| `std_dev_running_requests` | Gauge | Spread of in-flight requests. |
-| `ready_endpoints` | Gauge | Ready endpoints in the pool. |
-| `per_endpoint_queue_size` | Gauge | Per-endpoint queue depth; labels `{name, model_server_endpoint}`. |
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_average_kv_cache_utilization` | Gauge | `name` (InferencePool name) | Mean KV-cache utilization across the pool. |
+| `llm_d_epp_average_queue_size` | Gauge | `name` (InferencePool name) | Mean queue depth. |
+| `llm_d_epp_average_running_requests` | Gauge | `name` (InferencePool name) | Mean in-flight requests. |
+| `llm_d_epp_std_dev_kv_cache_utilization` | Gauge | `name` (InferencePool name) | Spread of KV-cache utilization. |
+| `llm_d_epp_std_dev_queue_size` | Gauge | `name` (InferencePool name) | Spread of queue depth. |
+| `llm_d_epp_std_dev_running_requests` | Gauge | `name` (InferencePool name) | Spread of in-flight requests. |
+| `llm_d_epp_ready_endpoints` | Gauge | `name` (InferencePool name) | Ready endpoints in the pool. |
+| `llm_d_epp_per_endpoint_queue_size` | Gauge | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint queue depth. |
+| `llm_d_epp_per_endpoint_nixl_failed_transfers_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint failed NIXL KV cache transfers. |
+| `llm_d_epp_per_endpoint_nixl_failed_notifications_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint failed NIXL KV cache notifications. |
+| `llm_d_epp_per_endpoint_nixl_kv_expired_requests_total` | Counter | `name` (InferencePool name), `model_server_endpoint` | Per-endpoint requests whose KV cache expired before it was read. |
+
+The `llm_d_epp_per_endpoint_nixl_*` series expose the counters that the
+[core metrics extractor](../pkg/epp/framework/plugins/datalayer/extractor/metrics/README.md#attributes-produced)
+reads from each endpoint. A series appears once an endpoint reports the counter, and restarts from
+zero when the model server restarts. If an endpoint stops reporting the counter while its pod stays
+Ready, the series keeps its last value.
 
 ### Scheduler
 
-| Name | Type | Notes |
-|---|---|---|
-| `scheduler_e2e_duration_seconds` | Histogram | End-to-end scheduling latency. |
-| `scheduler_attempts_total` | Counter | Scheduling attempts; labels `{status, target_model_name, endpoint_name, namespace, port}`. |
+These metrics are owned by EPP scheduler instrumentation.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+
+`reason` is one of:
+
+| Reason | Meaning |
+|---|---|
+| `all_filtered` | The filters of at least one scheduler profile removed every candidate, and the profile handler failed the attempt. `llm_d_epp_scheduler_filter_eliminated_total` shows which filter removed them. |
+| `no_profile_selected` | The profile handler selected no scheduler profile to run, for example a `header-profile-handler` request whose header names no configured profile. |
+| `profile_handler_error` | The profile handler failed the attempt with every profile run succeeding, or wrote a request attribute it does not declare. |
+
+Requests rejected before scheduling, when no endpoint matches the request or screeners remove every
+candidate, are not scheduling attempts and are not counted by these metrics.
 
 ### EPP processing overhead
 
-Unlabelled.
+These metrics are owned by EPP request and response processing instrumentation.
 
-| Name | Type | Notes |
-|---|---|---|
-| `request_processing_duration_seconds` | Histogram | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `flow_control_request_queue_duration_seconds` separates it out. |
-| `response_processing_duration_seconds` | Histogram | Sum of the per-chunk handler slices for a streamed response, so model-server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_request_processing_duration_seconds` | Histogram | - | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `llm_d_epp_flow_control_request_queue_duration_seconds` separates it out. |
+| `llm_d_epp_response_processing_duration_seconds` | Histogram | - | Sum of the per-chunk handler slices for a streamed response, so model server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
 
 ### Plugin, info, and model rewrite
 
-| Name | Type | Notes |
-|---|---|---|
-| `plugin_duration_seconds` | Histogram | Per-plugin execution time; labels `{extension_point, plugin_type, plugin_name}`. |
-| `info` | Gauge | Build info; labels `{commit, build_ref}`. |
-| `model_rewrite_decisions_total` | Counter | Model-rewrite decisions; labels `{model_rewrite_name, model_name, target_model}`. |
+These metrics come from EPP plugin instrumentation, EPP build information, and model-rewrite
+decisions.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_plugin_duration_seconds` | Histogram | `extension_point`, `plugin_type`, `plugin_name` | Per-plugin execution time. |
+| `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
+| `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
 
 ### Data layer errors
 
-| Name | Type | Notes |
-|---|---|---|
-| `datalayer_poll_errors_total` | Counter | Data-source poll failures; label `{source_type}`. |
-| `datalayer_extract_errors_total` | Counter | Extractor failures; labels `{source_type, extractor_type}`. |
+These metrics are owned by the EPP data-layer runtime.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
+| `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+
+### Endpoint health
+
+These metrics belong to `endpoint-health-filter`. They are registered when the filter is configured
+and updated when the filter observes a change in an endpoint's health. The `reason` label is
+`poll` for failing metric polls and `response` for consecutive failed responses.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_endpoint_health_excluded_endpoints` | Gauge | `plugin_name` | Endpoints currently excluded from scheduling. |
+| `llm_d_epp_endpoint_health_ejections_total` | Counter | `plugin_name`, `reason` | Endpoints marked unhealthy. |
+| `llm_d_epp_endpoint_health_readmissions_total` | Counter | `plugin_name`, `reason` | Unhealthy marks cleared. An endpoint is readmitted once no reason marks it. |
+| `llm_d_epp_endpoint_health_fail_open_total` | Counter | `plugin_name` | Scheduling cycles in which every candidate was unhealthy and all were kept. Alert on a non-zero rate. |
 
 ### Prefix cache indexer (approximate)
 
-Labels `{plugin_name, plugin_type}`.
+These metrics belong to the `approx-prefix-cache-producer`. They describe its approximate prefix
+index and are separate from the precise KV-cache index metrics. The metric families are registered
+when the producer is created; observations require prefix lookups.
 
-| Name | Type | Notes |
-|---|---|---|
-| `prefix_indexer_size` | Gauge | Entries in the approximate prefix index. |
-| `prefix_indexer_hit_ratio` | Histogram | Prefix-match hit ratio. |
-| `prefix_indexer_hit_bytes` | Histogram | Bytes matched per lookup. |
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_indexer_size` | Gauge | `plugin_name`, `plugin_type` | Entries in the approximate prefix index. |
+| `llm_d_epp_prefix_indexer_hit_ratio` | Histogram | `plugin_name`, `plugin_type` | Prefix-match hit ratio. |
+| `llm_d_epp_prefix_indexer_hit_bytes` | Histogram | `plugin_name`, `plugin_type` | Bytes matched per lookup. |
+
+### Prefix cache prediction
+
+The `approx-prefix-cache-producer` and the `precise-prefix-cache-producer` emit these metrics,
+labelled by the producer that observed them. `burst-prefix-cache-producer` also publishes prefix
+match data but is not instrumented here. Requests that reach no endpoint are not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the endpoints the scheduler selected from. |
+| `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the request's candidate endpoints before filtering. |
+| `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Prompt tokens the predictions were measured against. |
+| `llm_d_epp_prefix_mm_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens predicted to hit the chosen endpoint's prefix cache. |
+| `llm_d_epp_prefix_mm_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens the multimodal prediction was measured against. |
+
+For a request disaggregated into prefill and decode stages, the prediction is recorded for the
+`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
+KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+the primary profile's endpoint, and `endpoint_role` is `decode`.
+
+The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`
+for text-only), the same value as the `mm.modality` span attribute. Each request is observed once,
+so summing over `modality` keeps the all-requests ratio exact. Per-modality breakdowns filter the
+label, e.g. `modality=~".*image.*"` covers requests carrying an image.
+
+The modality split applies to the predicted rate only. The delivered pair, `llm_d_epp_request_cached_tokens`
+divided by `llm_d_epp_request_input_tokens`, carries no modality label, so a per-modality predicted
+rate has no delivered counterpart to compare against.
+
+For the `approx-prefix-cache-producer`, the modality series describes the request mix, not
+multimodal hash correlation: that producer hashes token IDs, so on the vLLM render backend two
+requests with different images but the same placeholder tokens still match fully and its image
+series reads high for that reason. The `estimate` backend hashes the asset content into its
+multimodal placeholder tokens, so different images produce different tokens and do not match.
+
+The mm pair covers only requests whose match info carries multimodal attribution, so text-only
+requests never enter it and a zero observation means a multimodal request matched no blocks. Only
+the `precise-prefix-cache-producer` records it: the approximate producer's match is not
+multimodal-tainted. The predicted count sums each feature's tokens inside the matched prefix, so a
+feature that starts or ends mid-block contributes only the tokens it holds. Dividing
+`llm_d_epp_prefix_mm_predicted_cached_tokens_sum` by `llm_d_epp_prefix_mm_prompt_tokens_sum` gives
+the share of the request's multimodal tokens the routing decision served from cache; the
+prompt-level pair mixes text and multimodal tokens, so it cannot report that share. The pair
+carries no modality label: its predicted count aggregates every modality the request carries.
+
+The prefix hit rate the router predicted is `llm_d_epp_prefix_predicted_cached_tokens_sum` divided
+by `llm_d_epp_prefix_prompt_tokens_sum`. All four metrics are observed in one call, so any ratio
+among them divides counts taken over the same requests. The rate the model server delivered is a
+separate ratio, `llm_d_epp_request_cached_tokens_sum` divided by
+`llm_d_epp_request_input_tokens_sum`.
+
+The two maxima locate a shortfall in the prediction. Their endpoint sets narrow into each other:
+every candidate the request could have reached, those that survived the scheduler's filters and
+reached the picker, and the one the picker chose. Dividing
+`llm_d_epp_prefix_predicted_cached_tokens_sum` by `llm_d_epp_prefix_best_predicted_cached_tokens_sum`
+gives the share of the reachable reuse the routing decision captured, which is a scoring and picking
+question. Dividing `llm_d_epp_prefix_best_predicted_cached_tokens_sum` by
+`llm_d_epp_prefix_best_available_cached_tokens_sum` gives the share that survived filtering, which a
+filter may be right to reduce when it is shedding load away from a saturated endpoint holding the
+prefix. A profile that reports no scored candidates leaves only the chosen endpoint to go on, so both
+maxima fall back to the prediction for it and the ratios read as 1.
+
+Comparing these ratios is what the prediction metrics are for, subject to the limits below.
+
+The request cohorts differ. A prediction is recorded before the request is forwarded, while the
+request token metrics come from the model server's response, so a request that fails or returns no
+usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
+two pairs.
+
+The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
+`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
+request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
+describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
+
+The two maxima are scoped differently from each other for a disaggregated request.
+`llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
+while `llm_d_epp_prefix_best_available_cached_tokens` is taken before the role filters run and so
+spans prefill and decode pods together. A decode pod holding the prefix raises the available maximum
+while being unreachable by the prefill decision. Read the ratio between the two maxima as a filtering
+signal only where prefill and decode are served by the same pods. The decode profile's routing
+decision is not measured for a disaggregated request.
+
+Token units follow the tokenizer backend. The vLLM render backend counts the same tokens the model
+server reports, and the two ratios are directly comparable. The `estimate` backend, which is the
+zero-config default, packs bytes into four-byte pseudo-tokens: the predicted rate stays
+self-consistent, but CJK, code, and chat-template-heavy inputs shift it against the server's figure.
+
+`llm_d_epp_kv_cache_index_lookup_hits_total` also reports a best candidate, but not on terms that
+compare with these metrics: it counts blocks rather than tokens, only the precise producer feeds it,
+and it accumulates once per prompt rather than once per request.
+
+### Token producer render
+
+These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
+families are registered when the plugin is created; observations require render calls made for
+requests. The startup warmup probe is not observed.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
+
+`backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
+one whose caller went away before the render returned, and it is not counted as a failure. `reason`
+is one of:
+
+| Reason | Meaning |
+|---|---|
+| `timeout` | The render budget (`vllm.timeout` for completions, the larger of `vllm.timeout` and `vllm.mmTimeout` otherwise), an `endpointDiscovery.attemptTimeout`, or the caller's deadline expired. |
+| `status` | The render endpoint returned a non-2xx status. |
+| `connection` | The request could not be sent or the connection failed before a response arrived. |
+| `decode` | The response body could not be decoded. |
+| `no_endpoints` | Endpoint discovery has no render endpoint to select. |
+| `other` | Any other failure. |
+
+For requests with captured tool-field attributes, the `tokenize` span records the render
+result in `llm_d.epp.token_producer.result`. A decoded conversation response with no tokens
+sets the producer result to `skipped_no_tokens`. The HTTP client span records `http.response.status_code`;
+HTTP 4xx rejection is a render error with reason `status`, without inferring which tool
+field caused it. Render metrics aggregate tool and non-tool requests. Field preservation
+checks and a successful render do not establish template-intent preservation.
+
+A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
+skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
+render budget, while a render endpoint that is down shows `connection` failures with short
+durations. The plugin also logs render failures at error level with the elapsed time and the
+configured timeout, at most once every 10 seconds per plugin instance.
 
 ### Multimodal encoder cache
 
-| Name | Type | Notes |
-|---|---|---|
-| `encoder_cache_queries_total` | Counter | Encoder-cache lookups; labels `{plugin_type, plugin_name, modality}`. |
-| `encoder_cache_hits_total` | Counter | Encoder-cache hits; labels `{plugin_type, plugin_name, pod, modality}`. |
-| `encoder_cache_hit_ratio` | Histogram | Hit ratio; labels `{plugin_type, plugin_name}`. |
+These metrics belong to the `mm-embeddings-cache-producer`, not Flow Control. The producer keeps an
+EPP-side, reference-aware cache model of multimodal item hashes per endpoint to estimate
+model-server encoder-cache locality. It does not report raw encoder metrics from the model server.
+The metric families are registered when the producer is created; observations require multimodal
+cache lookups.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_encoder_cache_queries_total` | Counter | `plugin_type`, `plugin_name`, `modality` | Encoder-cache lookups. |
+| `llm_d_epp_encoder_cache_hits_total` | Counter | `plugin_type`, `plugin_name`, `pod`, `modality` | Encoder-cache hits. |
+| `llm_d_epp_encoder_cache_hit_ratio` | Histogram | `plugin_type`, `plugin_name` | Hit ratio. |
 
 ### Program-aware fairness
 
-| Name | Type | Notes |
-|---|---|---|
-| `program_aware_jains_fairness_index` | Gauge | Jain's fairness index across programs. |
-| `program_aware_avg_wait_time_milliseconds` | Gauge | Mean wait time; label `{program_id}`. |
-| `program_aware_attained_service_tokens` | Gauge | Attained service; label `{program_id}`. |
+These metrics are owned by the `program-aware-fairness` Flow Control policy. They require the
+`flowControl` feature gate and a Flow Control configuration that selects this policy. Enabling Flow
+Control alone does not emit them.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_program_aware_jains_fairness_index` | Gauge | - | Jain's fairness index across programs. |
+| `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
+| `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
 ### Predicted latency and SLO
 
-Labels `{plugin_name, plugin_type, model_name, target_model_name}` (some add `type`).
+These metrics are registered and recorded by the `predicted-latency-producer`. They are present
+only when that plugin is configured and records the related prediction, observation, or SLO event.
 
-| Name | Type | Notes |
-|---|---|---|
-| `inference_request_metric` | Gauge | Observed request metric; adds label `type`. |
-| `request_predicted_ttft_seconds` | Histogram | Predicted time to first token. |
-| `request_ttft_prediction_duration_seconds` | Histogram | Time spent computing the TTFT prediction. |
-| `request_predicted_tpot_seconds` | Histogram | Predicted time per output token. |
-| `request_tpot_prediction_duration_seconds` | Histogram | Time spent computing the TPOT prediction. |
-| `request_slo_violation_total` | Counter | SLO violations; adds label `type`. |
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_inference_request_metric` | Gauge | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | Observed request metric. |
+| `llm_d_epp_request_predicted_ttft_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time to first token. |
+| `llm_d_epp_request_ttft_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TTFT prediction. |
+| `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
+| `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
+| `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
+| `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
 ### Disaggregation
 
-Both metrics carry labels `{plugin_name, plugin_type, model_name, decision_type}`. The current names
-are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin.
+The EPP disaggregation metrics come from two different plugins.
 
-#### `disagg_decision_total`
+#### `disagg-profile-handler`
+
+This plugin records the routing decision for each request.
+
+#### `llm_d_epp_disagg_decision_total`
 
 *   **Type:** Counter
 *   **Labels:**
+    *   `plugin_name`, `plugin_type`: the `disagg-profile-handler` plugin instance recording the
+        decision
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
@@ -188,33 +556,73 @@ are under `llm_d_epp_`; each has a deprecated `llm_d_inference_scheduler_*` twin
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
 *   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
+    Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.
 
-#### `pd_decision_total` (deprecated handler)
+#### `disaggregatedset-rollout-screener`
 
-> Prefer `disagg_decision_total`. This metric is maintained for the deprecated `pd-profile-handler`
-> and covers only P/D disaggregation, not encode disaggregation.
+This Alpha plugin records revision-match failures and revision-gating state.
+
+#### `llm_d_epp_disaggregatedset_strict_revision_no_match_total`
 
 *   **Type:** Counter
-*   **Labels:** `model_name`; `decision_type` (`decode-only` or `prefill-decode`).
-*   **Description:** Counts requests by the Prefill/Decode disaggregation decision.
+*   **Labels:**
+    *   `plugin_type`, `plugin_name`: the `disaggregatedset-rollout-screener` plugin instance
+        recording the failure
+*   **Description:** Strict revision selections that matched no endpoint and failed closed. A
+    request carrying the revision header (`x-llm-d-disagg-revision` by default) filters candidates
+    to that revision; when none match, the request has no eligible endpoint, which surfaces as
+    HTTP 503 rather than falling back to another endpoint.
+*   **Actionability:** A nonzero rate means requests are arriving with a revision header value that
+    has no Ready endpoint. Check rollout progress and Pod readiness for the revision the header
+    identifies.
 
-#### DisaggregatedSet rollout
+#### `llm_d_epp_disaggregatedset_revision_gating_share`
 
-These metrics are exposed by the Alpha `disaggregatedset-rollout-screener` plugin.
-
-| Name | Type | Labels | Notes |
-|---|---|---|---|
-| `disaggregatedset_strict_header_no_match_total` | Counter | `plugin_type`, `plugin_name`, `selector` | Strict header selections that matched no endpoint and failed closed. |
-| `disaggregatedset_revision_gating_share` | Gauge | `plugin_type`, `plugin_name`, `mode`, `revision` | Current weighted share from `0` to `1`. Incomplete revisions report `0`; a revision's series is removed when it disappears from the observed Pod set. |
+*   **Type:** Gauge
+*   **Labels:**
+    *   `plugin_type`, `plugin_name`: the `disaggregatedset-rollout-screener` plugin instance
+    *   `mode`: `sum` or `max-role` when revision gating is active; empty when
+        `revisionGating.mode` is `disabled` (gating is inactive, so the configured mode is not
+        recorded)
+    *   `revision`: the observed `DisaggregatedSet` revision label
+*   **Description:** Current weighted share, from `0` to `1`, of traffic the revision-gating
+    algorithm assigns to this revision. A revision missing a required role reports `0`. A
+    revision's series is removed once it disappears from the observed Pod set.
+*   **Actionability:** Track this alongside rollout progress to confirm traffic shifts toward the
+    new revision at the rate expected for the configured gating mode.
 
 ### Flow control
 
-Exposed when the `flowControl` feature gate is enabled.
+Flow Control is disabled by default. These metrics are exposed only when the `flowControl` feature
+gate is enabled with `featureGates: ["flowControl"]`.
 
-#### `flow_control_request_queue_duration_seconds`
+These metrics are owned by the EPP Flow Control layer.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_flow_control_request_queue_duration_seconds` | Histogram | `fairness_id`, `priority`, `outcome`, `inference_pool`, `model_name`, `target_model_name` | Time from queue entry to terminal outcome. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_flow_control_dispatch_cycle_duration_seconds` | Histogram | - | Cost of one dispatch cycle. |
+| `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Histogram | `fairness_id`, `priority`, `outcome` | Time spent admitting a request to the queue. |
+| `llm_d_epp_flow_control_queue_size` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Requests currently held in the queue. |
+| `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
+| `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
+| `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
+| `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
+| `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
+| `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
+| `llm_d_epp_flow_control_global_capacity_utilization_requests` | Gauge | `inference_pool` | Global request capacity use. |
+| `llm_d_epp_flow_control_global_capacity_utilization_bytes` | Gauge | `inference_pool` | Global byte capacity use. |
+| `llm_d_epp_flow_control_requests_total` | Counter | `outcome`, `priority`, `inference_pool` | Requests by terminal outcome. |
+| `llm_d_epp_flow_control_revocations_issued_total` | Counter | `priority`, `inference_pool` | In-flight revocations issued. |
+| `llm_d_epp_flow_control_revocations_total` | Counter | `outcome`, `inference_pool` | In-flight revocations by terminal outcome. |
+| `llm_d_epp_flow_control_reclaim_target` | Gauge | `inference_pool` | Last computed reclamation deficit. |
+| `llm_d_epp_flow_control_pending_reclaim` | Gauge | `inference_pool` | Outstanding and cooling reclamation debit. |
+| `llm_d_epp_flow_control_revocation_confirmation_seconds` | Histogram | `inference_pool` | Time from revocation to confirmed stream termination. |
+
+#### `llm_d_epp_flow_control_request_queue_duration_seconds`
 
 *   **Type:** Histogram
 *   **Labels:** `fairness_id`, `priority`, `outcome` (`Dispatched`, `RejectedCapacity`,
@@ -225,21 +633,21 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** Primary latency signal for flow control. Rising p99 indicates backends are saturated
     or capacity limits are too tight.
 
-#### `flow_control_dispatch_cycle_duration_seconds`
+#### `llm_d_epp_flow_control_dispatch_cycle_duration_seconds`
 
 *   **Type:** Histogram
 *   **Description:** Time taken for each internal dispatch cycle.
 *   **Usage:** Measures the overhead of the dispatch loop itself. Rising values indicate increasing
     cost per cycle from saturation detection, priority band iteration, or fairness evaluation.
 
-#### `flow_control_request_enqueue_duration_seconds`
+#### `llm_d_epp_flow_control_request_enqueue_duration_seconds`
 
 *   **Type:** Histogram
 *   **Labels:** `fairness_id`, `priority`, `outcome`
 *   **Description:** Time taken to enqueue a request into the Flow Control layer.
 *   **Usage:** Measures the time spent in capacity checks and queue insertion within the processor.
 
-#### `flow_control_queue_size`
+#### `llm_d_epp_flow_control_queue_size`
 
 *   **Type:** Gauge
 *   **Labels:** `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name`
@@ -247,7 +655,7 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** Tracks queue depth per priority band and tenant. A steadily growing value indicates
     the dispatch rate is lower than the arrival rate.
 
-#### `flow_control_queue_bytes`
+#### `llm_d_epp_flow_control_queue_bytes`
 
 *   **Type:** Gauge
 *   **Labels:** `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name`
@@ -255,7 +663,7 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** Tracks memory pressure from queued requests. Compare against the configured `maxBytes`
     capacity to gauge how close a band is to rejecting new requests.
 
-#### `flow_control_pool_saturation`
+#### `llm_d_epp_flow_control_pool_saturation`
 
 *   **Type:** Gauge
 *   **Labels:** `inference_pool`, `stage`
@@ -269,23 +677,22 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Usage:** When the effective saturation reaches the usage limit threshold, the dispatch cycle
     skips dispatching and requests remain queued. A reading pinned at exactly 1.0 can be
     fail-closed stale-metrics or an empty pool rather than genuine overload (which typically reads
-    above 1.0); check `flow_control_stale_endpoints` to disambiguate.
+    above 1.0); check `llm_d_epp_flow_control_stale_endpoints` to disambiguate.
 
-#### `flow_control_stale_endpoints`
+#### `llm_d_epp_flow_control_stale_endpoints`
 
 *   **Type:** Gauge
-*   **Labels:** `detector`
+*   **Labels:** `detector`, `stage`
 *   **Description:** Number of candidate endpoints whose metrics are missing or older than the
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
-    `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
-    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
-    out stale metrics in another stage; per-stage stale accounting is tracked in
-    [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
-*   **Usage:** A nonzero value during a dispatch stall indicates a model-server metrics collection
-    problem (scrape path, port, TLS, auth) rather than genuine overload.
+    `inference_extension_*` twin). `stage` is `prefill` or `decode` when flow control evaluates a
+    pipeline stage separately, and empty when the detector is evaluated without stage partitioning.
+*   **Usage:** A nonzero value during a dispatch stall indicates a model server metrics collection
+    problem (endpoint path, port, TLS, or authentication) rather than genuine overload. Check the
+    `stage` label to localize the collection problem to one pipeline stage.
 
-#### `flow_control_capacity_utilization_requests`
+#### `llm_d_epp_flow_control_capacity_utilization_requests`
 
 *   **Type:** Gauge
 *   **Labels:** `priority`, `inference_pool`
@@ -293,28 +700,28 @@ Exposed when the `flowControl` feature gate is enabled.
     occupied (0.0-1.0), aggregated over every flow in the band. This is not a per-flow-queue metric:
     `priority` identifies the band. A band that does not configure `maxRequests` falls back to a
     default denominator, so every configured band reports a series. The all-bands rollup is a
-    separate metric, `flow_control_global_capacity_utilization_requests`.
+    separate metric, `llm_d_epp_flow_control_global_capacity_utilization_requests`.
 *   **Usage:** Lets operators alert on "the band is at N% of its request limit" without joining
     configured `maxRequests` values into the query. Sustained values near 1.0 precede
-    `flow_control_requests_total{outcome="RejectedCapacity"}` rising. Note the denominator is always
+    `llm_d_epp_flow_control_requests_total{outcome="RejectedCapacity"}` rising. Note the denominator is always
     the band's own capacity: when a global cap sits below the sum of the band caps, admission is
     bounded by the global cap first, so the per-band ratio understates real pressure — read it
-    alongside `flow_control_global_capacity_utilization_requests`. (Making a band's denominator
+    alongside `llm_d_epp_flow_control_global_capacity_utilization_requests`. (Making a band's denominator
     `min(band, global)` would make one band's ratio depend on other bands' configuration, which is
     worse.)
 
-#### `flow_control_capacity_utilization_bytes`
+#### `llm_d_epp_flow_control_capacity_utilization_bytes`
 
 *   **Type:** Gauge
 *   **Labels:** `priority`, `inference_pool`
-*   **Description:** Byte-size counterpart of `flow_control_capacity_utilization_requests`: the
+*   **Description:** Byte-size counterpart of `llm_d_epp_flow_control_capacity_utilization_requests`: the
     fraction of a priority band's effective byte-size capacity currently occupied (0.0-1.0),
     aggregated over every flow in the band, with the same default-denominator fallback.
 *   **Usage:** Memory-pressure equivalent of the request-count ratio; a band can hit its `maxBytes`
     ceiling long before its `maxRequests` one when payloads are large. The same global-cap caveat
-    applies — compare against `flow_control_global_capacity_utilization_bytes`.
+    applies — compare against `llm_d_epp_flow_control_global_capacity_utilization_bytes`.
 
-#### `flow_control_global_capacity_utilization_requests`
+#### `llm_d_epp_flow_control_global_capacity_utilization_requests`
 
 *   **Type:** Gauge
 *   **Labels:** `inference_pool`
@@ -325,16 +732,16 @@ Exposed when the `flowControl` feature gate is enabled.
     aggregations over the per-band family (`sum`, `max`, `topk`) do not double count or rank against
     the rollup.
 
-#### `flow_control_global_capacity_utilization_bytes`
+#### `llm_d_epp_flow_control_global_capacity_utilization_bytes`
 
 *   **Type:** Gauge
 *   **Labels:** `inference_pool`
-*   **Description:** Byte-size counterpart of `flow_control_global_capacity_utilization_requests`,
+*   **Description:** Byte-size counterpart of `llm_d_epp_flow_control_global_capacity_utilization_requests`,
     with the same optional-and-omitted-when-unset behaviour.
 *   **Usage:** Shows whether the global byte ceiling, rather than any single band, is what is
     bounding admission.
 
-#### `flow_control_requests_total`
+#### `llm_d_epp_flow_control_requests_total`
 
 *   **Type:** Counter
 *   **Labels:**
@@ -347,7 +754,7 @@ Exposed when the `flowControl` feature gate is enabled.
 *   **Description:** Total requests processed by the Flow Control layer, incremented once per request
     after its terminal outcome is determined.
 *   **Usage:** Direct signal for rejection and eviction rates without log parsing. Unlike
-    `flow_control_request_queue_duration_seconds_count`, this counter also captures controller-level
+    `llm_d_epp_flow_control_request_queue_duration_seconds_count`, this counter also captures controller-level
     early rejections where no queue item is created (e.g. rejection during controller shutdown).
 *   **Actionability:**
     *   Rising `outcome="RejectedCapacity"`: queue limits too tight or backends persistently
@@ -361,26 +768,28 @@ Exposed when the `flowControl` feature gate is enabled.
     *   `outcome="Dispatched"` is the healthy baseline; compare against total request rate for the
         acceptance ratio.
 
-### ext_proc streams
+### EPP ext_proc streams
 
 Three metrics covering the ext_proc gRPC stream lifecycle. Disabled by default; enable with
 `--enable-grpc-stream-metrics`.
 
-#### `extproc_streams_inflight`
+These metrics are owned by the EPP ext_proc server.
+
+#### `llm_d_epp_extproc_streams_inflight`
 
 *   **Type:** Gauge
 *   **Description:** Number of ext_proc gRPC streams currently open.
 *   **Usage:** Sized at one stream per Envoy worker per EPP backend. A persistent increase under
     steady load indicates streams are being opened faster than they close.
 
-#### `extproc_stream_duration_seconds`
+#### `llm_d_epp_extproc_stream_duration_seconds`
 
 *   **Type:** Histogram
 *   **Description:** Duration an ext_proc gRPC stream stays open, in seconds.
 *   **Usage:** Long-lived streams are normal; the histogram surfaces the distribution. A sudden shift
     toward short durations can indicate Envoy reconnecting due to handler errors.
 
-#### `extproc_streams_total`
+#### `llm_d_epp_extproc_streams_total`
 
 *   **Type:** Counter
 *   **Labels:** `code` - the gRPC status code at stream close (`OK`, `Canceled`, `DeadlineExceeded`,
@@ -393,11 +802,15 @@ Three metrics covering the ext_proc gRPC stream lifecycle. Disabled by default; 
 
 ### In-flight load
 
-In-flight load, emitted under the `llm_d_epp_` prefix. Present only when an `InFlightLoadProducer` is
-configured: the producer owns these metrics and registers them through the plugin metrics recorder. The
-per-endpoint gauges are updated as requests are admitted and released.
+These metrics belong to `inflight-load-producer`. They are registered only when the producer is
+configured. The producer updates the per-endpoint gauges when requests are admitted and released.
 
-#### `inflight_requests`
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_inflight_requests` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `fairness_id`, `priority` | Current requests in flight on each endpoint. |
+| `llm_d_epp_inflight_tokens` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `fairness_id`, `priority` | Current tokens in flight on each endpoint. |
+
+#### `llm_d_epp_inflight_requests`
 
 *   **Type:** Gauge
 *   **Labels:**
@@ -410,7 +823,7 @@ per-endpoint gauges are updated as requests are admitted and released.
 *   **Description:** Requests currently in flight on each endpoint (scheduled, not yet completed), as tracked by the in-flight load producer.
 *   **Usage:** Per-replica queue depth for load-aware routing and capacity analysis.
 
-#### `inflight_tokens`
+#### `llm_d_epp_inflight_tokens`
 
 *   **Type:** Gauge
 *   **Labels:**
@@ -425,39 +838,140 @@ per-endpoint gauges are updated as requests are admitted and released.
 
 ### KV-cache index
 
-Prefix `llm_d_epp_`. Registered only when the embedded llm-d-kv-cache metrics are enabled (see
-[Embedded llm-d-kv-cache metrics](#embedded-llm-d-kv-cache-metrics)). Unlabeled.
+These metrics belong to the precise-prefix-cache pipeline. Set
+`indexerConfig.kvBlockIndexConfig.enableMetrics` to `true` on the
+`precise-prefix-cache-producer` parameters. The option defaults to `false`, and shipped sample
+configs (e.g. [`deploy/config/sim-epp-kvcache-config.yaml`](../deploy/config/sim-epp-kvcache-config.yaml))
+leave it off, so these series are absent until an operator opts in. The embedded llm-d-kv-cache
+index and KV-event pool register these metrics in the router pod's EPP registry, so they are
+available from the existing EPP `/metrics` endpoint. Index metrics are unlabeled. KV-event metrics
+use the labels shown below.
 
-| Name | Type | Notes |
-|---|---|---|
-| `kv_cache_index_admissions_total` | Counter | Blocks admitted to the index. |
-| `kv_cache_index_evictions_total` | Counter | Blocks evicted from the index. |
-| `kv_cache_index_lookup_requests_total` | Counter | Index lookups performed. |
-| `kv_cache_index_lookup_hits_total` | Counter | Contiguous prefix blocks matched by the best pod per lookup. |
-| `kv_cache_index_max_pod_hit_count_total` | Counter | Longest contiguous per-pod prefix chain observed per lookup. |
-| `kv_cache_index_lookup_latency_seconds` | Histogram | Index lookup latency. |
-| `kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | Deduplicated removal hashes suppressed. |
-| `kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | Deduplicated removal hashes forwarded. |
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_kv_cache_index_admissions_total` | Counter | - | Blocks admitted to the index. |
+| `llm_d_epp_kv_cache_index_evictions_total` | Counter | - | Blocks evicted from the index. |
+| `llm_d_epp_kv_cache_index_lookup_requests_total` | Counter | - | Index lookups performed. |
+| `llm_d_epp_kv_cache_index_lookup_hits_total` | Counter | - | Contiguous prefix blocks matched by the best pod per lookup. |
+| `llm_d_epp_kv_cache_index_max_pod_hit_count_total` | Counter | - | Longest contiguous per-pod prefix chain observed per lookup. |
+| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. |
+| `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | - | Deduplicated removal hashes suppressed. |
+| `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | - | Deduplicated removal hashes forwarded. |
+| `llm_d_epp_kv_cache_events_stores_skipped_total` | Counter | `cache_kind`, `reason` | KV store events skipped before prefix indexing. |
+| `llm_d_epp_kv_cache_events_removals_skipped_total` | Counter | `cache_kind`, `reason` | KV removal events skipped before prefix indexing. |
+| `llm_d_epp_kv_cache_events_active_subscribers` | Gauge | - | ZMQ subscribers currently managed. |
+| `llm_d_epp_kv_cache_events_subscriber_reconnections_total` | Counter | `pod_identifier` | ZMQ subscriber reconnection attempts. |
+| `llm_d_epp_kv_cache_events_messages_received_total` | Counter | `pod_identifier` | Messages received from ZMQ subscribers. |
+| `llm_d_epp_kv_cache_events_zmq_errors_total` | Counter | `pod_identifier`, `operation` | ZMQ subscriber errors. |
+| `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
+| `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
+
+### P/D sidecar request and stage metrics
+
+Emitted by the sidecar proxy on its `/metrics` endpoint; see [P/D sidecar](#pd-sidecar) for
+enablement and TLS.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
+| `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
+| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |
+| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. |
+| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. |
+| `llm_d_disagg_sidecar_request_errors_total` | Counter | `stage` | Stage errors. `stage` is `encode`, `prefill`, or `decode`. |
+| `llm_d_disagg_sidecar_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field outcomes, once per field and client request. |
+
+#### Sidecar tool-calling request fields
+
+Checks cover Chat Completions (`tools`, `tool_choice`, `parallel_tool_calls`, `response_format`)
+and Messages (`tools`, `tool_choice`). Responses, Completions, and native Generate APIs are excluded.
+Supported paths include direct/data-parallel forwarding, sequential and parallel NIXL, P2P
+prefill/decode and peer/self-source forwarding, Mooncake, SGLang, shared-storage, encoder-to-inference
+handoffs, and chunked decode. Per-image encoder priming is outside the full inference-field checks.
+
+| Label | Values |
+|---|---|
+| `component` | `routing_sidecar` |
+| `direction` | `request` |
+| `field` | `tools`, `tool_choice`, `parallel_tool_calls`, `response_format`, subject to API support |
+| `status` | `preserved`, `changed`, `dropped`; `rejected` is reserved for explicit field-specific rejection |
+
+Comparisons use the client snapshot and the serialized body at each actual inference dispatch.
+JSON object key order and equivalent numeric representations do not count as changes; array order
+and absent versus null values do. Each observed field contributes one worst outcome across dispatched
+stages, retries, and decode chunks: `preserved` < `changed` < `dropped` < `rejected`.
+Prepared but unsent requests produce no field outcomes. Generic HTTP errors, network failures, and
+cancellation do not establish field rejection; the sidecar has no field-specific rejection signal.
+Failed captures produce no guessed outcomes. Direct passthrough checks require complete, valid body
+consumption and preserve the forwarded bytes.
+
+Existing `forward_request` spans carry the combined request outcomes. Existing `prefill`, `decode`,
+and `chunked_decode` spans carry their own dispatch outcomes. Asynchronous prefill does not delay
+request reporting. Tool-field attributes use the shared `llm_d.tool_calling.*` convention:
+`api_surface`, `present`, `tool_choice`, `tool_count`, and `field.<field>.status`.
+Choice values are `auto`, `none`, `required`, `named`, or `unknown`; nonempty tool arrays use count
+buckets `1`, `2-5`, `6-10`, or `11+`. Named choices omit the tool name.
+
+Requests without supported tool fields or observed field outcomes receive no tool attributes or
+counters. A Chat Completions request containing only `response_format` retains its field outcome
+with `present=false` and no choice/count attributes. Valid client summaries can remain on a trace
+when a failure prevents dispatch. Tool-field telemetry omits tool names, schemas, arguments, prompt
+content, and content-derived hashes. Response-field integrity is outside these checks.
+
+To compare request-field outcome rates across EPP and sidecar metrics scraped by the same
+Prometheus instance:
+
+```promql
+sum by (component, field, status) (
+  rate({__name__=~"llm_d_(epp|disagg_sidecar)_tool_calling_field_status_total", direction="request"}[5m])
+)
+```
 
 ### MoRI-IO DNS re-resolution
 
-Prefix `moriio_dns_`. Emitted by the sidecar proxy when MoRI-IO peer host specs
-are DNS names that are re-resolved on the request path (see the
-[MoRI-IO feature guide](../pkg/sidecar/proxy/MORIIO_README.md)). Registered on
-the same controller-runtime registry as the other metrics on this page.
-Unlabeled.
+Emitted by the sidecar proxy when MoRI-IO peer host specs are DNS names that are re-resolved on the
+request path (see the
+[MoRI-IO feature guide](../pkg/sidecar/proxy/MORIIO_README.md)). These metrics are unlabeled and are
+served on the sidecar `/metrics` endpoint; see [P/D sidecar](#pd-sidecar) for enablement and TLS.
 
-Unlike the EPP `/metrics` endpoint, the sidecar does not serve metrics by
-default. Pass `--metrics-port` (e.g. `--metrics-port=9090`) to the sidecar to
-expose these counters at `/metrics` on that port; `0` (the default) disables it.
-The `MORIIO_METRICS_ADDR` env var (e.g. `:9090`) is a backward-compatible
-fallback, consulted only when `--metrics-port` is unset.
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `moriio_dns_reresolve_total` | Counter | - | Successful request-path re-resolutions of a peer DNS name (counted per actual lookup; concurrent lookups coalesced by singleflight count once). |
+| `moriio_dns_ip_changed_total` | Counter | - | Re-resolutions where the peer resolved to a different IP than the cached value (peer pod likely restarted at a new IP). |
+| `moriio_dns_lookup_failures_total` | Counter | - | Failed peer DNS lookups on the request path; the resolver then serves the last-known-good IP (or, on cold start, the raw spec). |
 
-| Name | Type | Notes |
+## Deprecated series
+
+The legacy series listed here have been deprecated. Prefer the current `llm_d_epp_*` names in new
+dashboards and alerts. Series marked "no longer emitted" are removed; the table records their
+replacements so dashboards and alerts can be updated.
+
+| Legacy series | Current replacement | Notes |
 |---|---|---|
-| `moriio_dns_reresolve_total` | Counter | Successful request-path re-resolutions of a peer DNS name (counted per actual lookup; concurrent lookups coalesced by singleflight count once). |
-| `moriio_dns_ip_changed_total` | Counter | Re-resolutions where the peer resolved to a different IP than the cached value (peer pod likely restarted at a new IP). |
-| `moriio_dns_lookup_failures_total` | Counter | Failed peer DNS lookups on the request path; the resolver then serves the last-known-good IP (or, on cold start, the raw spec). |
+| `llm_d_inference_scheduler_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Deprecated; no longer emitted. |
+| `llm_d_inference_scheduler_datalayer_poll_errors_total`, `llm_d_inference_scheduler_datalayer_extract_errors_total` | `llm_d_epp_datalayer_poll_errors_total`, `llm_d_epp_datalayer_extract_errors_total` | Deprecated; no longer emitted. |
+| `inference_extension_scheduler_e2e_duration_seconds` | `llm_d_epp_scheduler_e2e_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Deprecated; no longer emitted. |
+| `inference_extension_plugin_duration_seconds` | `llm_d_epp_plugin_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_info` | `llm_d_epp_info` | Deprecated; no longer emitted. |
+| `inference_extension_model_rewrite_decisions_total` | `llm_d_epp_model_rewrite_decisions_total` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_request_queue_duration_seconds` | `llm_d_epp_flow_control_request_queue_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_dispatch_cycle_duration_seconds` | `llm_d_epp_flow_control_dispatch_cycle_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_request_enqueue_duration_seconds` | `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_queue_size` | `llm_d_epp_flow_control_queue_size` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_queue_bytes` | `llm_d_epp_flow_control_queue_bytes` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_pool_saturation` | `llm_d_epp_flow_control_pool_saturation` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_size` | `llm_d_epp_prefix_indexer_size` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_hit_ratio` | `llm_d_epp_prefix_indexer_hit_ratio` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_hit_bytes` | `llm_d_epp_prefix_indexer_hit_bytes` | Deprecated; no longer emitted. |
+| `kvcache_index_admissions_total`, `kvcache_index_evictions_total`, `kvcache_index_lookup_requests_total`, `kvcache_index_lookup_hits_total`, `kvcache_index_max_pod_hit_count_total`, `kvcache_index_lookup_latency_seconds` | `llm_d_epp_kv_cache_index_*` | Deprecated; no longer emitted. |
+| `kvcache_kvevents_dedup_removed_hashes_suppressed_total`, `kvcache_kvevents_dedup_removed_hashes_forwarded_total` | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total`, `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Deprecated; no longer emitted. |
+
+The historical `llm_d_router_epp_*` prefix is not emitted by the current Go code.
+
+Current-only examples include `llm_d_epp_flow_control_stale_endpoints`, flow-control capacity and
+revocation metrics, `llm_d_epp_plugin_data_scope_violations_total`, EPP processing-overhead metrics,
+`llm_d_epp_prefix_cache_affinity_filter_decisions_total`, and most KV-event metrics.
 
 ## Related work
 

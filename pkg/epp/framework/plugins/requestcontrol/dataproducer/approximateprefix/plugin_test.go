@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,12 +21,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -142,7 +146,7 @@ func TestPreRequest(t *testing.T) {
 		perPromptHashes := prefixhash.GetBlockHashes(context.Background(), req1, config.BlockSizeTokens, defaultMaxPrefixBlocks)
 		for _, promptHashes := range perPromptHashes {
 			for _, hash := range promptHashes {
-				pods := p.indexer().Get(hash)
+				pods := p.indexer().(*indexer).Get(hash)
 				assert.Contains(t, pods, ServerID(endpoint1.GetMetadata().ID))
 			}
 		}
@@ -189,9 +193,9 @@ func TestPreRequest(t *testing.T) {
 
 		// Since capacity is 2, the first request's hash should have been evicted.
 		// The latter two should still be present.
-		assert.Empty(t, p.indexer().Get(allHashes[0][0]))
-		assert.NotEmpty(t, p.indexer().Get(allHashes[1][0]))
-		assert.NotEmpty(t, p.indexer().Get(allHashes[2][0]))
+		assert.Empty(t, p.indexer().(*indexer).Get(allHashes[0][0]))
+		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[1][0]))
+		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[2][0]))
 	})
 }
 
@@ -213,6 +217,10 @@ func TestDataProducerValidation(t *testing.T) {
 	}, {
 		AutoTune:        false,
 		BlockSizeTokens: 0,
+	}, {
+		AutoTune:               false,
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: -1,
 	}}
 
 	for _, config := range validConfigs {
@@ -388,6 +396,40 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	assert.Contains(t, p.indexer().Pods(), ServerID(endpoint.GetMetadata().ID))
 }
 
+// TestMakeserver_AutotuneCapacityInRouterBlocks verifies that the autotuned LRU
+// holds as many tokens as the model server's KV cache.
+func TestMakeserver_AutotuneCapacityInRouterBlocks(t *testing.T) {
+	tests := []struct {
+		name    string
+		metrics *fwkdl.Metrics
+		want    int
+	}{
+		{name: "engine block below the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 31250}, want: 7812},
+		{name: "engine block at the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000}, want: 1000},
+		{name: "engine block above the floor", metrics: &fwkdl.Metrics{CacheBlockSize: 128, CacheNumBlocks: 1000}, want: 1000},
+		{name: "cache smaller than one router block", metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 2}, want: 1},
+		{name: "engine block size not reported", metrics: &fwkdl.Metrics{CacheNumBlocks: 1000}, want: 1000},
+		{name: "prefix match unit below the engine block", metrics: &fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 32, CacheNumBlocks: 1000}, want: 64000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{
+				AutoTune:             true,
+				BlockSizeTokens:      defaultBlockSizeTokens,
+				LRUCapacityPerServer: defaultLRUCapacityPerServer,
+			}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			assert.NoError(t, err)
+
+			endpoint := fwksched.NewEndpoint(
+				&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+				tc.metrics, fwkdl.NewAttributes(),
+			)
+			assert.Equal(t, tc.want, p.makeserver(endpoint).NumOfGPUBlocks)
+		})
+	}
+}
+
 func TestMaxPrefixTokensToMatch(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1, MaxPrefixTokensToMatch=2 -> maxBlocks = 2/1 = 2.
@@ -516,6 +558,22 @@ func TestGetBlockSize_AutotuneAboveMinimumPassesThrough(t *testing.T) {
 	assert.Equal(t, 128, got, "autotuned block size at or above minimum should not be clamped")
 }
 
+func TestGetBlockSize_AutotunePrefersPrefixMatchUnitOverBlockSize(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+		&fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 128},
+		fwkdl.NewAttributes(),
+	)
+
+	got := p.GetBlockSize([]fwksched.Endpoint{endpoint})
+	assert.Equal(t, 128, got,
+		"prefix_match_unit should be preferred over block_size when both are present")
+}
+
 // TestGetBlockSize_ManualConfigClampedBelowMinimum verifies that the floor
 // applies to manual configuration as well — configured BlockSizeTokens below
 // minBlockSizeTokens is silently raised so the indexer memory bound holds
@@ -532,11 +590,9 @@ func TestGetBlockSize_ManualConfigClampedBelowMinimum(t *testing.T) {
 
 // TestGetBlockSize_AutotuneFallbackClampsLowConfig verifies that the floor applies
 // to the autotune fallback path too — when AutoTune is on but no endpoint metric is
-// available, the configured BlockSizeTokens still gets clamped. This is the path the
-// default config (AutoTune=true, BlockSizeTokens=16) would land on if endpoint
-// metrics are missing.
+// available, the configured BlockSizeTokens still gets clamped.
 func TestGetBlockSize_AutotuneFallbackClampsLowConfig(t *testing.T) {
-	cfg := config{AutoTune: true, BlockSizeTokens: 16} // default config shape
+	cfg := config{AutoTune: true, BlockSizeTokens: 16}
 	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 	assert.NoError(t, err)
 
@@ -641,6 +697,48 @@ func TestFactory_DeprecatedBlockSizeMapped(t *testing.T) {
 		"deprecated 'blockSize' should map to BlockSizeTokens")
 	assert.Equal(t, 0, dp.config.BlockSize,
 		"deprecated 'blockSize' should be cleared after mapping")
+}
+
+// TestFactory_BlockSizeWarningOnlyForLowConfiguredValue verifies that the
+// below-minimum startup warning fires for a configured blockSizeTokens below
+// minBlockSizeTokens and not for the default. See #3174.
+func TestFactory_BlockSizeWarningOnlyForLowConfiguredValue(t *testing.T) {
+	tests := []struct {
+		name        string
+		params      string
+		wantWarning bool
+	}{
+		{name: "no parameters", params: "", wantWarning: false},
+		{name: "empty parameters", params: `{}`, wantWarning: false},
+		{name: "configured at minimum", params: `{"blockSizeTokens": 64}`, wantWarning: false},
+		{name: "configured below minimum", params: `{"blockSizeTokens": 16}`, wantWarning: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged []string
+			logger := funcr.New(func(_, args string) {
+				logged = append(logged, args)
+			}, funcr.Options{})
+			ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+			defer cancel()
+			handle := plugin.NewEppHandle(ctx, func() []k8stypes.NamespacedName { return nil }, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
+
+			var dec *json.Decoder
+			if tc.params != "" {
+				dec = plugin.StrictDecoder(json.RawMessage(tc.params))
+			}
+			_, err := ApproxPrefixCacheFactory("test", dec, handle)
+			assert.NoError(t, err)
+
+			warned := false
+			for _, rec := range logged {
+				if strings.Contains(rec, "blockSizeTokens is below the recommended minimum") {
+					warned = true
+				}
+			}
+			assert.Equal(t, tc.wantWarning, warned, "logged: %v", logged)
+		})
+	}
 }
 
 func TestProduce_MultiPrompt(t *testing.T) {

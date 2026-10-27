@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +19,7 @@ package handlers
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -25,9 +27,10 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -70,7 +73,7 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 
 	var parsedResp *fwkrh.ParsedResponse
-	parser, err := s.getOrResolveParser(ctx, reqCtx)
+	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else {
@@ -86,15 +89,17 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
-		// Metrics observe the values this chunk carried, not the accumulated ones: a field
-		// already reported by an earlier chunk would otherwise be observed a second time.
-		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokens)
-		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.CompletionTokens)
-		if parsedResp.Usage.PromptTokenDetails != nil {
-			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, parsedResp.Usage.PromptTokenDetails.CachedTokens)
-		}
 	}
 	if endOfStream {
+		// Recorded once here rather than per chunk: a server reporting cumulative
+		// usage on more than one chunk would otherwise be observed once per chunk.
+		// A stream that ends without reaching end of stream records no token counts,
+		// since the abnormal-termination path calls the director directly.
+		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)
+		metrics.RecordOutputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.CompletionTokens)
+		if reqCtx.Usage.PromptTokenDetails != nil {
+			metrics.RecordPromptCachedTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokenDetails.CachedTokens)
+		}
 		metrics.RecordNormalizedTimePerOutputToken(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp, reqCtx.Usage.CompletionTokens)
 		metrics.RecordRequestLatencies(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.RequestReceivedTimestamp, reqCtx.responseCompleteTimestamp)
 		metrics.RecordResponseSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.responseSize)
@@ -105,11 +110,10 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 }
 
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
-// The Anthropic streaming format splits usage across events - message_start carries the
-// prompt tokens and the cached-token detail, message_delta carries the completion tokens -
-// and those events reach the parser in separate chunks, so each field is taken only from
-// the blocks that report it. Parsers that emit usage once with every field populated are
-// unaffected.
+// Anthropic streaming reports usage on message_start and again on message_delta, and a
+// block may carry only some of the fields, so a zero is read as "not reported" and
+// leaves the accumulated value alone. Parsers that emit usage once with every field
+// populated are unaffected.
 func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
@@ -181,6 +185,18 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 				RawValue: []byte("true"),
 			},
 		},
+	}
+
+	// Stamp the flow control queue duration ahead of the streamed body so it reaches the client before the
+	// first token. Absent when flow control did not process the request; zero means a dispatch with no
+	// measurable queueing.
+	if reqCtx.FlowControlAdmitted {
+		headers = append(headers, &configPb.HeaderValueOption{
+			Header: &configPb.HeaderValue{
+				Key:      metadata.FlowQueueDurationHeaderKey,
+				RawValue: []byte(strconv.FormatInt(reqCtx.FlowControlQueueDuration.Milliseconds(), 10)),
+			},
+		})
 	}
 
 	// Include any non-system-owned headers.

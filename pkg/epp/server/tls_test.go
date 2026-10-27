@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,16 +40,23 @@ func TestApplyTLSOverrides(t *testing.T) {
 		},
 		{
 			name:           "only min version",
-			minVersion:     tls.VersionTLS12,
-			wantMinVersion: tls.VersionTLS12,
+			minVersion:     tls.VersionTLS13,
+			wantMinVersion: tls.VersionTLS13,
 		},
 		{
 			name:             "only cipher suites",
 			cipherSuites:     []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384},
+			wantMinVersion:   tls.VersionTLS12,
 			wantCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384},
 		},
 		{
-			name: "neither set",
+			name:           "neither set",
+			wantMinVersion: tls.VersionTLS12,
+		},
+		{
+			name:           "below minimum ignored",
+			minVersion:     tls.VersionTLS10,
+			wantMinVersion: tls.VersionTLS12,
 		},
 	}
 	for _, tt := range tests {

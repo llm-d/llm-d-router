@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,11 +35,12 @@ var (
 // NotificationExtractor implements both Extractor and NotificationExtractor for testing.
 // It records all events it receives and provides helper methods for test assertions.
 type NotificationExtractor struct {
-	name       string
-	gvk        schema.GroupVersionKind
-	events     []fwkdl.NotificationEvent
-	mu         sync.Mutex
-	extractErr error
+	name         string
+	gvk          schema.GroupVersionKind
+	events       []fwkdl.NotificationEvent
+	mu           sync.Mutex
+	extractErr   error
+	extractPanic any
 }
 
 // NewNotificationExtractor creates a new mock extractor with the given name.
@@ -61,6 +63,12 @@ func (m *NotificationExtractor) WithExtractError(err error) *NotificationExtract
 	return m
 }
 
+// WithExtractPanic configures the extractor to panic on Extract.
+func (m *NotificationExtractor) WithExtractPanic(v any) *NotificationExtractor {
+	m.extractPanic = v
+	return m
+}
+
 func (m *NotificationExtractor) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: m.name, Name: m.name}
 }
@@ -69,8 +77,12 @@ func (m *NotificationExtractor) GVK() schema.GroupVersionKind {
 	return m.gvk
 }
 
-// Extract records the event and returns any configured error.
+// Extract records the event and returns any configured error, or panics first
+// when WithExtractPanic was configured.
 func (m *NotificationExtractor) Extract(_ context.Context, event fwkdl.NotificationEvent) error {
+	if m.extractPanic != nil {
+		panic(m.extractPanic)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = append(m.events, event)

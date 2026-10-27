@@ -1,0 +1,22 @@
+# Multimodal omni-model dev environment — separate InferencePool per modality.
+#
+# Deploys a vLLM-omni worker pool with HTTPRoutes routing multimodal
+# endpoints to a dedicated omni InferencePool. Uses standard EPP config
+# (no modality-filter); pod homogeneity within each pool eliminates the
+# need for architecture-aware filtering.
+#
+# To add a text-only pool (e.g. Llama), deploy a second InferencePool
+# and add a catch-all PathPrefix HTTPRoute pointing to it. Exact-path
+# routes for audio/image take precedence per Gateway API spec.
+#
+# Requires:
+#   - Gateway API CRDs (inference.networking.k8s.io/v1 InferencePool)
+#   - A Gateway named "inference-gateway"
+#   - Worker pods with app: ${OMNI_POOL_NAME}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- httproutes.yaml
+- ../../../components/inference-gateway/
+- ../../../components/vllm-omni/

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,12 +18,18 @@ limitations under the License.
 package error
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/llm-d/llm-d-router/pkg/common/envoy"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // RequestDroppedReasonHeaderKey is the HTTP response header that communicates the specific
@@ -39,6 +46,7 @@ const (
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
+	RequestDroppedReasonInternal         RequestDroppedReason = "rejected-internal"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().
@@ -82,61 +90,58 @@ func CanonicalCode(err error) string {
 	return Unknown
 }
 
-// BuildErrResponse maps an error to an Envoy ImmediateResponse with the appropriate
-// HTTP status code and error message body. If the error code is not recognized,
-// it returns a gRPC error instead of an ImmediateResponse.
-func BuildErrResponse(err error) (*extProcPb.ProcessingResponse, error) {
-	var httpCode envoyTypePb.StatusCode
+// httpCodes maps a canonical code to the HTTP status it is answered with. The
+// envelope derives its error type from the status (reqcommon.ErrorEnvelope).
+var httpCodes = map[string]envoyTypePb.StatusCode{
+	BadRequest:         envoyTypePb.StatusCode_BadRequest,
+	Unauthorized:       envoyTypePb.StatusCode_Unauthorized,
+	Forbidden:          envoyTypePb.StatusCode_Forbidden,
+	NotFound:           envoyTypePb.StatusCode_NotFound,
+	PreconditionFailed: envoyTypePb.StatusCode_PreconditionFailed,
+	ResourceExhausted:  envoyTypePb.StatusCode_TooManyRequests,
+	Internal:           envoyTypePb.StatusCode_InternalServerError,
+	ServiceUnavailable: envoyTypePb.StatusCode_ServiceUnavailable,
+}
 
-	switch CanonicalCode(err) {
-	case BadRequest:
-		httpCode = envoyTypePb.StatusCode_BadRequest
-	case Unauthorized:
-		httpCode = envoyTypePb.StatusCode_Unauthorized
-	case Forbidden:
-		httpCode = envoyTypePb.StatusCode_Forbidden
-	case NotFound:
-		httpCode = envoyTypePb.StatusCode_NotFound
-	case PreconditionFailed:
-		httpCode = envoyTypePb.StatusCode_PreconditionFailed
-	case ResourceExhausted:
-		httpCode = envoyTypePb.StatusCode_TooManyRequests
-	case Internal:
-		httpCode = envoyTypePb.StatusCode_InternalServerError
-	case ServiceUnavailable:
-		httpCode = envoyTypePb.StatusCode_ServiceUnavailable
-	default:
+// errorBody serializes the error in the envelope of the API the request was sent to.
+// Messages quote request fragments, so HTML characters are written verbatim.
+func errorBody(apiType reqcommon.APIType, e Error, httpCode envoyTypePb.StatusCode) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(reqcommon.ErrorEnvelope(apiType, int(httpCode), e.Msg)); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// BuildErrResponse maps an error to an Envoy ImmediateResponse with the appropriate
+// HTTP status code and a JSON body in the error envelope of apiType. If the error
+// code is not recognized, it returns a gRPC error instead of an ImmediateResponse.
+func BuildErrResponse(err error, apiType reqcommon.APIType) (*extProcPb.ProcessingResponse, error) {
+	httpCode, ok := httpCodes[CanonicalCode(err)]
+	if !ok {
 		return nil, status.Errorf(status.Code(err), "failed to handle request: %v", err)
 	}
 
-	ir := &extProcPb.ImmediateResponse{
-		Status: &envoyTypePb.HttpStatus{
-			Code: httpCode,
-		},
+	e, _ := err.(Error)
+	body, encodeErr := errorBody(apiType, e, httpCode)
+	if encodeErr != nil {
+		return nil, status.Errorf(codes.Internal, "failed to encode error response: %v", encodeErr)
 	}
 
-	if err.Error() != "" {
-		ir.Body = []byte(err.Error())
+	contentType := &configPb.HeaderValueOption{
+		Header: &configPb.HeaderValue{Key: reqcommon.HeaderContentType, RawValue: []byte(reqcommon.ContentTypeJSON)},
 	}
-
-	if e, ok := err.(Error); ok && len(e.Headers) > 0 {
-		setHeaders := make([]*configPb.HeaderValueOption, 0, len(e.Headers))
-		for k, v := range e.Headers {
-			setHeaders = append(setHeaders, &configPb.HeaderValueOption{
-				Header: &configPb.HeaderValue{
-					Key:      k,
-					RawValue: []byte(v),
-				},
-			})
-		}
-		ir.Headers = &extProcPb.HeaderMutation{
-			SetHeaders: setHeaders,
-		}
-	}
+	setHeaders := append([]*configPb.HeaderValueOption{contentType}, envoy.GenerateHeadersMutation(e.Headers)...)
 
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: ir,
+			ImmediateResponse: &extProcPb.ImmediateResponse{
+				Status:  &envoyTypePb.HttpStatus{Code: httpCode},
+				Body:    body,
+				Headers: &extProcPb.HeaderMutation{SetHeaders: setHeaders},
+			},
 		},
 	}, nil
 }

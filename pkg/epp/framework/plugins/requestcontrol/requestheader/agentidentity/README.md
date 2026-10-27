@@ -1,7 +1,7 @@
 # Agent Identity
 
 **Type:** `agent-identity`
-**Interfaces:** `requestcontrol.RequestHeaderProcessor`
+**Interfaces:** `requestcontrol.RequestHeaderProcessor`, `plugin.ProducerPlugin`
 
 Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then derives `FairnessID` from this attribute when no explicit fairness header is present, so every turn of an agent session lands in the same flow-control fairness queue.
 
@@ -51,7 +51,7 @@ The plugin is stateless and safe under concurrent use.
 Default configuration — no parameters, only the built-in headers are checked:
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: agent-identity
@@ -60,7 +60,7 @@ plugins:
 With additional headers — checked before the built-in defaults (header names are arbitrary; substitute whatever the agent actually emits):
 
 ```yaml
-apiVersion: inference.networking.x-k8s.io/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
   - type: agent-identity

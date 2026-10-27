@@ -1,5 +1,6 @@
 /*
 Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +23,6 @@ package prefixhash
 import (
 	"context"
 	"encoding/binary"
-	"iter"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
@@ -44,7 +44,11 @@ type HashBlock struct {
 // Hash computes a stable unique identifier for the HashBlock content.
 func (b HashBlock) Hash() uint64 {
 	if len(b.Tokens) > 0 {
-		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4)
+		// Reinterprets the uint32 slice as bytes to hash without copying. Safe
+		// because the length check above guarantees a valid backing array, and
+		// the byte length (len(Tokens) * 4) matches uint32's size exactly, so
+		// the resulting slice stays within the array's bounds.
+		byteSlice := unsafe.Slice((*byte)(unsafe.Pointer(&b.Tokens[0])), len(b.Tokens)*4) //#nosec G103 -- see comment above
 		return xxhash.Sum64(byteSlice)
 	}
 
@@ -58,68 +62,76 @@ func (b HashBlock) Hash() uint64 {
 // For subsequent blocks, the hash is calculated as: hash(block i content, hash(i-1)).
 // It requires request.Body.TokenizedRequest to be populated by a token-producer backend.
 func GetBlockHashes(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) [][]BlockHash {
+	hashes, _ := GetBlockHashesWithPromptTokens(ctx, request, blockSizeTokens, maxPrefixBlocks)
+	return hashes
+}
+
+// GetBlockHashesWithPromptTokens hashes as GetBlockHashes does and additionally
+// returns the token count of the prompt behind each entry, positionally aligned
+// with the hashes. A prompt's final block may be partial, so converting a
+// matched block count back to tokens overshoots unless it is bounded by the
+// length of the prompt that produced the blocks.
+func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.InferenceRequest, blockSizeTokens int, maxPrefixBlocks int) ([][]BlockHash, []int) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	if request == nil || request.Body == nil {
 		loggerDebug.Info("Request or request data is nil, skipping hashing")
-		return nil
+		return nil, nil
 	}
 
 	tp := request.Body.TokenizedRequest
 	if tp == nil || tp.TokenCount() == 0 {
 		loggerDebug.Info("TokenizedRequest is empty, skipping hashing")
-		return nil
+		return nil, nil
 	}
 
 	var result [][]BlockHash
+	var promptTokens []int
 	for _, p := range tp.Prompts {
-		seq := getKVCacheBlocksFromTokens(p.TokenIDs, blockSizeTokens)
-		hashes := computeBlockHashes(seq, request, maxPrefixBlocks)
+		hashes := computeBlockHashes(request, p.TokenIDs, blockSizeTokens, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
+			promptTokens = append(promptTokens, len(p.TokenIDs))
 		}
 	}
 	if len(result) == 0 {
 		loggerDebug.Info("No kv cache block found")
-		return nil
+		return nil, nil
 	}
-	return result
+	return result, promptTokens
 }
 
-// computeBlockHashes calculates the hash for content blocks.
-func computeBlockHashes(seq iter.Seq[HashBlock], request *scheduling.InferenceRequest, maxPrefixBlocks int) []BlockHash {
-	var blockHashes []BlockHash
-
-	h := xxhash.New()
-	// Different models should have different hashes even with the same body.
-	_, _ = h.Write([]byte(request.TargetModel))
-	if cacheSalt := request.Body.TokenizedRequest.CacheSalt; cacheSalt != "" {
-		_, _ = h.Write([]byte(cacheSalt))
+// computeBlockHashes hashes a prompt in blocks of blockSizeTokens tokens, the
+// last possibly partial, up to maxPrefixBlocks blocks. Block i's hash is xxhash
+// over its content hash and block i-1's hash, both little-endian; block 0
+// chains from a seed hashed over the target model and cache salt.
+func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, blockSizeTokens, maxPrefixBlocks int) []BlockHash {
+	if len(tokens) == 0 || blockSizeTokens <= 0 || maxPrefixBlocks <= 0 {
+		return nil
 	}
+	count := min((len(tokens)-1)/blockSizeTokens+1, maxPrefixBlocks)
+	blockHashes := make([]BlockHash, 0, count)
 
-	prevBlockHash := BlockHash(h.Sum64())
+	// Different models should have different hashes even with the same body.
+	// Length-prefixing each field keeps distinct model and salt pairs from
+	// encoding to the same bytes, so model "ab" with salt "c" and model "a"
+	// with salt "bc" no longer share a seed.
+	var seed xxhash.Digest
+	seed.Reset()
+	var seedLen [8]byte
+	writeLengthPrefixedString(&seed, seedLen[:], request.TargetModel)
+	writeLengthPrefixedString(&seed, seedLen[:], request.Body.TokenizedRequest.CacheSalt)
+	prevBlockHash := BlockHash(seed.Sum64())
 
-	count := 0
-	for block := range seq {
-		if count >= maxPrefixBlocks {
-			break
-		}
-		h.Reset()
-		blockID := block.Hash()
-		_, _ = h.Write(toBytes(BlockHash(blockID)))
-		_, _ = h.Write(toBytes(prevBlockHash))
-		blockHashes = append(blockHashes, BlockHash(h.Sum64()))
-
-		prevBlockHash = blockHashes[len(blockHashes)-1]
-		count++
+	var buf [16]byte
+	for i := range count {
+		block := HashBlock{Tokens: tokens[i*blockSizeTokens : min((i+1)*blockSizeTokens, len(tokens))]}
+		PutBlockHash(buf[:8], BlockHash(block.Hash()))
+		PutBlockHash(buf[8:], prevBlockHash)
+		prevBlockHash = BlockHash(xxhash.Sum64(buf[:]))
+		blockHashes = append(blockHashes, prevBlockHash)
 	}
 
 	return blockHashes
-}
-
-func toBytes(i BlockHash) []byte {
-	bytes := make([]byte, 8)
-	PutBlockHash(bytes, i)
-	return bytes
 }
 
 // PutBlockHash writes h into the first 8 bytes of buf in little-endian order.
@@ -129,19 +141,12 @@ func PutBlockHash(buf []byte, h BlockHash) {
 	binary.LittleEndian.PutUint64(buf, uint64(h))
 }
 
-func getKVCacheBlocksFromTokens(ids []uint32, blockSizeTokens int) iter.Seq[HashBlock] {
-	return func(yield func(HashBlock) bool) {
-		if len(ids) == 0 || blockSizeTokens <= 0 {
-			return
-		}
-		for i := 0; i < len(ids); i += blockSizeTokens {
-			end := i + blockSizeTokens
-			if end > len(ids) {
-				end = len(ids)
-			}
-			if !yield(HashBlock{Tokens: ids[i:end]}) {
-				return
-			}
-		}
-	}
+// writeLengthPrefixedString writes s to d preceded by its length as an 8-byte
+// little-endian integer. Length-prefixing makes a sequence of strings
+// unambiguous: no two sequences of distinct strings share an encoding. lenBuf
+// must have length at least 8 and is overwritten.
+func writeLengthPrefixedString(d *xxhash.Digest, lenBuf []byte, s string) {
+	binary.LittleEndian.PutUint64(lenBuf, uint64(len(s)))
+	_, _ = d.Write(lenBuf)
+	_, _ = d.WriteString(s)
 }

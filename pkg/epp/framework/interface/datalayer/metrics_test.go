@@ -60,3 +60,13 @@ func TestMetricsToString(t *testing.T) {
 	var none *Metrics
 	assert.Equal(t, "", none.String())
 }
+
+func TestMetricsUpdated(t *testing.T) {
+	var none *Metrics
+	assert.False(t, none.Updated())
+	assert.False(t, NewMetrics().Updated())
+
+	m := NewMetrics()
+	m.UpdateTime = time.Now()
+	assert.True(t, m.Updated())
+}

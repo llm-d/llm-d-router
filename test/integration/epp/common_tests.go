@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +29,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	integration "github.com/llm-d/llm-d-router/test/integration"
+	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Model name constants shared across test suites.
@@ -137,9 +138,9 @@ func ReqRequestHeadersAndResponseGRPC(
 
 // --- Response Expectations ---
 
-func buildRouteResponse(endpoint, targetModel, prompt string, stream bool) []*extProcPb.ProcessingResponse {
+func buildRouteResponse(endpoint, targetModel, prompt string, priority int, stream bool) []*extProcPb.ProcessingResponse {
 	bodyMap := map[string]any{
-		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0,
+		"max_tokens": 100, "model": targetModel, "prompt": prompt, "temperature": 0, "priority": priority,
 	}
 	if stream {
 		bodyMap["stream"] = true
@@ -171,14 +172,14 @@ func buildGRPCRouteResponse(endpoint, prompt, methodName string, stream bool) []
 }
 
 // ExpectRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
-// rewritten to match the target model.
-func ExpectRouteTo(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, false)
+// rewritten to match the target model. priority is the resolved InferenceObjective priority injected into the body.
+func ExpectRouteTo(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, false)
 }
 
 // ExpectRouteToWithStream asserts that the request was successfully routed with streaming enabled.
-func ExpectRouteToWithStream(endpoint, targetModel, prompt string) []*extProcPb.ProcessingResponse {
-	return buildRouteResponse(endpoint, targetModel, prompt, true)
+func ExpectRouteToWithStream(endpoint, targetModel, prompt string, priority int) []*extProcPb.ProcessingResponse {
+	return buildRouteResponse(endpoint, targetModel, prompt, priority, true)
 }
 
 // ExpectPassthroughRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
@@ -204,20 +205,75 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 	return buildGRPCRouteResponse(endpoint, prompt, method, true)
 }
 
-// ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
+// ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
+// serialized in the OpenAI error envelope.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg)
+	return integration.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader())
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
 func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+	return integration.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
+		&envoyCorev3.HeaderValueOption{
+			Header: &envoyCorev3.HeaderValue{
+				Key:      errcommon.RequestDroppedReasonHeaderKey,
+				RawValue: []byte(reason),
+			},
+		})
+}
+
+// openAIErrorBody is the OpenAI error envelope the EPP answers with for the given status.
+func openAIErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "server_error"
+	switch code {
+	case envoyTypePb.StatusCode_BadRequest:
+		errType = "invalid_request_error"
+	case envoyTypePb.StatusCode_TooManyRequests:
+		errType = "rate_limit_error"
+	}
+	body, _ := json.Marshal(struct {
+		Error openAIErrorFields `json:"error"`
+	}{Error: openAIErrorFields{Message: msg, Type: errType, Code: int(code)}})
+	return string(body)
+}
+
+type openAIErrorFields struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
+}
+
+// ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
+// given code and message, serialized in the Anthropic error envelope.
+func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
+	return integration.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader())
+}
+
+func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "api_error"
+	if code == envoyTypePb.StatusCode_BadRequest {
+		errType = "invalid_request_error"
+	}
+	body, _ := json.Marshal(struct {
+		Type  string             `json:"type"`
+		Error anthropicErrFields `json:"error"`
+	}{Type: "error", Error: anthropicErrFields{Type: errType, Message: msg}})
+	return string(body)
+}
+
+type anthropicErrFields struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {
+	return &envoyCorev3.HeaderValueOption{
 		Header: &envoyCorev3.HeaderValue{
-			Key:      errcommon.RequestDroppedReasonHeaderKey,
-			RawValue: []byte(reason),
+			Key:      reqcommon.HeaderContentType,
+			RawValue: []byte(reqcommon.ContentTypeJSON),
 		},
-	})
+	}
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
@@ -312,12 +368,12 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
 				P(2, 10, 0.2),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelMyModelTarget, "test1", prio(2)),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
-				"inference_pool_ready_pods":         cleanMetric(metricReadyPods(3)),
+				"llm_d_epp_request_total":   cleanMetric(metricReqTotal(modelMyModel, modelMyModelTarget, prio(2))),
+				"llm_d_epp_ready_endpoints": cleanMetric(metricReadyPods(3)),
 			},
-			wantSpans: []string{"gateway.request", "gateway.request_orchestration"},
+			wantSpans: []string{"request", "request_orchestration"},
 		},
 		{
 			name:     "select active lora, low queue",
@@ -327,9 +383,9 @@ func commonTestCases(prio func(int) int) []testCase {
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Has LoRA)
 				P(2, 10, 0.2, "foo", "bar"),
 			},
-			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2"),
+			wantResponses: ExpectRouteTo("192.168.1.2:8000", modelSQLLoraTarget, "test2", prio(2)),
 			wantMetrics: map[string]string{
-				"inference_objective_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
+				"llm_d_epp_request_total": cleanMetric(metricReqTotal(modelSQLLora, modelSQLLoraTarget, prio(2))),
 			},
 		},
 		{
@@ -337,7 +393,7 @@ func commonTestCases(prio func(int) int) []testCase {
 			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-				"inference error: Internal - no pods available in datastore"),
+				"no pods available in datastore"),
 		},
 		{
 			name: "request missing model field",
@@ -346,7 +402,7 @@ func commonTestCases(prio func(int) int) []testCase {
 				`{"prompt":"hello world"}`,
 			),
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-				"inference error: BadRequest - model not found in request body"),
+				"model not found in request body"),
 		},
 	}
 }
@@ -378,17 +434,17 @@ func labelsToString(labels []label) string {
 
 func metricReqTotal(model, target string, priority int) string {
 	return fmt.Sprintf(`
-    # HELP inference_objective_request_total [ALPHA] [Deprecated: Use llm_d_epp_request_total] Counter of inference objective requests broken out for each model and target model.
-    # TYPE inference_objective_request_total counter
-    inference_objective_request_total{%s} 1
-    `, labelsToString([]label{{"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
+    # TYPE llm_d_epp_request_total counter
+    llm_d_epp_request_total{%s} 1
+    `, labelsToString([]label{{"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {
 	return fmt.Sprintf(`
-    # HELP inference_pool_ready_pods [ALPHA] [Deprecated: Use llm_d_epp_ready_endpoints] The number of ready pods in the inference server pool.
-    # TYPE inference_pool_ready_pods gauge
-    inference_pool_ready_pods{%s} %d
+	# HELP llm_d_epp_ready_endpoints [ALPHA] The number of ready endpoints in the inference server pool.
+	# TYPE llm_d_epp_ready_endpoints gauge
+	llm_d_epp_ready_endpoints{%s} %d
     `, labelsToString([]label{{"name", testPoolName}}), count)
 }
 

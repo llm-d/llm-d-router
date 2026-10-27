@@ -23,26 +23,47 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
-func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+const finishReasonCacheThreshold = "cache_threshold"
+
+func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running Shared Storage protocol", "url", prefillPodHostPort)
 
-	original, completionRequest, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	defer toolFields.report(r.Context())
 
 	// If "cache_hit_threshold" is present in the request, we try to decode first. The decode node must meet the cache hit threshold in order to execute.
 	// If the decode node is below the threshold, it won't process the request and return a "cache_threshold" finish reason. In that case,
 	// we fall back to P/D disaggregation: perform prefill and then decode.
 	// For more information refer to the RFC https://github.com/vllm-project/vllm/issues/24256
-	if cacheHitThreshold, hasCacheHitThreshold := completionRequest[requestFieldCacheHitThreshold]; hasCacheHitThreshold {
-		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first", requestFieldCacheHitThreshold, cacheHitThreshold)
+	if _, hasCacheHitThreshold := body[reqcommon.FieldCacheHitThreshold]; hasCacheHitThreshold {
+		s.logger.V(logging.DEBUG).Info("cache_hit_threshold field found in the request, trying to decode first")
 		decodeReq := cloneRequestWithBody(r.Context(), r, original)
-		needsPrefill, err := s.tryDecode(w, decodeReq, completionRequest)
+		attemptStart := time.Now()
+		attemptWriter, attemptStatus := captureResponseStatus(w)
+		attemptReturned := false
+		defer recordDecodeAbort(&attemptReturned, attemptStart)
+		_, _ = toolFields.compareValidatedDispatched(original)
+		needsPrefill, err := s.tryDecode(attemptWriter, decodeReq, body)
+		attemptReturned = true
+		// An attempt that falls back to prefill is not sampled; the decode after
+		// prefill is this request's decode stage.
+		if !needsPrefill {
+			metrics.RecordDecodeDuration(time.Since(attemptStart))
+			if err != nil || attemptStatus.failed() {
+				metrics.RecordError(metrics.StageDecode)
+			}
+		}
 		if err != nil {
 			return
 		}
@@ -50,19 +71,19 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 			s.logger.V(logging.DEBUG).Info("decode succeeded without prefill")
 			return
 		}
-		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold", requestFieldCacheHitThreshold, cacheHitThreshold)
+		s.logger.V(logging.DEBUG).Info("decode failed due to failing to meet the cache hit threshold")
 	}
 
 	// we clone the completion request to avoid modifying the original request
-	prefillRequest := maps.Clone(completionRequest)
-	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest); err != nil {
+	prefillRequest := maps.Clone(body)
+	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest, apiType, toolFields); err != nil {
 		s.logger.Error(err, "prefill failed")
 		return
 	}
 
 	s.logger.V(logging.DEBUG).Info("forwarding to decoder after prefill")
-	completionRequest[requestFieldCacheHitThreshold] = 0
-	decodeRequestBody, err := json.Marshal(completionRequest)
+	body[reqcommon.FieldCacheHitThreshold] = 0
+	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
@@ -71,12 +92,22 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	}
 
 	decodeReq := cloneRequestWithBody(r.Context(), r, decodeRequestBody)
-	s.decoderProxy.ServeHTTP(w, decodeReq)
+	decodeStart := time.Now()
+	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	_, _ = toolFields.compareValidatedDispatched(decodeRequestBody)
+	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	decodeReturned = true
+	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	if decodeStatus.failed() {
+		metrics.RecordError(metrics.StageDecode)
+	}
 }
 
 // tryDecode attempts to decode and returns whether prefill is needed.
-func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, completionRequest map[string]any) (bool, error) {
-	if isStreaming, _ := completionRequest[requestFieldStream].(bool); isStreaming {
+func (s *Server) tryDecode(w http.ResponseWriter, r *http.Request, body map[string]any) (bool, error) {
+	if isStreaming, _ := body[reqcommon.FieldStream].(bool); isStreaming {
 		if flusher, ok := w.(flushableResponseWriter); ok {
 			bw := newResponseWriterWithBuffer(flusher)
 			return s.tryDecodeStreaming(bw, r)
@@ -92,10 +123,10 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	s.decoderProxy.ServeHTTP(dw, r)
 
 	if isHTTPError(dw.statusCode) {
-
+		maps.Copy(w.Header(), dw.headers)
 		w.WriteHeader(dw.statusCode)
 		if dw.buffer.Len() > 0 {
-			w.Write(dw.buffer.Bytes()) //nolint:errcheck
+			WriteAll(w, dw.buffer.Bytes())
 		}
 
 		err := errors.New("decode request failed")
@@ -107,7 +138,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	// Parse response to check finish_reason
 	var response map[string]any
 	if err := json.Unmarshal(dw.buffer.Bytes(), &response); err != nil {
-		s.logger.Error(err, "failed to unmarshal decode response", "response", dw.buffer.String())
+		s.logger.Error(jsonErrorForLog(err), "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
 
 		if err := errorInternalServerError(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
@@ -122,7 +153,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 
 	// Decode succeeded, write response to client
 	maps.Copy(w.Header(), dw.headers)
-	w.Write(dw.buffer.Bytes()) //nolint:errcheck
+	WriteAll(w, dw.buffer.Bytes())
 
 	return false, nil
 }
@@ -133,8 +164,19 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request) (bool, error) {
 	// Run ServeHTTP in a goroutine so we can inspect the initial choice to determine if we need to prefill.
 	done := make(chan struct{})
+	// Written by the decode goroutine, read after done is closed.
+	var aborted bool
 	go func() {
 		defer close(done)
+		// net/http only recovers http.ErrAbortHandler on the request goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec != http.ErrAbortHandler {
+					panic(rec)
+				}
+				aborted = true
+			}
+		}()
 		s.decoderProxy.ServeHTTP(w, r)
 	}()
 
@@ -149,9 +191,25 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 
 	statusCode := w.getStatusCode()
 	if isHTTPError(statusCode) {
-		if err := w.flushBufferAndGoDirect(); err != nil {
-			s.logger.Error(err, "failed to flush buffer to client")
-			return false, err
+		// A status of 0 means the decoder never called WriteHeader or Write.
+		// Flushing that would commit an empty 200. Leave it unwritten so the
+		// abort below drops the connection instead.
+		var flushErr error
+		if statusCode != 0 {
+			flushErr = w.flushBufferAndGoDirect()
+			if flushErr != nil {
+				s.logger.Error(flushErr, "failed to flush buffer to client")
+			}
+		}
+		// The decode goroutine may still be writing. Wait for it, then replay
+		// the abort here. net/http only recovers http.ErrAbortHandler on the
+		// request goroutine.
+		<-done
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
+		if flushErr != nil {
+			return false, flushErr
 		}
 		return false, fmt.Errorf("decode request failed with status code: %d", statusCode)
 	}
@@ -170,23 +228,41 @@ func (s *Server) tryDecodeStreaming(w *responseWriterWithBuffer, r *http.Request
 		return false, err
 	}
 	<-done
+	if aborted {
+		// Replay the abort on the request goroutine, where net/http recovers it
+		// and drops the connection.
+		panic(http.ErrAbortHandler)
+	}
 	return false, nil
 }
 
 // hasCacheThresholdFinishReason checks if a parsed response contains cache_threshold finish reason.
 func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
+	if stop, ok := response["stop_reason"].(string); ok && stop == finishReasonCacheThreshold {
+		return true
+	}
+	if delta, ok := response["delta"].(map[string]any); ok {
+		if stop, ok := delta["stop_reason"].(string); ok && stop == finishReasonCacheThreshold {
+			return true
+		}
+	}
+
 	choices, ok := response[responseFieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return false
 	}
 
-	choice, ok := choices[0].(map[string]any)
-	if !ok {
-		return false
+	for _, raw := range choices {
+		choice, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		finishReason, ok := choice[responseFieldFinishReason].(string)
+		if ok && finishReason == finishReasonCacheThreshold {
+			return true
+		}
 	}
-
-	finishReason, ok := choice[responseFieldFinishReason].(string)
-	return ok && finishReason == finishReasonCacheThreshold
+	return false
 }
 
 // checkBufferedResponseForCacheThreshold checks the buffered SSE response for cache_threshold finish reason.
@@ -195,11 +271,11 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 	// Parse SSE format: "data: {...json...}\n\ndata: {...json...}\n\n"
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == "data: [DONE]" || !strings.HasPrefix(line, "data: ") {
+		if line == "" || line == reqcommon.SSEDone || !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
 			continue
 		}
 
-		jsonData := strings.TrimPrefix(line, "data: ")
+		jsonData := strings.TrimPrefix(line, reqcommon.SSEDataPrefix)
 		var response map[string]any
 		if err := json.Unmarshal([]byte(jsonData), &response); err != nil {
 			s.logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", jsonData)
@@ -214,13 +290,12 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 }
 
 // prefill routes a request to a prefill node
-func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, completionRequest map[string]any) error {
+func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType, toolFields *toolCallingRequest) error {
 	// Prepare prefill request
-	completionRequest[requestFieldMaxTokens] = 1
-	completionRequest[requestFieldMaxCompletionTokens] = 1
-	completionRequest[requestFieldCacheHitThreshold] = 0
+	reqcommon.CapSingleToken(body, apiType)
+	body[reqcommon.FieldCacheHitThreshold] = 0
 
-	pbody, err := json.Marshal(completionRequest)
+	pbody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
@@ -240,13 +315,18 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	// send prefill request
 	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
 	pw := &bufferedResponseWriter{}
+	prefillStart := time.Now()
+	_, _ = toolFields.compareValidatedDispatched(pbody)
 	prefillHandler.ServeHTTP(pw, preq)
+	metrics.RecordPrefillDuration(time.Since(prefillStart))
 
 	if isHTTPError(pw.statusCode) {
+		metrics.RecordError(metrics.StagePrefill)
 		s.logger.Error(nil, "prefill request failed", "code", pw.statusCode)
+		maps.Copy(w.Header(), pw.headers)
 		w.WriteHeader(pw.statusCode)
 		if pw.buffer.Len() > 0 {
-			w.Write(pw.buffer.Bytes()) //nolint:errcheck
+			WriteAll(w, pw.buffer.Bytes())
 		}
 		return fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
 	}

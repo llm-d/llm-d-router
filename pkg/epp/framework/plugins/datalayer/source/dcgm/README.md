@@ -55,7 +55,7 @@ so metrics include a `pod` label (GPU Operator sets this by default).
 ## Complete Configuration Example
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: dcgm-data-source

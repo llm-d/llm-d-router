@@ -1,0 +1,19 @@
+router:
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
+  epp:
+    image:
+      registry: ghcr.io/llm-d
+      repository: llm-d-router-endpoint-picker
+      tag: v0.10.0
+      pullPolicy: IfNotPresent
+    flags:
+      enable-pprof: false
+      v: 2
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: optimized-baseline
+      study.llm-d.ai/name: epp-tracing-overhead

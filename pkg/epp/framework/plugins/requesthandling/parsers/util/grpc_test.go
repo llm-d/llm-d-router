@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package grpcutil
+package parserutil
 
 import (
 	"encoding/binary"
@@ -95,6 +95,62 @@ func TestParseGrpcPayload(t *testing.T) {
 			want := tt.want
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("ParseGrpcPayload() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestParseGrpcPayloads(t *testing.T) {
+	frame := func(payload string) []byte {
+		b := make([]byte, 5+len(payload))
+		binary.BigEndian.PutUint32(b[1:5], uint32(len(payload))) //#nosec G115 -- test fixture, small gRPC frame payloads
+		copy(b[5:], payload)
+		return b
+	}
+	tests := []struct {
+		name    string
+		data    []byte
+		want    [][]byte
+		wantErr string
+	}{
+		{
+			name: "no frames",
+			data: nil,
+		},
+		{
+			name: "one frame",
+			data: frame("hello"),
+			want: [][]byte{[]byte("hello")},
+		},
+		{
+			name: "two frames",
+			data: append(frame("hello"), frame("world")...),
+			want: [][]byte{[]byte("hello"), []byte("world")},
+		},
+		{
+			name:    "incomplete trailing frame keeps the frames before it",
+			data:    append(frame("hello"), frame("world")[:8]...),
+			want:    [][]byte{[]byte("hello")},
+			wantErr: "incomplete gRPC payload: header indicates 5 bytes, but only 3 bytes are available",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseGrpcPayloads(tt.data)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("got error nil, want %q", tt.wantErr)
+				}
+				if gotErr := err.Error(); gotErr != tt.wantErr {
+					t.Errorf("got error %q, want %q", gotErr, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("got error %v, want nil", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("ParseGrpcPayloads() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

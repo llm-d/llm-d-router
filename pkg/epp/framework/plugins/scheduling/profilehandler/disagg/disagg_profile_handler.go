@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package disagg provides profile handler plugins for the epp.
 package disagg
 
@@ -9,12 +25,12 @@ import (
 	"net"
 	"strings"
 
-	"github.com/go-logr/logr"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -68,6 +84,14 @@ func ParseStageOrder(s string) (StageOrder, error) {
 // The value is an Endpoint.
 var PeerEndpointAttributeKey = plugin.NewDataKey("peer-endpoint", DisaggProfileHandlerType)
 
+// prefillDeclinedAttributeKey marks, for decode-first mode, that the PD
+// decider itself chose not to run the prefill profile (or no PD decider is
+// configured). ProcessResults reads this to tell that intentional skip apart
+// from a prefill profile that was picked to run and then failed to find any
+// endpoint: both leave profileResults[prefillProfile] as a nil entry, but
+// only the former is safe to complete decode-only. The value is a bool.
+var prefillDeclinedAttributeKey = plugin.NewDataKey("prefill-declined", DisaggProfileHandlerType)
+
 // ── Factory & constructor ────────────────────────────────────────────────────
 
 type disaggProfilesParameters struct {
@@ -86,55 +110,6 @@ type DisaggProfileHandlerParameters struct {
 	StageOrder StageOrder               `json:"stageOrder,omitempty"`
 	Profiles   disaggProfilesParameters `json:"profiles"`
 	Deciders   disaggDecidersParameters `json:"deciders"`
-}
-
-// legacyDisaggProfileHandlerParameters is the deprecated flat parameter format.
-// Unknown fields (e.g. pd-profile-handler's prefixPluginType, primaryPort) are
-// silently ignored by json.Unmarshal, so they need not be declared here.
-type legacyDisaggProfileHandlerParameters struct {
-	StageOrder               StageOrder `json:"stageOrder,omitempty"`
-	DecodeProfile            string     `json:"decodeProfile"`
-	PrefillProfile           string     `json:"prefillProfile"`
-	EncodeProfile            string     `json:"encodeProfile"`
-	PrefillDeciderPluginName string     `json:"prefillDeciderPluginName"`
-	EncodeDeciderPluginName  string     `json:"encodeDeciderPluginName"`
-	// DeciderPluginName is a legacy alias from pd-profile-handler, maps to deciders.prefill.
-	DeciderPluginName string `json:"deciderPluginName"`
-}
-
-// toDisaggParams copies legacy flat fields into the nested format, logging a
-// deprecation warning for each field in use.
-func (l *legacyDisaggProfileHandlerParameters) toDisaggParams(logger logr.Logger) DisaggProfileHandlerParameters {
-	p := DisaggProfileHandlerParameters{}
-	if l.StageOrder != "" {
-		p.StageOrder = l.StageOrder
-	}
-	if l.DecodeProfile != "" {
-		logger.Info("Deprecated parameter 'decodeProfile', use 'profiles.decode' instead")
-		p.Profiles.Decode = l.DecodeProfile
-	}
-	if l.PrefillProfile != "" {
-		logger.Info("Deprecated parameter 'prefillProfile', use 'profiles.prefill' instead")
-		p.Profiles.Prefill = l.PrefillProfile
-	}
-	if l.EncodeProfile != "" {
-		logger.Info("Deprecated parameter 'encodeProfile', use 'profiles.encode' instead")
-		p.Profiles.Encode = l.EncodeProfile
-	}
-	if l.PrefillDeciderPluginName != "" {
-		logger.Info("Deprecated parameter 'prefillDeciderPluginName', use 'deciders.prefill' instead")
-		p.Deciders.Prefill = l.PrefillDeciderPluginName
-	}
-	// DeciderPluginName is a lower-priority alias for prefill decider (from pd-profile-handler).
-	if l.DeciderPluginName != "" && p.Deciders.Prefill == "" {
-		logger.Info("Deprecated parameter 'deciderPluginName', use 'deciders.prefill' instead")
-		p.Deciders.Prefill = l.DeciderPluginName
-	}
-	if l.EncodeDeciderPluginName != "" {
-		logger.Info("Deprecated parameter 'encodeDeciderPluginName', use 'deciders.encode' instead")
-		p.Deciders.Encode = l.EncodeDeciderPluginName
-	}
-	return p
 }
 
 // HandlerFactory is the unified factory for all disaggregation profile handlers.
@@ -194,38 +169,11 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	return handler.WithName(name), nil
 }
 
-func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, handle plugin.Handle) (any, error) {
-	logger := log.FromContext(handle.Context())
-
+func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
 	parameters := DisaggProfileHandlerParameters{}
 	if rawParameters != nil {
-		// Capture raw bytes once so we can try each schema independently with
-		// strict decoding. The decoder passed in is one-shot, so we re-read
-		// from these bytes for the second attempt.
-		var raw json.RawMessage
-		if err := rawParameters.Decode(&raw); err != nil {
+		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler - %w", err)
-		}
-
-		// Try the new (nested) schema strictly first. If the user supplied
-		// only new-format fields, this succeeds. Per #1068, deprecated
-		// (legacy flat) fields are not in the new struct, so they would
-		// produce "unknown field" errors here — that's the signal to fall
-		// back to the legacy schema.
-		errNew := plugin.StrictDecoder(raw).Decode(&parameters)
-		if errNew != nil {
-			legacy := legacyDisaggProfileHandlerParameters{}
-			if errLegacy := plugin.StrictDecoder(raw).Decode(&legacy); errLegacy != nil {
-				// Neither schema parses cleanly: either mixed schemas or a
-				// genuinely unknown field. Surface both errors so callers can
-				// tell which they meant.
-				return nil, fmt.Errorf("failed to parse parameters of the disagg-profile-handler: "+
-					"nested schema error: %w; legacy schema error: %v "+
-					"(use one format exclusively: either nested profiles/deciders or the deprecated flat fields)",
-					errNew, errLegacy)
-			}
-			logger.Info("Deprecated: using flat parameter format, migrate to nested profiles/deciders format")
-			parameters = legacy.toDisaggParams(logger)
 		}
 	}
 
@@ -270,6 +218,8 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 var (
 	_ scheduling.ProfileHandler = &Handler{}
 	_ requestcontrol.PreRequest = &Handler{}
+	_ plugin.ProducerPlugin     = &Handler{}
+	_ plugin.ConsumerPlugin     = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -309,14 +259,70 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	return h
 }
 
-// Consumes defines data types consumed by this plugin (through the PD decider).
-func (*Handler) Consumes() plugin.DataDependencies {
-	return plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{
-			attrprefix.PrefixCacheMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey:   scheduling.TokenizedRequest{},
-		},
+// Produces declares the request attributes the handler publishes for later
+// scheduling phases and for its own ProcessResults, plus everything its
+// deciders write. Both live in the per-request store rather than on an
+// endpoint.
+//
+// The deciders run inside this handler's extension points, through the request
+// the handler was handed, so their keys are confined against this declaration
+// rather than their own.
+func (h *Handler) Produces() map[plugin.DataKey]any {
+	produced := map[plugin.DataKey]any{
+		// Endpoint is an interface; its zero value is the type witness the
+		// data graph compares against a consumer's declaration.
+		PeerEndpointAttributeKey:    scheduling.Endpoint(nil),
+		prefillDeclinedAttributeKey: false,
 	}
+	for _, decider := range []deciderPlugin{h.pdDecider, h.encodeDecider} {
+		producer, ok := decider.(plugin.ProducerPlugin)
+		if !ok {
+			continue
+		}
+		for key, witness := range producer.Produces() {
+			produced[key] = witness
+		}
+	}
+	return produced
+}
+
+// Consumes declares the prefix match info and tokenized prompt the handler
+// requires for P/D, plus everything its deciders declare. The deciders' reads
+// are confined against this declaration for the reason given on Produces.
+func (h *Handler) Consumes() plugin.DataDependencies {
+	prefixMatchInfoDK := attrprefix.PrefixCacheMatchInfoDataKey
+	if h.pdDecider != nil {
+		if consumer, ok := h.pdDecider.(prefixMatchInfoConsumer); ok {
+			prefixMatchInfoDK = consumer.prefixMatchInfoDataKey()
+		}
+	}
+	consumed := plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
+			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+		},
+		Optional: map[plugin.DataKey]any{},
+	}
+	deciders := []deciderPlugin{h.pdDecider, h.encodeDecider}
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Required {
+				consumed.Required[key] = witness
+			}
+		}
+	}
+	// A key one decider requires stays required when the other lists it as
+	// optional.
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Optional {
+				if _, required := consumed.Required[key]; !required {
+					consumed.Optional[key] = witness
+				}
+			}
+		}
+	}
+	return consumed
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
@@ -344,14 +350,16 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	defer span.End()
 
 	if request == nil {
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_nil_request"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_nil_request"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	if h.stageOrder == StageOrderPrefillFirst {
@@ -367,18 +375,18 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	if _, executed := profileResults[h.decodeProfile]; !executed {
 		decodeProfile, ok := profiles[h.decodeProfile]
 		if !ok {
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("error_missing_decode_profile"))
 			return map[string]scheduling.SchedulerProfile{}
 		}
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 		return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 	}
 
 	decodeRes := profileResults[h.decodeProfile]
 	if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 		span.SetAttributes(
-			attribute.String("llm_d.epp.profile_handler.decision", "complete"),
-			attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
+			semconv.LLMDEPPProfileHandlerDecision("complete"),
+			semconv.LLMDEPPProfileHandlerDecodeFailed(true),
 		)
 		return map[string]scheduling.SchedulerProfile{}
 	}
@@ -387,12 +395,12 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run the decider.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_encode"))
 		}
 	}
 
@@ -403,23 +411,19 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
-			// Decider rejected prefill - mark as evaluated so we don't re-run the decider.
+			// Decider rejected prefill - mark as evaluated so we don't re-run the decider,
+			// and record that this is an intentional skip, not a failed run.
 			profileResults[h.prefillProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_prefill"))
+			request.PutAttribute(prefillDeclinedAttributeKey, true)
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_prefill"))
 		}
 	}
 
 	// ── All stages done: record routing decision ───────────────────────────
-	encodeUsed := profileResults[h.encodeProfile] != nil
-	prefillUsed := profileResults[h.prefillProfile] != nil
-
-	decision := DisaggDecisionType(encodeUsed, prefillUsed)
-	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
-
+	h.recordDecision(span, request, profileResults)
 	return map[string]scheduling.SchedulerProfile{}
 }
 
@@ -431,18 +435,13 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 		decodeRes := profileResults[h.decodeProfile]
 		if decodeRes == nil || len(decodeRes.TargetEndpoints) == 0 {
 			span.SetAttributes(
-				attribute.String("llm_d.epp.profile_handler.decision", "complete"),
-				attribute.Bool("llm_d.epp.profile_handler.decode_failed", true),
+				semconv.LLMDEPPProfileHandlerDecision("complete"),
+				semconv.LLMDEPPProfileHandlerDecodeFailed(true),
 			)
 			return map[string]scheduling.SchedulerProfile{}
 		}
 
-		encodeUsed := profileResults[h.encodeProfile] != nil
-		prefillUsed := profileResults[h.prefillProfile] != nil
-
-		decision := DisaggDecisionType(encodeUsed, prefillUsed)
-		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "complete_"+decision))
+		h.recordDecision(span, request, profileResults)
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -450,7 +449,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	// In prefill-first mode, prefill runs whenever the prefill profile is configured.
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
 			return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 		}
 	}
@@ -459,19 +458,19 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	if _, hasEncodeProfile := profiles[h.encodeProfile]; hasEncodeProfile {
 		if _, executed := profileResults[h.encodeProfile]; !executed {
 			if h.encodeDecider != nil && h.encodeDecider.disaggregate(ctx, request, nil) {
-				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_encode"))
+				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_encode"))
 				return map[string]scheduling.SchedulerProfile{h.encodeProfile: profiles[h.encodeProfile]}
 			}
 			// Decider rejected encode - mark as evaluated so we don't re-run.
 			profileResults[h.encodeProfile] = nil
-			span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "skip_encode"))
+			span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("skip_encode"))
 		}
 	}
 
 	// ── Stage 3: Decode (mandatory) ────────────────────────────────────────
 	decodeProfile, ok := profiles[h.decodeProfile]
 	if !ok {
-		span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "error_missing_decode_profile"))
+		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("error_missing_decode_profile"))
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -481,8 +480,37 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 		request.PutAttribute(PeerEndpointAttributeKey, prefillRes.TargetEndpoints[0])
 	}
 
-	span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_decode"))
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_decode"))
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
+}
+
+// prefillRequiredButFailed reports whether the prefill profile was picked to
+// run and found no endpoint, as opposed to the PD decider declining it.
+func (h *Handler) prefillRequiredButFailed(request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) bool {
+	prefillRes, ok := profileResults[h.prefillProfile]
+	if !ok || prefillRes != nil {
+		return false
+	}
+	declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey)
+	return !declined
+}
+
+// recordDecision records the routing decision once all stages are done.
+// Requests that ProcessResults rejects are not routed and are not counted.
+func (h *Handler) recordDecision(span trace.Span, request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) {
+	if h.prefillRequiredButFailed(request, profileResults) {
+		span.SetAttributes(
+			semconv.LLMDEPPProfileHandlerDecision("complete"),
+			semconv.LLMDEPPProfileHandlerPrefillFailed(true),
+		)
+		return
+	}
+	encodeUsed := profileResults[h.encodeProfile] != nil
+	prefillUsed := profileResults[h.prefillProfile] != nil
+
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
 }
 
 // ProcessResults implements scheduling.ProfileHandler.
@@ -505,7 +533,12 @@ func (h *Handler) ProcessResults(
 
 	updatedResults[h.decodeProfile] = decodeRunResults
 
-	if prefillRes, ok := profileResults[h.prefillProfile]; ok && prefillRes != nil {
+	if h.prefillRequiredButFailed(request, profileResults) {
+		// Completing decode-only here would silently run prefill work on a
+		// decode pod instead of failing the request.
+		return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
+	}
+	if prefillRes := profileResults[h.prefillProfile]; prefillRes != nil {
 		updatedResults[h.prefillProfile] = prefillRes
 	}
 
@@ -532,64 +565,66 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 
 	if request == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "request_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("request_is_nil"),
 		)
 		return nil
 	}
 	if schedulingResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.disagg.reason", "scheduling_result_is_nil"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPDisaggReason("scheduling_result_is_nil"),
 		)
 		return nil
 	}
 
 	if request.TargetModel != "" {
-		span.SetAttributes(attribute.String("gen_ai.request.model", request.TargetModel))
+		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(attribute.String("gen_ai.request.id", request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header
-	delete(request.Headers, routing.PrefillEndpointHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.PrefillEndpointHeader)
 	prefillProfileRunResult := schedulingResult.ProfileResults[h.prefillProfile]
 	switch {
 	case prefillProfileRunResult == nil:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_result"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_result"),
 		)
 	case len(prefillProfileRunResult.TargetEndpoints) == 0:
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
-			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_target_endpoints"),
+			semconv.LLMDEPPPDDisaggregationUsed(false),
+			semconv.LLMDEPPPDReason("no_prefill_profile_target_endpoints"),
 		)
 	default:
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
-		request.Headers[routing.PrefillEndpointHeader] = prefillHostPort
+		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.pd.disaggregation_used", true),
-			attribute.String("llm_d.epp.pd.prefill_pod_address", targetPod.Address),
-			attribute.String("llm_d.epp.pd.prefill_pod_port", targetPod.Port),
+			semconv.LLMDEPPPDDisaggregationUsed(true),
+			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
+			semconv.LLMDEPPPDPrefillPodPort(targetPod.Port),
 		)
 	}
 
 	// Encode header
-	delete(request.Headers, routing.EncoderEndpointsHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.EncoderEndpointsHeader)
 	encodeProfileRunResult := schedulingResult.ProfileResults[h.encodeProfile]
 	if encodeProfileRunResult == nil {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_result"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_result"),
 		)
 		return nil
 	}
 
-	var encodeHostPorts []string
+	encodeHostPorts := make([]string, 0, len(encodeProfileRunResult.TargetEndpoints))
 	for _, endpoint := range encodeProfileRunResult.TargetEndpoints {
 		targetEndpoint := endpoint.GetMetadata()
 		encodeHostPort := net.JoinHostPort(targetEndpoint.Address, targetEndpoint.Port)
@@ -597,16 +632,16 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	}
 	if len(encodeHostPorts) == 0 {
 		span.SetAttributes(
-			attribute.Bool("llm_d.epp.encode.disaggregation_used", false),
-			attribute.String("llm_d.epp.encode.reason", "no_encode_profile_target_endpoints"),
+			semconv.LLMDEPPEncodeDisaggregationUsed(false),
+			semconv.LLMDEPPEncodeReason("no_encode_profile_target_endpoints"),
 		)
 		return nil
 	}
 
-	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
+	routing.SetRoutingHeader(request.Headers, routing.EncoderEndpointsHeader, strings.Join(encodeHostPorts, ","))
 	span.SetAttributes(
-		attribute.Bool("llm_d.epp.encode.disaggregation_used", true),
-		attribute.String("llm_d.epp.encode.endpoints", strings.Join(encodeHostPorts, ",")),
+		semconv.LLMDEPPEncodeDisaggregationUsed(true),
+		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),
 	)
 	return nil
 }

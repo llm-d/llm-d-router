@@ -13,9 +13,11 @@ For each candidate endpoint, the scorer reads `EncoderCacheMatchInfo` and comput
 score = matchedItemSize / totalRequestItemSize
 ```
 
-For the unweighted producer path in this PR, every unique multimodal item has size
-`1`, so the score is the fraction of unique request multimodal hashes that are
-likely cached on the endpoint.
+When tokenized multimodal metadata is available, item weights come from
+multimodal placeholder lengths, so larger multimodal inputs contribute more to
+the score. Otherwise, every unique multimodal item has item weight `1`, so the
+score is the fraction of unique request multimodal hashes that are likely cached
+on the endpoint.
 
 This produces a normalized score in the range `[0, 1]`:
 
@@ -36,7 +38,11 @@ The attribute is produced by `mm-embeddings-cache-producer` before scheduling.
 
 ## Configuration
 
-This plugin does not define any plugin-specific parameters.
+- `producerName` (string, optional): scopes the consumed data key to a named
+  producer instance. Leave empty to consume from the default producer.
+
+Weighting is controlled by the match data emitted by the producer; the scorer
+remains size-agnostic.
 
 **Configuration Example:**
 

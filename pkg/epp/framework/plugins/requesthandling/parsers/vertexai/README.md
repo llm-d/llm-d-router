@@ -33,7 +33,7 @@ For responses, the parser:
 To enable the Vertex AI parser, configure it in your `EndpointPickerConfig` under the `requestHandler` section:
 
 ```yaml
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 requestHandler:
   parsers:

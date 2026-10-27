@@ -28,9 +28,12 @@ import (
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
 const (
@@ -39,20 +42,17 @@ const (
 
 	// generatePathSuffix is the SGLang native generate API path.
 	generatePathSuffix = "generate"
-
-	streamingRespPrefix = "data: "
-	streamingDoneMarker = "[DONE]"
-	contentTypeHeader   = "content-type"
-	eventStreamType     = "text/event-stream"
 )
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser = &SGLangHTTPParser{}
+	_ fwkrh.Parser            = &SGLangHTTPParser{}
+	_ fwkrh.ModelNameRewriter = &SGLangHTTPParser{}
+	_ fwkrh.PriorityRewriter  = &SGLangHTTPParser{}
 )
 
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
-// endpoint. Only pre-tokenized prompts are supported.
+// endpoint. Pre-tokenized prompts and raw text prompts are supported.
 type SGLangHTTPParser struct {
 	typedName fwkplugin.TypedName
 }
@@ -93,6 +93,8 @@ func (p *SGLangHTTPParser) Claims() fwkrh.Claims {
 // sgLangGenerateWire is the subset of /generate fields this parser reads.
 type sgLangGenerateWire struct {
 	InputIDs       json.RawMessage `json:"input_ids"`
+	CacheSalt      json.RawMessage `json:"cache_salt"`
+	Text           json.RawMessage `json:"text"`
 	ExtraKey       json.RawMessage `json:"extra_key"`
 	SamplingParams json.RawMessage `json:"sampling_params"`
 	Stream         bool            `json:"stream"`
@@ -113,50 +115,125 @@ func (p *SGLangHTTPParser) ParseRequest(_ context.Context, body []byte, headers 
 }
 
 // parseGenerateRequest decodes a /generate body into an InferenceRequestBody.
-// input_ids are required. Multimodal inputs are not supported.
+// input_ids or text are required. Multimodal inputs are not supported.
 func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResult, error) {
 	var wire sgLangGenerateWire
 	if err := json.Unmarshal(rawBody, &wire); err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	if !hasJSONValue(wire.InputIDs) {
-		return nil, errors.New("invalid generate request: input_ids must be provided")
+	hasInputIDs := hasJSONValue(wire.InputIDs)
+	hasText := hasJSONValue(wire.Text)
+	if !hasInputIDs && !hasText {
+		return nil, errors.New("invalid generate request: input_ids or text must be provided")
 	}
 
-	cacheSalt, err := parseCacheSalt(wire.ExtraKey)
+	cacheSalt, err := parseCacheSalt("cache_salt", wire.CacheSalt)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported generate request: %w", err)
 	}
-	tokenIDs, err := parseInputIDs(wire.InputIDs)
+	extraKey, err := parseCacheSalt("extra_key", wire.ExtraKey)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported generate request: %w", err)
+	}
+	// SGLang partitions its cache on (extra_key, cache_salt) but publishes only
+	// cache_salt in KV events. Encoding the pair keeps extra_key requests from
+	// matching blocks indexed under a bare cache_salt.
+	if extraKey != "" {
+		pair, err := json.Marshal([]string{extraKey, cacheSalt})
+		if err != nil {
+			return nil, fmt.Errorf("invalid generate request: %w", err)
+		}
+		cacheSalt = string(pair)
+	}
+
+	var tokenIDs []uint32
+	var text string
+	if hasInputIDs {
+		tokenIDs, err = parseInputIDs(wire.InputIDs)
+		if err != nil {
+			return nil, fmt.Errorf("invalid generate request: %w", err)
+		}
+	} else {
+		text, err = parseText(wire.Text)
+		if err != nil {
+			return nil, fmt.Errorf("invalid generate request: %w", err)
+		}
+	}
+
+	// Keep the full body as a map so priority can be injected; when nothing is
+	// mutated, repackage still forwards the original bytes unchanged. input_ids
+	// stays raw because decoding it into []any allocates per token.
+	bodyMap, err := parserutil.UnmarshalMapWithRawField(rawBody, "input_ids")
 	if err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
-		Generate:        &fwkrh.GenerateRequest{TokenIDs: tokenIDs, CacheSalt: cacheSalt},
-		Payload:         fwkrh.RawPayload(rawBody),
+	body := &fwkrh.InferenceRequestBody{
+		Generate: &fwkrh.GenerateRequest{
+			TokenIDs:  tokenIDs,
+			Text:      text,
+			CacheSalt: cacheSalt,
+		},
+		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
-	}, SkipResponseProcessing: false}, nil
+	}
+	if model, ok := bodyMap["model"].(string); ok {
+		body.Model = model
+	}
+	return &fwkrh.ParseResult{Body: body, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
+}
+
+// RewritePriority removes any client-supplied priority from the SGLang /generate
+// payload and writes the resolved EPP priority. The director only calls this when
+// priority propagation is enabled; see parsers.RewritePriority for the
+// cross-backend priority semantics.
+func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	return parsers.RewritePriority(ctx, payload, priority)
 }
 
 func hasJSONValue(data json.RawMessage) bool {
 	return len(data) > 0 && strings.TrimSpace(string(data)) != "null"
 }
 
-func parseCacheSalt(data json.RawMessage) (string, error) {
+func parseCacheSalt(field string, data json.RawMessage) (string, error) {
 	if !hasJSONValue(data) {
 		return "", nil
 	}
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
-		return "", errors.New("extra_key must be a string")
+		return "", fmt.Errorf("%s must be a string", field)
+	}
+	return value, nil
+}
+
+func parseText(data json.RawMessage) (string, error) {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", errors.New("text must be a string")
+	}
+	if len(value) == 0 {
+		return "", errors.New("text cannot be empty")
 	}
 	return value, nil
 }
 
 func parseInputIDs(data json.RawMessage) ([]uint32, error) {
+	if ids, ok := fwkrh.ParseCanonicalTokenIDs(data); ok {
+		return ids, nil
+	}
+
 	var ids []uint32
 	if err := json.Unmarshal(data, &ids); err != nil {
 		return nil, errors.New("input_ids must be an array of uint32 integers")
@@ -210,8 +287,8 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 
 func isEventStream(headers map[string]string) bool {
 	for key, value := range headers {
-		if strings.EqualFold(key, contentTypeHeader) &&
-			strings.Contains(strings.ToLower(value), eventStreamType) {
+		if strings.EqualFold(key, reqcommon.HeaderContentType) &&
+			strings.Contains(strings.ToLower(value), request.MediaTypeEventStream) {
 			return true
 		}
 	}
@@ -223,12 +300,12 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		data, ok := strings.CutPrefix(line, streamingRespPrefix)
+		data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
 		if !ok {
 			continue
 		}
 		data = strings.TrimSpace(data)
-		if data == streamingDoneMarker {
+		if data == reqcommon.SSEDoneMarker {
 			continue
 		}
 		var resp sgLangResponse

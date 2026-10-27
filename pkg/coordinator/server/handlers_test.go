@@ -18,35 +18,91 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
 type stubStep struct {
 	name string
 	err  error
+	// fn, when non-nil, takes precedence over err. Tests use it to observe
+	// state (e.g. gauge labels) at pipeline-execution time.
+	fn func(context.Context, *pipeline.RequestContext) error
 }
 
 func (s stubStep) Name() string { return s.name }
 
-func (s stubStep) Execute(context.Context, *pipeline.RequestContext) error { return s.err }
+func (s stubStep) Execute(ctx context.Context, rc *pipeline.RequestContext) error {
+	if s.fn != nil {
+		return s.fn(ctx, rc)
+	}
+	return s.err
+}
+
+// stubGatewayURL is a placeholder used by tests that never actually issue a
+// passthrough request. A real value only matters in passthrough_test.go.
+const stubGatewayURL = "http://gateway-stub.invalid"
+
+type captureRevisionDecisionStep struct {
+	requestID          string
+	revisionDecisionID string
+}
+
+func (s *captureRevisionDecisionStep) Name() string { return "capture-revision-decision" }
+
+func (s *captureRevisionDecisionStep) Execute(_ context.Context, reqCtx *pipeline.RequestContext) error {
+	s.requestID = reqCtx.RequestID
+	s.revisionDecisionID = reqCtx.RevisionDecisionID
+	return nil
+}
+
+// capturingStep records the RequestContext it saw, for assertions on what the
+// handler populated before the pipeline ran.
+type capturingStep struct {
+	captured *pipeline.RequestContext
+}
+
+func (s *capturingStep) Name() string { return "capture" }
+
+func (s *capturingStep) Execute(_ context.Context, rc *pipeline.RequestContext) error {
+	s.captured = rc
+	return nil
+}
 
 func newTestServer(stepErr error) *Server {
+	return newTestServerWithGateway(stepErr, stubGatewayURL)
+}
+
+func newTestServerWithGateway(stepErr error, gatewayURL string) *Server {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", err: stepErr}})
-	srv, err := New(config.ServerConfig{}, p)
+	// A default *http.Transport{} is safe here: the passthrough handler needs a
+	// non-typed-nil RoundTripper so httputil.ReverseProxy dials the test server.
+	gw := gateway.NewWithTransport(&http.Transport{}, gatewayURL)
+	srv, err := New(config.ServerConfig{}, p, gw)
 	if err != nil {
 		panic(err) // default config is always valid
 	}
@@ -119,6 +175,29 @@ func TestHandleInference_SuccessMapsTo200(t *testing.T) {
 	}
 }
 
+func TestHandleInferenceGeneratesCoordinatorRevisionDecisionID(t *testing.T) {
+	step := &captureRevisionDecisionStep{}
+	gw := gateway.NewWithTransport(&http.Transport{}, stubGatewayURL)
+	srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientRequestID = "client-request-id"
+	rec := postInferenceWithRequestID(t, srv, clientRequestID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if step.requestID != clientRequestID {
+		t.Fatalf("request ID = %q, want %q", step.requestID, clientRequestID)
+	}
+	if step.revisionDecisionID == "" || step.revisionDecisionID == clientRequestID {
+		t.Fatalf("revision decision ID = %q, want an independent coordinator value", step.revisionDecisionID)
+	}
+	if _, err := uuid.Parse(step.revisionDecisionID); err != nil {
+		t.Fatalf("revision decision ID %q is not a UUID: %v", step.revisionDecisionID, err)
+	}
+}
+
 func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	// JSON `null` unmarshals to a nil map without error; reject it before steps
 	// write to the body and panic.
@@ -130,11 +209,331 @@ func TestHandleInference_NullBodyMapsTo400(t *testing.T) {
 	}
 }
 
+func TestHandleInference_InvalidJSONReturnsOpenAIError(t *testing.T) {
+	for _, path := range []string{
+		reqcommon.PathChatCompletions,
+		reqcommon.PathCompletions,
+		reqcommon.PathResponses,
+		reqcommon.PathVLLMGenerate,
+	} {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				body string
+			}{
+				{name: "empty", body: ""},
+				{name: "truncated", body: `{"model":"m","messages":[`},
+				{name: "unescaped quotes", body: `{"model":"m","messages":[{"role":"user","content":"say "hello""}]}`},
+				{name: "null", body: "null"},
+				{name: "array", body: "[]"},
+				{name: "string", body: `"hello"`},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					reached := false
+					p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+						reached = true
+						return nil
+					}}})
+					srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+					require.NoError(t, err)
+
+					req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(tc.body))
+					req.Header.Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+					rec := httptest.NewRecorder()
+					srv.httpServer.Handler.ServeHTTP(rec, req)
+
+					require.Equal(t, http.StatusBadRequest, rec.Code)
+					require.False(t, reached, "invalid request must not reach the pipeline")
+					require.Equal(t, reqcommon.ContentTypeJSON, rec.Header().Get(reqcommon.HeaderContentType))
+					require.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+					require.JSONEq(t, `{"error":{"message":"invalid JSON body","type":"invalid_request_error","code":400}}`, rec.Body.String())
+				})
+			}
+		})
+	}
+}
+
+// TestHandleInference_RejectionsUseAPIEnvelope covers every rejection the
+// handler writes itself: the body read failure, the size cap, the Responses
+// stateful-field check and the pipeline error path share the envelope the
+// invalid-JSON rejection uses, with the error type the EPP carries for the
+// same status. A /v1/messages rejection uses the Anthropic envelope, which
+// carries no code field.
+func TestHandleInference_RejectionsUseAPIEnvelope(t *testing.T) {
+	type rejection struct {
+		name       string
+		cfg        config.ServerConfig
+		stepErr    error
+		path       string
+		body       io.Reader
+		wantStatus int
+		wantType   string
+		wantMsg    string
+	}
+	cases := []rejection{
+		{
+			name:       "body read failure",
+			path:       reqcommon.PathChatCompletions,
+			body:       iotest.ErrReader(errors.New("connection reset")),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantMsg:    "failed to read request body",
+		},
+		{
+			name:       "body too large",
+			cfg:        config.ServerConfig{MaxRequestBodySize: 1},
+			path:       reqcommon.PathChatCompletions,
+			body:       strings.NewReader(`{"model":"m","pad":"` + strings.Repeat("x", int(config.BytesPerMB)) + `"}`),
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantType:   "invalid_request_error",
+			wantMsg:    "request body too large",
+		},
+		{
+			name:       "stateful responses field",
+			path:       reqcommon.PathResponses,
+			body:       strings.NewReader(`{"model":"m","input":"hi","previous_response_id":"resp_1"}`),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantMsg:    reqcommon.RejectStatefulResponsesFields(map[string]any{"previous_response_id": "resp_1"}).Error(),
+		},
+		{
+			name:       "pipeline client error",
+			stepErr:    fmt.Errorf("render: prompt must be a string: %w", pipeline.ErrBadRequest),
+			path:       reqcommon.PathChatCompletions,
+			body:       strings.NewReader(`{"model":"m"}`),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+		},
+		{
+			name:       "upstream 4xx forwarded",
+			stepErr:    fmt.Errorf("wrapped: %w", &pipeline.UpstreamError{Step: "render", StatusCode: http.StatusUnprocessableEntity, Body: "bad tokens"}),
+			path:       reqcommon.PathChatCompletions,
+			body:       strings.NewReader(`{"model":"m"}`),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantType:   "invalid_request_error",
+		},
+		{
+			name:       "unclassified pipeline error",
+			stepErr:    errors.New("prefill: connect: connection refused"),
+			path:       reqcommon.PathChatCompletions,
+			body:       strings.NewReader(`{"model":"m"}`),
+			wantStatus: http.StatusBadGateway,
+			wantType:   "server_error",
+		},
+		{
+			name:       "messages invalid JSON",
+			path:       reqcommon.PathMessages,
+			body:       strings.NewReader(`{bad`),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantMsg:    "invalid JSON body",
+		},
+		{
+			name:       "messages unclassified pipeline error",
+			stepErr:    errors.New("prefill: connect: connection refused"),
+			path:       reqcommon.PathMessages,
+			body:       strings.NewReader(`{"model":"m"}`),
+			wantStatus: http.StatusBadGateway,
+			wantType:   "api_error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pipeline.New([]pipeline.Step{stubStep{name: "stub", err: tc.stepErr}})
+			srv, err := New(tc.cfg, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, tc.path, tc.body)
+			req.Header.Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+
+			require.Equal(t, tc.wantStatus, rec.Code)
+			require.Contains(t, rec.Header().Get(reqcommon.HeaderContentType), reqcommon.ContentTypeJSON)
+			require.Equal(t, reqcommon.ContentTypeOptionsNoSniff, rec.Header().Get(reqcommon.HeaderContentTypeOptions))
+
+			var envelope struct {
+				Type  string `json:"type"`
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+					Code    int    `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope), rec.Body.String())
+			if tc.path == reqcommon.PathMessages {
+				require.Equal(t, "error", envelope.Type)
+				require.NotContains(t, rec.Body.String(), `"code"`)
+			} else {
+				require.Equal(t, tc.wantStatus, envelope.Error.Code)
+			}
+			require.Equal(t, tc.wantType, envelope.Error.Type)
+			if tc.wantMsg != "" {
+				require.Equal(t, tc.wantMsg, envelope.Error.Message)
+			} else {
+				require.NotEmpty(t, envelope.Error.Message)
+			}
+		})
+	}
+}
+
+func TestHandleInference_ResponsesRejectsStatefulFields(t *testing.T) {
+	// Locks in that the handler refuses a Responses request depending on state
+	// it does not keep, before the pipeline sees the body; see
+	// reqcommon.RejectStatefulResponsesFields for the field list.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "previous_response_id", body: `{"model":"m","input":"hi","previous_response_id":"resp-123"}`},
+		{name: "conversation", body: `{"model":"m","input":"hi","conversation":"conv-1"}`},
+		{name: "background", body: `{"model":"m","input":"hi","background":true}`},
+		{name: "file_id", body: `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"file-1"}]}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reached := false
+			p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+				reached = true
+				return nil
+			}}})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", rec.Code)
+			}
+			if reached {
+				t.Error("expected the pipeline not to run for a rejected request")
+			}
+		})
+	}
+}
+
+func TestHandleInference_ResponsesAcceptsStatelessRequest(t *testing.T) {
+	// store and background:false carry no state the router has to resolve, so
+	// they reach the pipeline unchanged alongside the rest of the body.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","input":"hi","store":true,"background":false}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if got, _ := seenBody["store"].(json.RawMessage); string(got) != "true" {
+		t.Errorf("expected store to pass through, got %s", got)
+	}
+	if got, _ := seenBody["input"].(json.RawMessage); string(got) != `"hi"` {
+		t.Errorf("expected unrelated fields to survive, got input=%s", got)
+	}
+}
+
+func TestHandleInference_ResponsesRejectionScopedToPath(t *testing.T) {
+	// The rejection must not run for other paths: a chat-completions client is
+	// free to send its own store/previous_response_id/background fields (even
+	// if meaningless there) without the coordinator refusing the request.
+	var seenBody map[string]any
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		seenBody = rc.Body
+		return nil
+	}}})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	body := `{"model":"m","previous_response_id":"resp-123","conversation":"conv-1","store":true,"background":true}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	for _, field := range []string{"previous_response_id", "conversation", "store", "background"} {
+		if _, ok := seenBody[field]; !ok {
+			t.Errorf("expected %q to survive on a non-responses path", field)
+		}
+	}
+}
+
+func TestHandleInference_BodyKeepsNestedKeyOrder(t *testing.T) {
+	// Steps build every upstream request by marshaling reqCtx.Body. Top-level
+	// keys are sorted here so the whole body must round-trip byte-for-byte.
+	body := `{"messages":[{"role":"user","content":"Hi"}],"model":"m",` +
+		`"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"zebra":{},"apple":{},"mango":{}}}}}]}`
+	var forwarded []byte
+	step := stubStep{name: "capture", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		var err error
+		forwarded, err = json.Marshal(rc.Body)
+		return err
+	}}
+	srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if string(forwarded) != body {
+		t.Fatalf("forwarded body changed:\n got: %s\nwant: %s", forwarded, body)
+	}
+}
+
+func TestDecodeRequestBody(t *testing.T) {
+	tools := `[{"type":"function","function":{"parameters":{"properties":{"b":{},"a":{}}}}}]`
+	parsed, err := decodeRequestBody([]byte(`{"model":"m","stream":true,"prompt":"hi","token_ids":[1],` +
+		`"sampling_params":{"max_tokens":5},"features":{},"tools":` + tools + `}`))
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{
+		"model":           "m",
+		"stream":          true,
+		"prompt":          "hi",
+		"token_ids":       []any{1.0},
+		"sampling_params": map[string]any{"max_tokens": 5.0},
+		"features":        map[string]any{},
+		"tools":           json.RawMessage(tools),
+	}, parsed)
+
+	for _, body := range []string{`[1,2]`, `null`, `"text"`} {
+		_, err := decodeRequestBody([]byte(body))
+		require.Error(t, err, "body %s", body)
+	}
+}
+
+func TestDecodeRequestBody_PreservesLargeIntegers(t *testing.T) {
+	body := `{"model":"m","response_format":{"json_schema":{"schema":{"enum":[9007199254740993]}}},"seed":9007199254740993}`
+	parsed, err := decodeRequestBody([]byte(body))
+	require.NoError(t, err)
+	out, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	require.Equal(t, body, string(out))
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p)
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gateway.NewWithTransport(nil, stubGatewayURL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -149,7 +548,7 @@ func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 
 func TestNew_RejectsNegativeMaxRequestBodySize(t *testing.T) {
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	if _, err := New(config.ServerConfig{MaxRequestBodySize: -1}, p); err == nil {
+	if _, err := New(config.ServerConfig{MaxRequestBodySize: -1}, p, gateway.NewWithTransport(nil, stubGatewayURL)); err == nil {
 		t.Fatal("expected error for negative MaxRequestBodySize")
 	}
 }
@@ -158,8 +557,29 @@ func TestNew_RejectsOverflowMaxRequestBodySize(t *testing.T) {
 	// MaxInt64 would cause maxRequestBodySize+1 to overflow to a negative
 	// io.LimitReader limit, making it return immediate EOF.
 	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
-	if _, err := New(config.ServerConfig{MaxRequestBodySize: math.MaxInt64}, p); err == nil {
+	if _, err := New(config.ServerConfig{MaxRequestBodySize: math.MaxInt64}, p, gateway.NewWithTransport(nil, stubGatewayURL)); err == nil {
 		t.Fatal("expected error for MaxRequestBodySize > MaxInt64-1")
+	}
+}
+
+func TestNew_RejectsNilGatewayClient(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, nil); err == nil {
+		t.Fatal("expected error for nil gateway client")
+	}
+}
+
+func TestNew_RejectsGatewayURLWithoutHost(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, "not-a-url")); err == nil {
+		t.Fatal("expected error for gateway URL without a host")
+	}
+}
+
+func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	if _, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, "http://gw:notaport")); err == nil {
+		t.Fatal("expected error for unparsable gateway URL")
 	}
 }
 
@@ -236,7 +656,48 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 	}
 }
 
+func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
+	// x-llm-d-peer-topology, epp-profile and Prefer are headers the coordinator
+	// alone injects (copied from the prefill response, set to select a profile,
+	// or set on the conditional-decode probe); a client-supplied value must
+	// never survive into OriginalHeaders, since a later step trusts it as
+	// coordinator-generated and EPP answers a client Prefer: if-available with 412.
+	step := &capturingStep{}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
+	req.Header.Set(reqcommon.EPPProfileHeaderKey, "decode")
+	req.Header.Set("Prefer", "if-available")
+	req.Header.Set("x-user-data", "keep-me")
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+
+	if step.captured == nil {
+		t.Fatal("pipeline step did not run")
+	}
+	if got := step.captured.OriginalHeaders.Get(reqcommon.PeerTopologyHeaderKey); got != "" {
+		t.Fatalf("client-supplied x-llm-d-peer-topology must be stripped, got %q", got)
+	}
+	if got := step.captured.OriginalHeaders.Get(reqcommon.EPPProfileHeaderKey); got != "" {
+		t.Fatalf("client-supplied epp-profile must be stripped, got %q", got)
+	}
+	if got := step.captured.OriginalHeaders.Get("Prefer"); got != "" {
+		t.Fatalf("client-supplied Prefer must be stripped, got %q", got)
+	}
+	if got := step.captured.OriginalHeaders.Get("x-user-data"); got != "keep-me" {
+		t.Fatalf("unrelated headers must pass through, got %q", got)
+	}
+}
+
 func TestRoutesRegistered(t *testing.T) {
+	// With the NotFound passthrough in place, an unregistered path no longer
+	// returns 404 — it reverse-proxies to the stub gateway and returns 502.
+	// Assert 200 to prove the path reaches its handler (stub step + handleHealth
+	// both leave the recorder at its default 200).
 	const inferenceBody = `{"model":"m","token_ids":[1,2,3]}`
 	tests := []struct {
 		name   string
@@ -244,9 +705,11 @@ func TestRoutesRegistered(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{"chat completions", http.MethodPost, gateway.PathChatCompletions, inferenceBody},
-		{"completions", http.MethodPost, gateway.PathCompletions, inferenceBody},
-		{"generate", http.MethodPost, gateway.DefaultGeneratePath, inferenceBody},
+		{"chat completions", http.MethodPost, reqcommon.PathChatCompletions, inferenceBody},
+		{"completions", http.MethodPost, reqcommon.PathCompletions, inferenceBody},
+		{"responses", http.MethodPost, reqcommon.PathResponses, inferenceBody},
+		{"messages", http.MethodPost, reqcommon.PathMessages, inferenceBody},
+		{"generate", http.MethodPost, reqcommon.PathVLLMGenerate, inferenceBody},
 		{"healthz", http.MethodGet, "/healthz", ""},
 		{"readyz", http.MethodGet, "/readyz", ""},
 	}
@@ -256,9 +719,615 @@ func TestRoutesRegistered(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
 			rec := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(rec, req)
-			if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
-				t.Fatalf("route %s %s not registered: got HTTP %d", tt.method, tt.path, rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("route %s %s expected 200, got HTTP %d", tt.method, tt.path, rec.Code)
 			}
 		})
 	}
+}
+
+// newMetricsRegistry wires the coordinator's metric vectors onto a fresh
+// registry so a test can inspect their state end-to-end via the same package-
+// level vectors the handler mutates. Reset clears the vectors' state so
+// concurrent tests do not see each other's increments.
+func newMetricsRegistry(t *testing.T) *prometheus.Registry {
+	return metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+}
+
+func TestHandleInference_SuccessRecordsRequestFamily(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	rec := postInference(t, newTestServer(nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"), "no errors expected on the success path")
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_duration_seconds", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_duration_seconds observation, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": "m"}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation, got %d", hc)
+	}
+}
+
+func TestHandleInference_UpstreamErrorRecordsErrorCode(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	stepErr := fmt.Errorf("wrapped: %w", &pipeline.UpstreamError{Step: "prefill", StatusCode: http.StatusServiceUnavailable, Body: "down"})
+	rec := postInference(t, newTestServer(stepErr))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9,
+	)
+}
+
+func TestHandleInference_StreamedUpstreamErrorClassifiedAndNotOverwritten(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	// stubStep writes a streamed response body first, then returns an
+	// UpstreamStreamedError. The handler must classify it for
+	// request_error_total but must not call http.Error on top of the bytes
+	// already on the wire.
+	const streamedBody = "streamed 500 body from decode worker"
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusInternalServerError)
+		_, _ = rc.ResponseWriter.Write([]byte(streamedBody))
+		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "streamed status must survive: no http.Error overwrite")
+	require.Equal(t, streamedBody, rec.Body.String(), "streamed body must survive: no http.Error overwrite")
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeUpstream5xx})),
+		1e-9, "streamed upstream 5xx must classify as upstream_5xx in request_error_total",
+	)
+}
+
+func TestHandleInference_StepWrittenErrorClassifiedAndNotOverwritten(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	const stepBody = `{"error":{"message":"unknown mode"}}`
+	step := stubStep{name: "async-broker", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusBadRequest)
+		_, _ = rc.ResponseWriter.Write([]byte(stepBody))
+		return &pipeline.ResponseWrittenError{Step: "async-broker", StatusCode: http.StatusBadRequest, Cause: pipeline.ErrBadRequest}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "step status must survive: no http.Error overwrite")
+	require.Equal(t, stepBody, rec.Body.String(), "step body must survive: no http.Error overwrite")
+
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeBadRequest})),
+		1e-9,
+	)
+}
+
+// A step returns after the client's request context ended; only the context
+// error itself goes uncounted.
+func TestHandleInference_AbortedRequestAccounting(t *testing.T) {
+	cases := []struct {
+		name       string
+		returns    error  // error the step returns; nil returns the context error
+		wantCode   string // request_error_total{wantCode}; "" counts nothing
+		wantStatus int    // status written; 0 writes nothing
+	}{
+		{name: "step returns the context error"},
+		{
+			name:     "decode streamed a 500 before the client left",
+			returns:  &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError},
+			wantCode: coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "upstream answered 503 before the client left",
+			returns:    &pipeline.UpstreamError{Step: "decode", StatusCode: http.StatusServiceUnavailable},
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+			wantStatus: http.StatusBadGateway,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			step := stubStep{name: "decode", fn: func(ctx context.Context, _ *pipeline.RequestContext) error {
+				cancel()
+				if tc.returns != nil {
+					return tc.returns
+				}
+				return ctx.Err()
+			}}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if tc.wantStatus == 0 {
+				require.Empty(t, rec.Body.String())
+			} else {
+				require.Equal(t, tc.wantStatus, rec.Code)
+			}
+			if tc.wantCode == "" {
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			} else {
+				require.InDelta(t, 1.0,
+					promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": tc.wantCode})),
+					1e-9,
+				)
+				require.Equal(t, 1, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			}
+			require.InDelta(t, 1.0,
+				promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+			require.InDelta(t, 0.0,
+				promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+		})
+	}
+}
+
+func TestHandleInference_PipelineDoneRecordsNoError(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	step := stubStep{name: "async-broker", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		rc.ResponseWriter.WriteHeader(http.StatusAccepted)
+		return pipeline.ErrPipelineDone
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+	require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+}
+
+func TestHandleInference_PipelinePanicRecordsErrorAndPropagates(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	panicky := stubStep{name: "prefill", fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+		panic("boom")
+	}}
+	p := pipeline.New([]pipeline.Step{panicky})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "pipeline panic must propagate out of handleInference so chi Recoverer at the server edge can answer 500")
+
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeInternal})),
+			1e-9, "request_error_total must record the panic under error_code=internal",
+		)
+		require.InDelta(t, 1.0,
+			promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+			1e-9, "request_total must still fire on panic so error-rate ratios stay meaningful",
+		)
+		require.InDelta(t, 0.0,
+			promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+			1e-9, "request_running must be balanced back to 0 after a panic",
+		)
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+}
+
+func TestHandleInference_MalformedBodyRecordsBadRequestWithUnknownModel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not-json"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed body, got %d", rec.Code)
+	}
+
+	// Malformed pre-parse: model attributes to "unknown".
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": coordmetrics.ModelUnknown, "error_code": coordmetrics.ErrorCodeBadRequest})),
+		1e-9,
+	)
+	// request_size_bytes covers the malformed branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on invalid-JSON path, got %d", hc)
+	}
+}
+
+func TestHandleInference_NullBodyRecordsRequestSize(t *testing.T) {
+	// JSON null returns nil parsed; the size histogram must still be observed
+	// under the unknown label so the family is consistent across early returns.
+	reg := newMetricsRegistry(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("null"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on null-body path, got %d", hc)
+	}
+}
+
+// erroringReader returns some bytes and then fails, so a test can drive the
+// io.ReadAll error branch without racing on connection resets.
+type erroringReader struct {
+	prefix []byte
+	pos    int
+}
+
+func (e *erroringReader) Read(p []byte) (int, error) {
+	if e.pos < len(e.prefix) {
+		n := copy(p, e.prefix[e.pos:])
+		e.pos += n
+		return n, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func TestHandleInference_ReadErrorRecordsPartialRequestSize(t *testing.T) {
+	// A partial-read failure must still observe the size histogram; the value
+	// recorded is what was read before the error, not the promised size.
+	reg := newMetricsRegistry(t)
+
+	partial := []byte(`{"mod`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &erroringReader{prefix: partial})
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on read-error path, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hs != float64(len(partial)) {
+		t.Fatalf("expected partial-read length %d recorded on read-error path, got %v", len(partial), hs)
+	}
+}
+
+// blockingReader gates the first Read call on unblock, so a test can catch
+// the handler mid-io.ReadAll and inspect the in-flight gauge before the JSON
+// parse has run.
+type blockingReader struct {
+	once    sync.Once
+	started chan struct{}
+	unblock chan struct{}
+	body    io.Reader
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	b.once.Do(func() {
+		close(b.started)
+		<-b.unblock
+	})
+	return b.body.Read(p)
+}
+
+func TestHandleInference_PreparseWorkIsCountedAsInflight(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	br := &blockingReader{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+		body:    strings.NewReader(`{"model":"m"}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", br)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		newTestServer(nil).handleInference(rec, req)
+		close(done)
+	}()
+
+	// Wait until the handler is inside io.ReadAll before observing. The gauge
+	// must already reflect the request under the "unknown" label; the JSON
+	// has not been parsed yet, so no other label is possible.
+	<-br.started
+	require.InDelta(t, 1.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be 1 during pre-parse under the unknown label",
+	)
+
+	close(br.unblock)
+	<-done
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "unknown label must balance to 0 after the label was swapped and the handler returned",
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9, "parsed model label must balance to 0 after the handler returned",
+	)
+}
+
+func TestHandleInference_OversizeBodyBalancesGauge(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	p := pipeline.New([]pipeline.Step{stubStep{name: "stub"}})
+	srv, err := New(config.ServerConfig{MaxRequestBodySize: 1}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	oversize := strings.Repeat("x", config.BytesPerMB+1)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(oversize))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+
+	// The 413 path must touch request_running: mustRequestRunningGauge fails
+	// if the series is absent, so an omitted Inc on the pre-parse path is
+	// caught as a hard failure and cannot be read as a legitimate 0.
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9, "gauge must be back at 0 for the unknown label after 413",
+	)
+	// request_size_bytes covers the 413 branch under the unknown label.
+	if hc := histogramCount(t, reg, "llm_d_coordinator_request_size_bytes", map[string]string{"model_name": coordmetrics.ModelUnknown}); hc != 1 {
+		t.Fatalf("expected 1 request_size_bytes observation on 413 path, got %d", hc)
+	}
+}
+
+func TestHandleInference_ParsedModelSwapsLabel(t *testing.T) {
+	reg := newMetricsRegistry(t)
+
+	var (
+		unknownDuring float64
+		parsedDuring  float64
+	)
+	observer := stubStep{
+		name: "observe",
+		fn: func(_ context.Context, _ *pipeline.RequestContext) error {
+			unknownDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown}))
+			parsedDuring = promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"}))
+			return nil
+		},
+	}
+	p := pipeline.New([]pipeline.Step{observer})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	rec := postInference(t, srv)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.InDelta(t, 0.0, unknownDuring, 1e-9, "unknown must be 0 during pipeline: the entry Inc was swapped out on parse")
+	require.InDelta(t, 1.0, parsedDuring, 1e-9, "parsed model must be 1 during pipeline: the entry Inc was swapped to this label on parse")
+
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": coordmetrics.ModelUnknown})),
+		1e-9,
+	)
+	require.InDelta(t, 0.0,
+		promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+		1e-9,
+	)
+}
+
+// mustRequestRunningGauge finds the request_running gauge series matching all
+// of labels in reg. A missing series fails the test, so an untouched series
+// cannot be mistaken for a legitimate 0 by promtestutil.ToFloat64.
+func mustRequestRunningGauge(t *testing.T, reg *prometheus.Registry, labels map[string]string) prometheus.Gauge {
+	t.Helper()
+	const name = "llm_d_coordinator_request_running"
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if labelsMatch(m.GetLabel(), labels) {
+				g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "shadow"})
+				g.Set(m.GetGauge().GetValue())
+				return g
+			}
+		}
+	}
+	t.Fatalf("gauge %s%v not present", name, labels)
+	return nil
+}
+
+// mustCounter looks up the counter series matching all of labels from reg. The
+// series must exist; a missing series is a test failure so promtestutil.ToFloat64
+// cannot silently see zero from an absent series.
+func mustCounter(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) prometheus.Counter {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if !labelsMatch(m.GetLabel(), labels) {
+				continue
+			}
+			c := prometheus.NewCounter(prometheus.CounterOpts{Name: "shadow"})
+			c.Add(m.GetCounter().GetValue())
+			return c
+		}
+	}
+	t.Fatalf("counter %s%v not present", name, labels)
+	return nil
+}
+
+func histogramCount(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) uint64 {
+	return metricstest.HistogramCount(t, reg, name, labels)
+}
+
+func histogramSum(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) float64 {
+	return metricstest.HistogramSum(t, reg, name, labels)
+}
+
+// seriesCount returns the number of series (label-set combinations) that the
+// metric family with the given name currently carries. Zero means the vector
+// has never been observed under any label combination.
+func seriesCount(t *testing.T, reg *prometheus.Registry, name string) int {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == name {
+			return len(mf.GetMetric())
+		}
+	}
+	return 0
+}
+
+func labelsMatch(actual []*dto.LabelPair, want map[string]string) bool {
+	if want == nil {
+		return true
+	}
+	got := map[string]string{}
+	for _, l := range actual {
+		got[l.GetName()] = l.GetValue()
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func TestRoutesRegistered_MethodMismatchReturns405(t *testing.T) {
+	// A registered route with the wrong method must return 405, not fall
+	// through to the passthrough. Chi's default MethodNotAllowed handler
+	// produces this; the coordinator does not override it.
+	srv := newTestServer(nil)
+	req := httptest.NewRequest(http.MethodGet, reqcommon.PathChatCompletions, nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET on POST-only %s, got %d", reqcommon.PathChatCompletions, rec.Code)
+	}
+}
+
+func TestHandleInference_RecordsOrchestrationOverheadAndResponseBytes(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	rec := postInference(t, newTestServer(nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteChatCompletions}); hc != 1 {
+		t.Fatalf("expected 1 orchestration_overhead_seconds observation, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_size_bytes observation, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs != 0 {
+		t.Fatalf("expected 0 response bytes on a silent success path, got %v", hs)
+	}
+}
+
+// TestHandleInference_ParseDurationIsNotInflatedByPipelineTime guards the
+// parse-phase measurement: ParseDuration must be recorded before the
+// pipeline runs and must cover only body read + JSON unmarshal. A regression
+// that defers the capture to handler exit (after the pipeline) would leave
+// RequestContext.ParseDuration at 0 during pipeline execution and drive
+// orchestration_overhead_seconds to zero by absorbing step time into the
+// parse term.
+func TestHandleInference_ParseDurationIsNotInflatedByPipelineTime(t *testing.T) {
+	var capturedParseDuration time.Duration
+	const stepSleep = 50 * time.Millisecond
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		capturedParseDuration = rc.ParseDuration
+		time.Sleep(stepSleep)
+		return nil
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	// A padded body (~64 KiB of JSON string) makes parse time comfortably
+	// measurable so the > 0 assertion cannot flake on coarse clocks.
+	bigPad := strings.Repeat("x", 64*1024)
+	body := `{"model":"m","pad":"` + bigPad + `"}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Greater(t, capturedParseDuration, time.Duration(0),
+		"ParseDuration must be set before the pipeline runs, got 0")
+	require.Less(t, capturedParseDuration, stepSleep,
+		"ParseDuration must not absorb pipeline execution time")
+}
+
+func TestHandleInference_ResponseBytesCountsStreamedAndErrorBodies(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	const streamedBody = "partial streamed body"
+	step := stubStep{name: "decode", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+		_, _ = rc.ResponseWriter.Write([]byte(streamedBody))
+		return &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError}
+	}}
+	p := pipeline.New([]pipeline.Step{step})
+	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","stream":true}`))
+	rec := httptest.NewRecorder()
+	srv.handleInference(rec, req)
+	require.Equal(t, streamedBody, rec.Body.String())
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hc != 1 {
+		t.Fatalf("expected 1 streaming response_size_bytes observation, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamTrue}); hs != float64(len(streamedBody)) {
+		t.Fatalf("expected streamed length %d, got %v", len(streamedBody), hs)
+	}
+}
+
+func TestHandleInference_ErrorPathRecordsResponseBytes(t *testing.T) {
+	reg := newMetricsRegistry(t)
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathCompletions, strings.NewReader("not-json"))
+	rec := httptest.NewRecorder()
+	newTestServer(nil).handleInference(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	if hc := histogramCount(t, reg, "llm_d_coordinator_orchestration_overhead_seconds", map[string]string{"route": coordmetrics.RouteCompletions}); hc != 1 {
+		t.Fatalf("expected 1 orchestration_overhead_seconds observation on completions, got %d", hc)
+	}
+	if hc := histogramCount(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hc != 1 {
+		t.Fatalf("expected 1 response_size_bytes observation on parse error, got %d", hc)
+	}
+	if hs := histogramSum(t, reg, "llm_d_coordinator_response_size_bytes", map[string]string{"stream": coordmetrics.StreamFalse}); hs <= 0 {
+		t.Fatalf("expected error body bytes > 0, got %v", hs)
+	}
+}
+
+func TestInferenceRoute(t *testing.T) {
+	require.Equal(t, coordmetrics.RouteChatCompletions, inferenceRoute(reqcommon.PathChatCompletions))
+	require.Equal(t, coordmetrics.RouteCompletions, inferenceRoute(reqcommon.PathCompletions))
+	require.Equal(t, coordmetrics.RouteResponses, inferenceRoute(reqcommon.PathResponses))
+	require.Equal(t, coordmetrics.RouteMessages, inferenceRoute(reqcommon.PathMessages))
+	require.Equal(t, coordmetrics.RouteGenerate, inferenceRoute(reqcommon.PathVLLMGenerate))
+	require.Equal(t, coordmetrics.RouteUnknown, inferenceRoute("/other"))
 }
