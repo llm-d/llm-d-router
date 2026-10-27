@@ -86,10 +86,13 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 }
 
 func decodeSGLangTokensField(dec *msgpack.Decoder, fields *typedEventFields) error {
-	var err error
-	fields.tokens, err = decodeSGLangTokenIDs(dec)
-	fields.hasTokens = err == nil
-	return err
+	tokens, err := decodeSGLangTokenIDs(dec)
+	if err != nil {
+		return err
+	}
+	fields.tokens = tokens
+	fields.hasTokens = true
+	return nil
 }
 
 func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
