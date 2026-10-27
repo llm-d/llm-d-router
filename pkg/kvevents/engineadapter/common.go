@@ -18,11 +18,12 @@ package engineadapter
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
 	"github.com/vmihailenco/msgpack/v5/msgpcode"
+
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 )
 
 const (
@@ -49,20 +50,18 @@ func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {
 	if !isIntegerCode(code) {
 		return 0, fmt.Errorf("unsupported numeric type: MessagePack code %#x", code)
 	}
-	var value uint64
 	if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
-		signed, decodeErr := dec.DecodeInt64()
-		err = decodeErr
-		if signed > 0 {
-			value = uint64(signed)
+		value, err := dec.DecodeInt64()
+		if err != nil {
+			return 0, err
 		}
-	} else {
-		value, err = dec.DecodeUint64()
+		return clamp.Uint32(value), nil
 	}
+	value, err := dec.DecodeUint64()
 	if err != nil {
 		return 0, err
 	}
-	return uint32(min(value, uint64(math.MaxUint32))), nil
+	return clamp.Uint32(clamp.Int64(value)), nil
 }
 
 func isIntegerCode(code byte) bool {
