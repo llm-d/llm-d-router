@@ -54,6 +54,9 @@ const (
 	APITypeSGLangGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+
+	// Keep apiTypeCount last so classifiers cover every API type.
+	apiTypeCount
 )
 
 // String implements fmt.Stringer so structured logs show readable API names.
@@ -78,13 +81,10 @@ func (a APIType) String() string {
 
 // Surface returns the API's observability identity.
 func (a APIType) Surface() APISurface {
-	switch a {
-	case APITypeChatCompletions, APITypeCompletions, APITypeResponses,
-		APITypeVLLMGenerate, APITypeSGLangGenerate, APITypeMessages:
-		return APISurface(a + 1)
-	default:
+	if a < 0 || a >= apiTypeCount {
 		return APISurfaceUnknown
 	}
+	return APISurface(a + 1)
 }
 
 // String returns a bounded API name, including for unsupported values.
@@ -135,22 +135,28 @@ func DetectAPIType(path string) APIType {
 	}
 }
 
-// DetectAPISurface returns a bounded generation API name for observability.
-// Auxiliary endpoints and missing paths are unknown rather than a routing default.
-func DetectAPISurface(path string) APISurface {
+// MatchAPIType classifies generation paths without a routing fallback.
+func MatchAPIType(path string) (APIType, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
-	for _, apiType := range []APIType{
-		APITypeChatCompletions, APITypeCompletions, APITypeResponses,
-		APITypeMessages, APITypeVLLMGenerate, APITypeSGLangGenerate,
-	} {
+	for apiType := range apiTypeCount {
 		// Keep the slash boundary while allowing provider-specific prefixes.
 		suffix := strings.TrimPrefix(apiType.Path(), "/v1")
 		if strings.HasSuffix(path, suffix) {
-			return apiType.Surface()
+			return apiType, true
 		}
 	}
-	return APISurfaceUnknown
+	return 0, false
+}
+
+// DetectAPISurface returns a bounded generation API name for observability.
+// Auxiliary endpoints and missing paths are unknown rather than a routing default.
+func DetectAPISurface(path string) APISurface {
+	apiType, ok := MatchAPIType(path)
+	if !ok {
+		return APISurfaceUnknown
+	}
+	return apiType.Surface()
 }
 
 // JSON request field names that cap output tokens, by API. Chat completions caps

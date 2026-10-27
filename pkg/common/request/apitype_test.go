@@ -56,6 +56,7 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
 		{name: "prefixed responses", path: "/prefix" + PathResponses, want: APITypeResponses},
+		{name: "responses item read", path: PathResponses + "/resp_123", want: APITypeResponses},
 		{name: "prefixed messages", path: "/prefix" + PathMessages, want: APITypeMessages},
 		{name: "prefixed generate", path: "/prefix" + PathVLLMGenerate, want: APITypeVLLMGenerate},
 		{name: "prefixed sglang generate", path: "/prefix" + PathSGLangGenerate, want: APITypeSGLangGenerate},
@@ -77,6 +78,7 @@ func TestDetectAPISurface(t *testing.T) {
 	}{
 		{"chat completions", PathChatCompletions, "chat_completions"},
 		{"completions", PathCompletions, "completions"},
+		{"prefixed completions", "/provider/model" + PathCompletions, "completions"},
 		{"responses", PathResponses, "responses"},
 		{"responses trailing slash and query", PathResponses + "/?stream=true", "responses"},
 		{"prefixed responses", "/provider/model" + PathResponses, "responses"},
@@ -85,10 +87,13 @@ func TestDetectAPISurface(t *testing.T) {
 		{"prefixed responses item read", "/provider/model" + PathResponses + "/resp_123", "unknown"},
 		{"messages", PathMessages, "messages"},
 		{"vllm generate", PathVLLMGenerate, "vllm_generate"},
+		{"prefixed vllm generate", "/provider/model" + PathVLLMGenerate, "vllm_generate"},
 		{"sglang generate", PathSGLangGenerate, "sglang_generate"},
+		{"prefixed sglang generate", "/provider/model" + PathSGLangGenerate, "sglang_generate"},
 		{"provider prefix", "/provider/model" + PathMessages, "messages"},
 		{"unversioned provider route", "/provider/messages", "messages"},
 		{"trailing slash and query", PathMessages + "/?beta=true", "messages"},
+		{"whitespace", " \t" + PathMessages + "/ \t", "messages"},
 		{"unknown", "/v1/embeddings", "unknown"},
 		{"missing", "", "unknown"},
 		{"token counting", PathMessages + "/count_tokens", "unknown"},
@@ -100,6 +105,14 @@ func TestDetectAPISurface(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			apiType, ok := MatchAPIType(tt.path)
+			if tt.want == "unknown" {
+				if ok {
+					t.Errorf("MatchAPIType(%q) = %v, true; want no match", tt.path, apiType)
+				}
+			} else if !ok || apiType.String() != tt.want {
+				t.Errorf("MatchAPIType(%q) = %v, %t; want %s, true", tt.path, apiType, ok, tt.want)
+			}
 			if got := DetectAPISurface(tt.path).String(); got != tt.want {
 				t.Errorf("DetectAPISurface(%q) = %q, want %q", tt.path, got, tt.want)
 			}
@@ -109,20 +122,20 @@ func TestDetectAPISurface(t *testing.T) {
 
 func TestAPISurfaceString(t *testing.T) {
 	var zero APISurface
-	for _, surface := range []APISurface{zero, APISurfaceUnknown, APISurface(-1), APISurface(1000)} {
+	for _, surface := range []APISurface{zero, APISurfaceUnknown, APISurface(-1), APISurface(apiTypeCount + 1), APISurface(1000)} {
 		if got := surface.String(); got != "unknown" {
 			t.Errorf("APISurface(%d).String() = %q, want unknown", surface, got)
 		}
 	}
-	for _, apiType := range []APIType{
-		APITypeChatCompletions, APITypeCompletions, APITypeResponses,
-		APITypeVLLMGenerate, APITypeSGLangGenerate, APITypeMessages,
-	} {
+	for apiType := range apiTypeCount {
 		if got := apiType.Surface().String(); got != apiType.String() {
 			t.Errorf("%v surface = %q, want %q", apiType, got, apiType.String())
 		}
+		if got, ok := MatchAPIType(apiType.Path()); !ok || got != apiType {
+			t.Errorf("MatchAPIType(%q) = %v, %t; want %v, true", apiType.Path(), got, ok, apiType)
+		}
 	}
-	for _, apiType := range []APIType{APIType(-1), APIType(1000)} {
+	for _, apiType := range []APIType{APIType(-1), apiTypeCount, APIType(1000)} {
 		if got := apiType.Surface(); got != APISurfaceUnknown {
 			t.Errorf("%v surface = %v, want unknown", apiType, got)
 		}

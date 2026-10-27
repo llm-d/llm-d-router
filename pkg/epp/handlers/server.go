@@ -284,14 +284,13 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 }
 
 func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
-	path, _, _ = strings.Cut(path, "?")
-	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
-	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages, reqcommon.APITypeResponses} {
-		// Keep the slash boundary while allowing provider-specific prefixes.
-		suffix := strings.TrimPrefix(apiType.Path(), "/v1")
-		if strings.HasSuffix(path, suffix) {
-			return apiType, true
-		}
+	apiType, ok := reqcommon.MatchAPIType(path)
+	if !ok {
+		return 0, false
+	}
+	switch apiType {
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeMessages, reqcommon.APITypeResponses:
+		return apiType, true
 	}
 	return 0, false
 }
