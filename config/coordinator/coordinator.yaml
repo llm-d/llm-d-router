@@ -137,7 +137,8 @@ pipeline:
   #   ec-shared-storage - shared filesystem (default for non-RDMA clusters)
   ec_connector: ec-shared-storage
 
-  # use_openai_format selects the wire format for the encode and prefill steps.
+  # use_openai_format selects the wire format for the encode, prefill and
+  # decode steps.
   #   true (default) - forward on the client's original path
   #                    (/v1/chat/completions, /v1/completions, /v1/responses,
   #                    /v1/messages).
@@ -450,3 +451,38 @@ pipeline:
     - type: decode
       # params:
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #
+      #   output_mode selects what a tokens-in decode leg asks the worker to
+      #   return. Read only when the leg emits the generate format
+      #   (use_openai_format: false); the OpenAI-compatible routes have no
+      #   such field. Both values require a worker that loads a tokenizer:
+      #   vLLM answers 400 under --tokens-only or --skip-tokenizer-init.
+      #     text (default) - token IDs plus the detokenized text.
+      #     derender       - token IDs plus the parsed assistant message
+      #                      (content, reasoning, tool_calls), so the worker
+      #                      applies its own parsers. vLLM refuses it
+      #                      together with stream: true, so the leg is sent
+      #                      unstreamed and a streaming client receives its
+      #                      answer in a single frame. On a worker with a
+      #                      tool or reasoning parser configured it also
+      #                      needs a parse_context from /render, which this
+      #                      pipeline does not send.
+      #   output_mode: text
+      #
+      #   wrap_chat_completion rebuilds the chat completions envelope around a
+      #   rewritten leg's response, for a client that called
+      #   /v1/chat/completions on a tokens-in pipeline. vLLM serves output_mode
+      #   on the generate envelope rather than returning an OpenAI one, so
+      #   without this the client reads a generate response: choices carry
+      #   token_ids beside their message, and the body names the request
+      #   request_id rather than id. Default false, which forwards the
+      #   generate response as it arrived.
+      #
+      #   Only a non-streaming chat-completions request is rewritten. A
+      #   streamed answer is a sequence of chat.completion.chunk frames this
+      #   step does not assemble, so it is forwarded unchanged; the other
+      #   client APIs keep the envelope their own schema declares.
+      #
+      #   The rewritten leg is not streamed to the client but read whole (up
+      #   to 8 MB) so the envelope can be rebuilt around it.
+      #   wrap_chat_completion: false
