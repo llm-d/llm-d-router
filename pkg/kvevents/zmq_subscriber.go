@@ -205,6 +205,14 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 	debugLogger := logger.V(logging.DEBUG)
 	for {
+		// Report the state the previous message left before waiting for the next.
+		if z.replayEndpoint != "" || z.snapshotEndpoint != "" {
+			liveOnly := 0.0
+			if !z.hasLastSeq {
+				liveOnly = 1
+			}
+			metrics.LiveOnly.WithLabelValues(z.podIdentifier).Set(liveOnly)
+		}
 		msg, err := sub.Recv()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -502,6 +510,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 			z.addTask(ctx, topic, 0, batch)
 		}
 		z.resyncOpen = false
+		metrics.SnapshotLoadDuration.Observe(time.Since(started).Seconds())
 		logger.Info("Snapshot loaded for resync", "cut", cut, "batches", len(batches),
 			"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
 		return true
@@ -517,6 +526,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	if cut >= 0 {
 		z.lastSeq, z.hasLastSeq = uint64(cut), true
 	}
+	metrics.SnapshotLoadDuration.Observe(time.Since(started).Seconds())
 	logger.Info("Snapshot loaded", "cut", cut, "batches", len(batches),
 		"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
 	return true

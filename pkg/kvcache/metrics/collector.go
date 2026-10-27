@@ -153,6 +153,23 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of ZMQ subscriber errors", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel, "operation"})
+	// LiveOnly reports, per pod with a snapshot or replay endpoint, whether the
+	// pod has no snapshot or replay base and is indexed from live events only.
+	LiveOnly = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only",
+		Help: metricsutil.HelpMsgWithStability(
+			"1 while the pod is indexed from live events only, without a snapshot or replay base",
+			compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// SnapshotLoadDuration observes successful snapshot loads, from the request
+	// until the snapshot's batches are queued for indexing.
+	SnapshotLoadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_load_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of successful snapshot loads in seconds, until the batches are queued for indexing",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+	})
 	// PoolQueueDepth tracks the total number of messages queued across all
 	// worker shards of the event processing pool.
 	PoolQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -177,6 +194,7 @@ func Collectors() []prometheus.Collector {
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
+		LiveOnly, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
 	}
 }
@@ -189,6 +207,7 @@ func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
+	LiveOnly.DeleteLabelValues(podIdentifier)
 }
 
 var registerMetricsOnce = sync.Once{}
