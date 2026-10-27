@@ -368,7 +368,8 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
-	if reqCtx.TargetModelName == "" {
+	// Native generate APIs allow requests without a model.
+	if reqCtx.TargetModelName == "" && inferenceRequestBody.Generate == nil {
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
 	if reqCtx.TargetModelName == inferenceRequestBody.Model {
