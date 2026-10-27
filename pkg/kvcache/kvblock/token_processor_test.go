@@ -28,6 +28,92 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
 
+func TestTokensToBigramKVBlockKeys(t *testing.T) {
+	for _, algorithm := range []string{kvblock.HashAlgorithmCBORFNV, kvblock.HashAlgorithmXXH64} {
+		t.Run(algorithm, func(t *testing.T) {
+			processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+				BlockSizeTokens: 2, HashAlgorithm: algorithm,
+			})
+			require.NoError(t, err)
+			tokens := []uint32{11, 22, 33, 44, 55}
+			keys, err := processor.TokensToBigramKVBlockKeys(0, tokens, 2, "model", nil)
+			require.NoError(t, err)
+			require.Len(t, keys, 2)
+			child, err := processor.TokensToBigramKVBlockKeys(keys[0], tokens[2:], 2, "model", nil)
+			require.NoError(t, err)
+			require.Equal(t, keys[1:], child)
+			changed, err := processor.TokensToBigramKVBlockKeys(0, []uint32{11, 22, 33, 44, 66}, 2, "model", nil)
+			require.NoError(t, err)
+			require.Equal(t, keys[0], changed[0])
+			require.NotEqual(t, keys[1], changed[1])
+			boundary, err := processor.TokensToBigramKVBlockKeys(0, tokens[:4], 2, "model", nil)
+			require.NoError(t, err)
+			require.Equal(t, keys[:1], boundary)
+			plain, err := processor.TokensToKVBlockKeys(0, tokens, "model", nil)
+			require.NoError(t, err)
+			require.NotEqual(t, plain[0], keys[0])
+			single, err := processor.TokensToBigramKVBlockKeys(0, tokens[:2], 1, "model", nil)
+			require.NoError(t, err)
+			require.NotEqual(t, plain[0], single[0])
+			_, err = processor.TokensToBigramKVBlockKeys(0, tokens, 0, "model", nil)
+			require.Error(t, err)
+			_, err = processor.TokensToBigramKVBlockKeys(0, tokens, 2, "model", []*kvblock.BlockExtraFeatures{{}})
+			require.ErrorContains(t, err, "does not match token chunk count")
+			require.ErrorContains(t, err, "blockSizeTokens=2, tokens=5")
+			_, err = processor.TokensToKVBlockKeys(0, tokens, "model", []*kvblock.BlockExtraFeatures{{}})
+			require.ErrorContains(t, err, "does not match token chunk count")
+			require.ErrorContains(t, err, "blockSizeTokens=2, tokens=5")
+		})
+	}
+}
+
+func TestCacheFormatCatalogZeroValue(t *testing.T) {
+	var absent *kvblock.CacheFormatCatalog
+	_, ok := absent.Get("pod")
+	require.False(t, ok)
+	var catalog kvblock.CacheFormatCatalog
+	catalog.Clear("missing")
+	_, ok = catalog.Get("pod")
+	require.False(t, ok)
+	format := kvblock.CacheFormat{Bigram: true, BlockSize: 64}
+	catalog.Learn("pod", format)
+	got, ok := catalog.Get("pod")
+	require.True(t, ok)
+	require.Equal(t, format, got)
+	catalog.Clear("pod")
+	_, ok = catalog.Get("pod")
+	require.False(t, ok)
+}
+
+func TestCacheFormatCatalogConcurrentUpdates(t *testing.T) {
+	catalog := kvblock.NewCacheFormatCatalog()
+	var wg sync.WaitGroup
+	for _, pod := range []string{"a", "b"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 100 {
+				format := kvblock.CacheFormat{Bigram: true, BlockSize: 16}
+				if i%2 == 0 {
+					format.BlockSize = 64
+				}
+				catalog.Learn(pod, format)
+				got, ok := catalog.Get(pod)
+				assert.True(t, ok)
+				assert.Equal(t, format, got)
+				if i%10 == 0 {
+					catalog.Clear(pod)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, pod := range []string{"a", "b"} {
+		_, ok := catalog.Get(pod)
+		require.True(t, ok)
+	}
+}
+
 func TestNewChunkedTokenDatabase_Validation(t *testing.T) {
 	tests := []struct {
 		name      string

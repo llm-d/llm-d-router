@@ -41,7 +41,8 @@ const (
 
 // kvCacheIndexer is the subset of kvcache.Indexer that the producer relies on.
 type kvCacheIndexer interface {
-	ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error)
+	ComputeBlockKeysForFormat(ctx context.Context, tokens []uint32, modelName string, extraFeatures []*kvblock.BlockExtraFeatures, format kvblock.CacheFormat) ([]kvblock.BlockHash, error)
+	CacheFormat(podID string) kvblock.CacheFormat
 	KVBlockIndex() kvblock.Index
 	MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error)
 }
@@ -58,7 +59,7 @@ type mmPromptContent struct {
 // return value holds one MM content value per returned prompt (nil for
 // text-only prompts), aligned positionally with the keys.
 func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
-	request *scheduling.InferenceRequest, blockSizeTokens int,
+	request *scheduling.InferenceRequest, format kvblock.CacheFormat,
 ) ([][]kvblock.BlockHash, []*mmPromptContent, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil, nil
@@ -74,7 +75,7 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 		if len(p.TokenIDs) == 0 {
 			continue
 		}
-		keys, mm, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, blockSizeTokens)
+		keys, mm, err := computeBlockKeysForTokens(ctx, idx, p.TokenIDs, p.MultiModalFeatures, tp.CacheSalt, request.TargetModel, format)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -88,20 +89,25 @@ func computeBlockKeys(ctx context.Context, idx kvCacheIndexer,
 }
 
 func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
-	tokens []uint32, mmFeatures []fwkrh.MultiModalFeature, cacheSalt, model string, blockSizeTokens int,
+	tokens []uint32, mmFeatures []fwkrh.MultiModalFeature, cacheSalt, model string, format kvblock.CacheFormat,
 ) ([]kvblock.BlockHash, *mmPromptContent, error) {
+	blockSizeTokens := format.BlockSize
+	cachedPositions := len(tokens)
+	if format.Bigram {
+		cachedPositions = max(0, cachedPositions-1)
+	}
 	var extraFeatures []*kvblock.BlockExtraFeatures
 	var mm *mmPromptContent
 	if len(mmFeatures) > 0 {
 		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(mmFeatures)
 		extraFeatures = kvblock.ComputeBlockExtraFeatures(
-			mmHashes, mmPlaceholders, blockSizeTokens, len(tokens))
+			mmHashes, mmPlaceholders, blockSizeTokens, cachedPositions)
 		if blockIndices := multimodalBlockIndices(mmFeatures, blockSizeTokens); len(blockIndices) > 0 {
 			mm = &mmPromptContent{blockIndices: blockIndices, features: mmFeatures}
 		}
 	}
-	extraFeatures = foldCacheSalt(extraFeatures, cacheSalt, len(tokens)/blockSizeTokens)
-	keys, err := idx.ComputeBlockKeysFromTokens(ctx, tokens, model, extraFeatures)
+	extraFeatures = foldCacheSalt(extraFeatures, cacheSalt, cachedPositions/blockSizeTokens)
+	keys, err := idx.ComputeBlockKeysForFormat(ctx, tokens, model, extraFeatures, format)
 	return keys, mm, err
 }
 

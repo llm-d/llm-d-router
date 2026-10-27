@@ -86,55 +86,63 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 }
 
 func decodeSGLangTokensField(dec *msgpack.Decoder, fields *typedEventFields) error {
-	tokens, err := decodeSGLangTokenIDs(dec)
+	tokens, lookahead, err := decodeSGLangTokenIDs(dec)
 	if err != nil {
 		return err
 	}
 	fields.tokens = tokens
+	fields.lookaheadToken = lookahead
 	fields.hasTokens = true
 	return nil
 }
 
-func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
+func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, *uint32, error) {
 	count, err := dec.DecodeArrayLen()
 	if err != nil {
-		return nil, fmt.Errorf("token_ids is not an array: %w", err)
+		return nil, nil, fmt.Errorf("token_ids is not an array: %w", err)
 	}
 	if count < 0 {
-		return nil, fmt.Errorf("token_ids is not an array: <nil>")
+		return nil, nil, fmt.Errorf("token_ids is not an array: <nil>")
 	}
 	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
 	if count == 0 {
-		return tokens, nil
+		return tokens, nil, nil
 	}
 	code, err := dec.PeekCode()
 	if err != nil {
-		return nil, fmt.Errorf("token_ids[0]: %w", err)
+		return nil, nil, fmt.Errorf("token_ids[0]: %w", err)
 	}
 	bigrams := msgpcode.IsFixedArray(code) || code == msgpcode.Array16 || code == msgpcode.Array32
+	var nextToken uint32
 	for i := range count {
 		if bigrams {
 			pairSize, err := dec.DecodeArrayLen()
 			if err != nil {
-				return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 			}
 			if pairSize != 2 {
-				return nil, fmt.Errorf("token_ids[%d]: expected pair of length 2, got %d", i, pairSize)
+				return nil, nil, fmt.Errorf("token_ids[%d]: expected pair of length 2, got %d", i, pairSize)
 			}
 		}
 		token, err := decodeTokenID(dec)
 		if err != nil {
-			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
 		if bigrams {
-			if _, err := decodeTokenID(dec); err != nil {
-				return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			if i > 0 && token != nextToken {
+				return nil, nil, fmt.Errorf("token_ids[%d]: bigram does not overlap the preceding pair", i)
+			}
+			nextToken, err = decodeTokenID(dec)
+			if err != nil {
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 			}
 		}
-		// One token per bigram preserves block_size and request-side chunking.
 		tokens = append(tokens, token)
 	}
-	return tokens, nil
+	if bigrams {
+		return tokens, &nextToken, nil
+	}
+	return tokens, nil, nil
 }
 
 func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error {
@@ -157,6 +165,7 @@ func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error
 
 func (f *typedEventFields) sglangBlockStoredEvent() *kvevents.BlockStoredEvent {
 	event := f.blockStoredEvent()
+	event.LookaheadToken = f.lookaheadToken
 	// Child blocks inherit the salt through the parent's request key.
 	if f.cacheSalt != "" && f.parentHash == 0 && len(f.blockHashes) > 0 {
 		event.ExtraKeys = make([][]any, len(f.blockHashes))

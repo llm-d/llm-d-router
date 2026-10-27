@@ -283,23 +283,24 @@ func decodeBlockSizeField(dec *msgpack.Decoder, fields *typedEventFields) error 
 }
 
 type typedEventFields struct {
-	tag           string
-	hasTag        bool
-	blockHashes   []uint64
-	hasHashes     bool
-	parentHash    uint64
-	tokens        []uint32
-	hasTokens     bool
-	blockSize     int
-	hasBlockSize  bool
-	loraID        *int
-	medium        string
-	loraName      *string
-	extraKeys     [][]any
-	cacheSalt     string
-	groupIdx      *int
-	specKind      kvevents.KVCacheSpecKind
-	slidingWindow *int
+	tag            string
+	hasTag         bool
+	blockHashes    []uint64
+	hasHashes      bool
+	parentHash     uint64
+	tokens         []uint32
+	lookaheadToken *uint32
+	hasTokens      bool
+	blockSize      int
+	hasBlockSize   bool
+	loraID         *int
+	medium         string
+	loraName       *string
+	extraKeys      [][]any
+	cacheSalt      string
+	groupIdx       *int
+	specKind       kvevents.KVCacheSpecKind
+	slidingWindow  *int
 }
 
 type rawTypedMapField struct {

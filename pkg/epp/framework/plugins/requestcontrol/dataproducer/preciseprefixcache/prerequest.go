@@ -51,26 +51,26 @@ var _ requestcontrol.PreRequest = &Producer{}
 // speculativeEntries records the speculative rows added on a routing decision
 // so the TTL-eviction callback can roll them back.
 type speculativeEntries struct {
-	perPromptKeys [][]kvblock.BlockHash
-	podEntries    []kvblock.PodEntry
+	perPodKeys map[string][][]kvblock.BlockHash
 }
 
 // blockKeysState carries the block keys computed in Produce to PreRequest
 // via PluginState, avoiding a second hash on the same request.
-// perPromptKeys holds one slice of block keys per prompt; single-prompt
-// requests use a length-1 outer slice.
 type blockKeysState struct {
-	perPromptKeys [][]kvblock.BlockHash
+	perFormatKeys map[kvblock.CacheFormat][][]kvblock.BlockHash
 }
 
 // Clone implements plugin.StateData.
 func (s *blockKeysState) Clone() plugin.StateData {
-	cp := make([][]kvblock.BlockHash, len(s.perPromptKeys))
-	for i, keys := range s.perPromptKeys {
-		cp[i] = make([]kvblock.BlockHash, len(keys))
-		copy(cp[i], keys)
+	cp := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(s.perFormatKeys))
+	for format, prompts := range s.perFormatKeys {
+		keys := make([][]kvblock.BlockHash, len(prompts))
+		for i, prompt := range prompts {
+			keys[i] = append([]kvblock.BlockHash(nil), prompt...)
+		}
+		cp[format] = keys
 	}
-	return &blockKeysState{perPromptKeys: cp}
+	return &blockKeysState{perFormatKeys: cp}
 }
 
 // bestAvailableState carries candidate predictions and their maximum from
@@ -222,18 +222,20 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 			return
 		}
 		entries := item.Value()
-		keys := make([]kvblock.BlockHash, 0)
-		for _, promptKeys := range entries.perPromptKeys {
-			keys = append(keys, promptKeys...)
-		}
-		if len(keys) == 0 || len(entries.podEntries) == 0 {
-			return
-		}
-		// On failure the entries stay until the pod's next Clear, or until the same
-		// prefix is routed to the same pod again and that TTL expiry succeeds.
-		if err := index.Evict(ctx, kvblock.RequestKey, keys, entries.podEntries); err != nil {
-			logger.Error(err, "Failed to evict speculative entries on TTL expiry",
-				"requestID", item.Key(), "keys", len(keys))
+		for podID, prompts := range entries.perPodKeys {
+			var keys []kvblock.BlockHash
+			for _, prompt := range prompts {
+				keys = append(keys, prompt...)
+			}
+			if len(keys) == 0 {
+				continue
+			}
+			// Failed evictions remain until the pod clears or a later routed request expires.
+			pods := []kvblock.PodEntry{{PodIdentifier: podID, Speculative: true}}
+			if err := index.Evict(ctx, kvblock.RequestKey, keys, pods); err != nil {
+				logger.Error(err, "Failed to evict speculative entries on TTL expiry",
+					"requestID", item.Key(), "pod", podID, "keys", len(keys))
+			}
 		}
 	})
 	go cache.Start()
@@ -278,68 +280,48 @@ func (p *Producer) PreRequest(ctx context.Context,
 			"requestID", request.RequestID)
 		return nil
 	}
-
-	hasKeys := false
-	for _, pk := range state.perPromptKeys {
-		if len(pk) > 0 {
-			hasKeys = true
-			break
-		}
-	}
-	if !hasKeys {
+	if len(state.perFormatKeys) == 0 {
 		return nil
 	}
 
 	targetEndpoint := schedulingResult.PrimaryEndpoint()
-	if targetEndpoint == nil {
+	if targetEndpoint == nil || targetEndpoint.GetMetadata() == nil {
 		return nil
 	}
-	targetMeta := targetEndpoint.GetMetadata()
-	if targetMeta == nil {
-		return nil
-	}
-	speculativePod := kvblock.PodEntry{
-		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
-		Speculative:   true,
-	}
-
 	index := p.kvCacheIndexer.KVBlockIndex()
-	// Insert per-prompt keys separately to preserve correct block adjacency.
-	for _, promptKeys := range state.perPromptKeys {
-		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-			logger.Error(err, "Failed to add speculative entries to index",
-				"pod", speculativePod.PodIdentifier)
-		}
-	}
-
-	allPodEntries := []kvblock.PodEntry{speculativePod}
-
-	// P/D disagg: seed the prefill endpoint too.
+	targets := []scheduling.Endpoint{targetEndpoint}
 	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
-		if prefillMeta := prefill.GetMetadata(); prefillMeta != nil {
-			prefillPod := kvblock.PodEntry{
-				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
-				Speculative:   true,
+		targets = append(targets, prefill)
+	}
+	perPodKeys := make(map[string][][]kvblock.BlockHash, len(targets))
+	for _, target := range targets {
+		md := target.GetMetadata()
+		if md == nil {
+			continue
+		}
+		podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
+		prompts := state.perFormatKeys[p.kvCacheIndexer.CacheFormat(podID)]
+		pod := kvblock.PodEntry{PodIdentifier: podID, Speculative: true}
+		for _, promptKeys := range prompts {
+			if len(promptKeys) == 0 {
+				continue
 			}
-			for _, promptKeys := range state.perPromptKeys {
-				if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-					logger.Error(err, "Failed to add speculative entries for prefill endpoint",
-						"pod", prefillPod.PodIdentifier)
-				}
+			if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{pod}); err != nil {
+				logger.Error(err, "Failed to add speculative entries to index", "pod", podID)
 			}
-			allPodEntries = append(allPodEntries, prefillPod)
+			perPodKeys[podID] = prompts
 		}
 	}
-
+	if len(perPodKeys) == 0 {
+		return nil
+	}
 	p.speculativeCache.Set(request.RequestID, &speculativeEntries{
-		perPromptKeys: state.perPromptKeys,
-		podEntries:    allPodEntries,
+		perPodKeys: perPodKeys,
 	}, p.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
-		"pod", speculativePod.PodIdentifier,
-		"prompts", len(state.perPromptKeys),
+		"pods", len(perPodKeys),
 		"ttl", p.speculativeTTL)
 	return nil
 }
