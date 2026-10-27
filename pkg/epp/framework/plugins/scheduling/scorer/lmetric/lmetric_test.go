@@ -58,6 +58,19 @@ func TestLMetricScorerUsesDecodeBatchSizeNotInFlightTokens(t *testing.T) {
 	assert.Equal(t, 1.0, scores[longInFlightTokens])
 }
 
+func TestLMetricScorerUsesUnweightedCachedBlocksForTokenCost(t *testing.T) {
+	scorer := newTestScorer()
+	tierWeighted := makeEndpoint("tier-weighted", 2, 10, 16, 0, 0, scorer)
+	tierWeighted.Put(scorer.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(2, 10, 16).WithCachedBlockCount(8))
+
+	unweighted := makeEndpoint("unweighted", 5, 10, 16, 0, 0, scorer)
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{tierWeighted, unweighted})
+
+	assert.Equal(t, 1.0, scores[tierWeighted])
+	assert.Equal(t, 0.0, scores[unweighted])
+}
+
 func TestLMetricScorerIsInvariantToCommonISLScale(t *testing.T) {
 	scorer := newTestScorer()
 	shortA := makeEndpoint("short-a", 75, 100, 16, 1, 100, scorer)
@@ -102,8 +115,8 @@ func newTestScorer() *Scorer {
 func makeEndpoint(name string, matchBlocks, totalBlocks int, blockSizeTokens int, inFlightRequests, inFlightTokens int64, scorer *Scorer) fwksched.Endpoint {
 	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: name}}, fwkdl.NewMetrics(), nil)
 	if matchBlocks >= 0 {
-		endpoint.Put(scorer.prefixMatchDataKey.String(), attrprefix.NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens))
+		endpoint.Put(scorer.prefixMatchDataKey, attrprefix.NewPrefixCacheMatchInfo(matchBlocks, totalBlocks, blockSizeTokens))
 	}
-	endpoint.Put(scorer.inFlightLoadDataKey.String(), &attrconcurrency.InFlightLoad{Requests: inFlightRequests, Tokens: inFlightTokens})
+	endpoint.Put(scorer.inFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: inFlightRequests, Tokens: inFlightTokens})
 	return endpoint
 }

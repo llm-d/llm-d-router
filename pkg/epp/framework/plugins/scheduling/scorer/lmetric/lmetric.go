@@ -112,7 +112,7 @@ func (s *Scorer) cost(endpoint fwksched.Endpoint) (float64, bool) {
 }
 
 func (s *Scorer) uncachedPrefillTokens(endpoint fwksched.Endpoint) (float64, bool) {
-	raw, ok := endpoint.Get(s.prefixMatchDataKey.String())
+	raw, ok := endpoint.Get(s.prefixMatchDataKey)
 	if !ok {
 		return 0, false
 	}
@@ -120,23 +120,23 @@ func (s *Scorer) uncachedPrefillTokens(endpoint fwksched.Endpoint) (float64, boo
 	if !ok || info == nil || info.TotalBlocks() <= 0 {
 		return 0, false
 	}
-	matchBlocks := info.MatchBlocks()
-	if matchBlocks < 0 {
-		matchBlocks = 0
+	cachedBlocks := info.CachedBlockCount()
+	if cachedBlocks < 0 {
+		cachedBlocks = 0
 	}
-	if matchBlocks > info.TotalBlocks() {
-		matchBlocks = info.TotalBlocks()
+	if cachedBlocks > info.TotalBlocks() {
+		cachedBlocks = info.TotalBlocks()
 	}
 	blockSizeTokens := info.BlockSizeTokens()
 	if blockSizeTokens <= 0 {
 		blockSizeTokens = 1
 	}
-	return float64(info.TotalBlocks()-matchBlocks) * float64(blockSizeTokens), true
+	return float64(info.TotalBlocks()-cachedBlocks) * float64(blockSizeTokens), true
 }
 
 func (s *Scorer) decodeBatchSize(endpoint fwksched.Endpoint) float64 {
 	requests := int64(0)
-	if raw, ok := endpoint.Get(s.inFlightLoadDataKey.String()); ok {
+	if raw, ok := endpoint.Get(s.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			requests = load.Requests
 		}
