@@ -27,11 +27,13 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
@@ -949,7 +951,7 @@ func newSnapshotReplayHarness(
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", false))
+		ctx, t.Name(), "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", false))
 	pub := zmq4.NewPub(ctx)
 	require.NoError(t, pub.Dial(pubEndpoint))
 	time.Sleep(100 * time.Millisecond)
@@ -1024,6 +1026,33 @@ func TestZMQSubscriber_SnapshotSequenceResetReloadsPod(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "a sequence reset must replace the pod's state with a new snapshot")
 	assert.False(t, h.indexed(999), "a frame at or before the cut is already in the snapshot")
 	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func TestZMQSubscriber_SnapshotMetrics(t *testing.T) {
+	liveOnly := func() float64 {
+		var m dto.Metric
+		require.NoError(t, metrics.LiveOnly.WithLabelValues(t.Name()).Write(&m))
+		return m.GetGauge().GetValue()
+	}
+	loads := func() uint64 {
+		var m dto.Metric
+		require.NoError(t, metrics.SnapshotLoadDuration.Write(&m))
+		return m.GetHistogram().GetSampleCount()
+	}
+	before := loads()
+
+	h, server := newSnapshotHarness(t, -2)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == 1 },
+		5*time.Second, 50*time.Millisecond, "a pod without a snapshot must be reported as live-only")
+	assert.Equal(t, before, loads(), "an unavailable snapshot is not a load")
+
+	// The engine restarted and serves a snapshot.
+	server.set(0, buildDistinctBlockStoredPayload(t, 300))
+	h.send(t, 0, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == 0 },
+		5*time.Second, 50*time.Millisecond, "a loaded snapshot must clear the live-only state")
+	assert.Equal(t, before+1, loads())
 }
 
 func TestZMQSubscriber_SnapshotPreferredOverReplay(t *testing.T) {
