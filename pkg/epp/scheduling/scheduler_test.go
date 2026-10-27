@@ -40,6 +40,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -279,7 +280,7 @@ func TestScheduleLogsProcessResultsSuccessOnlyWithoutError(t *testing.T) {
 // tests do not cover.
 func TestScheduleDefaultProfileFilterWithPrefixAffinity(t *testing.T) {
 	const (
-		producerName = "approx-prefix-cache-producer"
+		producerName = approxprefixconstants.ApproxPrefixCachePluginType
 		queueWeight  = 2.0
 		kvWeight     = 2.0
 		prefixWeight = 3.0
