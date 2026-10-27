@@ -488,17 +488,29 @@ func fetchCoordinatorLogs(nsName string) string {
 // never carries the field at all, whatever the client sent. Pipeline request
 // bodies surface only at TRACE, so this relies on the coordinator running at
 // log_level 5.
+//
+// requestsSpeakChat covers the decode request too: the decode leg follows
+// pipeline.use_openai_format like encode and prefill, so a disabled
+// passthrough addresses it at the generate route, which carries its limits
+// under sampling_params and defines no max_completion_tokens.
 func verifyTokenLimits(logs string, limits tokenLimits, requestsSpeakChat bool, capSteps []string) {
+	decodeField := `"x-llm-d-epp-profile":"decode"`
+
 	ginkgo.By("Verifying decode request forwards the client min_tokens/max_tokens")
-	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"decode"`,
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, decodeField,
 		fmt.Sprintf(`"min_tokens":%d`, limits.min), fmt.Sprintf(`"max_tokens":%d`, limits.max))).To(gomega.BeTrue(),
 		"coordinator logs have no decode request body carrying min_tokens=%d and max_tokens=%d", limits.min, limits.max)
 
-	if limits.maxCompletion > 0 {
+	switch {
+	case limits.maxCompletion > 0 && requestsSpeakChat:
 		ginkgo.By("Verifying decode request forwards the client max_completion_tokens")
-		gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"decode"`,
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, decodeField,
 			fmt.Sprintf(`"max_completion_tokens":%d`, limits.maxCompletion))).To(gomega.BeTrue(),
 			"coordinator logs have no decode request body carrying max_completion_tokens=%d", limits.maxCompletion)
+	case limits.maxCompletion > 0:
+		ginkgo.By("Verifying decode request drops max_completion_tokens on the generate wire format")
+		gomega.Expect(logHasLine(logs, `"body":"request body"`, decodeField, `"max_completion_tokens"`)).To(gomega.BeFalse(),
+			"decode request body must not carry max_completion_tokens on the generate wire format")
 	}
 
 	for _, phase := range capSteps {

@@ -90,6 +90,7 @@ const (
 	FieldURL                  = "url"
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
+	FieldOutputMode           = "output_mode"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
@@ -117,6 +118,33 @@ const (
 	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
 	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
 )
+
+// Response body fields of the OpenAI-compatible APIs. The chat completions
+// envelope names the request it answers by FieldID and labels itself by
+// FieldObject; a choice carries its position, its assistant message, and why
+// generation stopped. The vLLM generate API shares the choice field names but
+// names the request FieldRequestID and carries no object label.
+const (
+	FieldID           = "id"
+	FieldObject       = "object"
+	FieldCreated      = "created"
+	FieldRequestID    = "request_id"
+	FieldChoices      = "choices"
+	FieldMessage      = "message"
+	FieldDelta        = "delta"
+	FieldIndex        = "index"
+	FieldFinishReason = "finish_reason"
+)
+
+// ObjectChatCompletion is the object label of a non-streamed chat completions
+// response. The streamed counterpart is ObjectChatCompletionChunk.
+const (
+	ObjectChatCompletion      = "chat.completion"
+	ObjectChatCompletionChunk = "chat.completion.chunk"
+)
+
+// RoleAssistant is the role of a generated message.
+const RoleAssistant = "assistant"
 
 // Server-sent event framing for streamed responses. SGLang sends the bare
 // marker as an event payload, the OpenAI APIs send the framed line.

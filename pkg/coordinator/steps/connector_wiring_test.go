@@ -221,10 +221,59 @@ func TestDecodeStep_UnknownConnectorRejected(t *testing.T) {
 	}
 }
 
-func TestDecodeStep_UseOpenAIFormatOverrideRejected(t *testing.T) {
+func TestDecodeStep_UseOpenAIFormatAccepted(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
-	if _, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false}); err == nil {
-		t.Fatal("expected error overriding use_openai_format")
+	step, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": false})
+	if err != nil {
+		t.Fatalf("NewDecodeStep: %v", err)
+	}
+	if step.(*DecodeStep).useOpenAIFormat {
+		t.Fatal("use_openai_format=false did not reach the step")
+	}
+}
+
+func TestDecodeStep_UseOpenAIFormatNonBoolRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	if _, err := NewDecodeStep(gwClient, map[string]any{"use_openai_format": "false"}); err == nil {
+		t.Fatal("expected error for a non-bool use_openai_format")
+	}
+}
+
+func TestDecodeStep_OutputMode(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	for _, tc := range []struct {
+		name  string
+		param any
+		want  string
+	}{
+		{name: "defaults to text", param: nil, want: reqcommon.OutputModeText},
+		{name: "text", param: reqcommon.OutputModeText, want: reqcommon.OutputModeText},
+		{name: "derender parses on the worker", param: reqcommon.OutputModeDerender, want: reqcommon.OutputModeDerender},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]any{}
+			if tc.param != nil {
+				params[reqcommon.FieldOutputMode] = tc.param
+			}
+			step, err := NewDecodeStep(gwClient, params)
+			if err != nil {
+				t.Fatalf("NewDecodeStep: %v", err)
+			}
+			if got := step.(*DecodeStep).outputMode; got != tc.want {
+				t.Fatalf("outputMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecodeStep_OutputModeInvalidRejected covers a mode the worker would
+// answer with 400: the coordinator refuses it at startup instead.
+func TestDecodeStep_OutputModeInvalidRejected(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	for _, mode := range []any{"tokens", "Text", "tokens-only", true} {
+		if _, err := NewDecodeStep(gwClient, map[string]any{reqcommon.FieldOutputMode: mode}); err == nil {
+			t.Fatalf("expected an error for output_mode %v", mode)
+		}
 	}
 }
 
