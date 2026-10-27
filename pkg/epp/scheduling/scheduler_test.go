@@ -29,6 +29,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -37,6 +38,8 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -265,6 +268,135 @@ func TestScheduleLogsProcessResultsSuccessOnlyWithoutError(t *testing.T) {
 			assert.Equal(t, test.wantErr, err != nil, "Schedule error: %v", err)
 			assert.Equal(t, test.wantLogged, slices.Contains(sink.messages, successMsg),
 				"success message logged; captured messages: %q", sink.messages)
+		})
+	}
+}
+
+// TestScheduleDefaultProfileFilterWithPrefixAffinity runs the default scheduling
+// profile end to end: the real utilization detector filters candidates before the
+// queue, KV cache, and prefix cache scorers run with the default weights. It pins
+// the interaction between the filter and prefix affinity, which the per-plugin
+// tests do not cover.
+func TestScheduleDefaultProfileFilterWithPrefixAffinity(t *testing.T) {
+	const (
+		producerName = "approx-prefix-cache-producer"
+		queueWeight  = 2.0
+		kvWeight     = 2.0
+		prefixWeight = 3.0
+	)
+
+	handle := fwkplugin.NewEppHandle(t.Context(), func() []k8stypes.NamespacedName { return nil })
+	detectorPlugin, err := utilization.UtilizationDetectorFactory(utilization.UtilizationDetectorType, nil, handle)
+	require.NoError(t, err)
+	detector, ok := detectorPlugin.(fwksched.Filter)
+	require.True(t, ok, "the default utilization detector must implement Filter")
+
+	prefixScorer, err := schedprefix.New(t.Context(), schedprefix.PrefixCacheScorerPluginType, producerName)
+	require.NoError(t, err)
+
+	profile := NewSchedulerProfile().
+		WithFilters(detector).
+		WithScorers(
+			NewWeightedScorer(queuedepth.NewQueueScorer(), queueWeight),
+			NewWeightedScorer(kvcacheutilization.NewKVCacheUtilizationScorer(), kvWeight),
+			NewWeightedScorer(prefixScorer, prefixWeight),
+		).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(single.NewSingleProfileHandler(),
+		map[string]fwksched.SchedulerProfile{"default": profile}))
+
+	type endpointSpec struct {
+		name       string
+		queue      int
+		kvCache    float64
+		prefixFull bool
+	}
+
+	tests := []struct {
+		name       string
+		endpoints  []endpointSpec
+		wantPicked string
+		wantScores map[string]float64
+	}{
+		{
+			// The full prefix match scores 3.0 and outweighs the queue advantage
+			// (weight 2.0) of the idle endpoint while the queue is below the
+			// default threshold of 5.
+			name: "full prefix match wins below the queue threshold",
+			endpoints: []endpointSpec{
+				{name: "pod1", queue: 4, kvCache: 0.1, prefixFull: true},
+				{name: "pod2", queue: 0, kvCache: 0.1},
+			},
+			wantPicked: "pod1",
+			wantScores: map[string]float64{"pod1": 4.8, "pod2": 3.8},
+		},
+		{
+			// pod1 is removed before scoring, so the queue scorer normalizes over
+			// pod2 (queue 0) and pod3 (queue 2) only: pod3 scores 0, not the 0.6
+			// it would score if the filtered endpoint still set the range.
+			name: "at the queue threshold the prefix match is filtered before scoring",
+			endpoints: []endpointSpec{
+				{name: "pod1", queue: 5, kvCache: 0.1, prefixFull: true},
+				{name: "pod2", queue: 0, kvCache: 0.1},
+				{name: "pod3", queue: 2, kvCache: 0.1},
+			},
+			wantPicked: "pod2",
+			wantScores: map[string]float64{"pod2": 3.8, "pod3": 1.8},
+		},
+		{
+			// Every endpoint is at or over the threshold, so the filter fails open
+			// and all of them are scored and ranked as usual.
+			name: "all endpoints over the threshold are kept and scored",
+			endpoints: []endpointSpec{
+				{name: "pod1", queue: 5, kvCache: 0.1, prefixFull: true},
+				{name: "pod2", queue: 6, kvCache: 0.1},
+			},
+			wantPicked: "pod1",
+			wantScores: map[string]float64{"pod1": 6.8, "pod2": 1.8},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prefixKey := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
+			scrapedAt := time.Now()
+			endpoints := make([]fwksched.Endpoint, 0, len(test.endpoints))
+			for _, spec := range test.endpoints {
+				endpoint := fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: spec.name}},
+					&fwkdl.Metrics{
+						WaitingQueueSize:    spec.queue,
+						KVCacheUsagePercent: spec.kvCache,
+						UpdateTime:          scrapedAt,
+					}, nil)
+				matchedBlocks := 0
+				if spec.prefixFull {
+					matchedBlocks = 10
+				}
+				endpoint.Put(prefixKey, attrprefix.NewPrefixCacheMatchInfo(matchedBlocks, 10, 1))
+				endpoints = append(endpoints, endpoint)
+			}
+
+			result, err := scheduler.Schedule(context.Background(), &fwksched.InferenceRequest{
+				RequestID:   uuid.NewString(),
+				TargetModel: "any-model",
+			}, endpoints)
+			require.NoError(t, err)
+
+			profileResult := result.ProfileResults["default"]
+			require.NotNil(t, profileResult)
+			require.Len(t, profileResult.TargetEndpoints, 1)
+			assert.Equal(t, test.wantPicked, profileResult.TargetEndpoints[0].GetMetadata().ID.Name)
+
+			gotScores := make(map[string]float64, len(profileResult.ScoredCandidates))
+			for _, candidate := range profileResult.ScoredCandidates {
+				gotScores[candidate.GetMetadata().ID.Name] = candidate.Score
+			}
+			require.Len(t, gotScores, len(test.wantScores))
+			for name, want := range test.wantScores {
+				assert.InDelta(t, want, gotScores[name], 1e-9, "score of %s", name)
+			}
 		})
 	}
 }
