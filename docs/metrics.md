@@ -338,9 +338,7 @@ These metrics are owned by EPP scheduler instrumentation.
 | `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
 | `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
 
-Each scheduler invocation records an attempt and latency, including failures. The API
-surface is captured before scheduler plugins run and uses the bounded values described
-in [Request and latency](#request-and-latency).
+Each scheduler invocation records an attempt and latency, including failures.
 
 `reason` is one of:
 
