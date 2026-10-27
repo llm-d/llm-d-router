@@ -41,6 +41,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // newAsyncTestStep builds the step through its factory against a miniredis,
@@ -350,6 +352,51 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 		err := step.Execute(ctx, reqCtx)
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+	})
+	t.Run("enqueue with a generated id cancels the queued request", func(t *testing.T) {
+		// The client never sees the generated id, so a request it cannot
+		// fetch or delete must not be left for a worker to dispatch.
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+
+		eid := envelopeID("team-a", reqCtx.RequestID)
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), exists, "the abandoned request should be marked cancelled before dispatch")
+	})
+	t.Run("enqueue with a client-chosen id stays queued", func(t *testing.T) {
+		// The client already knows this id, so it can still fetch, delete, or
+		// retry the request after this connection is gone.
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{
+				defaultModeHeader:            "enqueue",
+				defaultTenantHeader:          "team-a",
+				reqcommon.RequestIDHeaderKey: "client-job",
+			})
+		reqCtx.RequestID = "client-job"
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, pipeline.ErrPipelineDone)
+
+		eid := envelopeID("team-a", "client-job")
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
+		require.NoError(t, err)
+		assert.Zero(t, exists, "a request the client can still address should not be cancelled")
+		members, err := rdb.ZRange(t.Context(), "team-default-queue", 0, -1).Result()
+		require.NoError(t, err)
+		assert.Len(t, members, 1, "a request the client can still address should stay queued")
 	})
 }
 
