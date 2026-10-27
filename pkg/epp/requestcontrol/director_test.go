@@ -20,14 +20,20 @@ package requestcontrol
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +42,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/genproto/googleapis/api/httpbody"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,11 +71,13 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
@@ -75,6 +85,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -155,6 +167,127 @@ func TestDirector_ModelRewriteIfNeeded(t *testing.T) {
 			} else {
 				require.Equal(t, tt.raw, reqCtx.Request.RawBody)
 			}
+		})
+	}
+}
+
+func TestDirector_VertexAIPrefixCache(t *testing.T) {
+	model := "llama-3-8b"
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(nil)
+	require.NoError(t, err)
+	tokens := make([]uint32, tokenProcessor.BlockSize())
+	for i := range tokens {
+		tokens[i] = 42
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions/render", r.URL.Path)
+		var rendered map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&rendered)) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		assert.Equal(t, model, rendered["model"])
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"token_ids": tokens}))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	indexerConfig, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	indexer, err := kvcache.NewKVCacheIndexer(ctx, indexerConfig, tokenProcessor)
+	require.NoError(t, err)
+	cachedKeys, err := tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
+	require.NoError(t, err)
+	require.Len(t, cachedKeys, 1)
+	podIdentifier := "192.168.1.100:8000"
+	require.NoError(t, indexer.KVBlockIndex().Add(ctx, nil, cachedKeys, []kvblock.PodEntry{
+		{PodIdentifier: podIdentifier, DeviceTier: kvcache.GPUTier},
+	}))
+
+	parameters := json.RawMessage(fmt.Sprintf(
+		`{"modelName":%q,"vllm":{"url":%q,"messagesRenderMode":"native","responsesRenderMode":"native"}}`, model, server.URL))
+	p, err := tokenizer.PluginFactory("vertex-tokenizer", fwkplugin.StrictDecoder(parameters), fwkplugin.NewEppHandle(ctx, nil))
+	require.NoError(t, err)
+	producer, ok := p.(fwkrc.DataProducer)
+	require.True(t, ok)
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{p})
+
+	raw := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"Hello"}]}`, model))
+	payload, err := proto.Marshal(&aiplatformpb.ChatCompletionsRequest{
+		HttpBody: &httpbody.HttpBody{Data: raw},
+	})
+	require.NoError(t, err)
+	frame := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload))) //#nosec G115 -- test fixture, small proto message
+	copy(frame[5:], payload)
+
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address: "192.168.1.100",
+				Port:    "8000",
+				ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+			}, nil, fwkdl.NewAttributes())}},
+		},
+	}
+
+	for _, tt := range []struct {
+		name        string
+		headerModel string
+		wantTarget  string
+		wantBlocks  int
+	}{
+		{name: "no rewrite header", wantTarget: model, wantBlocks: 1},
+		{name: "matching rewrite header", headerModel: model, wantTarget: model, wantBlocks: 1},
+		{name: "different rewrite header", headerModel: "resolved-model", wantTarget: "resolved-model"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			director, requestCtx := newSinglePodDirector(t, result)
+			director.requestControlPlugins.WithDataProducerPlugins(producer)
+			headers := []*configPb.HeaderValue{
+				{Key: ":method", RawValue: []byte(http.MethodPost)},
+				{Key: ":path", RawValue: []byte("/google.cloud.aiplatform.v1beta1.PredictionService/ChatCompletions")},
+				{Key: "content-type", RawValue: []byte("application/grpc")},
+			}
+			if tt.headerModel != "" {
+				headers = append(headers, &configPb.HeaderValue{Key: metadata.ModelNameRewriteKey, RawValue: []byte(tt.headerModel)})
+			}
+
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{
+					ID:      "vertex-cache",
+					Headers: make(map[string]string),
+					RawBody: append([]byte(nil), frame...),
+				},
+				Parser: vertexai.NewVertexAIParser(),
+			}
+			streamingServer := &handlers.StreamingServer{}
+			require.NoError(t, streamingServer.HandleRequestHeaders(requestCtx, reqCtx, &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: headers}},
+			}))
+			parsed, err := reqCtx.Parser.ParseRequest(requestCtx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+			require.NoError(t, err)
+			require.NotNil(t, parsed.Body.ChatCompletions)
+			_, err = director.HandleRequest(requestCtx, reqCtx, parsed.Body)
+			require.NoError(t, err)
+			assert.Equal(t, model, reqCtx.IncomingModelName)
+			assert.Equal(t, tt.wantTarget, reqCtx.SchedulingRequest.TargetModel)
+			assert.Equal(t, frame, reqCtx.Request.RawBody)
+			assert.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
+			assert.False(t, parsed.Body.Mutated)
+
+			tokenized := reqCtx.SchedulingRequest.Body.TokenizedRequest
+			require.NotNil(t, tokenized)
+			require.Len(t, tokenized.Prompts, 1)
+			assert.Equal(t, tokens, tokenized.Prompts[0].TokenIDs)
+			keys, err := indexer.ComputeBlockKeysFromTokens(requestCtx, tokenized.Prompts[0].TokenIDs, reqCtx.SchedulingRequest.TargetModel, nil)
+			require.NoError(t, err)
+			matches, err := indexer.MatchBlockKeys(requestCtx, keys, sets.New(podIdentifier))
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBlocks, matches[podIdentifier].MatchedBlocks)
 		})
 	}
 }

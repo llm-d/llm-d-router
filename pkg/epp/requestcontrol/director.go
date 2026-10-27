@@ -353,6 +353,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 // differs from the model the parser read out of the body, marking the body Mutated so
 // repackage can skip re-marshaling when nothing changed.
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	if reqCtx.TargetModelName == "" {
+		reqCtx.TargetModelName = reqCtx.IncomingModelName
+	}
 	logger := log.FromContext(ctx)
 	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
 	if !ok {
@@ -363,9 +366,6 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	if !ok {
 		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
 		return nil
-	}
-	if reqCtx.TargetModelName == "" {
-		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
 	// Native generate APIs allow requests without a model.
