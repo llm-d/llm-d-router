@@ -18,6 +18,9 @@ package kvblock
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -142,5 +145,111 @@ func TestInMemoryIndexEngineEvictKeepsMappingAddedConcurrently(t *testing.T) {
 		got, err := idx.GetRequestKey(ctx, engineKey)
 		require.NoError(t, err, "trial %d: engine key mapping removed while pod B's entry remains", i)
 		require.Equal(t, requestKey, got, "trial %d", i)
+	}
+}
+
+// TestInMemoryIndexConcurrentWritersMatchSequentialModel runs one writer per
+// pod entry, each issuing random stores and removals over a small shared key
+// space. A writer's ops are sequential, as a kvevents shard's are per pod, so
+// the final state of its entry on a key is fixed by its own last op on that
+// key however the writers interleave. The test checks every entry against
+// that, and that every key held through an engine key still resolves.
+func TestInMemoryIndexConcurrentWritersMatchSequentialModel(t *testing.T) {
+	const (
+		pods   = 4
+		keys   = 3
+		ops    = 40
+		rounds = 1000
+	)
+	engineKey := func(k int) BlockHash { return BlockHash(1000 + k) }
+	requestKey := func(k int) BlockHash { return BlockHash(1 + k) }
+
+	type writer struct {
+		entry PodEntry
+		// engine writers store and remove by engine key like kvevents;
+		// the others write speculative entries like PreRequest.
+		engine bool
+		// clear lets the writer clear its pod, which also removes the pod's
+		// speculative entries, so it is only set when no speculative writer runs.
+		clear   bool
+		present [keys]bool
+	}
+
+	tests := []struct {
+		name        string
+		speculative bool
+	}{
+		{name: "engine and speculative writers", speculative: true},
+		{name: "engine writers with clear"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			for r := range rounds {
+				idx, err := NewInMemoryIndex(nil)
+				require.NoError(t, err)
+
+				var writers []*writer
+				for p := range pods {
+					id := fmt.Sprintf("10.0.0.%d:8000", p+1)
+					writers = append(writers, &writer{
+						entry: PodEntry{PodIdentifier: id, DeviceTier: "gpu"}, engine: true, clear: !tc.speculative,
+					})
+					if tc.speculative {
+						writers = append(writers, &writer{entry: PodEntry{PodIdentifier: id, Speculative: true}})
+					}
+				}
+
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				for i, w := range writers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						rng := rand.New(rand.NewPCG(uint64(r), uint64(i))) //#nosec G404 -- test data
+						entries := []PodEntry{w.entry}
+						<-start
+						for range ops {
+							k := rng.IntN(keys)
+							switch op := rng.IntN(4); {
+							case op == 0 && w.engine:
+								_ = idx.Add(ctx, []BlockHash{engineKey(k)}, []BlockHash{requestKey(k)}, entries)
+								w.present[k] = true
+							case op == 0:
+								_ = idx.Add(ctx, nil, []BlockHash{requestKey(k)}, entries)
+								w.present[k] = true
+							case op == 1 && w.engine:
+								_ = idx.Evict(ctx, EngineKey, []BlockHash{engineKey(k)}, entries)
+								w.present[k] = false
+							case op == 3 && w.clear:
+								_ = idx.Clear(ctx, w.entry.PodIdentifier)
+								w.present = [keys]bool{}
+							default:
+								_ = idx.Evict(ctx, RequestKey, []BlockHash{requestKey(k)}, entries)
+								w.present[k] = false
+							}
+						}
+					}()
+				}
+				close(start)
+				wg.Wait()
+
+				for k := range keys {
+					// Lookup stops at the first missing key, so each key is looked up on its own.
+					got, err := idx.Lookup(ctx, []BlockHash{requestKey(k)}, nil)
+					require.NoError(t, err)
+					heldByEngineWriter := false
+					for _, w := range writers {
+						require.Equal(t, w.present[k], slices.Contains(got[requestKey(k)], w.entry),
+							"round %d: entry %v on key %d", r, w.entry, requestKey(k))
+						heldByEngineWriter = heldByEngineWriter || (w.engine && w.present[k])
+					}
+					if heldByEngineWriter {
+						_, err := idx.GetRequestKey(ctx, engineKey(k))
+						require.NoError(t, err, "round %d: engine key %d does not resolve", r, engineKey(k))
+					}
+				}
+			}
+		})
 	}
 }
