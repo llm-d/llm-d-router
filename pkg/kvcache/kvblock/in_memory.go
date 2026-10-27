@@ -110,9 +110,10 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 
 // InMemoryIndex is an in-memory implementation of the Index interface.
 type InMemoryIndex struct {
-	// mu orders Add's pod entry inserts against the removal of an emptied request
-	// key and of an engine key mapping whose request keys are all empty. Add takes
-	// it also when engineKeys is nil. Lookup does not take it.
+	// mu orders Add's engine key mapping writes and pod entry inserts against the
+	// removal of an emptied request key and of an engine key mapping whose request
+	// keys are all empty. Add takes it also when engineKeys is nil. Lookup does not
+	// take it.
 	mu sync.Mutex
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
@@ -351,6 +352,14 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return err
 	}
 
+	// Hold m.mu across the engine->request mappings and the pod entry inserts,
+	// also when engineKeys is nil. Evict and Clear re-check emptiness under m.mu
+	// before removing a request key or an engine key mapping, so they cannot
+	// remove one that this call has written but whose entries it has not
+	// inserted yet.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
 	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
@@ -364,11 +373,6 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu, also when engineKeys is nil: Evict and Clear re-check emptiness
-	// under m.mu before removing a request key or an engine key mapping, so they
-	// cannot remove one while these entries are being inserted.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, requestKey := range requestKeys {
 		podCache, found := m.data.Get(requestKey)
