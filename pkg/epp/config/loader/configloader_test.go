@@ -116,6 +116,44 @@ func TestBuildDataLayerConfigExposesCrossReplicaSyncerOnHandle(t *testing.T) {
 
 // --- Test: Phase 1 (Raw Loading & Static Defaults) ---
 
+func TestBackgroundMergeYAMLConfiguration(t *testing.T) {
+	registerTestPlugins(t)
+	for _, trigger := range []string{"disabled", "callback", "off"} {
+		t.Run(trigger, func(t *testing.T) {
+			configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: %s
+  parameters:
+    backgroundMerge:
+      trigger: %s
+`, reqdataprodprefix.ApproxPrefixCachePluginType, trigger)
+			logger := logging.NewTestLogger()
+			rawConfig, _, err := LoadRawConfig([]byte(configText), logger)
+			require.NoError(t, err)
+			var parameters struct {
+				BackgroundMerge struct {
+					Trigger any `json:"trigger"`
+				} `json:"backgroundMerge"`
+			}
+			require.NoError(t, json.Unmarshal(rawConfig.Plugins[0].Parameters, &parameters))
+			handle := testutils.NewTestHandle(t.Context())
+			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
+			if trigger == "off" {
+				// YAML 1.1 converts the unquoted token to a boolean before plugin decoding.
+				require.Equal(t, false, parameters.BackgroundMerge.Trigger)
+				require.ErrorContains(t, err, "cannot unmarshal bool")
+				require.Nil(t, cfg)
+				return
+			}
+			require.Equal(t, trigger, parameters.BackgroundMerge.Trigger)
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			require.Contains(t, handle.GetAllPluginsWithNames(), reqdataprodprefix.ApproxPrefixCachePluginType)
+		})
+	}
+}
+
 func TestLoadRawConfiguration(t *testing.T) {
 	t.Parallel()
 

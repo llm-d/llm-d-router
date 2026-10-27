@@ -158,8 +158,20 @@ const (
 	defaultMaxSyncedTokens = defaultLRUCapacityPerServer * defaultBlockSizeTokens
 )
 
+const (
+	backgroundMergeDisabled = "disabled"
+	backgroundMergeCallback = "callback"
+)
+
+// backgroundMergeConfig selects the background peer-prefix merge trigger.
+type backgroundMergeConfig struct {
+	Trigger string `json:"trigger,omitempty"`
+}
+
 // config defines the configuration for the prefix cache plugins.
 type config struct {
+	// BackgroundMerge defaults to disabled; Produce still merges on every request.
+	BackgroundMerge backgroundMergeConfig `json:"backgroundMerge,omitempty"`
 	// If set to true, the plugin will automatically adjust the configuration based on various
 	// metrics from the model servers.
 	AutoTune bool `json:"autoTune"`
