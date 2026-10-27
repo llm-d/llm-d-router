@@ -18,6 +18,7 @@ package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -34,6 +35,77 @@ func TestSGLangShardingKey(t *testing.T) {
 	adapter := NewSGLangAdapter()
 	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123@llama-2-7b"}))
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
+}
+
+func TestSGLangParseMessage_TokenIDs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tokens  any
+		want    []uint32
+		wantErr string
+	}{
+		"plain":   {tokens: []uint32{11, 22}, want: []uint32{11, 22}},
+		"bigrams": {tokens: [][]uint32{{11, 22}, {22, 33}}, want: []uint32{11, 22}},
+		"empty":   {tokens: []uint32{}, want: []uint32{}},
+		"clamped plain": {
+			tokens: []any{int64(-1), uint64(math.MaxUint32) + 1},
+			want:   []uint32{0, math.MaxUint32},
+		},
+		"clamped bigrams": {
+			tokens: [][]any{{int64(-1), 1}, {uint64(math.MaxUint32) + 1, int64(-1)}},
+			want:   []uint32{0, math.MaxUint32},
+		},
+		"nil":        {tokens: nil, wantErr: "token_ids is not an array"},
+		"non-array":  {tokens: "invalid", wantErr: "token_ids is not an array"},
+		"short pair": {tokens: [][]uint32{{1}}, wantErr: "token_ids[0]"},
+		"long pair":  {tokens: [][]uint32{{1, 2, 3}}, wantErr: "token_ids[0]"},
+		"non-integer second": {
+			tokens: [][]any{{1, "invalid"}}, wantErr: "token_ids[0]: unsupported numeric type",
+		},
+		"plain then pair": {tokens: []any{1, []uint32{2, 3}}, wantErr: "token_ids[1]"},
+		"pair then plain": {tokens: []any{[]uint32{1, 2}, 3}, wantErr: "token_ids[1]"},
+	} {
+		encodings := []string{"array"}
+		if name == "bigrams" {
+			encodings = append(encodings, "map")
+		}
+		for _, encoding := range encodings {
+			t.Run(name+"/"+encoding, func(t *testing.T) {
+				var event any = []any{eventTagBlockStored, []uint64{100}, nil, tc.tokens, 2, nil, "GPU"}
+				if encoding == "map" {
+					event = map[string]any{
+						"type": eventTagBlockStored, "block_hashes": []uint64{100},
+						"token_ids": tc.tokens, "block_size": 2, "medium": "GPU",
+					}
+				}
+				payload, err := msgpack.Marshal([]any{0.0, []any{event}, nil})
+				require.NoError(t, err)
+				_, _, batch, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+				if tc.wantErr != "" {
+					require.ErrorContains(t, err, tc.wantErr)
+					return
+				}
+				require.NoError(t, err)
+				require.Len(t, batch.Events, 1)
+				stored, ok := batch.Events[0].(*kvevents.BlockStoredEvent)
+				require.True(t, ok)
+				require.Equal(t, tc.want, stored.Tokens)
+				require.Equal(t, 2, stored.BlockSize)
+			})
+		}
+	}
+}
+
+func TestDecodeSGLangTokenIDs_PairWireEncoding(t *testing.T) {
+	for name, payload := range map[string][]byte{
+		"array16 pair": {0x91, 0xdc, 0, 2, 11, 22},
+		"array32 pair": {0x91, 0xdd, 0, 0, 0, 2, 11, 22},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tokens, err := decodeSGLangTokenIDs(msgpack.NewDecoder(bytes.NewReader(payload)))
+			require.NoError(t, err)
+			require.Equal(t, []uint32{11}, tokens)
+		})
+	}
 }
 
 // TestSGLangParseMessage_Valid tests full message parsing through the SGLang adapter.

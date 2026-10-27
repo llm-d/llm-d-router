@@ -42,7 +42,7 @@ type SGLangAdapter struct{}
 var sglangBlockStoredFieldDecoders = []eventFieldDecoder{
 	{"block_hashes", decodeHashesField},
 	{"parent_block_hash", decodeParentHashField},
-	{"token_ids", decodeTokensField},
+	{"token_ids", decodeSGLangTokensField},
 	{"block_size", decodeBlockSizeField},
 	{"lora_id", decodeLoraID},
 	{"medium", decodeMedium},
@@ -83,6 +83,55 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 	}
 
 	return podID, modelName, eventBatch, nil
+}
+
+func decodeSGLangTokensField(dec *msgpack.Decoder, fields *typedEventFields) error {
+	var err error
+	fields.tokens, err = decodeSGLangTokenIDs(dec)
+	fields.hasTokens = err == nil
+	return err
+}
+
+func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
+	count, err := dec.DecodeArrayLen()
+	if err != nil {
+		return nil, fmt.Errorf("token_ids is not an array: %w", err)
+	}
+	if count < 0 {
+		return nil, fmt.Errorf("token_ids is not an array: <nil>")
+	}
+	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
+	if count == 0 {
+		return tokens, nil
+	}
+	code, err := dec.PeekCode()
+	if err != nil {
+		return nil, fmt.Errorf("token_ids[0]: %w", err)
+	}
+	bigrams := msgpcode.IsFixedArray(code) || code == msgpcode.Array16 || code == msgpcode.Array32
+	for i := range count {
+		if bigrams {
+			pairSize, err := dec.DecodeArrayLen()
+			if err != nil {
+				return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
+			if pairSize != 2 {
+				return nil, fmt.Errorf("token_ids[%d]: expected pair of length 2, got %d", i, pairSize)
+			}
+		}
+		token, err := decodeTokenID(dec)
+		if err != nil {
+			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+		}
+		if bigrams {
+			if _, err := decodeTokenID(dec); err != nil {
+				return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
+		}
+		// One token per bigram preserves block_size and request-side chunking.
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
 }
 
 func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error {

@@ -602,30 +602,37 @@ func decodeTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
 
 	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
 	for i := range count {
-		code, err := dec.PeekCode()
+		token, err := decodeTokenID(dec)
 		if err != nil {
 			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		if !isIntegerCode(code) {
-			return nil, fmt.Errorf("token_ids[%d]: unsupported numeric type: MessagePack code %#x", i, code)
-		}
-		var value uint64
-		if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
-			signed, decodeErr := dec.DecodeInt64()
-			err = decodeErr
-			if signed > 0 {
-				value = uint64(signed)
-			}
-		} else {
-			value, err = dec.DecodeUint64()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
-		}
-		value = min(value, uint64(math.MaxUint32))
-		tokens = append(tokens, uint32(value))
+		tokens = append(tokens, token)
 	}
 	return tokens, nil
+}
+
+func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {
+	code, err := dec.PeekCode()
+	if err != nil {
+		return 0, err
+	}
+	if !isIntegerCode(code) {
+		return 0, fmt.Errorf("unsupported numeric type: MessagePack code %#x", code)
+	}
+	var value uint64
+	if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
+		signed, decodeErr := dec.DecodeInt64()
+		err = decodeErr
+		if signed > 0 {
+			value = uint64(signed)
+		}
+	} else {
+		value, err = dec.DecodeUint64()
+	}
+	if err != nil {
+		return 0, err
+	}
+	return uint32(min(value, uint64(math.MaxUint32))), nil
 }
 
 func decodeInt(dec *msgpack.Decoder) (int, error) {
