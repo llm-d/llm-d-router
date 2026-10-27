@@ -11,9 +11,11 @@ cost(endpoint) = PToken(endpoint) * BS(endpoint)
 Where:
 
 ```text
-PToken = (totalBlocks - matchBlocks) * blockSizeTokens
+PToken = (totalBlocks - cachedBlockCount) * blockSizeTokens
 BS = inFlightRequests + 1
 ```
+
+`cachedBlockCount` is the unweighted count of contiguous cached prefix blocks on the endpoint.
 
 The endpoint with the lowest cost receives the highest score. Scores are normalized across candidates:
 
