@@ -54,9 +54,16 @@ func NewSchedulerProfile() *SchedulerProfile {
 
 // SchedulerProfile provides a profile configuration for the scheduler which influence routing decisions.
 type SchedulerProfile struct {
+	name    string
 	filters []fwksched.Filter
 	scorers []*WeightedScorer
 	picker  fwksched.Picker
+}
+
+// WithName sets the profile name that labels the profile's scheduler metrics.
+func (p *SchedulerProfile) WithName(name string) *SchedulerProfile {
+	p.name = name
+	return p
 }
 
 // WithFilters sets the given filter plugins as the Filter plugins.
@@ -181,9 +188,15 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		// surfaces in production. Producers run under executePluginsAsDAG, which
 		// does fail the request on one.
 		scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, filterExtensionPoint, filter, request, filteredEndpoints)
+		candidates := len(filteredEndpoints)
 		before := time.Now()
 		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, scopedRequest, scoped))
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+		// A counter panics on a negative Add, and a filter may return more
+		// endpoints than it received.
+		if eliminated := candidates - len(filteredEndpoints); eliminated > 0 {
+			metrics.RecordSchedulerFilterEliminated(p.name, typedName.Type, typedName.Name, eliminated)
+		}
 		if debugEnabled {
 			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
 		}

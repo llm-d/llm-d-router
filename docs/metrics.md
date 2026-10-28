@@ -114,23 +114,60 @@ lifecycle handled by the router.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority` | Total requests. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `error_code` | Errored requests. |
-| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | End-to-end request latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Request body size. |
-| `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Response body size. |
-| `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Input token count. |
-| `llm_d_epp_request_output_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Output token count. |
-| `llm_d_epp_request_cached_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Prompt tokens served from cache. |
-| `llm_d_epp_request_running` | Gauge | `model_name`, `target_model_name`, `fairness_id`, `priority` | Requests currently in flight. |
-| `llm_d_epp_request_ntpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Normalized time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
-| `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
+| `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
+| `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Response body size. |
+| `llm_d_epp_request_input_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Input token count. |
+| `llm_d_epp_request_output_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Output token count. |
+| `llm_d_epp_request_cached_tokens` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Prompt tokens served from cache. |
+| `llm_d_epp_request_running` | Gauge | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests currently in flight. |
+| `llm_d_epp_request_ntpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Normalized time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_ttft_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `streaming` | Time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_tpot_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Time per output token for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_streaming_itl_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Inter-token latency for streaming. Carries a trace exemplar; see [Exemplars](#exemplars). |
 
 Requests answered locally by a responder, such as `GET /v1/models`, are not counted in
 `llm_d_epp_request_total` or `llm_d_epp_request_size_bytes`. A responder error is counted in
 `llm_d_epp_request_error_total` with empty `model_name` and `target_model_name` labels.
+
+The `api_surface` label identifies generation APIs with the values `messages`,
+`chat_completions`, `completions`, `responses`, `vllm_generate`, and `sglang_generate`.
+Responses item reads (`/v1/responses/{id}`), auxiliary token-count and render routes,
+vLLM gRPC `Generate`, Vertex AI paths, and missing or unrecognized paths use `unknown`. EPP captures
+the surface from the incoming path before routing can rewrite it. The corresponding
+request span carries `llm_d.epp.api_surface`, including requests without tools and
+requests rejected during parsing.
+
+Request volume and errors per second can be queried separately by surface:
+
+```promql
+sum by (api_surface) (rate(llm_d_epp_request_total[5m]))
+sum by (api_surface) (rate(llm_d_epp_request_error_total[5m]))
+```
+
+The request counter excludes parsing and scheduling failures; the error counter includes
+those failures. Their ratio does not represent the error fraction of all incoming requests.
+Latency observations require response completion and exclude interrupted requests.
+Token usage is observed once on response completion, including usage accumulated across
+Messages streaming events. Input tokens include uncached and cached prompt tokens;
+`request_cached_tokens` records the cache-read subset reported by the model server.
+Interrupted streams contribute no completed-request token observations. The running-request
+gauge releases each request when it completes or its ext_proc stream closes.
+
+Per-surface p95 latency uses the histogram buckets:
+
+```promql
+histogram_quantile(0.95,
+  sum by (le, api_surface) (rate(llm_d_epp_request_duration_seconds_bucket[5m]))
+)
+```
+
+Selectors return a separate series for each surface. Use `sum without (api_surface)`
+for counters and histogram buckets to combine surfaces while preserving other labels.
+Queries joining these metrics to metrics without `api_surface` need explicit aggregation
+or vector matching.
 
 #### Streaming latency buckets
 
@@ -165,7 +202,7 @@ Longer ladders increase series cardinality and can affect rolling-upgrade query 
 
 - **Cardinality.** Every edge is one more series per label combination, on top of `_sum` and
   `_count`, so the cost scales with the number of distinct
-  `model_name`/`target_model_name`/`fairness_id`/`priority` combinations a deployment produces.
+  `model_name`/`target_model_name`/`fairness_id`/`priority`/`api_surface` combinations a deployment produces.
   The 64-edge limit bounds that growth; it leaves room above both default ladders, which have
   25 and 21 edges.
 - **Rolling upgrades.** Pods on the old and new layouts expose different `le` sets at the same
@@ -208,9 +245,18 @@ include field values or request content.
 
 Request checks cover Chat Completions (`tools`, `tool_choice`, `parallel_tool_calls`,
 `response_format`), Messages (`tools`, `tool_choice`), and Responses (`tools`, `tool_choice`,
-`parallel_tool_calls`). Provider-prefixed inference endpoints are supported. Render,
-count-token, and response-management subpaths do not emit these request-integrity metrics.
+`parallel_tool_calls`). Provider-prefixed inference endpoints are supported. For
+`component="epp"`, render, count-token, and response-management subpaths are excluded.
 Responses structured output (`text.format`) is outside these field checks.
+
+The `component` label distinguishes the EPP inference-request boundary (`epp`) from the
+EPP-side HTTP tokenizer client (`tokenizer_http`). The tokenizer compares the serialized
+input with the render copy after render-only transformations, once per call across retries.
+For HTTP Messages compatibility conversion, the comparison baseline is the original
+tool fields translated to Chat Completions format. Tool-choice modes and
+`disable_parallel_tool_use` are translated, and spans retain the Messages API summary.
+Its counters check local request-field preservation, not render success or template intent.
+Warmup calls, absent fields, unavailable endpoints, and failed telemetry capture are excluded.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
@@ -222,8 +268,8 @@ Chat Completions `response_format` is compared separately for integrity. Request
 only `response_format` report its field status and `present=false`, without tool-choice or
 tool-count attributes.
 
-Request errors unrelated to tool fields, scheduling failures, and failures to read fields
-for telemetry produce no field-status metrics. The trace retains summary metadata, such as tool presence,
+At the EPP inference-request boundary, errors unrelated to tool fields, scheduling failures,
+and failures to read fields for telemetry produce no field-status metrics. The trace retains summary metadata, such as tool presence,
 tool-choice mode, and a tool-count bucket, when it can be read from the incoming request.
 EPP reports `rejected` only for a supported field identified by the parser as causing the
 request to fail. This covers invalid JSON types in `tools` for Chat Completions and Messages,
@@ -289,6 +335,21 @@ These metrics are owned by EPP scheduler instrumentation.
 |---|---|---|---|
 | `llm_d_epp_scheduler_e2e_duration_seconds` | Histogram | - | End-to-end scheduling latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_scheduler_attempts_total` | Counter | `status`, `target_model_name`, `endpoint_name`, `namespace`, `port` | Scheduling attempts. |
+| `llm_d_epp_scheduler_filter_eliminated_total` | Counter | `profile`, `plugin_type`, `plugin_name` | Candidate endpoints removed by each filter in a scheduler profile run. Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run. |
+| `llm_d_epp_scheduler_failures_total` | Counter | `reason` | Failed scheduling attempts. Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once. |
+
+Each scheduler invocation records an attempt and latency, including failures.
+
+`reason` is one of:
+
+| Reason | Meaning |
+|---|---|
+| `all_filtered` | The filters of at least one scheduler profile removed every candidate, and the profile handler failed the attempt. `llm_d_epp_scheduler_filter_eliminated_total` shows which filter removed them. |
+| `no_profile_selected` | The profile handler selected no scheduler profile to run, for example a `header-profile-handler` request whose header names no configured profile. |
+| `profile_handler_error` | The profile handler failed the attempt with every profile run succeeding, or wrote a request attribute it does not declare. |
+
+Requests rejected before scheduling, when no endpoint matches the request or screeners remove every
+candidate, are not scheduling attempts and are not counted by these metrics.
 
 ### EPP processing overhead
 
@@ -296,8 +357,11 @@ These metrics are owned by EPP request and response processing instrumentation.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_request_processing_duration_seconds` | Histogram | - | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `llm_d_epp_flow_control_request_queue_duration_seconds` separates it out. |
-| `llm_d_epp_response_processing_duration_seconds` | Histogram | - | Sum of the per-chunk handler slices for a streamed response, so model server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+| `llm_d_epp_request_processing_duration_seconds` | Histogram | `api_surface` | Time from request receipt until the request body has been handled. Includes admission control, so with flow control enabled this covers queue wait; `llm_d_epp_flow_control_request_queue_duration_seconds` separates it out. |
+| `llm_d_epp_response_processing_duration_seconds` | Histogram | `api_surface` | Sum of the per-chunk handler slices for a streamed response, so model server generation time between chunks is excluded. For a non-streaming response, the interval from response headers to completion. |
+
+Request processing observations include parsing and admission failures. Response processing
+observations include interrupted streams that reached the response phase.
 
 ### Plugin, info, and model rewrite
 
@@ -318,6 +382,19 @@ These metrics are owned by the EPP data-layer runtime.
 |---|---|---|---|
 | `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+
+### Endpoint health
+
+These metrics belong to `endpoint-health-filter`. They are registered when the filter is configured
+and updated when the filter observes a change in an endpoint's health. The `reason` label is
+`poll` for failing metric polls and `response` for consecutive failed responses.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_endpoint_health_excluded_endpoints` | Gauge | `plugin_name` | Endpoints currently excluded from scheduling. |
+| `llm_d_epp_endpoint_health_ejections_total` | Counter | `plugin_name`, `reason` | Endpoints marked unhealthy. |
+| `llm_d_epp_endpoint_health_readmissions_total` | Counter | `plugin_name`, `reason` | Unhealthy marks cleared. An endpoint is readmitted once no reason marks it. |
+| `llm_d_epp_endpoint_health_fail_open_total` | Counter | `plugin_name` | Scheduling cycles in which every candidate was unhealthy and all were kept. Alert on a non-zero rate. |
 
 ### Prefix cache indexer (approximate)
 
@@ -445,6 +522,13 @@ is one of:
 | `decode` | The response body could not be decoded. |
 | `no_endpoints` | Endpoint discovery has no render endpoint to select. |
 | `other` | Any other failure. |
+
+For requests with captured tool-field attributes, the `tokenize` span records the render
+result in `llm_d.epp.token_producer.result`. A decoded conversation response with no tokens
+sets the producer result to `skipped_no_tokens`. The HTTP client span records `http.response.status_code`;
+HTTP 4xx rejection is a render error with reason `status`, without inferring which tool
+field caused it. Render metrics aggregate tool and non-tool requests. Field preservation
+checks and a successful render do not establish template-intent preservation.
 
 A request whose render call fails is routed without a tokenized prompt, so prefix-cache scoring is
 skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the

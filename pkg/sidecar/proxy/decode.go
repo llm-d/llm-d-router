@@ -359,8 +359,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	lastResponse[reqcommon.FieldUsage] = cumulativeUsage
 
-	if choices, ok := lastResponse[responseFieldChoices].([]any); ok && len(choices) > 0 {
-		choice := maps.Clone(choices[0].(map[string]any))
+	if choice := firstChoice(lastResponse); choice != nil {
+		choice = maps.Clone(choice)
 		fullText := textAccum.String()
 		if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
 			msg = maps.Clone(msg)

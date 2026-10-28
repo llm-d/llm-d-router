@@ -17,9 +17,9 @@ limitations under the License.
 // This file holds the encoder fan-out scaffolding shared by every EC
 // connector: multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
-// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect)
-// supplies its own per-response perItem callback and otherwise reuses
-// these helpers verbatim.
+// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect,
+// ec-mooncake via fanoutEncoderMooncake) supplies its own per-response perItem
+// callback and otherwise reuses these helpers verbatim.
 
 package proxy
 
@@ -214,6 +214,8 @@ func anthropicImagePart(part map[string]any) (map[string]any, bool) {
 // positional index and the buffered encoder response. The
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
+// prepare, when non-nil, may add fields to an item's encoder request body
+// before it is sent.
 //
 // The first goroutine to fail cancels the group context so sibling encoder
 // requests are aborted at the transport layer. Every failure is logged before
@@ -225,6 +227,7 @@ func (s *Server) fanoutEncoder(
 	encoderHostPorts []string,
 	requestID string,
 	apiType reqcommon.APIType,
+	prepare func(idx int, body map[string]any),
 	perItem func(idx int, pw *bufferedResponseWriter) error,
 ) error {
 	if len(encoderHostPorts) == 0 {
@@ -255,6 +258,9 @@ func (s *Server) fanoutEncoder(
 			// A Messages request gets NewEncoderPrimingBody's Messages body at
 			// the chat path; see its doc for why that holds.
 			encoderRequest := reqcommon.NewEncoderPrimingBody(originalRequest, mmItem, apiType)
+			if prepare != nil {
+				prepare(idx, encoderRequest)
+			}
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {

@@ -280,6 +280,9 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
 			return s.handleECSharedStorage
 		}},
+		{name: "ec-mooncake", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+			return s.handleECMooncake
+		}},
 	}
 	imageBody := func() map[string]any {
 		return userMessageRequest(imageURLItem("https://example.com/img.jpg"))
@@ -339,7 +342,8 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				encoderURL, err := url.Parse(encoder.URL)
 				require.NoError(t, err)
 
-				s := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+				// ECMooncakePodIP names the local decoder as the ec-mooncake consumer.
+				s := NewProxy(Config{Port: "0", DecoderURL: encoderURL, ECMooncakePodIP: "10.0.0.9"})
 				s.logger = log.Log
 				decoderCalled := false
 				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

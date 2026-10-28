@@ -34,6 +34,13 @@ groups:
         stability: development
         annotations:
           go.name: LLMDECProxyEncoderCount
+      - id: llm_d.epp.api_surface
+        type: string
+        brief: "The external inference API."
+        stability: development
+        examples: ["messages"]
+        annotations:
+          go.name: LLMDEPPAPISurface
       - id: llm_d.epp.disagg.reason
         type: string
         brief: "Disaggregation reason."

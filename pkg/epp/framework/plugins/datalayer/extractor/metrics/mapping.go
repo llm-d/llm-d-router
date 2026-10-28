@@ -59,9 +59,17 @@ type MappingConfig struct {
 	CustomMetrics       []CustomMetric
 }
 
+type metricAggregation string
+
+const (
+	metricAggregationSum metricAggregation = "sum"
+)
+
+// CustomMetric pairs a metric spec with the endpoint attribute key where its extracted value is stored.
 type CustomMetric struct {
 	AttributeKey string
 	Spec         *Spec
+	Aggregation  metricAggregation
 	Optional     bool
 }
 
@@ -188,21 +196,31 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 	seenKeys := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
-			errs = append(errs, errors.New("custom metric attributeKey cannot be empty"))
+			errs = append(errs, errors.New("customMetrics entry attributeKey cannot be empty"))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {
-			errs = append(errs, fmt.Errorf("custom metric attributeKey %q is duplicated", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry attributeKey %q is duplicated", cfg.AttributeKey))
 			continue
 		}
 		seenKeys[cfg.AttributeKey] = struct{}{}
 		if cfg.Spec == nil {
-			errs = append(errs, fmt.Errorf("custom metric %q spec cannot be empty", cfg.AttributeKey))
+			errs = append(errs, fmt.Errorf("customMetrics entry %q metricSpec cannot be empty", cfg.AttributeKey))
+			continue
+		}
+		if cfg.Aggregation != "" && cfg.Aggregation != metricAggregationSum {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry %q has unsupported aggregation %q; use %q or omit aggregation",
+				cfg.AttributeKey,
+				cfg.Aggregation,
+				metricAggregationSum,
+			))
 			continue
 		}
 		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         cfg.Spec,
+			Aggregation:  cfg.Aggregation,
 			Optional:     cfg.Optional,
 		})
 	}

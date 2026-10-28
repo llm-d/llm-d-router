@@ -39,6 +39,7 @@ import (
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -59,7 +60,8 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	close(s.readyCh)
 
 	// Wrap handler with OpenTelemetry middleware to extract trace context from incoming requests
-	handler := otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
+	// The attribution handoff wraps it so every route's server span carries EPP's fairness identity.
+	handler := tracing.WithAttributionHandoff(otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			path := ""
 			if r.URL != nil {
@@ -67,7 +69,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 			return r.Method + " " + path
 		}),
-	)
+	))
 
 	server := &http.Server{
 		Handler: handler,

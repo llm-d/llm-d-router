@@ -49,6 +49,7 @@ import (
 
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -676,13 +677,15 @@ func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
 // unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
 // is told to strip when no plugin set them, deprecated aliases included, plus
-// the screening headers it always strips.
+// the screening headers it always strips and the attribution handoff EPP only
+// sends on sampled traces.
 var unsetRoutingHeaders = slices.Concat(
 	routing.HeaderNames(routing.PrefillEndpointHeader),
 	routing.HeaderNames(routing.EncoderEndpointsHeader),
 	routing.HeaderNames(routing.DataParallelEndpointHeader),
 	routing.HeaderNames(routing.KVCacheSourceHeader),
 	[]string{routing.EndpointPinHeader},
+	[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
 )
 
 func makeDestinationMetadata(endpoint string) *structpb.Struct {

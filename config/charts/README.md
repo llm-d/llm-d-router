@@ -283,6 +283,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
 | `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |
 | `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
+| `router.epp.podDisruptionBudget` | PodDisruptionBudget for the EPP Deployment: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. `minAvailable` requires at least 2 effective replicas (`replicas`, or `autoscaling.minReplicas` when autoscaled) — a single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
 | `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
@@ -500,7 +501,9 @@ the client's session identifier, or `default` for the `default-flow` sentinel. S
 before the identity resolves keep the value set at ingress: the fairness header value, or
 `default-flow` with source `default` when the header is absent, even if the agent-identity
 plugin would have supplied one. Span values are not subject to the `fairness_id`
-metric-label cardinality cap. The pair is not propagated as request headers.
+metric-label cardinality cap. On sampled traces the EPP also hands the pair to the P/D
+sidecar, so sidecar spans carry it too; see
+[Sidecar Tracing](../../docs/disaggregation.md#sidecar-tracing).
 
 #### Complete Monitoring & Tracing Example
 
@@ -728,6 +731,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
 | `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |
 | `router.proxy.autoscaling.minReplicas` | Minimum number of proxy replicas for the HPA. | `1` |
 | `router.proxy.autoscaling.maxReplicas` | Maximum number of proxy replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |

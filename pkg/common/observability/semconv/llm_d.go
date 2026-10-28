@@ -32,6 +32,8 @@ const (
 	LLMDECProxyEncoderCandidatesKey = attribute.Key("llm_d.ec_proxy.encoder_candidates")
 	// LLMDECProxyEncoderCountKey: Allowed encoder count in EC proxy.
 	LLMDECProxyEncoderCountKey = attribute.Key("llm_d.ec_proxy.encoder_count")
+	// LLMDEPPAPISurfaceKey: The external inference API.
+	LLMDEPPAPISurfaceKey = attribute.Key("llm_d.epp.api_surface")
 	// LLMDEPPDisaggReasonKey: Disaggregation reason.
 	LLMDEPPDisaggReasonKey = attribute.Key("llm_d.epp.disagg.reason")
 	// LLMDEPPEncodeDisaggregationUsedKey: Whether encode disaggregation was used.
@@ -297,6 +299,11 @@ func LLMDECProxyEncoderCandidates(value int) attribute.KeyValue {
 // LLMDECProxyEncoderCount: Allowed encoder count in EC proxy.
 func LLMDECProxyEncoderCount(value int) attribute.KeyValue {
 	return LLMDECProxyEncoderCountKey.Int(value)
+}
+
+// LLMDEPPAPISurface: The external inference API.
+func LLMDEPPAPISurface(value string) attribute.KeyValue {
+	return LLMDEPPAPISurfaceKey.String(value)
 }
 
 // LLMDEPPDisaggReason: Disaggregation reason.

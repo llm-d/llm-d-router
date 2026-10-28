@@ -1143,6 +1143,11 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv[requestFieldTransferID]).To(Equal(pkv[requestFieldTransferID]))
 		Expect(dkv[requestFieldTransferID]).ToNot(BeEmpty())
 
+		By("decode remote_request_id matches its request ID header")
+		requestID := env.decodeHandler.GetCompletionHeaders()[0].Get(reqcommon.RequestIDHeaderKey)
+		Expect(requestID).ToNot(BeEmpty())
+		Expect(dkv).To(HaveKeyWithValue("remote_request_id", requestID))
+
 		By("both HTTP requests share the same X-Data-Parallel-Rank header")
 		ph := dpRankHeader(env.prefillHandler, 0)
 		Expect(ph).To(Equal(strconv.Itoa(int(pRank))))

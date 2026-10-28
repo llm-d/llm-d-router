@@ -31,11 +31,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -46,15 +51,14 @@ const (
 	defaultHTTPRenderTimeout   = 5 * time.Second
 	defaultHTTPRenderMMTimeout = 30 * time.Second
 
-	completionsRenderPath = "/v1/completions/render"
-	chatRenderPath        = "/v1/chat/completions/render"
-	messagesRenderPath    = "/v1/messages/render"
-	responsesRenderPath   = "/v1/responses/render"
+	completionsRenderPath  = "/v1/completions/render"
+	chatRenderPath         = "/v1/chat/completions/render"
+	messagesRenderPath     = "/v1/messages/render"
+	responsesRenderPath    = "/v1/responses/render"
+	componentTokenizerHTTP = "tokenizer_http" //#nosec G101 – metric component label, not a credential
 
-	// maxErrorBodySnippetBytes truncates non-2xx response bodies before
-	// embedding them in the returned error, so a misconfigured upstream that
-	// returns a large HTML error page can't blow up log size.
-	maxErrorBodySnippetBytes = 1024
+	// Bound draining while allowing connection reuse for small error responses.
+	maxErrorResponseDrainBytes = 1024
 
 	// vllmAPIKeyEnvVar names the environment variable holding the render
 	// endpoint's API key, sent by the warmup probe as a Bearer token. Request
@@ -65,6 +69,28 @@ const (
 // authHeaderCtxKey carries the inbound request's Authorization header from
 // Plugin.Produce to the render call without widening tokenInputProducer.produce.
 type authHeaderCtxKey struct{}
+
+type renderToolAttributesCtxKey struct{}
+
+type renderToolBaselineCtxKey struct{}
+
+type renderToolBaseline struct {
+	source     toolcalling.RequestSnapshot
+	comparison toolcalling.RequestSnapshot
+}
+
+type renderTraceTransport struct {
+	base http.RoundTripper
+}
+
+func (t *renderTraceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// otelhttp starts the client span before calling the underlying transport.
+	if span := trace.SpanFromContext(req.Context()); span.IsRecording() {
+		attrs, _ := req.Context().Value(renderToolAttributesCtxKey{}).([]attribute.KeyValue)
+		span.SetAttributes(attrs...)
+	}
+	return t.base.RoundTrip(req)
+}
 
 // withAuthHeader returns ctx carrying the Authorization header value verbatim.
 func withAuthHeader(ctx context.Context, value string) context.Context {
@@ -89,15 +115,27 @@ func vllmWarmupAuthHeader() string {
 // renderStatusError is a non-2xx response from the render endpoint.
 type renderStatusError struct {
 	StatusCode int
-	Body       string
 }
 
 func (e *renderStatusError) Error() string {
-	return fmt.Sprintf("vLLM render returned status %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("vLLM render returned status %d", e.StatusCode)
 }
 
 // errRenderDecode marks a 2xx render response whose body could not be decoded.
 var errRenderDecode = errors.New("unmarshal response")
+
+// Payload errors can contain request or response values. Keep the cause for classification
+// without including it in errors printed by logs or traces.
+type renderPayloadError struct {
+	summary error
+	cause   error
+}
+
+func (e *renderPayloadError) Error() string { return e.summary.Error() }
+
+func (e *renderPayloadError) Unwrap() []error {
+	return []error{e.summary, e.cause}
+}
 
 // isRenderAuthError reports whether err carries a 401 or 403 render response.
 func isRenderAuthError(err error) bool {
@@ -203,11 +241,13 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		return nil, err
 	}
 	return &vllmHTTPRenderer{
-		client: &http.Client{Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(
+		client: &http.Client{Transport: otelhttp.NewTransport(&renderTraceTransport{base: transport}, otelhttp.WithSpanNameFormatter(
 			// Name the outbound span after the render route instead of the
 			// transport's default "HTTP POST" so traces identify render calls.
 			func(_ string, r *http.Request) string { return "tokenize_render " + r.URL.Path },
-		))},
+		), otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.Context().Value(unobservedRenderCtxKey{}) == nil
+		}))},
 		endpointPicker: endpointPicker,
 		timeout:        timeout,
 		mmTimeout:      mmTimeout,
@@ -368,11 +408,12 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	case fwkrh.Marshaler:
 		payload, err = body.Marshal()
 		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
+			return &renderPayloadError{summary: errors.New("marshal request"), cause: err}
 		}
 	default:
 		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	}
+	inboundPayload := payload
 	if r.prefillOnly {
 		if payload, err = renderOnlyBudget(path, payload); err != nil {
 			return fmt.Errorf("apply render-only output budget: %w", err)
@@ -381,6 +422,38 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	if r.omitMMKwargs {
 		if payload, err = omitMMKwargs(payload); err != nil {
 			return fmt.Errorf("omit multimodal kwargs: %w", err)
+		}
+	}
+	var toolStatuses []toolcalling.FieldStatus
+	if toolcalling.TelemetryEnabled(ctx) && ctx.Value(unobservedRenderCtxKey{}) == nil {
+		switch path {
+		case chatRenderPath, messagesRenderPath, responsesRenderPath:
+			// Telemetry capture failures must not change rendering behavior.
+			var snapshot toolcalling.RequestSnapshot
+			var statuses []toolcalling.FieldStatus
+			var compareErr error
+			if baseline, ok := ctx.Value(renderToolBaselineCtxKey{}).(*renderToolBaseline); ok {
+				if baseline != nil {
+					snapshot = baseline.source
+					var forwarded toolcalling.RequestSnapshot
+					forwarded, compareErr = toolcalling.CaptureRequestJSON(reqcommon.DetectAPIType(path), payload)
+					if compareErr == nil {
+						statuses, compareErr = toolcalling.CompareRequests(baseline.comparison, forwarded)
+					}
+				}
+			} else {
+				snapshot, statuses, compareErr = compareRenderToolFields(ctx, reqcommon.DetectAPIType(path), inboundPayload, payload, r.prefillOnly || r.omitMMKwargs)
+			}
+			if compareErr == nil {
+				toolStatuses = statuses
+			}
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				attrs := snapshot.SpanAttributes(statuses)
+				span.SetAttributes(attrs...)
+				if len(attrs) > 0 {
+					ctx = context.WithValue(ctx, renderToolAttributesCtxKey{}, attrs)
+				}
+			}
 		}
 	}
 
@@ -392,6 +465,9 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	baseURL, err := r.endpointPicker.Pick()
 	if err != nil {
 		return fmt.Errorf("pick render endpoint: %w", err)
+	}
+	if len(toolStatuses) > 0 {
+		eppmetrics.RecordToolCallingFieldStatuses(componentTokenizerHTTP, toolcalling.DirectionRequest, toolStatuses)
 	}
 	picker, canRetry := r.endpointPicker.(retryingRenderEndpointPicker)
 	retryable, attemptErr := r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
@@ -407,6 +483,35 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkrh
 	}
 	_, err = r.postJSONAttempt(reqCtx, baseURL, path, payload, out)
 	return err
+}
+
+// Compare the serialized render copy without re-capturing an unchanged body.
+func compareRenderToolFields(ctx context.Context, surface reqcommon.APIType, inbound, outbound []byte, outboundValidated bool) (toolcalling.RequestSnapshot, []toolcalling.FieldStatus, error) {
+	before, ok := toolcalling.RequestSnapshotForBody(ctx, surface, inbound)
+	if !ok {
+		var err error
+		before, err = toolcalling.CaptureRequestJSON(surface, inbound)
+		if err != nil {
+			return before, nil, err
+		}
+	}
+	after := before
+	if !bytes.Equal(inbound, outbound) {
+		if outboundValidated && before.CanSkipCapture(outbound) {
+			return before, nil, nil
+		}
+		capture := toolcalling.CaptureRequestJSON
+		if outboundValidated {
+			capture = toolcalling.CaptureValidatedRequestJSON
+		}
+		var err error
+		after, err = capture(surface, outbound)
+		if err != nil {
+			return before, nil, err
+		}
+	}
+	statuses, err := toolcalling.CompareRequests(before, after)
+	return before, statuses, err
 }
 
 // renderOnlyBudget caps the output budget on the render copy of a JSON
@@ -495,14 +600,14 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodySnippetBytes))
-		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode, Body: string(snippet)}
+		_, _ = io.CopyN(io.Discard, httpResp.Body, maxErrorResponseDrainBytes)
+		return isRetryableRenderStatus(httpResp.StatusCode), &renderStatusError{StatusCode: httpResp.StatusCode}
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
 		// Connection failures can surface after successful response headers.
 		var networkErr net.Error
 		retryable := reqCtx.Err() != nil || errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		return retryable, fmt.Errorf("%w: %w", errRenderDecode, err)
+		return retryable, &renderPayloadError{summary: errRenderDecode, cause: err}
 	}
 	return false, nil
 }

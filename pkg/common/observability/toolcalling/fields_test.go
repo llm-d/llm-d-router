@@ -18,6 +18,7 @@ package toolcalling
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -245,6 +246,23 @@ func TestCaptureValidatedRequestJSONRequiresObject(t *testing.T) {
 	}
 	_, err := CaptureValidatedRequestJSON(reqcommon.APITypeChatCompletions, nil)
 	require.Error(t, err)
+}
+
+func TestRequestSnapshotForBody(t *testing.T) {
+	body := []byte(`{"tools":[]}`)
+	snapshot, err := CaptureRequestJSON(reqcommon.APITypeChatCompletions, body)
+	require.NoError(t, err)
+	ctx := WithRequestSnapshot(context.Background(), body, snapshot)
+
+	got, ok := RequestSnapshotForBody(ctx, reqcommon.APITypeChatCompletions, bytes.Clone(body))
+	require.True(t, ok)
+	require.Equal(t, snapshot.Summary(), got.Summary())
+	_, ok = RequestSnapshotForBody(ctx, reqcommon.APITypeChatCompletions, []byte(`{"tools":{}}`))
+	require.False(t, ok, "same-length mutations must not reuse the snapshot")
+	_, ok = RequestSnapshotForBody(ctx, reqcommon.APITypeMessages, body)
+	require.False(t, ok)
+	_, ok = RequestSnapshotForBody(context.Background(), reqcommon.APITypeChatCompletions, body)
+	require.False(t, ok)
 }
 
 func TestRequestSnapshotCanSkipCapture(t *testing.T) {

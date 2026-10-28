@@ -37,6 +37,7 @@ Custom llm-d router trace attributes.
 | `llm_d.ec_proxy.encode_disaggregation_used` | `boolean` | Whether encode disaggregation was used. | `LLMDECProxyEncodeDisaggregationUsed` |
 | `llm_d.ec_proxy.encoder_candidates` | `int` | Candidate encoder count in EC proxy. | `LLMDECProxyEncoderCandidates` |
 | `llm_d.ec_proxy.encoder_count` | `int` | Allowed encoder count in EC proxy. | `LLMDECProxyEncoderCount` |
+| `llm_d.epp.api_surface` | `string` | The external inference API. | `LLMDEPPAPISurface` |
 | `llm_d.epp.disagg.reason` | `string` | Disaggregation reason. | `LLMDEPPDisaggReason` |
 | `llm_d.epp.encode.disaggregation_used` | `boolean` | Whether encode disaggregation was used. | `LLMDEPPEncodeDisaggregationUsed` |
 | `llm_d.epp.encode.endpoints` | `string` | Encode endpoints. | `LLMDEPPEncodeEndpoints` |

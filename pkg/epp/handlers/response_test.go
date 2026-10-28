@@ -47,6 +47,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -818,6 +819,89 @@ func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
 	return true
 }
 
+func TestHandleResponseMetricsByAPISurface(t *testing.T) {
+	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeMessages, reqcommon.APITypeChatCompletions} {
+		for _, mode := range []string{"json", "streaming", "interrupted"} {
+			t.Run(apiType.String()+"/"+mode, func(t *testing.T) {
+				eppmetrics.Register()
+				eppmetrics.Reset()
+				t.Cleanup(eppmetrics.Reset)
+				streaming := mode != "json"
+				complete := mode != "interrupted"
+				contentType := reqcommon.ContentTypeJSON
+				chunks := [][]byte{[]byte(`{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":1}}`)}
+				if apiType == reqcommon.APITypeChatCompletions {
+					chunks = [][]byte{[]byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`)}
+				}
+				if streaming {
+					contentType = fwkrequest.MediaTypeEventStream
+					if apiType == reqcommon.APITypeMessages {
+						chunks = [][]byte{
+							[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1}}}` + "\n\n"),
+							[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"output_tokens":3}}` + "\n\n"),
+							[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
+						}
+					} else {
+						chunks = [][]byte{
+							[]byte("data: " + `{"choices":[{"delta":{"content":"hi"}}]}` + "\n\n"),
+							[]byte("data: " + `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}` + "\n\n"),
+							[]byte("data: [DONE]\n\n"),
+						}
+					}
+				}
+				server := NewStreamingServer(nil, &mockDirector{}, NewParserRegistry([]fwkrh.Parser{
+					openai.NewOpenAIParser(), anthropic.NewAnthropicParser(),
+				}, logr.Discard()), 0)
+				reqCtx := &RequestContext{
+					IncomingModelName: "model", TargetModelName: "model", apiSurface: apiType.Surface(),
+					RequestReceivedTimestamp: time.Now().Add(-time.Second), modelServerStreaming: streaming,
+					Request:  &Request{Headers: map[string]string{":path": apiType.Path()}},
+					Response: &Response{Headers: map[string]string{reqcommon.HeaderContentType: contentType}},
+				}
+				ctx := logutil.NewTestLoggerIntoContext(context.Background())
+				size := 0
+				for i, chunk := range chunks {
+					last := complete && i == len(chunks)-1
+					if last {
+						reqCtx.responseCompleteTimestamp = time.Now()
+					}
+					server.HandleResponseBody(ctx, reqCtx, chunk, last)
+					size += len(chunk)
+				}
+				labels := map[string]string{"api_surface": apiType.String()}
+				for name, sum := range map[string]float64{
+					"llm_d_epp_request_input_tokens": 3, "llm_d_epp_request_output_tokens": 3,
+					"llm_d_epp_request_cached_tokens": 1, "llm_d_epp_response_size_bytes": float64(size),
+				} {
+					if complete {
+						histogram := findHistogramMetric(t, name, labels)
+						require.Equal(t, uint64(1), histogram.GetSampleCount(), name)
+						require.Equal(t, sum, histogram.GetSampleSum(), name)
+					} else {
+						require.Zero(t, histogramSampleCount(t, name, labels), name)
+					}
+				}
+				wantCount := uint64(0)
+				if complete {
+					wantCount = 1
+				}
+				for _, name := range []string{"llm_d_epp_request_ntpot_seconds", "llm_d_epp_request_ttft_seconds"} {
+					require.Equal(t, wantCount, histogramSampleCount(t, name, labels), name)
+				}
+				if !streaming {
+					wantCount = 0
+				}
+				require.Equal(t, wantCount, histogramSampleCount(t, "llm_d_epp_request_streaming_tpot_seconds", labels))
+				wantITL := uint64(0)
+				if streaming {
+					wantITL = uint64(len(chunks) - 1)
+				}
+				require.Equal(t, wantITL, histogramSampleCount(t, "llm_d_epp_request_streaming_itl_seconds", labels))
+			})
+		}
+	}
+}
+
 func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	t.Parallel()
 
@@ -912,6 +996,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",
@@ -944,6 +1029,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 		"target_model_name": "target-model",
 		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
+		"api_surface":       reqcommon.APITypeMessages.String(),
 	}
 	// Each token count belongs to one request, so accumulating usage across chunks must not
 	// turn into a second observation on the chunk that completes it.
@@ -981,6 +1067,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",
@@ -1012,6 +1099,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 		"target_model_name": "target-model",
 		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
+		"api_surface":       reqcommon.APITypeMessages.String(),
 	}
 	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
 	require.Equal(t, uint64(1), inputTokens.GetSampleCount())

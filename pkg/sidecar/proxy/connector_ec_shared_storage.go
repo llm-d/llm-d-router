@@ -40,7 +40,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return 0, nil
 	}
-	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil)
+	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil, nil)
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request

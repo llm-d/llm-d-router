@@ -688,6 +688,47 @@ func TestP2PConnectorPort(t *testing.T) {
 	})
 }
 
+func TestECMooncakeOptions(t *testing.T) {
+	t.Run("defaults to vLLM's ec_port and POD_IP", func(t *testing.T) {
+		t.Setenv("POD_IP", "10.0.0.9")
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultECMooncakePort, opts.ECMooncakePort)
+		require.Equal(t, "10.0.0.9", opts.ECMooncakePodIP)
+	})
+
+	t.Run("env var overrides default port", func(t *testing.T) {
+		t.Setenv(envECMooncakePort, "19019")
+		opts := NewOptions()
+		require.Equal(t, 19019, opts.ECMooncakePort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		opts.ECMooncakePort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--ec-mooncake-port must be between 1 and 65535")
+	})
+
+	t.Run("rejects data-parallel-size > 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		opts.DataParallelSize = 2
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "does not support --data-parallel-size > 1")
+	})
+
+	t.Run("YAML sets port and local host", func(t *testing.T) {
+		opts := NewOptions()
+		opts.mergeYAMLConfiguration(yamlConfiguration{ECMooncakePort: 19019, ECMooncakePodIP: "decode.local"})
+		require.Equal(t, 19019, opts.ECMooncakePort)
+		require.Equal(t, "decode.local", opts.ECMooncakePodIP)
+	})
+}
+
 func TestValidateOffloadingDP(t *testing.T) {
 	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()

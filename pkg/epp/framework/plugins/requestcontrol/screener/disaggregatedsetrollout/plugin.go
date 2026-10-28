@@ -58,6 +58,7 @@ type Screener struct {
 	revisionDecisionStateKey fwkdl.StateKey
 	handle                   fwkplugin.Handle
 	localRevisionDecisions   *fwkplugin.PluginState
+	overflowGuard            fwksched.Filter
 
 	mu           sync.RWMutex
 	pods         map[types.NamespacedName]podInfo
@@ -84,18 +85,32 @@ var (
 	_ fwkdl.NotificationExtractor   = (*podNotificationHandler)(nil)
 )
 
+// ConfigParser decodes the parameters for the config loader, which reads the
+// overflow guard's pluginRef to create the guard before the Screener.
+func ConfigParser(parameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	config := &Config{}
+	if parameters == nil {
+		return config, nil
+	}
+	if err := parameters.Decode(config); err != nil {
+		return nil, fmt.Errorf("decode disaggregatedset-rollout-screener parameters: %w", err)
+	}
+	return config, nil
+}
+
 // Factory creates a disaggregatedset-rollout-screener from normal plugin parameters.
 func Factory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	if name == "" {
 		name = PluginType
 	}
-	config := Config{}
 	if parameters == nil {
 		return nil, errors.New("disaggregatedset-rollout-screener requires parameters")
 	}
-	if err := parameters.Decode(&config); err != nil {
-		return nil, fmt.Errorf("decode disaggregatedset-rollout-screener parameters: %w", err)
+	parsed, err := ConfigParser(parameters, handle)
+	if err != nil {
+		return nil, err
 	}
+	config := *parsed.(*Config)
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -104,7 +119,11 @@ func Factory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fw
 		return nil, fmt.Errorf("parse scope.labelSelector: %w", err)
 	}
 	registerMetrics()
-	return newScreener(name, config, scope, handle), nil
+	screener := newScreener(name, config, scope, handle)
+	if err := screener.resolveOverflowGuard(); err != nil {
+		return nil, err
+	}
+	return screener, nil
 }
 
 func newScreener(name string, config Config, scope labels.Selector, handle fwkplugin.Handle) *Screener {

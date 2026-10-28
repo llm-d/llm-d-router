@@ -30,6 +30,7 @@ func TestLLMDAttributeCompatibility(t *testing.T) {
 	floatValue := 1.25
 	boolValue := true
 	tests := []struct{ got, want attribute.KeyValue }{
+		{LLMDEPPAPISurface("messages"), attribute.Key("llm_d.epp.api_surface").String("messages")},
 		{LLMDToolCallingAPISurfaceKey.String("chat_completions"), attribute.Key("llm_d.tool_calling.api_surface").String("chat_completions")},
 		{LLMDToolCallingPresentKey.Bool(true), attribute.Key("llm_d.tool_calling.present").Bool(true)},
 		{LLMDToolCallingToolChoiceKey.String("auto"), attribute.Key("llm_d.tool_calling.tool_choice").String("auto")},
