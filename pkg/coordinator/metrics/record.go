@@ -17,8 +17,11 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"strconv"
 	"time"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 // IncRequestTotal increments request_total for the given model.
@@ -53,9 +56,11 @@ func DecRequestRunning(modelName string) {
 	requestRunning.WithLabelValues(boundModel(modelName)).Dec()
 }
 
-// RecordStepDuration observes the wall-time latency of one pipeline step.
-func RecordStepDuration(step string, d time.Duration) {
-	stepDuration.WithLabelValues(step).Observe(d.Seconds())
+// RecordStepDuration observes the wall-time latency of one pipeline step and
+// attaches the step's trace as an exemplar, so a point on a step latency graph
+// links to the span that produced it.
+func RecordStepDuration(ctx context.Context, step string, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, stepDuration.WithLabelValues(step), d.Seconds())
 }
 
 // IncStepErrorTotal increments step_errors_total for the given step and

@@ -104,7 +104,7 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 
 | Name | Type | Notes |
 |---|---|---|
-| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). |
+| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). Carries a trace exemplar; see [Exemplars](metrics.md#exemplars). |
 | `step_errors_total` | Counter | Step failures; adds label `error_code`. |
 | `step_running` | Gauge | Requests currently executing the step. Saturation rather than latency: `decode` stays in flight for the whole stream, so its value is the number of active streams. |
 

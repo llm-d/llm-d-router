@@ -223,7 +223,7 @@ in the error rate, can be opened as the trace behind it.
 | Exemplar label | Present when |
 |---|---|
 | `trace_id` | The request's trace is sampled. |
-| `span_id` | EPP tracing is on. With it off, only `trace_id` is attached. |
+| `span_id` | The observing component's tracing is on. With it off, only `trace_id` is attached. |
 
 Two things are needed to see them:
 
