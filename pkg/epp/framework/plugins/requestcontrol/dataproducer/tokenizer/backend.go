@@ -166,6 +166,14 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			return nil, fmt.Errorf("tokenization failed: %w", err)
 		}
 		return fwkrh.NewTokenizedRequest(tokenIDs), nil
+	case body.TextToSpeech != nil:
+		// /v1/audio/speech input is plain text to synthesize, so it renders
+		// through the same prompt path as generate text.
+		tokenIDs, _, err := b.tk.Render(ctx, fwkrh.PayloadMap{"model": b.modelName, "prompt": body.TextToSpeech.Input})
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		return fwkrh.NewTokenizedRequest(tokenIDs), nil
 	case body.Responses != nil:
 		legacy, err := b.legacyResponses.useLegacy(ctx, b.tk, b.modelName)
 		if err != nil {

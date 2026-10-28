@@ -270,6 +270,10 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
+	case body.TextToSpeech != nil:
+		// /v1/audio/speech input is plain text to synthesize, so its
+		// input-token estimate is the text itself.
+		return []byte(body.TextToSpeech.Input), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}

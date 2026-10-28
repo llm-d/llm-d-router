@@ -261,6 +261,29 @@ func TestProduce_TokenizerError(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
+func TestProduce_TextToSpeechRendersInputAsPrompt(t *testing.T) {
+	input := "synthesize this sentence"
+	tokenIDs := []uint32{11, 22, 33}
+	var gotPrompt any
+	tok := &mockTokenizer{
+		renderFunc: func(payload fwkrh.RequestPayload) ([][]uint32, [][]tokenizerTypes.Offset, error) {
+			m, _ := payload.AsMap()
+			gotPrompt = m["prompt"]
+			return [][]uint32{tokenIDs}, nil, nil
+		},
+	}
+	p := newTestPlugin(tok)
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrh.InferenceRequestBody{
+			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: input},
+		},
+	}
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	assert.Equal(t, input, gotPrompt)
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, tokenIDs, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+}
+
 func TestProduce_UnsupportedBodyType(t *testing.T) {
 	p := newTestPlugin(&mockTokenizer{})
 	req := &scheduling.InferenceRequest{

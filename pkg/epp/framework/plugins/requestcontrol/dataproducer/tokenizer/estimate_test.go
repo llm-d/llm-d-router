@@ -151,6 +151,18 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_TextToSpeech asserts /v1/audio/speech input is
+// byte-estimated from its text, like completions.
+func TestEstimateBackend_TextToSpeech(t *testing.T) {
+	input := "synthesize this sentence"
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: input},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte(input)), tp.Prompts[0].TokenIDs)
+}
+
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
 // the same tokens (locality precondition) and that distinct prompts differ.
 func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {
