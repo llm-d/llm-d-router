@@ -542,6 +542,55 @@ func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) 
 	}
 }
 
+// TestDecodeStep_PromptTokenIDsInKVParams verifies that chat-shaped decode
+// requests carry the rendered token ids in kv_transfer_params.prompt_token_ids,
+// except for multimodal requests and requests render did not tokenize.
+func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
+	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
+	tests := []struct {
+		name    string
+		path    string
+		tokens  []int
+		entries []pipeline.MultimodalEntry
+		want    bool
+	}{
+		{name: "chat", path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
+		{name: "responses", path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
+		{name: "messages", path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
+		{name: "multimodal", path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "not rendered", path: reqcommon.PathChatCompletions},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), map[string]any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				KVTransferParams:  map[string]any{"block_id": "xyz"},
+				Body:              map[string]any{"model": "m"},
+			}
+			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			kvParams := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			if ok != tc.want {
+				t.Fatalf("prompt_token_ids present = %v, want %v (params %v)", ok, tc.want, kvParams)
+			}
+			if tc.want && fmt.Sprint(got) != fmt.Sprint(tc.tokens) {
+				t.Fatalf("prompt_token_ids = %v, want %v", got, tc.tokens)
+			}
+			if kvParams["do_remote_prefill"] != true {
+				t.Fatalf("do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+			}
+		})
+	}
+}
+
 // TestDecodeStep_GenerateFormat_ToplevelKV verifies that for the
 // /inference/v1/generate format the decode step places kv_transfer_params at the
 // top level of the request body, and preserves the client's sampling_params so
