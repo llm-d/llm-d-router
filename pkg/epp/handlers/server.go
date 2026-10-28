@@ -540,7 +540,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
 		if outcome, reason, ok := requestOutcome(reqCtx, err, ctx.Err()); ok {
-			metrics.RecordRequestOutcome(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, outcome, reason)
+			metrics.RecordRequestOutcome(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, outcome, reason)
 		}
 		if span != nil {
 			if err != nil {

@@ -216,6 +216,7 @@ func TestProcessLabelsOutcomeWithFairnessAndPriority(t *testing.T) {
 	}
 	require.Equal(t, "team-a", labels["fairness_id"])
 	require.Equal(t, "-1", labels["priority"])
+	require.Equal(t, "completions", labels["api_surface"])
 	require.Equal(t, "rejected", labels["outcome"])
 }
 

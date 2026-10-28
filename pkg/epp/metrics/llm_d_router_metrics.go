@@ -81,7 +81,7 @@ var (
 			Name:      "request_outcome_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of requests by how they ended.", compbasemetrics.ALPHA),
 		},
-		append(append([]string{}, modelLabelsWithFairnessPriority...), "outcome", "reason"),
+		append(append([]string{}, requestLabelsWithAPISurface...), "outcome", "reason"),
 	)
 
 	llmdRequestLatencies = prometheus.NewHistogramVec(

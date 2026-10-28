@@ -239,10 +239,10 @@ func RecordFairnessIDResolution(inferencePool, fairnessID, source string) {
 }
 
 // RecordRequestOutcome records how a request ended.
-func RecordRequestOutcome(modelName, targetModelName, fairnessID, priority, outcome, reason string) {
+func RecordRequestOutcome(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority, outcome, reason string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, outcome, reason).Inc()
+	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), outcome, reason).Inc()
 }
 
 // RecordRequestSizes records the request sizes.
