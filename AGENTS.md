@@ -2,7 +2,7 @@
 
 llm-d Router. Go service that routes inference requests to model-serving pods via an Endpoint Picker (EPP), with a sidecar that coordinates disaggregated inference. Multi-vendor open source under the llm-d project. Review bandwidth is a shared community resource, so scope work tightly and discuss substantive changes in the open before code lands.
 
-`make help` lists targets. `make presubmit` is the pre-merge gate. All targets run inside a builder container; host Go is not required.
+`make help` lists targets. `make presubmit` is the pre-merge gate. Build, lint, and test targets run inside a builder container; `make tidy`, `make upgrade-deps`, and the code generation targets call the host Go toolchain.
 
 ## Agent operating rules
 
