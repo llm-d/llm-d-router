@@ -1,0 +1,75 @@
+# EPP configuration for per-team QoS classes on flow control.
+#
+# qos-admission maps each team to a class (a priority band), enforces its
+# token-rate commit, concurrency cap and size caps, and moves traffic above the
+# commit one class down. program-aware-fairness shares each band between teams
+# by least attained service.
+# latency-reporter records TTFT/TPOT for the critical class by prompt bucket and path.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: qos-admission
+  parameters:
+    mode: enforce
+    outputTokenWeight: 2
+    classes:
+    - {name: critical, priority: 100}
+    - {name: standard, priority: 10}
+    - {name: batch, priority: -10}
+    defaultTeam:
+      class: standard
+    teams:
+    - id: team-a
+      class: critical
+      commitTokensPerMinute: 200000
+      burstSeconds: 30
+      maxConcurrency: 20
+      maxPromptTokens: 8192
+      maxOutputTokens: 4096
+    - id: team-b
+      class: standard
+      commitTokensPerMinute: 50000
+      maxConcurrency: 10
+    - id: evals
+      class: batch
+      dailyTokens: 50000000
+- type: latency-reporter
+  parameters:
+    promptBuckets: [1024, 8192]
+    priorities: [100]
+- type: program-aware-fairness
+  parameters:
+    strategy: las
+- type: slo-deadline-ordering-policy
+- type: soft-reflective-ceiling-policy
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: prefix-cache-scorer
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2.0
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2.0
+  - pluginRef: prefix-cache-scorer
+    weight: 3.0
+flowControl:
+  defaultRequestTTL: 60s
+  usageLimitPolicyPluginRef: soft-reflective-ceiling-policy
+  defaultPriorityBand:
+    fairnessPolicyRef: program-aware-fairness
+  defaultNegativePriorityBand:
+    fairnessPolicyRef: program-aware-fairness
+    defaultRequestTTL: 300s
+  priorityBands:
+  - priority: 100
+    fairnessPolicyRef: program-aware-fairness
+    orderingPolicyRef: slo-deadline-ordering-policy
+  - priority: 10
+    fairnessPolicyRef: program-aware-fairness
+  - priority: -10
+    fairnessPolicyRef: program-aware-fairness
+    defaultRequestTTL: 300s
