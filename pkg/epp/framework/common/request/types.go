@@ -501,13 +501,17 @@ type TextToSpeechRequest struct {
 	Input string `json:"input"`
 	// Instructions steers voice or style and is tokenized alongside Input.
 	Instructions string `json:"instructions,omitempty"`
+	// RefText is the transcript of a reference audio clip for voice cloning
+	// and is tokenized alongside Input.
+	RefText string `json:"ref_text,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {
 	if r == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d}", len(r.Input), len(r.Instructions))
+	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d, RefTextLength: %d}",
+		len(r.Input), len(r.Instructions), len(r.RefText))
 }
 
 // AudioGenerateRequest represents the fields parsed from a vLLM Omni

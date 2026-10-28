@@ -927,7 +927,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &request.InferenceRequestBody{
 				TextToSpeech: &request.TextToSpeechRequest{
-					Input: "Hello from llm-d.",
+					Input:   "Hello from llm-d.",
+					RefText: "Hello.",
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -1180,6 +1181,36 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"model":        "test",
 				"input":        "hello",
 				"instructions": 42,
+			},
+			wantErr: true,
+		},
+		{
+			name:    "text to speech request with ref_text",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+				"input":    "Hello from llm-d.",
+				"ref_text": "This is the reference clip.",
+			},
+			want: &request.InferenceRequestBody{
+				TextToSpeech: &request.TextToSpeechRequest{
+					Input:   "Hello from llm-d.",
+					RefText: "This is the reference clip.",
+				},
+				Payload: request.PayloadMap{
+					"model":    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+					"input":    "Hello from llm-d.",
+					"ref_text": "This is the reference clip.",
+				},
+			},
+		},
+		{
+			name:    "text to speech request with non-string ref_text",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":    "test",
+				"input":    "hello",
+				"ref_text": 42,
 			},
 			wantErr: true,
 		},

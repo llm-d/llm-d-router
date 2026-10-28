@@ -191,6 +191,41 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions(t *testin
 	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
+// TestEstimateBackend_TextToSpeechIncludesRefText asserts a voice-cloning
+// reference-audio transcript is folded into the estimated text alongside
+// input, matching vLLM Omni's engine prefill, which tokenizes it as real
+// text, not just metadata.
+func TestEstimateBackend_TextToSpeechIncludesRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello", RefText: "this is the reference clip"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText asserts
+// instructions and ref_text are both folded in together, alongside input.
+func TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello", Instructions: "cheerful", RefText: "reference clip"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText asserts a
+// whitespace-only reference transcript is treated as absent.
+func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello", RefText: "   "},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+}
+
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
 // input is passed through as real tokens, not byte-estimated.
 func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {
