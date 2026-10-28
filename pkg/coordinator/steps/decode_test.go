@@ -605,6 +605,149 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_TokensInFormat_RewritesChatRequest verifies the tokens-in
+// decode leg (use_openai_format=false): a chat-completions client is sent to
+// the generate route with the rendered token IDs, output_mode=text so the
+// worker answers with detokenized text, and its top-level max_tokens moved
+// under sampling_params, which the generate API requires and does not default.
+func TestDecodeStep_TokensInFormat_RewritesChatRequest(t *testing.T) {
+	var parsed map[string]any
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output_mode": reqcommon.OutputModeText,
+			"choices":     []map[string]any{{"token_ids": []int{9707}, "text": " Hello"}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamKVConnector:    kv.NIXL,
+		"use_openai_format": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-tokens-in",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            testModelName,
+		TokenIDs:         []int{1, 2, 3},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+		// Limits stay json.RawMessage for the fields the server does not decode
+		// (see inspectedRequestFields), which is how they reach this step.
+		Body: map[string]any{
+			"model":                            testModelName,
+			"messages":                         []any{map[string]any{"role": "user", "content": "hi"}},
+			reqcommon.FieldMaxTokens:           json.RawMessage(`64`),
+			reqcommon.FieldMinTokens:           json.RawMessage(`2`),
+			reqcommon.FieldMaxCompletionTokens: json.RawMessage(`100`),
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != reqcommon.PathVLLMGenerate {
+		t.Fatalf("decode posted to %q, want %q", gotPath, reqcommon.PathVLLMGenerate)
+	}
+	if parsed[reqcommon.FieldOutputMode] != reqcommon.OutputModeText {
+		t.Fatalf("output_mode = %v, want %q", parsed[reqcommon.FieldOutputMode], reqcommon.OutputModeText)
+	}
+	tokenIDs, ok := parsed["token_ids"].([]any)
+	if !ok || len(tokenIDs) != 3 {
+		t.Fatalf("token_ids = %v, want the 3 rendered ids", parsed["token_ids"])
+	}
+	// The chat body's own shape must not reach the generate route.
+	if _, ok := parsed["messages"]; ok {
+		t.Fatal("messages reached the generate request")
+	}
+	sampling, ok := parsed[reqcommon.FieldSamplingParams].(map[string]any)
+	if !ok {
+		t.Fatalf("sampling_params = %v, want an object", parsed[reqcommon.FieldSamplingParams])
+	}
+	if sampling[reqcommon.FieldMaxTokens] != float64(64) {
+		t.Fatalf("sampling_params.max_tokens = %v, want the client's 64", sampling[reqcommon.FieldMaxTokens])
+	}
+	if sampling[reqcommon.FieldMinTokens] != float64(2) {
+		t.Fatalf("sampling_params.min_tokens = %v, want the client's 2", sampling[reqcommon.FieldMinTokens])
+	}
+	// max_completion_tokens is not a generate field, so the cap it named
+	// arrives as sampling_params.max_tokens or not at all.
+	if _, ok := parsed[reqcommon.FieldMaxCompletionTokens]; ok {
+		t.Error("max_completion_tokens reached the generate route")
+	}
+	if _, ok := parsed[reqcommon.FieldKVTransferParams].(map[string]any); !ok {
+		t.Fatal("expected top-level kv_transfer_params on the generate leg")
+	}
+}
+
+// TestDecodeStep_TokensInFormat_KeepsGenerateClientFields verifies that a
+// client already on the generate route keeps the fields it sent (sampling_params
+// and the generate-only extras) when the tokens-in decode leg rebuilds its body.
+func TestDecodeStep_TokensInFormat_KeepsGenerateClientFields(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"token_ids": []int{1}}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamKVConnector:    kv.NIXL,
+		"use_openai_format": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-gen-native",
+		OriginalPath:     reqcommon.PathVLLMGenerate,
+		Model:            testModelName,
+		TokenIDs:         []int{1, 2, 3, 4, 5},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+		Body: map[string]any{
+			"model":           testModelName,
+			"token_ids":       []int{1, 2, 3, 4, 5},
+			"cache_salt":      "tenant-a",
+			"sampling_params": map[string]any{"max_tokens": 50, "min_tokens": 3},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if parsed[reqcommon.FieldOutputMode] != reqcommon.OutputModeText {
+		t.Fatalf("output_mode = %v, want %q", parsed[reqcommon.FieldOutputMode], reqcommon.OutputModeText)
+	}
+	if parsed["cache_salt"] != "tenant-a" {
+		t.Fatalf("cache_salt = %v, want the client's value preserved", parsed["cache_salt"])
+	}
+	sampling, ok := parsed[reqcommon.FieldSamplingParams].(map[string]any)
+	if !ok {
+		t.Fatalf("sampling_params = %v, want an object", parsed[reqcommon.FieldSamplingParams])
+	}
+	// decode generates the real output, so the client's own caps stand.
+	if sampling[reqcommon.FieldMaxTokens] != float64(50) {
+		t.Fatalf("sampling_params.max_tokens = %v, want 50", sampling[reqcommon.FieldMaxTokens])
+	}
+	if sampling[reqcommon.FieldMinTokens] != float64(3) {
+		t.Fatalf("sampling_params.min_tokens = %v, want 3", sampling[reqcommon.FieldMinTokens])
+	}
+}
+
 // TestDecodeStep_UnreachableFormat_ReturnsError verifies that a request path
 // for a format prepareDecodeBody's switch does not handle explicitly
 // (APITypeSGLangGenerate) fails through its default case, reporting an error
@@ -620,7 +763,7 @@ func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
 		Body:             map[string]any{"model": testModelName},
 		KVTransferParams: map[string]any{"block_id": "block-1"},
 	}
-	if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err == nil {
+	if _, err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx, reqcommon.APITypeSGLangGenerate); err == nil {
 		t.Fatal("expected an error for an unreachable request format")
 	}
 }

@@ -90,6 +90,7 @@ const (
 	FieldURL                  = "url"
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
+	FieldOutputMode           = "output_mode"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"

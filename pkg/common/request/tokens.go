@@ -66,6 +66,35 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	return limits
 }
 
+// OutputTokenLimit returns the output-token cap apiType's body carries, reading
+// the same fields CapSingleToken writes (APIType.tokenLimitFields). ok is false
+// when the client set none, which means "the worker's own default".
+//
+// It is how a leg that rewrites a request into another API's shape carries the
+// cap across: the chat, legacy completions, Messages and Responses APIs name it
+// at the top level, while the vLLM generate API nests it under sampling_params,
+// so the field is not simply copied.
+//
+// The value is returned as it was decoded rather than as an int: it reaches the
+// model server, which validates it, and coercing here would turn a value this
+// package cannot read into a cap the client never asked for.
+func OutputTokenLimit(body map[string]any, apiType APIType) (any, bool) {
+	limits := body
+	if apiType == APITypeVLLMGenerate {
+		sp, ok := body[FieldSamplingParams].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		limits = sp
+	}
+	for _, field := range apiType.tokenLimitFields() {
+		if v, set := fieldValue(limits, field); set {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 // RejectStatefulResponsesFields reports an error naming the first field it
 // finds that depends on state the router does not keep: previous_response_id
 // and conversation reference a prior turn, background asks for an async job
