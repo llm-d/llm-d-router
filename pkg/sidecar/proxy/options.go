@@ -61,7 +61,6 @@ const (
 	kvConnector               = "kv-connector"
 	ecConnector               = "ec-connector"
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
-	p2pConnectorPortFlag      = "p2p-connector-port"
 	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
@@ -89,14 +88,12 @@ const (
 	envInferencePool           = "INFERENCE_POOL"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
-	envP2PConnectorPort        = "P2P_CONNECTOR_PORT"
 
 	// Defaults
 	defaultPort                  = "8000"
 	defaultModelServerPort       = "8200"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
-	defaultP2PConnectorPort      = 7777
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
 	// dispatch: it bounds how long the decode request waits on the prefill outcome
@@ -116,7 +113,6 @@ type yamlConfiguration struct {
 	Port                       int      `json:"port,omitempty"`
 	ModelServerPort            int      `json:"model-server-port,omitempty"`
 	MooncakeBootstrapPort      int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort           int      `json:"p2p-connector-port,omitempty"`
 	DataParallelSize           int      `json:"data-parallel-size,omitempty"`
 	KVConnector                string   `json:"kv-connector,omitempty"`
 	ECConnector                string   `json:"ec-connector,omitempty"`
@@ -211,13 +207,6 @@ func NewOptions() *Options {
 		}
 	}
 
-	p2pConnectorPort := defaultP2PConnectorPort
-	if portStr := os.Getenv(envP2PConnectorPort); portStr != "" {
-		if port, err := strconv.Atoi(portStr); err == nil {
-			p2pConnectorPort = port
-		}
-	}
-
 	return &Options{
 		Config: Config{
 			Port:                    defaultPort,
@@ -229,7 +218,6 @@ func NewOptions() *Options {
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
-			P2PConnectorPort:        p2pConnectorPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
@@ -277,8 +265,6 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the EC protocol between encoder and prefiller (for EPD mode). Supported: "+supportedECConnectorNamesStr+". Leave empty to skip encoder stage.")
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
-	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
@@ -705,17 +691,6 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
 	}
 
-	// Validate P2P connector port
-	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
-		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
-	}
-	// The injected port is offset by the target's DP rank, so the highest
-	// rank's port must stay in range too.
-	if opts.DataParallelSize > 1 && opts.P2PConnectorPort+opts.DataParallelSize-1 > 65535 {
-		return fmt.Errorf("--p2p-connector-port %d plus data-parallel rank %d exceeds 65535",
-			opts.P2PConnectorPort, opts.DataParallelSize-1)
-	}
-
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
 	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.
 	// offloading already provides the tier natively and needs no flag.
@@ -806,9 +781,6 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
 		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
-	}
-	if cfg.P2PConnectorPort != 0 && !opts.isFlagSet(p2pConnectorPortFlag) {
-		opts.P2PConnectorPort = cfg.P2PConnectorPort
 	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize

@@ -36,17 +36,20 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator; a client copy is
-// dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
-// Prefer: if-available, the conditional-decode probe's signal, with 412 on
-// any other leg.
+// internalForwardingHeaders are set only by the coordinator or read by it
+// from a phase response; a client copy is dropped, and so is a value of
+// forward_response_headers under these names. EPP routes on epp-profile and
+// x-llm-d-pin-host-port, and answers Prefer: if-available, the
+// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// P2P address names the prefill pod a decode request pulls from, so a client
+// cannot choose it.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
+	routing.KVCachePrefillHeader:          true,
 }
 
 func isForwardableHeader(name string) bool {
@@ -135,6 +138,13 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 	}
 }
 
+// P2PPeer is a pod's OffloadingConnector P2P tier address, the one a KV pull
+// dials. The pod's serving address is a different port.
+type P2PPeer struct {
+	Host string
+	Port int
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -206,6 +216,13 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
+	// KVRequestID is the kv-offloading transfer id. Set by the connector's
+	// PreparePrefillKVParams; empty with any other connector.
+	KVRequestID string
+	// PrefillPeer is the prefill pod's P2P tier address. Set by the
+	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
+	// response and with any other connector.
+	PrefillPeer *P2PPeer
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string

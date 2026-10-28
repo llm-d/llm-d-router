@@ -21,16 +21,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/go-logr/logr/funcr"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -60,9 +68,87 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 	}
 }
 
+func prefillOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
+	return &scheduling.SchedulingResult{
+		PrimaryProfileName: "prefill",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{ep}},
+		},
+	}
+}
+
 func readReusablePrefixTokens(request *scheduling.InferenceRequest, producerName string) (attrprefix.ReusablePrefixTokens, bool) {
 	key := attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName)
 	return scheduling.ReadRequestAttribute[attrprefix.ReusablePrefixTokens](request, key)
+}
+
+// bodyWith returns a parsed request body holding the given top-level fields.
+func bodyWith(fields map[string]any) *fwkrh.InferenceRequestBody {
+	return &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap(fields)}
+}
+
+// preRequest builds a request with an empty parsed body and the stashed best
+// match, so a test asserts on what PreRequest writes.
+func preRequest(p *Producer, id string, best *bestMatchPeer) *scheduling.InferenceRequest {
+	req := &scheduling.InferenceRequest{RequestID: id, Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	if best != nil {
+		req.PutAttribute(p.attrKey(), best)
+	}
+	return req
+}
+
+// peer builds a stashed best match at address:8080 on rank 0.
+func peer(address string, cachedTokens int) *bestMatchPeer {
+	return &bestMatchPeer{
+		hostPort:     net.JoinHostPort(address, "8080"),
+		address:      address,
+		p2pPort:      defaultP2PConnectorPort,
+		cachedTokens: cachedTokens,
+	}
+}
+
+// remoteKVSource returns the body's kv_transfer_params.remote_kv_source block,
+// or nil when absent.
+func remoteKVSource(req *scheduling.InferenceRequest) map[string]any {
+	src, _ := kvTransferParams(req.Body)[reqcommon.FieldRemoteKVSource].(map[string]any)
+	return src
+}
+
+// assertSource checks that the body pulls from address on p2pPort with a
+// fresh kv_request_id, and that the source header names the same peer.
+func assertSource(t *testing.T, req *scheduling.InferenceRequest, address string, p2pPort int) {
+	t.Helper()
+	src := remoteKVSource(req)
+	require.NotNil(t, src)
+	assert.Equal(t, address, src[reqcommon.FieldRemoteHost])
+	assert.Equal(t, p2pPort, src[reqcommon.FieldRemotePort])
+	assert.NotEmpty(t, src[reqcommon.FieldKVRequestID])
+	assert.True(t, req.Body.Mutated)
+	assert.Equal(t, net.JoinHostPort(address, strconv.Itoa(p2pPort)), req.Headers[routing.KVCacheSourceHeader])
+}
+
+// assertNoSource checks that PreRequest left the body untouched and set no
+// source header.
+func assertNoSource(t *testing.T, req *scheduling.InferenceRequest) {
+	t.Helper()
+	assert.Nil(t, remoteKVSource(req))
+	assert.False(t, req.Body.Mutated)
+	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+}
+
+// assertPrefillHeader checks the prefill pod's P2P tier address on its header,
+// and that the plugin left the serving address header to the profile handler.
+func assertPrefillHeader(t *testing.T, req *scheduling.InferenceRequest, address string, p2pPort int) {
+	t.Helper()
+	assert.Equal(t, net.JoinHostPort(address, strconv.Itoa(p2pPort)), req.Headers[routing.KVCachePrefillHeader])
+	assert.NotContains(t, req.Headers, routing.PrefillEndpointHeader)
+	assert.NotContains(t, req.Headers, routing.LegacyPrefillEndpointHeader)
+}
+
+// assertNoPrefillHeader checks that no prefill P2P address was set.
+func assertNoPrefillHeader(t *testing.T, req *scheduling.InferenceRequest) {
+	t.Helper()
+	assert.NotContains(t, req.Headers, routing.KVCachePrefillHeader)
 }
 
 // Factory defaults: token delta 1, default PrefixCacheMatchInfo producer.
@@ -301,53 +387,79 @@ func TestProduce_MetadataNilMax_DoesNotSuppressStash(t *testing.T) {
 	assert.Equal(t, "10.0.0.2:8080", best.hostPort)
 }
 
-// Best peer exceeds the decode pod's cached tokens by >= delta: header set.
-func TestPreRequest_SetsKVCacheSourceHeader(t *testing.T) {
+// Best peer exceeds the decode pod's cached tokens by >= delta: the body
+// pulls from it. A decode-only result sets no prefill headers.
+func TestPreRequest_WritesRemoteKVSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-hdr", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
+	req := preRequest(p, "req-src", peer("10.0.0.2", 48))
 
-	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
 
-	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
+	assertNoPrefillHeader(t, req)
 }
 
-// Delta below threshold: header not set.
-func TestPreRequest_DeltaBelowThreshold_NoHeader(t *testing.T) {
+// Delta below threshold: no source written.
+func TestPreRequest_DeltaBelowThreshold_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 17})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-low", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 32})
+	req := preRequest(p, "req-low", peer("10.0.0.2", 32))
 
-	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1)))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
 }
 
-// The chosen decode pod is itself the best match: header not set.
-func TestPreRequest_BestIsChosen_NoHeader(t *testing.T) {
+// The prefill header is written before the floor is checked, so it survives
+// a below-floor return.
+func TestPreRequest_DeltaBelowThreshold_KeepsPrefillHeader(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 17})
+
+	req := preRequest(p, "req-low-pd", peer("10.0.0.2", 32))
+
+	require.NoError(t, p.PreRequest(ctx, req, prefillOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.1", defaultP2PConnectorPort)
+}
+
+// The chosen decode pod is itself the best match: no source written.
+func TestPreRequest_BestIsChosen_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-self", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.1:8080", cachedTokens: 32})
+	req := preRequest(p, "req-self", peer("10.0.0.1", 32))
 
-	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2)))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2))))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
 }
 
-// P/D: the prefill pod computes the prefix; when it is the best match the
-// header is not set even if the decode pod holds fewer blocks.
-func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
+// No best match stashed: nothing is written and the request is untouched.
+func TestPreRequest_NoBestMatch_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-pd-self", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
+	req := preRequest(p, "req-none", nil)
+
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2))))
+
+	assertNoSource(t, req)
+	assertNoPrefillHeader(t, req)
+}
+
+// P/D: the prefill pod computes the prefix; when it is the best match no
+// source is written even if the decode pod holds fewer blocks. The prefill
+// headers are set regardless.
+func TestPreRequest_PrefillProfile_BestIsPrefill_NoSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-pd-self", peer("10.0.0.2", 48))
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -356,18 +468,19 @@ func TestPreRequest_PrefillProfile_BestIsPrefill_NoHeader(t *testing.T) {
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
 		},
 	}
-	_ = p.PreRequest(ctx, req, result)
+	require.NoError(t, p.PreRequest(ctx, req, result))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
-// P/D: a third pod out-caches the chosen prefill pod by >= delta: header set.
-func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
+// P/D: a third pod out-caches the chosen prefill pod by >= delta: the body
+// pulls from it and the prefill headers name the prefill pod.
+func TestPreRequest_PrefillProfile_SourceFromThirdPod(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-pd-third", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.3:8080", cachedTokens: 64})
+	req := preRequest(p, "req-pd-third", peer("10.0.0.3", 64))
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -376,25 +489,257 @@ func TestPreRequest_PrefillProfile_HeaderFromThirdPod(t *testing.T) {
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 1)}},
 		},
 	}
-	_ = p.PreRequest(ctx, req, result)
+	require.NoError(t, p.PreRequest(ctx, req, result))
 
-	assert.Equal(t, "10.0.0.3:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.3", defaultP2PConnectorPort)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
-// Inbound (spoofed) header is removed even when no best-match attribute was
-// stashed.
-func TestPreRequest_DeletesInboundHeader(t *testing.T) {
+// A coordinator prefill request: the prefill profile is the primary and only
+// profile. The prefill headers are set from it and the source is compared
+// against it.
+func TestPreRequest_PrefillIsPrimaryProfile(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	req := &scheduling.InferenceRequest{
-		RequestID: "req-spoof",
-		Headers:   map[string]string{routing.KVCacheSourceHeader: "evil:1234"},
+	req := preRequest(p, "req-prefill-primary", peer("10.0.0.3", 64))
+
+	result := prefillOnly(endpoint(p, "pod-b", "10.0.0.2", 1))
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertSource(t, req, "10.0.0.3", defaultP2PConnectorPort)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+// The P2P port is the configured rank-0 port plus the endpoint's rank, for
+// the prefill pod and for the source.
+func TestPreRequest_P2PPortAddsRankIndex(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 8000})
+
+	source := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-src"}, Address: "10.0.0.3", Port: "8081", RankIndex: 1,
+	}, nil, nil)
+	source.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(4, 4, testBlockSize).WithCachedBlockCount(4))
+	prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-p"}, Address: "10.0.0.2", Port: "8082", RankIndex: 2,
+	}, nil, nil)
+	prefill.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(0, 4, testBlockSize).WithCachedBlockCount(0))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-rank", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source, prefill}))
+	result := prefillOnly(prefill)
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertSource(t, req, "10.0.0.3", 8001)
+	assertPrefillHeader(t, req, "10.0.0.2", 8002)
+}
+
+// p2pConnectorPort plus the rank must stay a TCP port. A prefill endpoint
+// beyond it fails the request at the EPP with the misconfiguration named,
+// instead of a sidecar 500 on a malformed header.
+func TestPreRequest_PrefillP2PPortRange(t *testing.T) {
+	cases := map[string]struct {
+		connectorPort int
+		rank          int
+		wantPort      int // 0 when the request must fail
+	}{
+		"overflow":      {connectorPort: 65530, rank: 7},
+		"upper bound":   {connectorPort: 65534, rank: 1, wantPort: 65535},
+		"negative rank": {connectorPort: 7777, rank: -1},
 	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: tc.connectorPort})
+			prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+				ID: k8stypes.NamespacedName{Name: "pod-p"}, Address: "10.0.0.2", Port: "8080", RankIndex: tc.rank,
+			}, nil, nil)
+			req := &scheduling.InferenceRequest{RequestID: "req-" + name, Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
 
-	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0)))
+			err := p.PreRequest(ctx, req, prefillOnly(prefill))
 
+			if tc.wantPort == 0 {
+				require.ErrorContains(t, err, "outside 1-65535")
+				assert.NotContains(t, req.Headers, routing.KVCachePrefillHeader)
+				return
+			}
+			require.NoError(t, err)
+			assertPrefillHeader(t, req, "10.0.0.2", tc.wantPort)
+		})
+	}
+}
+
+// A source whose P2P port falls outside 1-65535 is not a candidate and does
+// not pin the pool maximum, so a source with fewer cached blocks is chosen.
+func TestProduce_P2PPortOverflowSource_NotChosen(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 65535})
+
+	overflow := endpoint(p, "pod-over", "10.0.0.1", 8)
+	overflow.GetMetadata().RankIndex = 1
+	valid := endpoint(p, "pod-ok", "10.0.0.2", 4)
+
+	req := &scheduling.InferenceRequest{RequestID: "req-over"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{overflow, valid}))
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	require.True(t, ok)
+	assert.Equal(t, "10.0.0.2", best.address)
+	assert.Equal(t, 65535, best.p2pPort)
+}
+
+// With every source outside the range nothing is stashed.
+func TestProduce_P2PPortOverflowOnlySource_NoStash(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 65535})
+
+	overflow := endpoint(p, "pod-over", "10.0.0.1", 8)
+	overflow.GetMetadata().RankIndex = 1
+
+	req := &scheduling.InferenceRequest{RequestID: "req-over-only"}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{overflow}))
+
+	_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+	assert.False(t, ok)
+}
+
+// The source is written next to the fields the body already carries, such as
+// a coordinator's remote_decoder block.
+func TestPreRequest_KeepsExistingKVTransferParams(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-keep", peer("10.0.0.2", 48))
+	req.Body = bodyWith(map[string]any{
+		reqcommon.FieldKVTransferParams: map[string]any{
+			reqcommon.FieldRemoteDecoder: map[string]any{reqcommon.FieldKVRequestID: "K"},
+		},
+	})
+
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
+	assert.Equal(t, map[string]any{reqcommon.FieldKVRequestID: "K"},
+		kvTransferParams(req.Body)[reqcommon.FieldRemoteDecoder])
+}
+
+// A body that pulls from a prefill pod (remote_prefiller) is a decode request
+// after prefill; no source is written next to it.
+func TestPreRequest_RemotePrefillerInBody_NoSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-decode-after-prefill", peer("10.0.0.2", 48))
+	req.Body = bodyWith(map[string]any{
+		reqcommon.FieldKVTransferParams: map[string]any{
+			reqcommon.FieldRemotePrefiller: map[string]any{reqcommon.FieldKVRequestID: "K"},
+		},
+	})
+
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+	assertNoSource(t, req)
+	assert.Contains(t, kvTransferParams(req.Body), reqcommon.FieldRemotePrefiller)
+}
+
+// The OpenAI parser keeps kv_transfer_params as json.RawMessage; the block is
+// decoded for the remote_prefiller check and stored back as an object with the
+// client's keys intact when a source is written.
+func TestPreRequest_RawKVTransferParams(t *testing.T) {
+	t.Run("remote_prefiller skips the source", func(t *testing.T) {
+		ctx := utils.NewTestContext(t)
+		p := New("test", Config{MinCachedTokenDelta: 1})
+		req := preRequest(p, "req-raw-prefiller", peer("10.0.0.2", 48))
+		req.Body = bodyWith(map[string]any{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"remote_prefiller":{"kv_request_id":"K"}}`),
+		})
+
+		require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+		assertNoSource(t, req)
+		assert.False(t, req.Body.Mutated)
+	})
+
+	t.Run("client keys kept next to the source", func(t *testing.T) {
+		ctx := utils.NewTestContext(t)
+		p := New("test", Config{MinCachedTokenDelta: 1})
+		req := preRequest(p, "req-raw-keep", peer("10.0.0.2", 48))
+		req.Body = bodyWith(map[string]any{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"max_load_tokens":5}`),
+		})
+
+		require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+		assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
+		assert.Equal(t, json.Number("5"), kvTransferParams(req.Body)["max_load_tokens"])
+	})
+}
+
+// A request without a parsed body gets the prefill headers and no panic.
+func TestPreRequest_NilBody(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-nil-body", peer("10.0.0.3", 64))
+	req.Body = nil
+	result := prefillOnly(endpoint(p, "pod-b", "10.0.0.2", 1))
+
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+}
+
+// A raw (unparsed) body cannot carry a source; it is left as received.
+func TestPreRequest_RawBody_NotMutated(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-raw", peer("10.0.0.2", 48))
+	req.Body = &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload([]byte(`{}`))}
+
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+	assert.False(t, req.Body.Mutated)
+	// The header announces a block in the body, so a body that cannot carry
+	// one gets no header either.
+	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+}
+
+// Nil request headers are allocated when the prefill headers are set.
+func TestPreRequest_NilHeaders(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-nil-headers", nil)
+	req.Headers = nil
+	result := prefillOnly(endpoint(p, "pod-b", "10.0.0.2", 1))
+
+	require.NoError(t, p.PreRequest(ctx, req, result))
+
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+// Factory wires p2pConnectorPort; default is defaultP2PConnectorPort,
+// and a port outside the TCP range is rejected.
+func TestPluginFactory_P2PConnectorPort(t *testing.T) {
+	def, err := PluginFactory("d", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, defaultP2PConnectorPort, def.(*Producer).p2pConnectorPort)
+
+	custom, err := PluginFactory("c", json.NewDecoder(strings.NewReader(`{"p2pConnectorPort": 9000}`)), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 9000, custom.(*Producer).p2pConnectorPort)
+
+	_, err = PluginFactory("big", json.NewDecoder(strings.NewReader(`{"p2pConnectorPort": 70000}`)), nil)
+	require.Error(t, err)
+	_, err = PluginFactory("zero", json.NewDecoder(strings.NewReader(`{"p2pConnectorPort": 0}`)), nil)
+	assert.Error(t, err)
+	_, err = PluginFactory("neg", json.NewDecoder(strings.NewReader(`{"p2pConnectorPort": -1}`)), nil)
+	require.Error(t, err)
 }
 
 // Consumes declares the PrefixCacheMatchInfo dependency name-bound to the
@@ -407,21 +752,22 @@ func TestConsumes_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	assert.True(t, ok)
 }
 
-// IPv6 endpoint addresses are emitted bracketed via net.JoinHostPort so the
-// sidecar's host:port validation accepts them.
-func TestPreRequest_IPv6HeaderBracketed(t *testing.T) {
+// An IPv6 source is written as a bare address in remote_host, the form vLLM
+// dials; the prefill address header is bracketed via net.JoinHostPort so the
+// sidecar's host:port validation accepts it.
+func TestPreRequest_IPv6(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
-	best := net.JoinHostPort("fd00::2", "8080")
-	req := &scheduling.InferenceRequest{RequestID: "req-ipv6", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: best, cachedTokens: 48})
+	req := preRequest(p, "req-ipv6", peer("fd00::2", 48))
+	result := prefillOnly(endpoint(p, "pod-a", "fd00::1", 1))
 
-	_ = p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "fd00::1", 1)))
+	require.NoError(t, p.PreRequest(ctx, req, result))
 
-	assert.Equal(t, best, req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "fd00::2", defaultP2PConnectorPort)
+	assertPrefillHeader(t, req, "fd00::1", defaultP2PConnectorPort)
 	// Round-trips through the same validation the sidecar applies.
-	_, _, err := net.SplitHostPort(req.Headers[routing.KVCacheSourceHeader])
+	_, _, err := net.SplitHostPort(req.Headers[routing.KVCachePrefillHeader])
 	assert.NoError(t, err)
 }
 
@@ -444,10 +790,9 @@ func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1, PrefillProfileName: "P"})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-custom-profile", Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: 48})
+	req := preRequest(p, "req-custom-profile", peer("10.0.0.2", 48))
 
-	// Best match IS the renamed prefill pod -> pulling from self, no header.
+	// Best match IS the renamed prefill pod -> pulling from self, no source.
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
@@ -455,8 +800,34 @@ func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
 			"P":      {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
 		},
 	}
-	_ = p.PreRequest(ctx, req, result)
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+// A prefillProfileName that matches no profile result sets no prefill header,
+// and the decision log names the configured profile so the mismatch is
+// visible from the EPP side.
+func TestPreRequest_DecisionLogNamesUnmatchedPrefillProfile(t *testing.T) {
+	var lines []string
+	capture := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: int(logging.DEFAULT)})
+	ctx := log.IntoContext(utils.NewTestContext(t), capture)
+	p := New("test", Config{MinCachedTokenDelta: 1, PrefillProfileName: "P"})
+
+	req := preRequest(p, "req-unmatched-profile", peer("10.0.0.2", 48))
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assert.Empty(t, req.Headers[routing.KVCachePrefillHeader])
+
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], `"prefillProfile"="P"`)
+	assert.Contains(t, lines[0], `"prefillEndpoint"=false`)
 }
 
 // Factory wires a custom prefillProfileName; default is "prefill".
@@ -741,12 +1112,12 @@ func TestPreRequest_ComputingSideCountsAllTiers(t *testing.T) {
 	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
 	computing := tierEndpoint(p, "pod-comp", "10.0.0.2", 5, map[string]int{"gpu": 5})
 
-	req := &scheduling.InferenceRequest{RequestID: "req-comp-tiers"}
+	req := &scheduling.InferenceRequest{RequestID: "req-comp-tiers", Body: bodyWith(map[string]any{})}
 	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
-	_ = p.PreRequest(ctx, req, decodeOnly(computing))
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
 
 	// source 6 cpu blocks minus computing 5 (gpu, but local) = 1 block < delta.
-	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+	assertNoSource(t, req)
 }
 
 func TestPreRequest_TierDataWithoutConfirmedCountUsesCachedCount(t *testing.T) {
@@ -764,29 +1135,29 @@ func TestPreRequest_TierDataWithoutConfirmedCountUsesCachedCount(t *testing.T) {
 			WithCachedBlockCount(5).
 			WithCachedBlocksByTier(map[string]int{"gpu": 5}))
 
-	req := &scheduling.InferenceRequest{RequestID: "req-tier-default", Headers: map[string]string{}}
+	req := &scheduling.InferenceRequest{RequestID: "req-tier-default", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
 	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
 	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
 
 	// The source leads by one block, below the two-block delta. A producer that
 	// publishes tier data without setting a separate confirmed count preserves
 	// its cached count, so the pull remains suppressed.
-	assert.Empty(t, req.Headers[routing.KVCacheSourceHeader])
+	assertNoSource(t, req)
 }
 
-func TestPreRequest_SpeculativeComputingCacheDoesNotSuppressHeader(t *testing.T) {
+func TestPreRequest_SpeculativeComputingCacheDoesNotSuppressSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1})
 
 	src := tierEndpoint(p, "pod-src", "10.0.0.1", 6, map[string]int{cpuDeviceTier: 6})
 	computing := tierEndpointWithConfirmed(p, "pod-comp", "10.0.0.2", 6, 0,
 		map[string]int{attrprefix.SpeculativeTierKey: 6})
-	req := &scheduling.InferenceRequest{RequestID: "req-speculative-computing", Headers: map[string]string{}}
+	req := &scheduling.InferenceRequest{RequestID: "req-speculative-computing", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
 
 	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{src, computing}))
 	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
 
-	assert.Equal(t, "10.0.0.1:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.1", defaultP2PConnectorPort)
 }
 
 // ---- cost model ----
@@ -817,9 +1188,9 @@ func queuedEndpoint(p *Producer, name, address string, cachedBlocks, waiting int
 }
 
 func costRequest(p *Producer, id string, sourceCachedTokens, sourceWaiting int) *scheduling.InferenceRequest {
-	req := &scheduling.InferenceRequest{RequestID: id, Headers: map[string]string{}}
-	req.PutAttribute(p.attrKey(), &bestMatchPeer{hostPort: "10.0.0.2:8080", cachedTokens: sourceCachedTokens, waitingQueue: sourceWaiting})
-	return req
+	best := peer("10.0.0.2", sourceCachedTokens)
+	best.waitingQueue = sourceWaiting
+	return preRequest(p, id, best)
 }
 
 // Factory parses the optional costModel block.
@@ -886,7 +1257,7 @@ func TestNew_CostModel_DefaultsBusyQueueThreshold(t *testing.T) {
 	req := costRequest(p, "req-new-default", 8192, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 0)))
 
-	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
 // Both pods idle, 8K delta: gain 8192*(19-3.9) us = 124 ms > t0 15 ms -> pull.
@@ -897,29 +1268,41 @@ func TestPreRequest_CostModel_IdlePull(t *testing.T) {
 	req := costRequest(p, "req-idle", 8192, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 0)))
 
-	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
 // Both pods idle, 512-token delta: gain 7.7 ms < t0 15 ms -> recompute.
-func TestPreRequest_CostModel_IdleSmallDelta_NoHeader(t *testing.T) {
+func TestPreRequest_CostModel_IdleSmallDelta_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1, CostModel: rigCostModel()})
 
 	req := costRequest(p, "req-small", 512, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 0)))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
 }
 
 // Busy destination adds requeue: 8K gain 124 ms < 15 + 500 -> recompute.
-func TestPreRequest_CostModel_BusyDestination_NoHeader(t *testing.T) {
+func TestPreRequest_CostModel_BusyDestination_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1, CostModel: rigCostModel()})
 
 	req := costRequest(p, "req-busy-d", 8192, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 1)))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
+}
+
+// A declined pull leaves the prefill header in place.
+func TestPreRequest_CostModel_Declined_KeepsPrefillHeader(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, CostModel: rigCostModel()})
+
+	req := costRequest(p, "req-busy-d-pd", 8192, 0)
+	require.NoError(t, p.PreRequest(ctx, req, prefillOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 1))))
+
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.1", defaultP2PConnectorPort)
 }
 
 // Busy destination, 64K delta: gain 990 ms > 515 -> pull.
@@ -930,18 +1313,18 @@ func TestPreRequest_CostModel_BusyDestination_LongDelta_Pull(t *testing.T) {
 	req := costRequest(p, "req-busy-d-long", 65536, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 1)))
 
-	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
 // Busy source adds srcwait: 8K gain 124 ms < 15 + 350 -> recompute.
-func TestPreRequest_CostModel_BusySource_NoHeader(t *testing.T) {
+func TestPreRequest_CostModel_BusySource_NoSource(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := New("test", Config{MinCachedTokenDelta: 1, CostModel: rigCostModel()})
 
 	req := costRequest(p, "req-busy-s", 8192, 1)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 0)))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
 }
 
 // busyQueueThreshold: a queue below the threshold does not count as busy.
@@ -954,7 +1337,7 @@ func TestPreRequest_CostModel_BusyQueueThreshold(t *testing.T) {
 	req := costRequest(p, "req-threshold", 8192, 2)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 2)))
 
-	assert.Equal(t, "10.0.0.2:8080", req.Headers[routing.KVCacheSourceHeader])
+	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
 // runningEndpoint builds a candidate with the given running-request count.
@@ -987,7 +1370,7 @@ func TestPreRequest_CostModel_FleetWeightScalesWithRunning(t *testing.T) {
 		req := costRequest(p, "req-fleet", 512, 0)
 		_ = p.PreRequest(ctx, req, decodeOnly(runningEndpoint(p, "pod-a", "10.0.0.1", tc.running, 0)))
 
-		_, set := req.Headers[routing.KVCacheSourceHeader]
+		set := remoteKVSource(req) != nil
 		assert.Equal(t, tc.pull, set, "fleetWeight=%v running=%d", tc.w, tc.running)
 	}
 }
@@ -1007,7 +1390,7 @@ func TestPreRequest_CostModel_FleetWeightOutweighsRequeue(t *testing.T) {
 		req := costRequest(p, "req-fleet-busy", 8192, 0)
 		_ = p.PreRequest(ctx, req, decodeOnly(runningEndpoint(p, "pod-a", "10.0.0.1", 4, 1)))
 
-		_, set := req.Headers[routing.KVCacheSourceHeader]
+		set := remoteKVSource(req) != nil
 		assert.Equal(t, tc.pull, set, "fleetWeight=%v", tc.w)
 	}
 }
@@ -1020,7 +1403,7 @@ func TestPreRequest_CostModel_RespectsMinCachedTokenDelta(t *testing.T) {
 	req := costRequest(p, "req-floor", 8192, 0)
 	_ = p.PreRequest(ctx, req, decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 0)))
 
-	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
+	assertNoSource(t, req)
 }
 
 // Produce stashes the sampled source's waiting-queue depth for PreRequest.
@@ -1132,4 +1515,13 @@ func TestProduce_CostModel_StashesChosenSourceState(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 7*testBlockSize, best.cachedTokens)
 	assert.Equal(t, 0, best.waitingQueue)
+}
+
+// New falls back to the default for any port outside the TCP range, as it
+// does for the token floor; the factory rejects such a configuration before
+// New sees it.
+func TestNew_P2PConnectorPortOutOfRangeDefaults(t *testing.T) {
+	for _, port := range []int{0, -5, 70000} {
+		assert.Equal(t, defaultP2PConnectorPort, New("test", Config{P2PConnectorPort: port}).p2pConnectorPort, "port %d", port)
+	}
 }

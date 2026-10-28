@@ -62,10 +62,10 @@ func newNIXLV2RequestID() (string, error) {
 	return id.String(), nil
 }
 
-func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
+func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, p2p p2pRouting, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
 
-	original, body, ok := s.readJSONBody(r, w)
+	original, body, ok := s.requestBody(r, w, p2p)
 	if !ok {
 		return
 	}
@@ -88,7 +88,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		transferID := "tx" + uuidStr
 		// Reuse the client snapshot when the parallel helper creates its request state.
 		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
-		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, kvCacheSource, apiType)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, p2p.source, apiType)
 		return
 	}
 
@@ -172,7 +172,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), p2p.source)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -500,7 +500,7 @@ func decodeResponseWriter(w http.ResponseWriter, cachedTokens int, rewrite, stre
 // two upstream calls in parallel so decode's block allocation overlaps prefill.
 func (s *Server) runNIXLProtocolV2WriteParallel(
 	w http.ResponseWriter, r *http.Request, original []byte,
-	body map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
+	body map[string]any, uuidStr, transferID, prefillPodHostPort string, source *kvSource,
 	apiType reqcommon.APIType,
 ) {
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
@@ -568,7 +568,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}
 	}
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), source)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 

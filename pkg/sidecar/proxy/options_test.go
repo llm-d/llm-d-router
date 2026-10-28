@@ -664,30 +664,6 @@ func TestToolCallingTelemetryOption(t *testing.T) {
 	require.True(t, opts.EnableToolCallingTelemetry)
 }
 
-func TestP2PConnectorPort(t *testing.T) {
-	t.Run("defaults to 7777", func(t *testing.T) {
-		opts := NewOptions()
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
-	})
-
-	t.Run("env var overrides default", func(t *testing.T) {
-		t.Setenv(envP2PConnectorPort, "9500")
-		opts := NewOptions()
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-		require.Equal(t, 9500, opts.P2PConnectorPort)
-	})
-
-	t.Run("rejects out-of-range port", func(t *testing.T) {
-		opts := NewOptions()
-		opts.P2PConnectorPort = 70000
-		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
-	})
-}
-
 func TestValidateOffloadingDP(t *testing.T) {
 	t.Run("allows offloading with data-parallel-size > 1", func(t *testing.T) {
 		opts := NewOptions()
@@ -701,24 +677,6 @@ func TestValidateOffloadingDP(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 1
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-	})
-
-	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
-		opts := NewOptions()
-		opts.KVConnector = constants.KVConnectorOffloading
-		opts.DataParallelSize = 4
-		opts.P2PConnectorPort = 65533
-		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "exceeds 65535")
-	})
-
-	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
-		opts := NewOptions()
-		opts.KVConnector = constants.KVConnectorOffloading
-		opts.DataParallelSize = 4
-		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
 	})

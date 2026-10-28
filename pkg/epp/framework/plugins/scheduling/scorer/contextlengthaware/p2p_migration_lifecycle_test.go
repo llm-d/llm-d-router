@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	concretedatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -132,7 +132,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	require.Len(t, coldCandidates, 1)
 	assert.Equal(t, "p-long", coldCandidates[0].GetMetadata().ID.Name)
 	require.NoError(t, p2p.PreRequest(ctx, coldRequest, migrationPrefillResult(coldCandidates[0])))
-	assert.NotContains(t, coldRequest.Headers, routing.KVCacheSourceHeader)
+	assert.Nil(t, migrationKVSource(coldRequest))
 
 	// The next turn has 102400 CPU-tier tokens on P-long and 1024 new tokens.
 	// Produce publishes that request-wide reusable floor before filtering, so
@@ -151,7 +151,16 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 	require.Len(t, warmCandidates, 1)
 	assert.Equal(t, "p-short", warmCandidates[0].GetMetadata().ID.Name)
 	require.NoError(t, p2p.PreRequest(ctx, followUpRequest, migrationPrefillResult(warmCandidates[0])))
-	assert.Equal(t, migrationLongSourceAddress+":8080", followUpRequest.Headers[routing.KVCacheSourceHeader])
+	assert.Equal(t, migrationLongSourceAddress, migrationKVSource(followUpRequest)[reqcommon.FieldRemoteHost])
+}
+
+// migrationKVSource returns the kv_transfer_params.remote_kv_source block the
+// p2p-source-producer wrote into the request body, or nil when absent.
+func migrationKVSource(request *scheduling.InferenceRequest) map[string]any {
+	payload, _ := request.Body.Payload.(fwkrh.PayloadMap)
+	params, _ := payload[reqcommon.FieldKVTransferParams].(map[string]any)
+	source, _ := params[reqcommon.FieldRemoteKVSource].(map[string]any)
+	return source
 }
 
 func migrationPrefiller(
@@ -179,6 +188,7 @@ func migrationTokenizedRequest(requestID string, tokenCount int) *scheduling.Inf
 		RequestID: requestID,
 		Headers:   map[string]string{},
 		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.PayloadMap{},
 			TokenizedRequest: &fwkrh.TokenizedRequest{
 				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
 			},

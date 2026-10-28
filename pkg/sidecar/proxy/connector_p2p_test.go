@@ -18,13 +18,17 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 
@@ -33,15 +37,31 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
+// p2pConnectorPort is the OffloadingConnector P2P tier port of data parallel
+// rank 0, the value EPP's p2p-source-producer computes for an endpoint on
+// rank 0.
+const p2pConnectorPort = 7777
+
+// prefillP2PHostPort returns the P2P tier address EPP sets for the prefill pod
+// at prefillHostPort: the same host on the rank-0 tier port.
+func prefillP2PHostPort(prefillHostPort string) string {
+	return net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(p2pConnectorPort))
+}
+
+// addPrefillRouting routes req to prefillHostPort with the P2P tier address the
+// offloading connector requires on a prefill request. The other connectors
+// strip the address header unread.
+func addPrefillRouting(req *http.Request, prefillHostPort string) {
+	req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+	req.Header.Add(routing.KVCachePrefillHeader, prefillP2PHostPort(prefillHostPort))
+}
+
 var _ = Describe("P2P Connector", func() {
 
 	var testInfo *sidecarTestInfo
 
-	const p2pConnectorPort = 7777
-
 	BeforeEach(func() {
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
-		testInfo.proxy.config.P2PConnectorPort = p2pConnectorPort
 	})
 
 	It("should send both requests with correct PD Multi Tier kv_transfer_params", func() {
@@ -52,7 +72,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+		addPrefillRouting(req, prefillHostPort)
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -75,10 +95,10 @@ var _ = Describe("P2P Connector", func() {
 		Expect(preq).To(HaveKey(reqcommon.FieldKVTransferParams))
 		prefillKVParams, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(prefillKVParams).ToNot(HaveKey(requestFieldRemotePrefiller))
-		prefillDecode, ok := prefillKVParams[requestFieldRemoteDecoder].(map[string]any)
+		Expect(prefillKVParams).ToNot(HaveKey(reqcommon.FieldRemotePrefiller))
+		prefillDecode, ok := prefillKVParams[reqcommon.FieldRemoteDecoder].(map[string]any)
 		Expect(ok).To(BeTrue())
-		prefillKVRequestID := prefillDecode[requestFieldKVRequestID]
+		prefillKVRequestID := prefillDecode[reqcommon.FieldKVRequestID]
 		Expect(prefillKVRequestID).ToNot(BeEmpty())
 		Expect(prefillDecode).ToNot(HaveKey(reqcommon.FieldRemoteHost))
 		Expect(prefillDecode).ToNot(HaveKey(reqcommon.FieldRemotePort))
@@ -98,10 +118,10 @@ var _ = Describe("P2P Connector", func() {
 		Expect(dreq).To(HaveKey(reqcommon.FieldKVTransferParams))
 		decodeKVParams, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodeKVParams).ToNot(HaveKey(requestFieldRemoteDecoder))
-		decodePrefill, ok := decodeKVParams[requestFieldRemotePrefiller].(map[string]any)
+		Expect(decodeKVParams).ToNot(HaveKey(reqcommon.FieldRemoteDecoder))
+		decodePrefill, ok := decodeKVParams[reqcommon.FieldRemotePrefiller].(map[string]any)
 		Expect(ok).To(BeTrue())
-		Expect(decodePrefill[requestFieldKVRequestID]).To(Equal(prefillKVRequestID))
+		Expect(decodePrefill[reqcommon.FieldKVRequestID]).To(Equal(prefillKVRequestID))
 		Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
 		Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 
@@ -113,6 +133,51 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	// Encoder disaggregation runs the P/D stage after the encoder stage; each
+	// EC connector must hand the prefill P2P port on to it. Only the NIXL
+	// connector writes ec_transfer_params into the prefill request.
+	DescribeTable("should carry the prefill P2P port through the encoder stage",
+		func(ecConnector string, prefillCarriesECParams bool) {
+			var encoderRequests atomic.Int32
+			encoderResponse := statusHandler(http.StatusOK, `{"choices":[{"message":{"content":""}}],"ec_transfer_params":{"hash-1":{"peer_host":"10.0.0.1","peer_port":5500}}}`)
+			encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				encoderRequests.Add(1)
+				encoderResponse.ServeHTTP(w, r)
+			}))
+			DeferCleanup(encoderBackend.Close)
+			testInfo.proxy = NewProxy(Config{Port: "0", DecoderURL: testInfo.decodeURL, KVConnector: constants.KVConnectorOffloading, ECConnector: ecConnector})
+			proxyBaseAddr := testInfo.startProxy()
+
+			// One image, so the encoder stage runs.
+			body, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+			Expect(err).ToNot(HaveOccurred())
+			prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+			postChatCompletions(proxyBaseAddr, string(body), map[string]string{
+				routing.PrefillEndpointHeader:  prefillHostPort,
+				routing.KVCachePrefillHeader:   prefillP2PHostPort(prefillHostPort),
+				routing.EncoderEndpointsHeader: encoderBackend.URL[len("http://"):],
+			})
+
+			Eventually(func() int {
+				return len(testInfo.prefillHandler.GetCompletionRequests())
+			}).Should(Equal(1))
+			Expect(encoderRequests.Load()).To(BeNumerically("==", 1))
+			preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+			if prefillCarriesECParams {
+				Expect(preq).To(HaveKey(reqcommon.FieldECTransferParams))
+			}
+
+			decodePrefill := decodeRemotePrefiller(testInfo)
+			Expect(decodePrefill[reqcommon.FieldRemoteHost]).To(Equal(extractHost(prefillHostPort)))
+			Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		},
+		Entry("ec-nixl", constants.ECConnectorNIXL, true),
+		Entry("ec-example", constants.ECExampleConnector, false),
+	)
+
 	It("should strip min_tokens from the prefill request and restore it in decode", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
@@ -121,7 +186,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+		addPrefillRouting(req, prefillHostPort)
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -174,7 +239,7 @@ var _ = Describe("P2P Connector", func() {
 		body := chatCompletionsRequestBodyWithMaxCompletionCap
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 		Expect(err).ToNot(HaveOccurred())
-		req.Header.Add(routing.PrefillEndpointHeader, blockingPrefill.URL[len("http://"):])
+		addPrefillRouting(req, blockingPrefill.URL[len("http://"):])
 
 		done := make(chan *http.Response, 1)
 		go func() {
@@ -213,7 +278,7 @@ var _ = Describe("P2P Connector", func() {
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
 			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionCap)))
 		Expect(err).ToNot(HaveOccurred())
-		req.Header.Add(routing.PrefillEndpointHeader, failingPrefill.URL[len("http://"):])
+		addPrefillRouting(req, failingPrefill.URL[len("http://"):])
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -237,7 +302,7 @@ var _ = Describe("P2P Connector", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
-		req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
+		addPrefillRouting(req, prefillHostPort)
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
@@ -278,149 +343,142 @@ var _ = DescribeTable("p2pPullAvailable",
 	Entry("the flag has no effect on shared-storage", constants.KVConnectorSharedStorage, true, false),
 )
 
-var _ = DescribeTable("p2pPortFor",
-	func(dpSize, dpBasePort int, target string, want int) {
-		s := &Server{
-			dpBasePort: dpBasePort,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: dpSize},
-		}
-		Expect(s.p2pPortFor(target)).To(Equal(want))
-	},
-	Entry("single DP uses the base port regardless of target", 1, 8000, "10.0.0.5:8003", 7777),
-	Entry("rank 0 target uses the base port", 4, 8000, "10.0.0.5:8000", 7777),
-	Entry("rank 2 target offsets by 2", 4, 8000, "10.0.0.5:8002", 7779),
-	Entry("last rank target offsets by dpSize-1", 4, 8000, "10.0.0.5:8003", 7780),
-	Entry("port below the base falls back to the base port", 4, 8000, "10.0.0.5:7999", 7777),
-	Entry("port beyond the rank range falls back to the base port", 4, 8000, "10.0.0.5:8004", 7777),
-	Entry("target without a port falls back to the base port", 4, 8000, "10.0.0.5", 7777),
-	Entry("unparsable port falls back to the base port", 4, 8000, "10.0.0.5:http", 7777),
-	Entry("zero base port disables derivation", 4, 0, "10.0.0.5:8002", 7777),
-	Entry("scheme-prefixed target derives the rank", 4, 8000, "http://10.0.0.5:8002", 7779),
-)
-
-var _ = Describe("p2pSourceParams", func() {
-	It("offsets remote_port by the source endpoint's DP rank", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
-		}
-		params := s.p2pSourceParams("10.0.0.9:8002")
-		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
-		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
-		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
-	})
-
-	It("keeps rank derivation on Clone, which rank servers rely on", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
-		}
-		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
-		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
-	})
-
-	It("derives both host and port from a scheme-prefixed source", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
-		}
-		params := s.p2pSourceParams("http://10.0.0.9:8002")
-		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
-		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
-	})
-})
-
 var _ = Describe("addP2PPullToPrefill", func() {
-	It("injects a pull when source and prefiller are different ranks on the same pod", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
-		}
-		params := map[string]any{}
+	It("copies the source block EPP wrote", func() {
+		params := map[string]any{reqcommon.FieldRemoteDecoder: map[string]any{reqcommon.FieldKVRequestID: "k"}}
+		source := &kvSource{kvRequestID: "k2", p2pPeer: p2pPeer{host: "10.0.6.107", port: 7780}}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8007")
+		addP2PPullToPrefill(params, source)
 
-		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.0.6.107"))
-		Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
+		Expect(params).To(HaveLen(2))
+		Expect(params[reqcommon.FieldRemoteKVSource]).To(Equal(map[string]any{
+			reqcommon.FieldKVRequestID: "k2",
+			reqcommon.FieldRemoteHost:  "10.0.6.107",
+			reqcommon.FieldRemotePort:  7780,
+		}))
 	})
 
-	It("skips the pull when source and prefiller are the same endpoint", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
-		}
-		params := map[string]any{}
+	It("leaves the params untouched without a source", func() {
+		params := map[string]any{reqcommon.FieldRemoteDecoder: map[string]any{reqcommon.FieldKVRequestID: "k"}}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8003")
+		addP2PPullToPrefill(params, nil)
 
-		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
+		Expect(params).To(HaveLen(1))
+		Expect(params).NotTo(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
-
-	It("skips the pull when the endpoints differ only by scheme", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
-		}
-		params := map[string]any{}
-
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8003")
-
-		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
-	})
-
-	It("still injects across ranks when the source is scheme-qualified", func() {
-		s := &Server{
-			dpBasePort: 8000,
-			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
-		}
-		params := map[string]any{}
-
-		// https exercises the normalized passthrough: the injected params must
-		// derive from the bare host:port, not the scheme-qualified original.
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8007")
-
-		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
-		Expect(ok).To(BeTrue())
-		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.0.6.107"))
-		Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
-	})
-	DescribeTable("IPv6 endpoint identity",
-		func(source, prefiller string, wantPull bool) {
-			s := &Server{
-				dpBasePort: 8000,
-				config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
-			}
-			params := map[string]any{}
-			s.addP2PPullToPrefill(params, source, prefiller)
-			if !wantPull {
-				Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
-				return
-			}
-			p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
-			Expect(ok).To(BeTrue())
-			Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("2001:db8::1"))
-			Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
-		},
-		Entry("expanded address is the same endpoint", "[2001:0db8:0:0:0:0:0:1]:8003", "[2001:db8::1]:8003", false),
-		Entry("uppercase URL is the same endpoint", "https://[2001:DB8::1]:8003", "[2001:db8::1]:8003", false),
-		Entry("zone is preserved for equivalent addresses", "http://[fe80:0:0:0:0:0:0:1%25eth0]:8003", "[fe80::1%eth0]:8003", false),
-		Entry("another rank remains a peer", "https://[2001:0DB8::1]:8003", "[2001:db8::1]:8007", true),
-	)
 })
 
-var _ = DescribeTable("normalizeEndpoint",
-	func(in, want string) {
-		Expect(normalizeEndpoint(in)).To(Equal(want))
+var _ = DescribeTable("parsePrefillP2P",
+	func(value string, want *p2pPeer) {
+		Expect(parsePrefillP2P(logr.Discard(), value)).To(Equal(want))
 	},
-	Entry("bare host:port unchanged", "10.0.6.107:8003", "10.0.6.107:8003"),
-	Entry("http scheme stripped", "http://10.0.6.107:8003", "10.0.6.107:8003"),
-	Entry("https scheme stripped", "https://10.0.6.107:8003", "10.0.6.107:8003"),
-	Entry("IPv6 literal canonicalized", "[::1]:8003", "[::1]:8003"),
-	Entry("IPv6 expanded address", "[2001:0DB8:0:0:0:0:0:1]:8003", "[2001:db8::1]:8003"),
-	Entry("IPv6 URL zone", "http://[fe80:0:0:0:0:0:0:1%25eth0]:8003", "[fe80::1%eth0]:8003"),
-	Entry("hostname unchanged", "model-worker:8003", "model-worker:8003"),
-	Entry("portless value returned as-is", "10.0.6.107", "10.0.6.107"),
-	Entry("portless URL reduced to host", "http://10.0.6.107", "10.0.6.107"),
+	Entry("absent header yields no address, which fails the request", "", nil),
+	Entry("rank-0 port", "10.0.0.1:7777", &p2pPeer{host: "10.0.0.1", port: 7777}),
+	Entry("offset port", "10.0.0.1:7780", &p2pPeer{host: "10.0.0.1", port: 7780}),
+	Entry("IPv6", "[fd00::1]:7777", &p2pPeer{host: "fd00::1", port: 7777}),
+	Entry("no port", "10.0.0.1", nil),
+	Entry("no host", ":7777", nil),
+	Entry("port not a number", "10.0.0.1:http", nil),
+	Entry("port zero", "10.0.0.1:0", nil),
+	Entry("port above the TCP range", "10.0.0.1:70000", nil),
 )
+
+var _ = DescribeTable("p2pPeer.String",
+	func(peer *p2pPeer, want string) {
+		Expect(peer.String()).To(Equal(want))
+	},
+	Entry("IPv4", &p2pPeer{host: "10.0.0.1", port: 7777}, "10.0.0.1:7777"),
+	Entry("IPv6 is bracketed", &p2pPeer{host: "fd00::1", port: 7777}, "[fd00::1]:7777"),
+	Entry("absent peer", (*p2pPeer)(nil), ""),
+)
+
+// decodeRemotePrefiller returns the remote_prefiller block of the one decode
+// request the decode backend received.
+func decodeRemotePrefiller(testInfo *sidecarTestInfo) map[string]any {
+	GinkgoHelper()
+	decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
+	Expect(decodeReqs).To(HaveLen(1))
+	kvParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
+	Expect(ok).To(BeTrue())
+	prefiller, ok := kvParams[reqcommon.FieldRemotePrefiller].(map[string]any)
+	Expect(ok).To(BeTrue())
+	return prefiller
+}
+
+var _ = Describe("P2P prefill address header", func() {
+
+	var testInfo *sidecarTestInfo
+
+	BeforeEach(func() {
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
+	})
+
+	// remote_prefiller is the header's host and port, not the serving address
+	// the sidecar connected to.
+	It("copies the address from the header into remote_prefiller and strips the header", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		postChatCompletions(proxyBaseAddr, chatCompletionsRequestBodyWithMaxCompletionCap, map[string]string{
+			routing.PrefillEndpointHeader: prefillHostPort,
+			routing.KVCachePrefillHeader:  "10.0.0.7:7779",
+		})
+
+		prefiller := decodeRemotePrefiller(testInfo)
+		Expect(prefiller[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.7"))
+		Expect(prefiller[reqcommon.FieldRemotePort]).To(BeNumerically("==", 7779))
+		for _, headers := range [][]http.Header{
+			testInfo.prefillHandler.GetCompletionHeaders(),
+			testInfo.decodeHandler.GetCompletionHeaders(),
+		} {
+			Expect(headers).To(HaveLen(1))
+			Expect(headers[0]).ToNot(HaveKey(http.CanonicalHeaderKey(routing.KVCachePrefillHeader)))
+			Expect(headers[0]).ToNot(HaveKey(http.CanonicalHeaderKey(routing.PrefillEndpointHeader)))
+		}
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	// expectRejected sends a prefill-routed request with the given address
+	// header value ("" for none) and expects the sidecar to fail it before any
+	// pod request is sent.
+	expectRejected := func(addressHeader string) {
+		GinkgoHelper()
+		proxyBaseAddr := testInfo.startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
+			bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionCap)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		if addressHeader != "" {
+			req.Header.Add(routing.KVCachePrefillHeader, addressHeader)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close()
+
+		Expect(resp.StatusCode).To(Equal(http.StatusInternalServerError))
+		respBody, err := io.ReadAll(resp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(respBody)).To(ContainSubstring(routing.KVCachePrefillHeader))
+		Expect(testInfo.prefillHandler.GetCompletionRequests()).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionRequests()).To(BeEmpty())
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	}
+
+	It("fails the request without the header", func() {
+		expectRejected("")
+	})
+
+	It("fails the request when the header is malformed", func() {
+		expectRejected("not-a-host-port")
+	})
+
+	It("fails the request when the header has no port", func() {
+		expectRejected("10.0.0.7")
+	})
+})

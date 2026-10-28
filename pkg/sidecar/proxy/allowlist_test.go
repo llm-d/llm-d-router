@@ -132,6 +132,7 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.IsAllowed("malicious.example.com:8080")).To(BeTrue())
 			Expect(validator.IsAllowed("10.0.0.1:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("http://evil.host/ssrf")).To(BeTrue())
+			Expect(validator.IsAllowedHost("malicious.example.com")).To(BeTrue())
 		})
 	})
 
@@ -304,6 +305,7 @@ var _ = Describe("AllowlistValidator", func() {
 				enabled:        true,
 				namespace:      "test-namespace",
 				allowedTargets: set.New[string](),
+				allowedHosts:   set.New[string](),
 			}
 			pod := &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -329,6 +331,14 @@ var _ = Describe("AllowlistValidator", func() {
 		It("should block allowlisted hosts on ports outside the pool target ports", func() {
 			Expect(validator.IsAllowed("10.244.1.100:9090")).To(BeFalse())
 			Expect(validator.IsAllowed("valid-pod:9999")).To(BeFalse())
+		})
+
+		It("should allow pod hosts on any port when checked by host", func() {
+			Expect(validator.IsAllowedHost("10.244.1.100")).To(BeTrue())
+			Expect(validator.IsAllowedHost("valid-pod")).To(BeTrue())
+			Expect(validator.IsAllowedHost("10.0.0.1")).To(BeFalse())
+			Expect(validator.IsAllowedHost("evil-pod")).To(BeFalse())
+			Expect(validator.IsAllowedHost("")).To(BeFalse())
 		})
 
 		It("should block targets without a port", func() {

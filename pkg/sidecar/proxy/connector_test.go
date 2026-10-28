@@ -85,7 +85,7 @@ func expectGenerateRequestTokenLimits(testInfo *sidecarTestInfo) {
 	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathVLLMGenerate,
 		bytes.NewReader([]byte(generateRequestBodyWithTokenLimits)))
 	Expect(err).ToNot(HaveOccurred())
-	req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+	addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
 
 	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())
@@ -379,7 +379,7 @@ var _ = Describe("Non-object request body", func() {
 
 			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 			Expect(err).ToNot(HaveOccurred())
-			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+			addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
 
 			resp, err := http.DefaultClient.Do(req)
 			Expect(err).ToNot(HaveOccurred())
@@ -423,7 +423,7 @@ var _ = Describe("Unreadable request body", func() {
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleNIXLV2(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+				s.handleNIXLV2(w, r, "10.0.0.1:8080", p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -435,7 +435,7 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleP2P(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+				s.handleP2P(w, r, "10.0.0.1:8080", p2pRouting{prefill: &p2pPeer{host: "10.0.0.1", port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -443,15 +443,11 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, nil, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
-			}),
-		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
-			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.decodeWithP2PSource(w, r, "10.0.0.2:8080")
+				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, nil, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -503,7 +499,7 @@ var _ = Describe("Stateful Responses fields", func() {
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleNIXLV2(w, r, upstream, "", reqcommon.APITypeResponses)
+				s.handleNIXLV2(w, r, upstream, p2pRouting{}, reqcommon.APITypeResponses)
 			}),
 		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -515,7 +511,7 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleP2P(w, r, upstream, "", reqcommon.APITypeResponses)
+				s.handleP2P(w, r, upstream, p2pRouting{prefill: &p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}, reqcommon.APITypeResponses)
 			}),
 		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -523,18 +519,33 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECNIXL(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECNIXL(w, r, upstream, []string{upstream}, nil, reqcommon.APITypeResponses)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECSharedStorage(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
-			}),
-		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
-			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.decodeWithP2PSource(w, r, upstream)
+				s.handleECSharedStorage(w, r, upstream, []string{upstream}, nil, reqcommon.APITypeResponses)
 			}),
 	)
 })
+
+// postChatCompletions sends body to the proxy's chat completions path with
+// headers and fails the spec on a non-200 answer.
+func postChatCompletions(proxyBaseAddr, body string, headers map[string]string) *http.Response {
+	GinkgoHelper()
+	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
+		bytes.NewReader([]byte(body)))
+	Expect(err).ToNot(HaveOccurred())
+	for k, v := range headers {
+		req.Header.Add(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	if resp.StatusCode != 200 {
+		bp, _ := io.ReadAll(resp.Body)
+		Fail(string(bp))
+	}
+	return resp
+}
 
 func sidecarConnectionTestSetup(connector string) *sidecarTestInfo {
 	testInfo := sidecarTestInfo{}
