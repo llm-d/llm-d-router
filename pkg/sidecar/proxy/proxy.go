@@ -122,6 +122,14 @@ type Config struct {
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
 
+	// ECMooncakePort is the ec_port the Mooncake EC consumer listens on for
+	// control messages. Used with --ec-connector=ec-mooncake.
+	ECMooncakePort int
+
+	// ECMooncakePodIP is the local decoder's address as encoder pods reach
+	// it, named as the Mooncake EC consumer when a request has no prefiller.
+	ECMooncakePodIP string
+
 	// EnableP2PPull declares that the OffloadingConnector P2P tier is available
 	// for cached-prefix pulls even when the PD connector is not offloading, i.e.
 	// the engines run MultiConnector(NixlConnector + OffloadingConnector). It has
@@ -532,6 +540,8 @@ func (s *Server) setECConnector() {
 		s.handleECConnector = s.handleECSharedStorage
 	case constants.ECConnectorNIXL:
 		s.handleECConnector = s.handleECNIXL
+	case constants.ECConnectorMooncake:
+		s.handleECConnector = s.handleECMooncake
 	default:
 		// Unknown EC connector value, skip encoder stage. Validate() should
 		// have rejected this earlier; reaching here means the validation was

@@ -449,6 +449,14 @@ var _ = Describe("Unreadable request body", func() {
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, nil, reqcommon.APITypeChatCompletions)
 			}),
+		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleECMooncake(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, nil, reqcommon.APITypeChatCompletions)
+			}),
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.2", port: p2pConnectorPort}}})
+			}),
 		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.runChunkedDecode(w, r)
@@ -524,6 +532,14 @@ var _ = Describe("Stateful Responses fields", func() {
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
 				s.handleECSharedStorage(w, r, upstream, []string{upstream}, nil, reqcommon.APITypeResponses)
+			}),
+		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleECMooncake(w, r, upstream, []string{upstream}, nil, reqcommon.APITypeResponses)
+			}),
+		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}})
 			}),
 	)
 })

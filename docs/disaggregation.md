@@ -825,6 +825,8 @@ Enabling the flag requires:
 | Connector | Flag | Env var | Default | Description |
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
+| `ec-mooncake` | `--ec-mooncake-port` | `EC_MOONCAKE_PORT` | `14579` | Port the EC consumer (the prefiller, or the local decoder when the request has no prefiller) listens on for Mooncake EC control messages. Corresponds to `ec_port` in vLLM's `ECTransferConfig`. `--data-parallel-size > 1` is rejected. |
+| `ec-mooncake` | `--ec-mooncake-pod-ip` | `POD_IP` | — | Address of the local decoder as encoder pods reach it, named to the encoders as the EC consumer when a request has no prefiller. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by the request body's `kv_transfer_params.remote_kv_source`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |
 

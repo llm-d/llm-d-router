@@ -61,6 +61,8 @@ const (
 	kvConnector               = "kv-connector"
 	ecConnector               = "ec-connector"
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
+	ecMooncakePortFlag        = "ec-mooncake-port"
+	ecMooncakePodIPFlag       = "ec-mooncake-pod-ip"
 	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
@@ -88,12 +90,15 @@ const (
 	envInferencePool           = "INFERENCE_POOL"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
+	envECMooncakePort          = "EC_MOONCAKE_PORT"
 
 	// Defaults
 	defaultPort                  = "8000"
 	defaultModelServerPort       = "8200"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
+	// defaultECMooncakePort matches the ec_port default of vLLM's ECTransferConfig.
+	defaultECMooncakePort = 14579
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
 	// dispatch: it bounds how long the decode request waits on the prefill outcome
@@ -113,6 +118,8 @@ type yamlConfiguration struct {
 	Port                       int      `json:"port,omitempty"`
 	ModelServerPort            int      `json:"model-server-port,omitempty"`
 	MooncakeBootstrapPort      int      `json:"mooncake-bootstrap-port,omitempty"`
+	ECMooncakePort             int      `json:"ec-mooncake-port,omitempty"`
+	ECMooncakePodIP            string   `json:"ec-mooncake-pod-ip,omitempty"`
 	DataParallelSize           int      `json:"data-parallel-size,omitempty"`
 	KVConnector                string   `json:"kv-connector,omitempty"`
 	ECConnector                string   `json:"ec-connector,omitempty"`
@@ -176,8 +183,9 @@ var (
 
 	// supportedECConnectors defines all valid E/P EC connector types
 	supportedECConnectors = map[string]struct{}{
-		constants.ECExampleConnector: {},
-		constants.ECConnectorNIXL:    {},
+		constants.ECExampleConnector:  {},
+		constants.ECConnectorNIXL:     {},
+		constants.ECConnectorMooncake: {},
 	}
 
 	// supportedTLSStages defines all valid stages for TLS configuration
@@ -188,7 +196,7 @@ var (
 	}
 
 	supportedKVConnectorNamesStr = strings.Join([]string{constants.KVConnectorNIXLV2, constants.KVConnectorSharedStorage, constants.KVConnectorSGLang, constants.KVConnectorMooncake, constants.KVConnectorOffloading}, ", ")
-	supportedECConnectorNamesStr = strings.Join([]string{constants.ECExampleConnector, constants.ECConnectorNIXL}, ", ")
+	supportedECConnectorNamesStr = strings.Join([]string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake}, ", ")
 
 	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
 )
@@ -207,6 +215,13 @@ func NewOptions() *Options {
 		}
 	}
 
+	ecMooncakePort := defaultECMooncakePort
+	if portStr := os.Getenv(envECMooncakePort); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			ecMooncakePort = port
+		}
+	}
+
 	return &Options{
 		Config: Config{
 			Port:                    defaultPort,
@@ -218,6 +233,8 @@ func NewOptions() *Options {
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
+			ECMooncakePort:          ecMooncakePort,
+			ECMooncakePodIP:         os.Getenv("POD_IP"),
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
@@ -265,6 +282,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the EC protocol between encoder and prefiller (for EPD mode). Supported: "+supportedECConnectorNamesStr+". Leave empty to skip encoder stage.")
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
+	fs.IntVar(&opts.ECMooncakePort, ecMooncakePortFlag, opts.ECMooncakePort,
+		"the ec_port the EC consumer (prefiller, or the local decoder without a prefiller) listens on for Mooncake EC control (only used with --ec-connector=ec-mooncake)")
+	fs.StringVar(&opts.ECMooncakePodIP, ecMooncakePodIPFlag, opts.ECMooncakePodIP,
+		"the local decoder's address reachable from encoder pods, named to encoders as the EC consumer when a request has no prefiller. Defaults to the POD_IP env var (only used with --ec-connector=ec-mooncake)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
@@ -691,6 +712,18 @@ func (opts *Options) Validate() error {
 		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
 	}
 
+	if opts.ECConnector == constants.ECConnectorMooncake {
+		if opts.ECMooncakePort < 1 || opts.ECMooncakePort > 65535 {
+			return fmt.Errorf("--ec-mooncake-port must be between 1 and 65535, got %d", opts.ECMooncakePort)
+		}
+		// vLLM offsets each DP rank's control port by data_parallel_index *
+		// tensor_parallel_size, which the sidecar cannot derive.
+		if opts.DataParallelSize > 1 {
+			return fmt.Errorf("--ec-connector=%s does not support --data-parallel-size > 1, got %d",
+				constants.ECConnectorMooncake, opts.DataParallelSize)
+		}
+	}
+
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
 	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.
 	// offloading already provides the tier natively and needs no flag.
@@ -781,6 +814,12 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
 		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
+	}
+	if cfg.ECMooncakePort != 0 && !opts.isFlagSet(ecMooncakePortFlag) {
+		opts.ECMooncakePort = cfg.ECMooncakePort
+	}
+	if cfg.ECMooncakePodIP != "" && !opts.isFlagSet(ecMooncakePodIPFlag) {
+		opts.ECMooncakePodIP = cfg.ECMooncakePodIP
 	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize
