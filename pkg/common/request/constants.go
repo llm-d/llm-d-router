@@ -73,6 +73,7 @@ const (
 	FieldRemoteEngineID       = "remote_engine_id"
 	FieldRemoteHost           = "remote_host"
 	FieldRemotePort           = "remote_port"
+	FieldPromptTokenIDs       = "prompt_token_ids"
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
