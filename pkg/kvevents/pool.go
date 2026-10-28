@@ -486,7 +486,10 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 			canonical[i] = engineFeatures[engineIdx]
 		}
 	} else {
-		// many:1 -> merge constituent engine features into each canonical block
+		// many:1 -> merge constituent engine features into each canonical block.
+		// An MM item spanning several engine blocks is tagged on each of them, so
+		// keep the first occurrence only, matching ComputeBlockExtraFeatures.
+		seen := make([]map[kvblock.MMHash]struct{}, canonicalBlockCount)
 		for i, ef := range engineFeatures {
 			canonicalIdx := i * canonicalBlockCount / engineBlockCount
 			if ef == nil {
@@ -494,9 +497,15 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 			}
 			if canonical[canonicalIdx] == nil {
 				canonical[canonicalIdx] = &kvblock.BlockExtraFeatures{}
+				seen[canonicalIdx] = make(map[kvblock.MMHash]struct{})
 			}
-			canonical[canonicalIdx].MMHashes = append(
-				canonical[canonicalIdx].MMHashes, ef.MMHashes...)
+			for _, h := range ef.MMHashes {
+				if _, ok := seen[canonicalIdx][h]; ok {
+					continue
+				}
+				seen[canonicalIdx][h] = struct{}{}
+				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, h)
+			}
 		}
 	}
 

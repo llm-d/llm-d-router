@@ -645,6 +645,34 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
 
+	t.Run("many:1 merge (MM item spans several engine blocks)", func(t *testing.T) {
+		// 4 engine blocks → 1 canonical block (ratio 4). The engine tags every
+		// block an item overlaps, so "img" appears on blocks 0-2 and "vid" on 2-3.
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img, vid}},
+			{MMHashes: []kvblock.MMHash{vid}},
+		}
+		result := realignExtraFeatures(features, 1)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, vid}, result[0].MMHashes)
+
+		// The request side lists each overlapping item once for the same layout.
+		want := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img"}, "video": {"vid"}},
+			map[string][]kvblock.PlaceholderRange{
+				"image": {{Offset: 0, Length: 40}},
+				"video": {{Offset: 40, Length: 24}},
+			},
+			64, 64)
+		require.Len(t, want, 1)
+		assert.Equal(t, want[0].MMHashes, result[0].MMHashes)
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
