@@ -18,8 +18,10 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 
@@ -38,15 +40,21 @@ import (
 
 const DecodeStepName = "decode"
 
+// maxDecodeWrapSize bounds a decode response read whole into memory for the
+// chat completions wrap. Generous for a completion body while still bounding a
+// runaway or adversarial worker.
+const maxDecodeWrapSize = 8 << 20 // 8 MB
+
 func init() {
 	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
 
 type DecodeStep struct {
-	useOpenAIFormat bool
-	outputMode      string
-	gwClient        *gateway.Client
-	kv              kv.Connector
+	useOpenAIFormat    bool
+	outputMode         string
+	wrapChatCompletion bool
+	gwClient           *gateway.Client
+	kv                 kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -61,15 +69,20 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	wrapChat, _, err := paramBool(params, ParamWrapChatCompletion)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
 	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &DecodeStep{
-		useOpenAIFormat: useOpenAI,
-		outputMode:      outputMode,
-		gwClient:        gwClient,
-		kv:              kvConn,
+		useOpenAIFormat:    useOpenAI,
+		outputMode:         outputMode,
+		wrapChatCompletion: wrapChat,
+		gwClient:           gwClient,
+		kv:                 kvConn,
 	}, nil
 }
 
@@ -99,6 +112,10 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
+	if s.wrapsChatCompletion(reqCtx, format) {
+		return s.serveWrappedChatCompletion(ctx, logger, reqCtx, path, body)
+	}
+
 	writer, finalize := s.responseWriter(reqCtx)
 	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
 	if err := finalize(); err != nil {
@@ -108,6 +125,71 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
 	}
 	return out.streamedError(DecodeStepName)
+}
+
+// wrapsChatCompletion reports whether this leg's response needs the chat
+// completions envelope rebuilt around it.
+//
+// Three conditions hold together. The client must have called
+// /v1/chat/completions, since that is the only envelope this step builds. The
+// leg must have been rewritten to the generate route, as an OpenAI-format leg
+// already answers in the client's own shape. And the request must not stream:
+// the wrap rewrites one complete JSON document, while a streamed answer is a
+// sequence of chat.completion.chunk frames this step does not assemble.
+func (s *DecodeStep) wrapsChatCompletion(reqCtx *pipeline.RequestContext, format reqcommon.APIType) bool {
+	return s.wrapChatCompletion &&
+		format == reqcommon.APITypeVLLMGenerate &&
+		reqcommon.DetectAPIType(reqCtx.OriginalPath) == reqcommon.APITypeChatCompletions &&
+		!reqCtx.Stream
+}
+
+// serveWrappedChatCompletion sends the decode leg as a plain call, rewrites the
+// generate response it returns into a chat completions one, and writes that to
+// the client. The leg is not proxied: the whole body is needed before any of it
+// can be rewritten.
+//
+// maxDecodeWrapSize bounds what is read, since this holds the response in
+// memory where the proxying path streams it.
+func (s *DecodeStep) serveWrappedChatCompletion(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, path string, body map[string]any) error {
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("%s: marshal: %w", DecodeStepName, err)
+	}
+
+	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+		logMsg:   "request body",
+		step:     DecodeStepName,
+		upstream: coordmetrics.UpstreamDecode,
+		path:     path,
+		body:     bodyBytes,
+		headers:  gatewayHeaders(reqCtx, gateway.PhaseDecode),
+	})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	generate, err := io.ReadAll(io.LimitReader(resp.Body, maxDecodeWrapSize+1))
+	if err != nil {
+		return fmt.Errorf("%s: reading response: %w", DecodeStepName, err)
+	}
+	if len(generate) > maxDecodeWrapSize {
+		return fmt.Errorf("%s: response exceeds %d bytes", DecodeStepName, maxDecodeWrapSize)
+	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
+
+	wrapped, err := wrapChatCompletion(generate, reqCtx.RequestID, s.outputMode)
+	if err != nil {
+		return fmt.Errorf("%s: %w", DecodeStepName, err)
+	}
+
+	w := reqCtx.ResponseWriter
+	w.Header().Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+	if _, err := w.Write(wrapped); err != nil {
+		return fmt.Errorf("%s: writing response: %w", DecodeStepName, err)
+	}
+	logger.V(logutil.DEFAULT).Info("wrapped generate response as a chat completion", "bodyLen", len(wrapped))
+	return nil
 }
 
 // responseWriter returns the writer the decode response is streamed through,

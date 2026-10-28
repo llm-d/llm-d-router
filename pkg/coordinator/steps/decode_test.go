@@ -748,6 +748,118 @@ func TestDecodeStep_TokensInFormat_KeepsGenerateClientFields(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_WrapsChatCompletion verifies the end of the wrapping path: a
+// non-streaming chat-completions client whose leg was rewritten to the generate
+// route receives a chat.completion envelope rather than the generate one.
+func TestDecodeStep_WrapsChatCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"request_id":"r1","output_mode":"derender","model":"test-model",
+			"kv_transfer_params":{"remote_host":"10.0.0.1"},
+			"choices":[{"index":0,"finish_reason":"stop","token_ids":[17],
+			"message":{"role":"assistant","content":"2 + 2 = 4"}}]}`))
+	}))
+	defer server.Close()
+
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		ParamKVConnector:          kv.NIXL,
+		"use_openai_format":       false,
+		reqcommon.FieldOutputMode: reqcommon.OutputModeDerender,
+		ParamWrapChatCompletion:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-wrap",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            testModelName,
+		TokenIDs:         []int{1, 2, 3},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+		Body:             map[string]any{"model": testModelName, "messages": []any{}},
+		ResponseWriter:   recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("client body is not JSON: %v (%q)", err, recorder.Body.String())
+	}
+	if got[reqcommon.FieldObject] != reqcommon.ObjectChatCompletion {
+		t.Fatalf("object = %v, want %q", got[reqcommon.FieldObject], reqcommon.ObjectChatCompletion)
+	}
+	if _, present := got[reqcommon.FieldKVTransferParams]; present {
+		t.Error("kv_transfer_params reached the client")
+	}
+	choice, _ := got[reqcommon.FieldChoices].([]any)[0].(map[string]any)
+	msg, _ := choice[reqcommon.FieldMessage].(map[string]any)
+	if msg[reqcommon.FieldContent] != "2 + 2 = 4" {
+		t.Fatalf("content = %v, want the generated text", msg[reqcommon.FieldContent])
+	}
+	if got[reqcommon.HeaderContentType] != nil {
+		t.Error("content-type leaked into the body")
+	}
+	if ct := recorder.Header().Get(reqcommon.HeaderContentType); ct != reqcommon.ContentTypeJSON {
+		t.Errorf("content-type = %q, want %q", ct, reqcommon.ContentTypeJSON)
+	}
+}
+
+// TestDecodeStep_WrapChatCompletionSkipped verifies the wrap is confined to the
+// case it can serve. A streaming request is proxied instead, since the wrap
+// rewrites one document and does not assemble chat.completion.chunk frames; a
+// client on another route keeps the envelope its own API declares.
+func TestDecodeStep_WrapChatCompletionSkipped(t *testing.T) {
+	const generateBody = `{"request_id":"r1","output_mode":"derender",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(generateBody))
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name   string
+		path   string
+		stream bool
+	}{
+		{name: "streaming chat completions", path: reqcommon.PathChatCompletions, stream: true},
+		{name: "generate client", path: reqcommon.PathVLLMGenerate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+				ParamKVConnector:          kv.NIXL,
+				"use_openai_format":       false,
+				reqcommon.FieldOutputMode: reqcommon.OutputModeText,
+				ParamWrapChatCompletion:   true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-skip",
+				OriginalPath:     tc.path,
+				Model:            testModelName,
+				Stream:           tc.stream,
+				TokenIDs:         []int{1, 2, 3},
+				KVTransferParams: map[string]any{"block_id": "block-1"},
+				Body:             map[string]any{"model": testModelName},
+				ResponseWriter:   recorder,
+			}
+			if err := step.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if body := recorder.Body.String(); body != generateBody {
+				t.Fatalf("client body = %q, want the generate response unchanged", body)
+			}
+		})
+	}
+}
+
 // TestDecodeStep_UnreachableFormat_ReturnsError verifies that a request path
 // for a format prepareDecodeBody's switch does not handle explicitly
 // (APITypeSGLangGenerate) fails through its default case, reporting an error

@@ -468,3 +468,21 @@ pipeline:
       #                      needs a parse_context from /render, which this
       #                      pipeline does not send.
       #   output_mode: text
+      #
+      #   wrap_chat_completion rebuilds the chat completions envelope around a
+      #   rewritten leg's response, for a client that called
+      #   /v1/chat/completions on a tokens-in pipeline. vLLM serves output_mode
+      #   on the generate envelope rather than returning an OpenAI one, so
+      #   without this the client reads a generate response: choices carry
+      #   token_ids beside their message, and the body names the request
+      #   request_id rather than id. Default false, which forwards the
+      #   generate response as it arrived.
+      #
+      #   Only a non-streaming chat-completions request is rewritten. A
+      #   streamed answer is a sequence of chat.completion.chunk frames this
+      #   step does not assemble, so it is forwarded unchanged; the other
+      #   client APIs keep the envelope their own schema declares.
+      #
+      #   The rewritten leg is not streamed to the client but read whole (up
+      #   to 8 MB) so the envelope can be rebuilt around it.
+      #   wrap_chat_completion: false

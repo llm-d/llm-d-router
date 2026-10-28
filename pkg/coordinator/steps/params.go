@@ -30,6 +30,10 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	// ParamWrapChatCompletion asks the decode step to answer a
+	// chat-completions client in that API's own envelope rather than the
+	// generate one its rewritten leg returns.
+	ParamWrapChatCompletion = "wrap_chat_completion"
 )
 
 func buildKVConnector(params map[string]any) (kv.Connector, error) {
