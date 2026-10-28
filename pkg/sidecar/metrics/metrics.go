@@ -44,6 +44,21 @@ const (
 	StageDecode  = "decode"
 )
 
+// Values of the mode label on nixlPushDispatchesTotal.
+const (
+	NIXLPushModeParallel = "parallel"
+	NIXLPushModeSerial   = "serial"
+)
+
+// Values of the reason label on nixlPushDispatchesTotal. A cache hit is the
+// reason of every parallel dispatch; the other reasons are those of serial
+// dispatches.
+const (
+	NIXLPushReasonCacheHit     = "cache_hit"
+	NIXLPushReasonCacheMiss    = "cache_miss"
+	NIXLPushReasonPrefillRetry = "prefill_retry"
+)
+
 var (
 	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -112,6 +127,31 @@ var (
 			toolcalling.MetricLabelStatus,
 		},
 	)
+
+	nixlPushDispatchesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: subsystem,
+			Name:      "nixl_push_dispatches_total",
+			Help:      metricsutil.HelpMsgWithStability("Total NIXL push dispatches, by mode (parallel or serial) and reason.", compbasemetrics.ALPHA),
+		},
+		[]string{"mode", "reason"},
+	)
+
+	nixlPushIdentityMismatchesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Subsystem: subsystem,
+			Name:      "nixl_push_identity_mismatches_total",
+			Help:      metricsutil.HelpMsgWithStability("Total parallel NIXL push dispatches whose prefill response did not carry the cached NIXL push identity, so the decode request was sent again.", compbasemetrics.ALPHA),
+		},
+	)
+
+	nixlPushIdentityDropsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Subsystem: subsystem,
+			Name:      "nixl_push_identity_drops_total",
+			Help:      metricsutil.HelpMsgWithStability("Total cached NIXL push identities dropped after a parallel NIXL push dispatch failed.", compbasemetrics.ALPHA),
+		},
+	)
 )
 
 var registerOnce sync.Once
@@ -128,6 +168,9 @@ func Register() {
 			decodeDuration,
 			errorsTotal,
 			toolCallingFieldStatusTotal,
+			nixlPushDispatchesTotal,
+			nixlPushIdentityMismatchesTotal,
+			nixlPushIdentityDropsTotal,
 		)
 	})
 }
@@ -190,4 +233,28 @@ func RecordToolCallingFieldStatuses(statuses []toolcalling.FieldStatus) {
 			string(result.Status),
 		).Inc()
 	}
+}
+
+// RecordNIXLPushDispatch counts a NIXL push dispatch for the given reason
+// (NIXLPushReasonCacheHit, NIXLPushReasonCacheMiss or
+// NIXLPushReasonPrefillRetry) under the mode that reason implies.
+func RecordNIXLPushDispatch(reason string) {
+	mode := NIXLPushModeSerial
+	if reason == NIXLPushReasonCacheHit {
+		mode = NIXLPushModeParallel
+	}
+	nixlPushDispatchesTotal.WithLabelValues(mode, reason).Inc()
+}
+
+// RecordNIXLPushIdentityMismatch counts a parallel NIXL push dispatch whose
+// decode request was sent again because the prefill response did not carry the
+// cached identity.
+func RecordNIXLPushIdentityMismatch() {
+	nixlPushIdentityMismatchesTotal.Inc()
+}
+
+// RecordNIXLPushIdentityDrop counts a cached NIXL push identity dropped after a
+// failed parallel dispatch.
+func RecordNIXLPushIdentityDrop() {
+	nixlPushIdentityDropsTotal.Inc()
 }

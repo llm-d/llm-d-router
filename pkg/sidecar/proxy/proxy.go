@@ -137,6 +137,13 @@ type Config struct {
 	// no effect with --kv-connector=offloading, where the tier is always present.
 	EnableP2PPull bool
 
+	// NIXLPushMode declares that the engines run vLLM's NixlPushConnector.
+	NIXLPushMode bool
+	// NIXLPushPrefillTimeout bounds how long a NIXL push dispatch that sends
+	// the prefill and decode requests at once waits for the prefill response
+	// before it cancels both. Zero falls back to defaultNIXLPushPrefillTimeout.
+	NIXLPushPrefillTimeout time.Duration
+
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
@@ -264,6 +271,7 @@ type Server struct {
 	prefillerProxies    *lru.Cache[string, http.Handler]      // cached prefiller proxy handlers
 	encoderProxies      *lru.Cache[string, http.Handler]      // cached encoder proxy handlers
 	mooncakeEngineIDs   *lru.Cache[string, map[string]string] // cached mooncake dp_rank->engine_id per prefill host:port
+	nixlPushIdentities  *nixlPushIdentityCache                // cached NIXL push identity per prefill host:port
 	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
 	forwardDataParallel bool                                  // Use special Data Parallel work around
 
@@ -368,12 +376,14 @@ func NewProxy(config Config) *Server {
 	prefillerCache, _ := lru.New[string, http.Handler](1024)
 	encoderCache, _ := lru.New[string, http.Handler](1024)
 	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024)
+	nixlPushIdentities, _ := newNIXLPushIdentityCache(1024)
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
 		prefillerProxies:    prefillerCache,
 		encoderProxies:      encoderCache,
 		mooncakeEngineIDs:   mooncakeEngineIDs,
+		nixlPushIdentities:  nixlPushIdentities,
 		prefillerURLPrefix:  "http://",
 		encoderURLPrefix:    "http://",
 		config:              config,
@@ -464,6 +474,7 @@ func (s *Server) Clone() *Server {
 		prefillerProxies:    s.prefillerProxies,
 		encoderProxies:      s.encoderProxies,
 		mooncakeEngineIDs:   s.mooncakeEngineIDs,
+		nixlPushIdentities:  s.nixlPushIdentities,
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,

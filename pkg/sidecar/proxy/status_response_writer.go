@@ -284,6 +284,18 @@ func (w *deferredCommitWriter) commit() bool {
 	return true
 }
 
+// commitThrough commits like commit but relays decode's response through dst,
+// which wraps the client writer and depends on what the caller learns at the
+// commit point.
+func (w *deferredCommitWriter) commitThrough(dst http.ResponseWriter) bool {
+	w.mu.Lock()
+	if !w.committed {
+		w.dst = dst
+	}
+	w.mu.Unlock()
+	return w.commit()
+}
+
 // abort discards buffered output and drops all future writes. It is a no-op
 // once decode's response has been relayed to the client, which the
 // concurrent-dispatch decode abort path reaches: the response is already on the

@@ -42,6 +42,10 @@ func jsonErrorForLog(err error) error {
 	return err
 }
 
+// errNIXLPushPrefillTimeout reports a parallel NIXL push dispatch that ran into
+// --nixl-push-prefill-timeout.
+var errNIXLPushPrefillTimeout = errors.New("prefill did not respond within the NIXL push prefill timeout")
+
 // vLLM error response
 type errorResponse struct {
 	Object  string `json:"object"`
@@ -73,6 +77,10 @@ func errorBadGateway(err error, w http.ResponseWriter) error {
 
 func errorInternalServerError(err error, w http.ResponseWriter) error {
 	return sendError(err, "InternalServerError", http.StatusInternalServerError, w)
+}
+
+func errorGatewayTimeout(err error, w http.ResponseWriter) error {
+	return sendError(err, "GatewayTimeout", http.StatusGatewayTimeout, w)
 }
 
 // sendError simulates vLLM errors

@@ -124,6 +124,34 @@ func TestRecordToolCallingFieldStatusesSkipsUnobservedAndInvalidValues(t *testin
 	require.Zero(t, promtestutil.CollectAndCount(toolCallingFieldStatusTotal))
 }
 
+func TestRecordNIXLPushDispatch(t *testing.T) {
+	nixlPushDispatchesTotal.Reset()
+
+	RecordNIXLPushDispatch(NIXLPushReasonCacheHit)
+	RecordNIXLPushDispatch(NIXLPushReasonCacheHit)
+	RecordNIXLPushDispatch(NIXLPushReasonCacheMiss)
+	RecordNIXLPushDispatch(NIXLPushReasonPrefillRetry)
+
+	// Each reason has one series, under the mode it implies.
+	require.Equal(t, 3, promtestutil.CollectAndCount(nixlPushDispatchesTotal))
+	require.Equal(t, 2.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeParallel, NIXLPushReasonCacheHit)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeSerial, NIXLPushReasonCacheMiss)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(nixlPushDispatchesTotal.WithLabelValues(NIXLPushModeSerial, NIXLPushReasonPrefillRetry)))
+}
+
+func TestRecordNIXLPushIdentityEvents(t *testing.T) {
+	// Plain counters have no Reset, so the test compares before/after values.
+	mismatches := promtestutil.ToFloat64(nixlPushIdentityMismatchesTotal)
+	drops := promtestutil.ToFloat64(nixlPushIdentityDropsTotal)
+
+	RecordNIXLPushIdentityMismatch()
+	RecordNIXLPushIdentityDrop()
+	RecordNIXLPushIdentityDrop()
+
+	require.Equal(t, mismatches+1, promtestutil.ToFloat64(nixlPushIdentityMismatchesTotal))
+	require.Equal(t, drops+2, promtestutil.ToFloat64(nixlPushIdentityDropsTotal))
+}
+
 // Register must be idempotent so repeated calls do not panic on duplicate
 // registration with controller-runtime's registry.
 func TestRegisterIdempotent(t *testing.T) {
@@ -138,13 +166,15 @@ func TestRegisterIdempotent(t *testing.T) {
 // breaking every scrape config/dashboard built on the doc comments' promises.
 func TestMetricNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal, toolCallingFieldStatusTotal)
+	reg.MustRegister(requestsTotal, disaggRequestsTotal, encodeDuration, prefillDuration, decodeDuration, errorsTotal, toolCallingFieldStatusTotal,
+		nixlPushDispatchesTotal, nixlPushIdentityMismatchesTotal, nixlPushIdentityDropsTotal)
 	// Gather omits a CounterVec with no children, so create one in each.
 	requestsTotal.WithLabelValues("x")
 	disaggRequestsTotal.WithLabelValues("x")
 	errorsTotal.WithLabelValues("x")
 	toolCallingFieldStatusTotal.WithLabelValues("routing_sidecar", toolcalling.DirectionRequest, string(toolcalling.FieldTools), string(toolcalling.FieldStatusPreserved))
 	t.Cleanup(toolCallingFieldStatusTotal.Reset)
+	nixlPushDispatchesTotal.WithLabelValues("x", "x")
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
@@ -162,5 +192,8 @@ func TestMetricNames(t *testing.T) {
 		"llm_d_disagg_sidecar_decode_duration_seconds",
 		"llm_d_disagg_sidecar_request_errors_total",
 		"llm_d_disagg_sidecar_tool_calling_field_status_total",
+		"llm_d_disagg_sidecar_nixl_push_dispatches_total",
+		"llm_d_disagg_sidecar_nixl_push_identity_mismatches_total",
+		"llm_d_disagg_sidecar_nixl_push_identity_drops_total",
 	}, names)
 }

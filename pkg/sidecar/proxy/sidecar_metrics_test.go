@@ -47,6 +47,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -3224,5 +3225,177 @@ func assertToolCallingStatuses(t *testing.T, statuses []toolcalling.FieldStatus,
 		seen[result.Field] = true
 		require.Contains(t, want, result.Field)
 		require.Equal(t, want[result.Field], result.Status)
+	}
+}
+
+// nixlPushMetrics is a point-in-time copy of the NIXL push metrics, compared
+// before and after a request because the collectors are process-global.
+type nixlPushMetrics struct {
+	cacheHit, cacheMiss, prefillRetry float64
+	mismatches, drops                 float64
+}
+
+func snapshotNIXLPushMetrics(t *testing.T) nixlPushMetrics {
+	t.Helper()
+	dispatches := func(reason string) float64 {
+		return counterValue(t, metricNIXLPushDispatches, "reason", reason)
+	}
+	return nixlPushMetrics{
+		cacheHit:     dispatches(metrics.NIXLPushReasonCacheHit),
+		cacheMiss:    dispatches(metrics.NIXLPushReasonCacheMiss),
+		prefillRetry: dispatches(metrics.NIXLPushReasonPrefillRetry),
+		mismatches:   unlabeledCounterValue(t, metricNIXLPushIdentityMismatches),
+		drops:        unlabeledCounterValue(t, metricNIXLPushIdentityDrops),
+	}
+}
+
+// delta returns after minus before for each field.
+func (after nixlPushMetrics) delta(before nixlPushMetrics) nixlPushMetrics {
+	return nixlPushMetrics{
+		cacheHit:     after.cacheHit - before.cacheHit,
+		cacheMiss:    after.cacheMiss - before.cacheMiss,
+		prefillRetry: after.prefillRetry - before.prefillRetry,
+		mismatches:   after.mismatches - before.mismatches,
+		drops:        after.drops - before.drops,
+	}
+}
+
+// pushPrefillResponse is a prefill response of vLLM's NixlPushConnector that
+// carries testNIXLPushIdentity(engineID).
+func pushPrefillResponse(t *testing.T, engineID string) string {
+	t.Helper()
+	kv := testNIXLPushIdentity(engineID).kvTransferParams()
+	kv[requestFieldTransferMode] = nixlTransferModePush
+	kv[reqcommon.FieldDoRemotePrefill] = true
+	kv[reqcommon.FieldDoRemoteDecode] = false
+	raw, err := json.Marshal(map[string]any{reqcommon.FieldKVTransferParams: kv})
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// Every NIXL push dispatch decision is counted and set on the request span.
+func TestHandleNIXLV2PushMetrics(t *testing.T) {
+	tracerProvider := sdktrace.NewTracerProvider()
+	pushed := pushPrefillResponse(t, "prefill-engine")
+
+	tests := []struct {
+		name string
+		// cached are the identities stored for the prefill endpoint before the
+		// request, in order.
+		cached []string
+		// prefill answers the prefill attempts in order; the last handler also
+		// answers any further attempt.
+		prefill   []http.Handler
+		retries   int
+		wantCode  int
+		wantStage stageMetrics
+		wantPush  nixlPushMetrics
+		// wantSpan holds the request span's NIXL push attributes as strings.
+		wantSpan map[attribute.Key]string
+	}{
+		{
+			name:      "cache miss dispatches serially",
+			prefill:   []http.Handler{statusHandler(http.StatusOK, pushed)},
+			wantCode:  http.StatusOK,
+			wantStage: stageMetrics{prefillCount: 1, decodeCount: 1},
+			wantPush:  nixlPushMetrics{cacheMiss: 1},
+			wantSpan: map[attribute.Key]string{
+				semconv.LLMDPDProxyNIXLPushDispatchReasonKey: metrics.NIXLPushReasonCacheMiss,
+			},
+		},
+		{
+			name:      "cached identity dispatches in parallel",
+			cached:    []string{"prefill-engine"},
+			prefill:   []http.Handler{statusHandler(http.StatusOK, pushed)},
+			wantCode:  http.StatusOK,
+			wantStage: stageMetrics{prefillCount: 1, decodeCount: 1},
+			wantPush:  nixlPushMetrics{cacheHit: 1},
+			wantSpan: map[attribute.Key]string{
+				semconv.LLMDPDProxyNIXLPushDispatchReasonKey:   metrics.NIXLPushReasonCacheHit,
+				semconv.LLMDPDProxyNIXLPushIdentityMismatchKey: "false",
+			},
+		},
+		{
+			name:   "retryable prefill status falls back to the serial path with one prefill sample",
+			cached: []string{"prefill-engine"},
+			prefill: []http.Handler{
+				statusHandler(http.StatusServiceUnavailable, `{"error":"overloaded"}`),
+				statusHandler(http.StatusOK, pushed),
+			},
+			retries:   1,
+			wantCode:  http.StatusOK,
+			wantStage: stageMetrics{prefillCount: 1, decodeCount: 1},
+			wantPush:  nixlPushMetrics{cacheHit: 1, prefillRetry: 1},
+			wantSpan: map[attribute.Key]string{
+				semconv.LLMDPDProxyNIXLPushDispatchReasonKey: metrics.NIXLPushReasonPrefillRetry,
+			},
+		},
+		{
+			name:      "prefill response with another identity sends decode again",
+			cached:    []string{"restarted-engine"},
+			prefill:   []http.Handler{statusHandler(http.StatusOK, pushed)},
+			wantCode:  http.StatusOK,
+			wantStage: stageMetrics{prefillCount: 1, decodeCount: 1},
+			wantPush:  nixlPushMetrics{cacheHit: 1, mismatches: 1},
+			wantSpan: map[attribute.Key]string{
+				semconv.LLMDPDProxyNIXLPushDispatchReasonKey:   metrics.NIXLPushReasonCacheHit,
+				semconv.LLMDPDProxyNIXLPushIdentityMismatchKey: "true",
+			},
+		},
+		{
+			name:      "failed parallel dispatch drops the cached identity",
+			cached:    []string{"prefill-engine"},
+			prefill:   []http.Handler{statusHandler(http.StatusInternalServerError, `{"error":"boom"}`)},
+			wantCode:  http.StatusInternalServerError,
+			wantStage: stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantPush:  nixlPushMetrics{cacheHit: 1, drops: 1},
+			wantSpan: map[attribute.Key]string{
+				semconv.LLMDPDProxyNIXLPushDispatchReasonKey:   metrics.NIXLPushReasonCacheHit,
+				semconv.LLMDPDProxyNIXLPushIdentityMismatchKey: "false",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempt := min(int(attempts.Add(1)), len(tt.prefill))
+				tt.prefill[attempt-1].ServeHTTP(w, r)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{
+				Port:                "0",
+				DecoderURL:          prefillURL,
+				NIXLPushMode:        true,
+				PrefillMaxRetries:   tt.retries,
+				PrefillRetryBackoff: time.Millisecond,
+			})
+			s.logger = log.Log
+			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
+			for _, engineID := range tt.cached {
+				s.nixlPushIdentities.put(prefillURL.Host, testNIXLPushIdentity(engineID))
+			}
+
+			ctx, requestSpan := tracerProvider.Tracer("test").Start(context.Background(), "forward_request")
+			beforeStage, beforePush := snapshotStageMetrics(t), snapshotNIXLPushMetrics(t)
+			rw := httptest.NewRecorder()
+			s.handleNIXLV2(rw, chatRequest(t, textChatBody()).WithContext(ctx), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			requestSpan.End()
+
+			assert.Equal(t, tt.wantCode, rw.Code)
+			assert.Equal(t, tt.wantStage, snapshotStageMetrics(t).delta(beforeStage))
+			assert.Equal(t, tt.wantPush, snapshotNIXLPushMetrics(t).delta(beforePush))
+			pushAttributes := map[attribute.Key]string{}
+			for _, kv := range requestSpan.(sdktrace.ReadOnlySpan).Attributes() {
+				if kv.Key == semconv.LLMDPDProxyNIXLPushDispatchReasonKey || kv.Key == semconv.LLMDPDProxyNIXLPushIdentityMismatchKey {
+					pushAttributes[kv.Key] = kv.Value.String()
+				}
+			}
+			assert.Equal(t, tt.wantSpan, pushAttributes)
+		})
 	}
 }
