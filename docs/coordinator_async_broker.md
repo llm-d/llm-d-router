@@ -47,7 +47,7 @@ HTTP/1.1 200 OK                    # the model's response, upstream status mirro
 # cancelled while queued:  499 once the AP drops it, until the result TTL expires
 ```
 
-If the coordinator generated the id and the client disconnects before the 202, the step cancels the request pre-dispatch.
+If the client disconnects before the 202, the step cancels the request pre-dispatch.
 
 After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
 
