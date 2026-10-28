@@ -132,6 +132,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointhealth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier"
@@ -153,6 +154,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/latencyobservation"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loadaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/loraresidency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/mmcacheaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/nohitlru"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -687,6 +689,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, fwkplugin.StabilityAlpha, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(topologyaffinityfilter.FilterType, fwkplugin.StabilityAlpha, topologyaffinityfilter.Factory)
 	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
+	fwkplugin.Register(endpointhealth.EndpointHealthFilterType, fwkplugin.StabilityAlpha, endpointhealth.Factory)
 
 	// extra scheduling scorers
 	// Beta
@@ -746,6 +749,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(burstprefix.PluginType, fwkplugin.StabilityAlpha, burstprefix.Factory)
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
 	fwkplugin.Register(selectivekv.PluginType, fwkplugin.StabilityAlpha, selectivekv.PluginFactory)
+	fwkplugin.Register(loraresidency.Type, fwkplugin.StabilityAlpha, loraresidency.Factory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
@@ -915,6 +919,9 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	r.schedulerConfig = cfg.SchedulerConfig
 
+	pollStatus := datalayer.NewPollStatusProducer(cfg.DataConfig)
+	handle.AddPlugin(pollStatus.TypedName().Name, pollStatus)
+
 	// Auto-create any DataProducer plugins that are needed by consumers already in
 	// the config but not yet satisfied by an existing producer.
 	if err := datalayer.CreateMissingDataProducers(ctx, fwkplugin.DefaultProducerRegistry, fwkplugin.Registry, handle); err != nil {
@@ -1012,6 +1019,9 @@ func validateKubernetesDiscoveryFlags(opts *runserver.Options) error {
 	}
 	if opts.PoolName == "" && opts.EndpointSelector == nil {
 		return errors.New("either pool-name or endpoint-selector must be set")
+	}
+	if opts.ObjectivesFile != "" {
+		return errors.New("objectives-file requires file discovery")
 	}
 	return nil
 }
@@ -1222,6 +1232,11 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 	pool := datalayer.NewEndpointPool(namespace, poolName)
 	ds := datastore.NewDatastore(r.servingCtx, epf).WithEndpointPool(pool)
+	objectivePriorities, err := loadObjectivesFile(opts.ObjectivesFile, ds)
+	if err != nil {
+		setupLog.Error(err, "Failed to load objectives file", "path", opts.ObjectivesFile)
+		return err
+	}
 
 	// On bare metal / Slurm / Ray (or any deployment without the K8s Downward
 	// API), neither --pool-namespace nor the NAMESPACE env var is set, so the
@@ -1243,7 +1258,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
 	//
-	// Note on InferenceObjective: with no objective CRDs to consult, per-request
+	// Note on InferenceObjective: without --objectives-file, per-request
 	// priority falls back to Director.defaultPriority (see
 	// pkg/epp/requestcontrol/director.go). Static priority bands configured in
 	// EndpointPickerConfig.flowControl are honored and applied via the FlowControl
@@ -1280,15 +1295,14 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
 
-	// Outside Kubernetes there is no InferenceObjective CRD, so per-request
-	// priority falls back to Director.defaultPriority (see
-	// pkg/epp/requestcontrol/director.go); static bands defined in
-	// EndpointPickerConfig.flowControl still apply.
+	// Per-request priority comes from --objectives-file; a request whose
+	// objective is not loaded gets Director.defaultPriority.
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
-	// File-discovery mode has no InferenceObjective reconciler to drive the
-	// control plane; static bands from config apply at registry construction.
-	endpointCandidates, admissionController, _, requestEvictor := r.initAdmissionControl(r.servingCtx, opts, eppConfig, endpointCandidates)
+	// Static bands from config apply at registry construction; --objectives-file
+	// bands are provisioned here, before the server starts serving.
+	endpointCandidates, admissionController, bandControlPlane, requestEvictor := r.initAdmissionControl(r.servingCtx, opts, eppConfig, endpointCandidates)
+	provisionObjectiveBands(bandControlPlane, objectivePriorities)
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
 	if requestEvictor != nil {
 		director.SetRequestEvictor(requestEvictor)

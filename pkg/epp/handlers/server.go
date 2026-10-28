@@ -642,6 +642,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if s.toolCallingTelemetryEnabled {
 					ctx = toolcalling.WithTelemetryEnabled(ctx)
 				}
+				if hasInboundToolSnapshot {
+					ctx = toolcalling.WithRequestSnapshot(ctx, inboundBody, inboundToolSnapshot)
+				}
 				reqCtx, err = s.director.HandleRequest(ctx, reqCtx, parseResult.Body)
 				// The Director may resolve agent identity after this request span opened.
 				tracing.AttributeRequest(ctx, span)
@@ -708,8 +711,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if traceEnabled {
 					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
 				}
-				// Envoy sends the response status as the ":status" pseudo-header.
-				if (header.Key == ":status" || header.Key == "status") && string(header.RawValue) != "200" {
+				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && string(header.RawValue) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType {
 					mediaType, _, _ := strings.Cut(envoy.GetHeaderValue(header), ";")
@@ -918,6 +920,8 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	if r.requestState == requestEvicted {
 		loggerTrace.Info("Sending ImmediateResponse for evicted request")
 		evicted := errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "request evicted by flow control"}
+		// Counted by Process's deferred error metric.
+		r.responseStatusCode = evicted.Code
 		if r.requestDroppedReason != "" {
 			evicted.Headers = map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(r.requestDroppedReason)}
 		}

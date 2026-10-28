@@ -224,6 +224,28 @@ func TestParseResponse(t *testing.T) {
 
 	invalidProtoBody, _ := createGrpcFrameRaw([]byte{0xFF})
 
+	contentBytes, err := proto.Marshal(&httpbody.HttpBody{Data: []byte(`{"choices":[{"delta":{"content":"Hi"}}]}`)})
+	if err != nil {
+		t.Fatalf("Failed to marshal HttpBody: %v", err)
+	}
+	contentFrame, err := createGrpcFrameRaw(contentBytes)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+	twoFrameBody := append(append([]byte{}, contentFrame...), validBody...)
+
+	eventStreamBytes, err := proto.Marshal(&httpbody.HttpBody{
+		ContentType: "text/event-stream",
+		Data:        []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n"),
+	})
+	if err != nil {
+		t.Fatalf("Failed to marshal HttpBody: %v", err)
+	}
+	eventStreamBody, err := createGrpcFrameRaw(eventStreamBytes)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+
 	tests := []struct {
 		name       string
 		body       []byte
@@ -241,6 +263,41 @@ func TestParseResponse(t *testing.T) {
 			name:    "Valid JSON response",
 			body:    validBody,
 			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Usage in a later frame of the chunk",
+			body:    twoFrameBody,
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Event stream HttpBody",
+			body:    eventStreamBody,
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantResult: &fwkrh.ParsedResponse{
+				Usage:          &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name:    "Usage read past an invalid frame",
+			body:    append(append([]byte{}, invalidProtoBody...), validBody...),
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantErr: "unmarshaling HttpBody response",
+			wantResult: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			},
+		},
+		{
+			name:    "Usage read before an incomplete trailing frame",
+			body:    append(append([]byte{}, validBody...), contentFrame[:8]...),
+			headers: map[string]string{"content-type": "application/grpc"},
+			wantErr: "incomplete gRPC payload",
 			wantResult: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
@@ -269,9 +326,7 @@ func TestParseResponse(t *testing.T) {
 				if !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("Expected error containing %q, got %v", tc.wantErr, err)
 				}
-				return
-			}
-			if err != nil {
+			} else if err != nil {
 				t.Fatalf("ParseResponse failed: %v", err)
 			}
 

@@ -9,3 +9,4 @@
 {{ include "llm-d-epp.sa-token-secret" . }}
 {{ include "llm-d-epp.service" . }}
 {{ include "llm-d-epp.service-monitor" . }}
+{{ include "llm-d-epp.pod-disruption-budget" . }}

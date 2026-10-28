@@ -127,6 +127,28 @@ func TelemetryEnabled(ctx context.Context) bool {
 	return enabled
 }
 
+type requestSnapshotContextKey struct{}
+
+type requestSnapshotContextValue struct {
+	body     []byte
+	snapshot RequestSnapshot
+}
+
+// WithRequestSnapshot carries a captured request through synchronous processing.
+// The caller keeps body unchanged until processing completes.
+func WithRequestSnapshot(ctx context.Context, body []byte, snapshot RequestSnapshot) context.Context {
+	return context.WithValue(ctx, requestSnapshotContextKey{}, requestSnapshotContextValue{body, snapshot})
+}
+
+// RequestSnapshotForBody returns the captured fields only for the same JSON body and API.
+func RequestSnapshotForBody(ctx context.Context, surface reqcommon.APIType, body []byte) (RequestSnapshot, bool) {
+	value, ok := ctx.Value(requestSnapshotContextKey{}).(requestSnapshotContextValue)
+	if !ok || value.snapshot.surface != surface || !bytes.Equal(value.body, body) {
+		return RequestSnapshot{}, false
+	}
+	return value.snapshot, true
+}
+
 // CanSkipCapture reports whether an empty snapshot and a body without JSON
 // escapes contain no supported field keys. It does not validate JSON syntax.
 func (snapshot RequestSnapshot) CanSkipCapture(body []byte) bool {

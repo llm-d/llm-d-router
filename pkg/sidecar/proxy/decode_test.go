@@ -481,6 +481,23 @@ var _ = Describe("Chunked Decode", func() {
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusBadGateway))
 		})
+
+		It("returns the response unmodified when the first choice is not an object", func() {
+			// completion_tokens equals max_tokens so the budget is exhausted
+			// after one chunk.
+			ti := newChunkedTestSetup(5, []string{
+				`{"choices":[null],"usage":{"prompt_tokens":3,"completion_tokens":10,"total_tokens":13}}`,
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]any
+			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+			Expect(body["choices"]).To(Equal([]any{nil}))
+		})
 	})
 
 	Describe("streaming", func() {

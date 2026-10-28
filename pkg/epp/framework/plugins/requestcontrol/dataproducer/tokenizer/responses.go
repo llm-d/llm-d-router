@@ -18,12 +18,15 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 )
@@ -102,7 +105,8 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 	}
 	if m.mode == "" {
 		mode := responsesRenderModeNative
-		tokens, _, err := tk.RenderResponses(ctx, fwkrh.PayloadMap{
+		probeCtx := withUnobservedRender(ctx)
+		tokens, _, err := tk.RenderResponses(probeCtx, fwkrh.PayloadMap{
 			"model": model, "max_output_tokens": 1, "input": "warmup",
 		})
 		if err != nil {
@@ -122,7 +126,7 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 			}
 			legacyProbe["model"] = model
 			legacyProbe["max_tokens"] = 1
-			tokens, _, err = tk.RenderChat(ctx, legacyProbe)
+			tokens, _, err = tk.RenderChat(probeCtx, legacyProbe)
 			if err != nil {
 				return false, fmt.Errorf("discover legacy Responses rendering: %w", err)
 			}
@@ -144,10 +148,15 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 // messages, and Instructions as a leading system message; other Input item
 // kinds (for example function_call, function_call_output, reasoning) are
 // left for a follow-up rather than tokenized incorrectly here.
-func (b renderBackend) renderLegacyResponses(ctx context.Context, r *fwkrh.ResponsesRequest) (*fwkrh.TokenizedRequest, error) {
-	payload, err := responsesPayload(r)
+func (b renderBackend) renderLegacyResponses(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
+	payload, err := responsesPayload(body.Responses)
 	if err != nil {
 		return nil, err
+	}
+	if toolcalling.TelemetryEnabled(ctx) {
+		if baseline := prepareLegacyResponsesToolFields(body); baseline != nil {
+			ctx = context.WithValue(ctx, renderToolBaselineCtxKey{}, baseline)
+		}
 	}
 	payload["model"] = b.modelName
 	tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, payload)
@@ -158,6 +167,56 @@ func (b renderBackend) renderLegacyResponses(ctx context.Context, r *fwkrh.Respo
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 	}}}, nil
+}
+
+func prepareLegacyResponsesToolFields(body *fwkrh.InferenceRequestBody) *renderToolBaseline {
+	var raw []byte
+	switch source := body.WirePayload().(type) {
+	case fwkrh.RawPayload:
+		raw = source
+	case fwkrh.Marshaler:
+		var err error
+		raw, err = source.Marshal()
+		if err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return nil
+	}
+	source, err := toolcalling.CaptureValidatedRequestJSON(reqcommon.APITypeResponses, raw)
+	if err != nil {
+		return nil
+	}
+	expected := fwkrh.PayloadMap{}
+	if value, ok := envelope[string(toolcalling.FieldTools)]; ok {
+		var tools []any
+		switch {
+		case json.Unmarshal(value, &tools) != nil:
+			expected[string(toolcalling.FieldTools)] = value
+		case tools != nil && len(tools) == 0:
+			expected[string(toolcalling.FieldTools)] = []any{}
+		default:
+			expected[string(toolcalling.FieldTools)] = convertResponsesTools(tools)
+		}
+	}
+	for _, field := range []toolcalling.Field{toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls} {
+		if value, ok := envelope[string(field)]; ok {
+			expected[string(field)] = value
+		}
+	}
+	normalized, err := expected.Marshal()
+	if err != nil {
+		return nil
+	}
+	comparison, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, normalized)
+	if err != nil {
+		return nil
+	}
+	return &renderToolBaseline{source: source, comparison: comparison}
 }
 
 func responsesPayload(r *fwkrh.ResponsesRequest) (fwkrh.PayloadMap, error) {

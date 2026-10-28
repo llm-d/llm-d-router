@@ -1432,3 +1432,44 @@ func TestRecordPluginDataScopeViolation(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestRecordSchedulerFilterEliminated(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	RecordSchedulerFilterEliminated("decode", "test-filter", "f1", 2)
+	RecordSchedulerFilterEliminated("decode", "test-filter", "f1", 3)
+	RecordSchedulerFilterEliminated("prefill", "test-filter", "f1", 1)
+
+	want, err := os.Open("testdata/llm_d_scheduler_filter_eliminated_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_scheduler_filter_eliminated_total"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestRecordSchedulerFailure(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	RecordSchedulerFailure(SchedulerFailureReasonAllFiltered)
+	RecordSchedulerFailure(SchedulerFailureReasonAllFiltered)
+	RecordSchedulerFailure(SchedulerFailureReasonNoProfileSelected)
+	RecordSchedulerFailure(SchedulerFailureReasonProfileHandlerError)
+
+	want, err := os.Open("testdata/llm_d_scheduler_failures_total_metric")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer want.Close()
+	if err := promtestutil.GatherAndCompare(metrics.Registry, want,
+		"llm_d_epp_scheduler_failures_total"); err != nil {
+		t.Error(err)
+	}
+}
