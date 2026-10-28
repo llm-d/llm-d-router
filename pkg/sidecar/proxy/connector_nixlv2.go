@@ -125,6 +125,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Keeps the client's body intact for the decode request below.
 	prefillRequest := maps.Clone(body)
+	// The EPP may forward the rendered prompt as kv_transfer_params.prompt_token_ids;
+	// both hops below replace kv_transfer_params, so carry the IDs or both pods re-tokenize.
+	promptTokenIDs := clientPromptTokenIDs(body)
 
 	// WRITE mode populates the destination fields the prefill engine needs for
 	// its RDMA Write; READ mode leaves them nil per the standard NIXLv2 contract.
@@ -173,6 +176,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	setPromptTokenIDs(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -410,6 +414,9 @@ retryLoop:
 			}
 		}
 	}
+	if dKVParams, ok := pKVTransferParams.(map[string]any); ok {
+		setPromptTokenIDs(dKVParams, promptTokenIDs)
+	}
 	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 
 	dbody, err := json.Marshal(body)
@@ -515,6 +522,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	// Keeps the client's body intact for the decode request built below.
 	prefillRequest := maps.Clone(body)
+	promptTokenIDs := clientPromptTokenIDs(body)
 
 	// Pin both requests to the same DP rank (kv_transfer_params + HTTP header).
 	// The header and remote_dp_rank must be in [0, dp_size_local).
@@ -569,6 +577,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	setPromptTokenIDs(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -614,6 +623,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
 	// request so peer restarts (new IP) are picked up within the TTL.
+	setPromptTokenIDs(body[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 	if len(remoteHosts) > 0 {
 		dkv := body[reqcommon.FieldKVTransferParams].(map[string]any)
 		dkv["remote_hosts"] = []any{prefillHost}

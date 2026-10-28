@@ -76,6 +76,8 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		reqcommon.FieldDoRemoteDecode:  true,
 		requestFieldTransferID:         transferID,
 	}
+	promptTokenIDs := clientPromptTokenIDs(requestData)
+	setPromptTokenIDs(prefillData[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 	// update fields from original body; return asap.
 	reqcommon.CapSingleToken(prefillData, apiType)
 
@@ -102,6 +104,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		requestFieldRemoteBootstrapAddr: bootstrapAddr,
 		reqcommon.FieldRemoteEngineID:   engineID,
 	}
+	setPromptTokenIDs(decodeData[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
