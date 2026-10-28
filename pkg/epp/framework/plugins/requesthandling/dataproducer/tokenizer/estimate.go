@@ -273,6 +273,8 @@ func estimateBytes(body *fwkrequest.InferenceRequestBody) ([]byte, error) {
 		return []byte(imageGenerationText(body.Images)), nil
 	case body.AudioGenerate != nil:
 		return []byte(audioGenerateText(body.AudioGenerate)), nil
+	case body.TextToSpeech != nil:
+		return []byte(body.TextToSpeech.Input), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}

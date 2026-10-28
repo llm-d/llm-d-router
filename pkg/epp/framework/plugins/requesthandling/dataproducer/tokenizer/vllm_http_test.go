@@ -204,6 +204,27 @@ func TestProduce_CompletionsVLLMHTTPUsesRawPayload(t *testing.T) {
 	assert.NotContains(t, sent, "model")
 }
 
+func TestProduce_TextToSpeechVLLMHTTPRenders(t *testing.T) {
+	srv, cap := httpFixture(t,
+		[]renderResponse{{TokenIDs: []uint32{4, 5}}}, renderResponse{})
+	defer srv.Close()
+
+	req := &scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+		},
+	}
+
+	p := newTestPlugin(newHTTPRenderer(t, srv))
+	require.NoError(t, p.Produce(context.Background(), req, nil))
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{4, 5}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(cap.completions, &sent))
+	assert.Equal(t, "hello", sent["prompt"])
+}
+
 // TestVLLMHTTPRenderer_RenderChat_Multimodal covers the chat endpoint: the raw
 // payload is forwarded directly and multimodal features are converted from wire
 // format to kvcache map shape.
