@@ -680,6 +680,10 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
+		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()
+		response.CompleteTimestamp = reqCtx.ResponseCompleteTimestamp()
+		response.Streaming = reqCtx.ModelServerStreaming()
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
