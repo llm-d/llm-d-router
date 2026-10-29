@@ -64,6 +64,9 @@ type (
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
+		// RankLabelName is the label naming the data-parallel rank of a series. An endpoint
+		// with several ranks behind its port reads only the series of its own rank.
+		RankLabelName string `json:"rankLabelName,omitempty"`
 	}
 
 	customMetricConfigParams struct {
@@ -103,6 +106,7 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		RankLabelName:       "engine",
 		// vLLM reports the tiering counters only when it runs with TieringOffloadingSpec,
 		// and creates each series on its first event.
 		CustomMetrics: []customMetricConfigParams{
@@ -267,6 +271,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
 			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
 			CustomMetrics:       customMetrics,
+			RankLabel:           engineConfig.RankLabelName,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
