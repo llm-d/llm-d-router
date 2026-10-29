@@ -173,7 +173,7 @@ func TestRequestHeader_SizeCaps(t *testing.T) {
 	assert.Equal(t, string(errcommon.RequestDroppedReasonSizeLimit), e.Headers[errcommon.RequestDroppedReasonHeaderKey])
 
 	err = p.RequestHeader(t.Context(), newRequest("team-a", 10, 500))
-	requireCode(t, err, errcommon.BadRequest)
+	_ = requireCode(t, err, errcommon.BadRequest)
 
 	assert.Equal(t, 0, p.teams["team-a"].inflight, "a rejected request holds no slot")
 }

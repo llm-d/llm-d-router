@@ -46,9 +46,9 @@ const (
 	// ClassHeader reports the class that served the request, or the class a rejection applied to.
 	ClassHeader = "x-llm-d-qos-class"
 	// RemainingTokensHeader reports the weighted tokens left in the team's bucket.
-	RemainingTokensHeader = "x-ratelimit-remaining-tokens"
+	RemainingTokensHeader = "x-ratelimit-remaining-tokens" //#nosec G101 -- header name, not a credential
 	// ResetTokensHeader reports the seconds until the team's bucket is full.
-	ResetTokensHeader = "x-ratelimit-reset-tokens"
+	ResetTokensHeader = "x-ratelimit-reset-tokens" //#nosec G101 -- header name, not a credential
 	// ConcurrencyRemainingHeader reports the team's unused concurrency.
 	ConcurrencyRemainingHeader = "x-llm-d-qos-concurrency-remaining"
 	// RetryAfterHeader carries the seconds a rejected client should wait.
@@ -226,11 +226,12 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	}
 	served, decision, charged := committed, decisionAdmitted, false
 	if team.bucket != nil {
-		if team.bucket.tryTake(cost, now) {
+		switch {
+		case team.bucket.tryTake(cost, now):
 			charged = true
-		} else if team.classIndex+1 < len(p.classes) {
+		case team.classIndex+1 < len(p.classes):
 			served, decision = p.classes[team.classIndex+1], decisionDowngraded
-		} else {
+		default:
 			wait := team.bucket.waitFor(cost, now)
 			team.mu.Unlock()
 			return p.reject(team, committed.Name, decisionRejectedQuota, p.quotaError(team, committed.Name, wait, "token rate commit exceeded"))
