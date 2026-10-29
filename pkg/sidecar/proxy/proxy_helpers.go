@@ -230,7 +230,7 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
 	reqcommon.FieldEcho:                 {},
-	requestFieldN:                       {},
+	reqcommon.FieldN:                    {},
 	reqcommon.FieldCacheHitThreshold:    {},
 	reqcommon.FieldContinueFinalMessage: {},
 	reqcommon.FieldAddGenerationPrompt:  {},
