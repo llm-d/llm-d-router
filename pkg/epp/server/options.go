@@ -225,9 +225,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
 	fs.IntVar(&opts.DataParallelRanksPerPort, "data-parallel-ranks-per-port", opts.DataParallelRanksPerPort,
-		"Number of data-parallel ranks a model server pod serves behind each target port, such as vLLM's Rust "+
-			"frontend with --data-parallel-size. Above 1, each target port of a pod becomes that many endpoints, "+
-			"one per rank, with RankIndex numbered port-major from 0.")
+		"Number of data-parallel ranks a model server pod serves behind its target port, such as vLLM's Rust "+
+			"frontend with --data-parallel-size. Above 1, the pool must have exactly one target port, and each pod "+
+			"becomes that many endpoints on that port, one per rank, with RankIndex 0 to N-1.")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
@@ -437,6 +437,10 @@ func (opts *Options) Validate() error {
 
 	if opts.DataParallelRanksPerPort < 1 {
 		return fmt.Errorf("data-parallel-ranks-per-port must be at least 1, got %d", opts.DataParallelRanksPerPort)
+	}
+	if opts.DataParallelRanksPerPort > 1 && opts.EndpointSelector != nil && len(opts.EndpointTargetPorts) != 1 {
+		return fmt.Errorf("data-parallel-ranks-per-port above 1 requires exactly one %q, got %d",
+			"endpoint-target-ports", len(opts.EndpointTargetPorts))
 	}
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {

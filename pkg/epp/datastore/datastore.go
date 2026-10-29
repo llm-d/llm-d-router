@@ -72,8 +72,9 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
-	// WithDataParallelRanksPerPort expands each target port of a pod into n rank endpoints
-	// sharing that port. Values below 2 keep one endpoint per port.
+	// WithDataParallelRanksPerPort expands the single target port of a pod into n rank endpoints
+	// sharing that port. Values below 2 keep one endpoint per port. Above 1, PoolSet rejects a
+	// pool with more than one target port.
 	WithDataParallelRanksPerPort(n int) Datastore
 
 	// InferenceObjective operations
@@ -190,6 +191,10 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	if endpointPool == nil {
 		ds.Clear()
 		return nil
+	}
+	if ds.ranksPerPort > 1 && len(endpointPool.TargetPorts) != 1 {
+		return fmt.Errorf("data-parallel ranks per port is %d, which requires exactly one target port, got %d",
+			ds.ranksPerPort, len(endpointPool.TargetPorts))
 	}
 	logger := log.FromContext(ctx)
 	ds.mu.Lock()

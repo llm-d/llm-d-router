@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
@@ -472,6 +473,23 @@ func TestDataParallelRanksPerPortFlag(t *testing.T) {
 	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-ranks-per-port") {
 		t.Errorf("Expected Validate() to reject zero data-parallel-ranks-per-port, got: %v", err)
 	}
+}
+
+func TestDataParallelRanksPerPortRequiresOneTargetPort(t *testing.T) {
+	selector, err := labels.Parse("app=vllm")
+	require.NoError(t, err)
+
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
+	opts.EndpointSelector = selector
+	opts.DataParallelRanksPerPort = 2
+	opts.EndpointTargetPorts = []int{8000, 8001}
+	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("Expected Validate() to reject several target ports with data-parallel-ranks-per-port=2, got: %v", err)
+	}
+
+	opts.EndpointTargetPorts = []int{8000}
+	require.NoError(t, opts.Validate())
 }
 
 func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {

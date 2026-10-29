@@ -891,26 +891,6 @@ func TestDataParallelRanksPerPort(t *testing.T) {
 				rankEndpoint("pod1-rank-1", "8000", 1),
 			},
 		},
-		{
-			name:        "several ports number their ranks port-major",
-			targetPorts: []v1.Port{{Number: 8000}, {Number: 8001}},
-			pod:         readyPod(nil),
-			want: []*fwkdl.EndpointMetadata{
-				rankEndpoint("pod1-rank-0", "8000", 0),
-				rankEndpoint("pod1-rank-1", "8000", 1),
-				rankEndpoint("pod1-rank-2", "8001", 2),
-				rankEndpoint("pod1-rank-3", "8001", 3),
-			},
-		},
-		{
-			name:        "an inactive port drops all of its ranks",
-			targetPorts: []v1.Port{{Number: 8000}, {Number: 8001}},
-			pod:         readyPod(map[string]string{activePortsAnnotation: "8001"}),
-			want: []*fwkdl.EndpointMetadata{
-				rankEndpoint("pod1-rank-2", "8001", 2),
-				rankEndpoint("pod1-rank-3", "8001", 3),
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -944,7 +924,7 @@ func TestDataParallelRanksPerPort_PortDeactivationRemovesRanks(t *testing.T) {
 	ctx := context.Background()
 	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).WithDataParallelRanksPerPort(2)
 	pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
-	pool.Spec.TargetPorts = []v1.Port{{Number: 8000}, {Number: 8001}}
+	pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
 	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
 
 	pod := &corev1.Pod{
@@ -952,16 +932,23 @@ func TestDataParallelRanksPerPort_PortDeactivationRemovesRanks(t *testing.T) {
 		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
 	}
 	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
-	require.Len(t, ds.PodList(AllPodsPredicate), 4)
+	require.Len(t, ds.PodList(AllPodsPredicate), 2)
 
-	pod.Annotations = map[string]string{activePortsAnnotation: "8000"}
+	pod.Annotations = map[string]string{activePortsAnnotation: "9000"}
 	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
-	endpoints := ds.PodList(AllPodsPredicate)
-	gotNames := make([]string, 0, len(endpoints))
-	for _, ep := range endpoints {
-		gotNames = append(gotNames, ep.GetMetadata().ID.Name)
-	}
-	assert.ElementsMatch(t, []string{"pod1-rank-0", "pod1-rank-1"}, gotNames)
+	assert.Empty(t, ds.PodList(AllPodsPredicate))
+}
+
+func TestDataParallelRanksPerPort_RejectsSeveralTargetPorts(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).WithDataParallelRanksPerPort(2)
+	pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+	pool.Spec.TargetPorts = []v1.Port{{Number: 8000}, {Number: 8001}}
+
+	err := ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exactly one target port")
+	assert.False(t, ds.PoolHasSynced(), "a rejected pool is not stored")
 }
 
 func TestActivePortFiltering(t *testing.T) {
