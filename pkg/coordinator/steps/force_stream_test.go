@@ -1994,7 +1994,7 @@ func TestKVHandoffReplaySafe(t *testing.T) {
 		kv.SGLang:        false,
 		kv.Offloading:    false,
 	} {
-		conn, err := kv.Build(name)
+		conn, err := kv.Build(name, nil)
 		require.NoError(t, err)
 		require.Equal(t, want, kvHandoffReplaySafe(conn), name)
 	}
