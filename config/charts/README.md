@@ -731,6 +731,9 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
 | `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
+| `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
+| `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
 | `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |
 | `router.proxy.autoscaling.minReplicas` | Minimum number of proxy replicas for the HPA. | `1` |
