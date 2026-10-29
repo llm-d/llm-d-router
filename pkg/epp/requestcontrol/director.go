@@ -502,7 +502,10 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
-		targetEndpoints = append(targetEndpoints, curEndpoint)
+		// Data-parallel rank endpoints of one pod share its address and port.
+		if !slices.Contains(targetEndpoints, curEndpoint) {
+			targetEndpoints = append(targetEndpoints, curEndpoint)
+		}
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
@@ -515,7 +518,11 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		scores := make(map[string]float64, len(primaryResult.ScoredCandidates))
 		for _, scoredEndpoint := range primaryResult.ScoredCandidates {
 			curMetadata := scoredEndpoint.GetMetadata()
-			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
+			address := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
+			// The proxy routes by address, so an address shared by data-parallel ranks takes its best rank's score.
+			if score, ok := scores[address]; !ok || scoredEndpoint.Score > score {
+				scores[address] = scoredEndpoint.Score
+			}
 		}
 		reqCtx.TargetEndpointScores = scores
 	}

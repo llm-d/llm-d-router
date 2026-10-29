@@ -567,6 +567,30 @@ func TestDirector_HandleRequest(t *testing.T) {
 		PrimaryProfileName: "testProfile",
 	}
 
+	rankEndpoint := func(rank int, score float64) *fwksched.ScoredEndpoint {
+		return &fwksched.ScoredEndpoint{
+			Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address:      "192.168.5.100",
+				Port:         "8000",
+				MetricsHost:  "192.168.5.100:8000",
+				ID:           types.NamespacedName{Name: fmt.Sprintf("pod5-rank-%d", rank), Namespace: "default"},
+				RankIndex:    rank,
+				RanksPerPort: 2,
+			}, nil, nil),
+			Score: score,
+		}
+	}
+	rank1Endpoint, rank0Endpoint := rankEndpoint(1, 0.83), rankEndpoint(0, 0.41)
+	rankScheduleResults := &fwksched.SchedulingResult{
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"testProfile": {
+				TargetEndpoints:  []fwksched.Endpoint{rank1Endpoint, rank0Endpoint, scoredEndpoint2},
+				ScoredCandidates: []fwksched.ScoredEndpoint{*rank1Endpoint, *rank0Endpoint, *scoredEndpoint2},
+			},
+		},
+		PrimaryProfileName: "testProfile",
+	}
+
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
@@ -678,6 +702,29 @@ func TestDirector_HandleRequest(t *testing.T) {
 					"192.168.1.100:8000": 0.91,
 					"192.168.2.100:8000": 0.74,
 					"192.168.3.100:8000": 0.12,
+				},
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "data-parallel ranks of one pod share one destination and its best score",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = rankScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod:       rank1Endpoint.GetMetadata(),
+				TargetEndpoint:  "192.168.5.100:8000,192.168.2.100:8000",
+				TargetEndpointScores: map[string]float64{
+					"192.168.5.100:8000": 0.83,
+					"192.168.2.100:8000": 0.74,
 				},
 			},
 			inferenceObjectiveName: objectiveName,
