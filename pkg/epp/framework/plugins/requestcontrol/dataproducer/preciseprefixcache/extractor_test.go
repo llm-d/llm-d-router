@@ -536,3 +536,29 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestProducer_EnsureSubscriber_RankEndpointSourceIncludesRank(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
+		ID:           k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:      "10.0.0.1",
+		Port:         "8000",
+		RankIndex:    1,
+		RanksPerPort: 2,
+	}))
+
+	assert.Equal(t, []string{"10.0.0.1:8000/rank-1"}, subscribers.sourceEndpoints)
+	assert.Equal(t, []string{"tcp://10.0.0.1:5558"}, subscribers.endpoints)
+}

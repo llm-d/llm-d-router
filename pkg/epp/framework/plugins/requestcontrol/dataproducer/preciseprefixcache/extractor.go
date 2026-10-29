@@ -78,7 +78,7 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	if snapshotPort := p.kvEventsConfig.PodDiscoveryConfig.SnapshotSocketPort; snapshotPort > 0 {
 		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
 	}
-	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
+	sourceEndpoint := p.indexPodIdentifier(meta)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers

@@ -299,7 +299,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 	speculativePod := kvblock.PodEntry{
-		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
+		PodIdentifier: p.indexPodIdentifier(targetMeta),
 		Speculative:   true,
 	}
 
@@ -318,7 +318,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
 		if prefillMeta := prefill.GetMetadata(); prefillMeta != nil {
 			prefillPod := kvblock.PodEntry{
-				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
+				PodIdentifier: p.indexPodIdentifier(prefillMeta),
 				Speculative:   true,
 			}
 			for _, promptKeys := range state.perPromptKeys {
