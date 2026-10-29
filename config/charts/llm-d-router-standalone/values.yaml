@@ -32,6 +32,12 @@ router:
     affinity: {}
     tolerations: []
 
+    # Annotations and pod-level securityContext for the proxy Deployment when
+    # mode=service. In sidecar mode router.epp.podAnnotations and
+    # router.epp.podSecurityContext apply instead.
+    podAnnotations: {}
+    podSecurityContext: {}
+
     # Autoscaling configuration for the proxy Deployment (when mode=service).
     # When enabled, a HorizontalPodAutoscaler (HPA) resource is created targeting the proxy Deployment.
     # router.proxy.replicas is ignored when autoscaling is enabled; use minReplicas and maxReplicas.
