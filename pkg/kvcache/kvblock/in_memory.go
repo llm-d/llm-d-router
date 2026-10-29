@@ -195,13 +195,6 @@ func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
 	return len(pc.entries) == 0
 }
 
-// size returns the number of entries.
-func (pc *PodCache) size() int {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-	return len(pc.entries)
-}
-
 // filteredEntries returns the entries whose PodIdentifier is in allowed (all
 // entries when allowed is empty) plus the unfiltered entry count.
 func (pc *PodCache) filteredEntries(allowed sets.Set[string]) (filtered []PodEntry, total int) {
