@@ -42,8 +42,10 @@ func init() {
 }
 
 type DecodeStep struct {
-	gwClient *gateway.Client
-	kv       kv.Connector
+	gwClient    *gateway.Client
+	kv          kv.Connector
+	forceStream bool
+	budget      *forceStreamBudget
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -57,7 +59,19 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
+	forceStream, _, err := paramBool(params, ParamForceStream)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, forceStream: forceStream}
+	if forceStream {
+		budget, err := parseForceStreamBudget(params)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		step.budget = budget
+	}
+	return step, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -67,6 +81,49 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
 		return err
+	}
+
+	// Force-streaming applies only to a non-streaming request. A chat or text
+	// request whose reply may carry fields the reassembler drops (tool calls,
+	// logprobs, reasoning) takes the pass-through to keep them; forceStreamLossy
+	// catches what the request declares up front, and a server-side default is
+	// caught on the frame mid-stream (both fall back here). Every other candidate
+	// reserves budget and reassembles the whole reply; one whose estimate exceeds
+	// the per-request cap, or that finds the budget full, falls through to the
+	// pass-through below, which buffers nothing.
+	if s.forceStream && !reqCtx.Stream {
+		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
+			switch {
+			case forceStreamLossy(shape, reqCtx.Body):
+				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
+			default:
+				reserved, ok := s.estimateReservation(reqCtx)
+				switch {
+				case !ok:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
+				case s.budget.tryReserve(reserved):
+					err := s.executeForceStream(ctx, logger, reqCtx, shape, reserved)
+					fallbackResult, isFallback := forceStreamFallbackResult(err)
+					if !isFallback {
+						return err
+					}
+					// The attempt failed with nothing written to the client. Falling back
+					// re-sends reqCtx.Body through the pass-through, so the pod may run the
+					// request twice. The body still carries the prefiller's one-shot P2P
+					// block handoff the forced attempt already pulled; replaying spent
+					// blocks is unsafe, so such a request fails cleanly instead (nothing
+					// reached the client, so a 5xx is honest).
+					if spendsRemoteBlocks(reqCtx.Body) {
+						logger.Error(err, "force-stream failed and its KV block handoff is spent; not replaying")
+						return err
+					}
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, fallbackResult)
+					// Fell back with nothing written; continue to the pass-through below.
+				default:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackBudget)
+				}
+			}
+		}
 	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
@@ -85,6 +142,45 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
 	}
 	return out.streamedError(DecodeStepName)
+}
+
+// spendsRemoteBlocks reports whether the decode body carries a one-shot P2P KV
+// handoff: remote_block_ids naming blocks the prefiller streamed to this decode pod
+// and frees once pulled (the NIXL path). The forced attempt already pulled them, so
+// re-sending the body would replay a spent handoff; the fallback is suppressed when
+// this is set. do_remote_prefill alone does not qualify: shared storage also sets
+// it but names no blocks, since the decode pod re-reads the shared store, making a
+// replay safe.
+func spendsRemoteBlocks(body map[string]any) bool {
+	params, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)
+	if !ok {
+		return false
+	}
+	ids, ok := params[reqcommon.FieldRemoteBlockIDs].([]any)
+	return ok && len(ids) > 0
+}
+
+// forceStreamFallbackResult classifies a force-stream error as fallback-eligible,
+// returning the outcome label to record if the request takes the pass-through. It
+// leaves the client uncommitted, so the caller may fall back; nil (a forced
+// success) and every other error are not fallbacks, so ok is false and the caller
+// returns them directly. The caller records the label only when it actually falls
+// back, so a suppressed fallback is never counted as one.
+func forceStreamFallbackResult(err error) (result string, ok bool) {
+	switch {
+	case errors.Is(err, errForceStreamOversize):
+		return coordmetrics.ForceStreamResultFallbackOversize, true
+	case errors.Is(err, errForceStreamUnreadable):
+		return coordmetrics.ForceStreamResultFallbackUnreadable, true
+	case errors.Is(err, errForceStreamLossyFrame):
+		return coordmetrics.ForceStreamResultFallbackUnsupported, true
+	case errors.Is(err, errForceStreamCeiling):
+		// A ceiling abort falls back like the others; it keeps the error_ceiling
+		// label so the byte-estimate shortfall stays visible for alerting.
+		return coordmetrics.ForceStreamResultErrorCeiling, true
+	default:
+		return "", false
+	}
 }
 
 // responseWriter returns the writer the decode response is streamed through,

@@ -30,6 +30,7 @@ import (
 	"strconv"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -110,7 +111,7 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
-		enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+		enableThinking = boolPtrFromAny(kwArgs[reqcommon.FieldEnableThinking])
 		// DeepSeek V4 activation: extra_body={"thinking":{"type":"enabled"|"disabled"}}.
 		if enableThinking == nil {
 			if m, ok := kwArgs["thinking"].(map[string]any); ok {

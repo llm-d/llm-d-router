@@ -61,6 +61,7 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldN                    = "n"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
@@ -93,6 +94,12 @@ const (
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+	FieldFunctions            = "functions"
+	FieldLogprobs             = "logprobs"
+	FieldReasoningEffort      = "reasoning_effort"
+	FieldChatTemplateKwargs   = "chat_template_kwargs"
+	FieldEnableThinking       = "enable_thinking"
+	FieldThinking             = "thinking" // Anthropic Messages thinking config
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap
@@ -100,6 +107,22 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Role values, the strings a message's FieldRole takes.
+const (
+	RoleAssistant = "assistant"
+)
+
+// Choice fields of a Chat Completions or Completions response, streamed or not.
+// A non-streaming chat reply holds each choice's output under FieldMessage; a
+// streamed chunk holds the increment under FieldDelta.
+const (
+	FieldChoices      = "choices"
+	FieldIndex        = "index"
+	FieldFinishReason = "finish_reason"
+	FieldMessage      = "message"
+	FieldDelta        = "delta"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report

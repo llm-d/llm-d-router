@@ -170,6 +170,47 @@ var (
 	)
 )
 
+// Force-stream family. Recorded by the decode step when force-streaming is
+// enabled: it streams the upstream response and reassembles it into one
+// non-streaming reply. The gauge tracks bytes reserved against the shared
+// buffer budget by the shapes that buffer the whole reply, so an operator can
+// see how close concurrent forced requests run to the limit; the counter
+// attributes each candidate request to its outcome, so it sums to candidate
+// volume.
+var (
+	forceStreamBufferedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_buffered_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Bytes currently reserved against the force-stream buffer budget by in-flight forced requests.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
+
+	forceStreamTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of force-stream candidate requests by model and outcome: "+
+					"forced (reassembled from a streamed upstream into one reply), "+
+					"fallback_budget (budget full), "+
+					"fallback_unbounded (a declared token limit whose estimate exceeds the per-request cap), "+
+					"fallback_unsupported (chat/text reply carries a field the reassembler drops, declared in the request or seen on a frame), "+
+					"fallback_oversize (Responses completed frame larger than the reservation plus the request body), "+
+					"fallback_unreadable (upstream 200 but a stream it could not parse), "+
+					"error_ceiling (buffered reply exceeded its reserved budget, usually a short byte estimate), "+
+					"error_upstream (upstream 4xx/5xx, or an error frame streamed after the 200, forwarded to the client), "+
+					"or error_transport (no upstream response). "+
+					"The fallback outcomes and error_ceiling take the non-forced pass-through, unless a spent one-shot KV handoff "+
+					"makes a replay unsafe, in which case the request fails as an error; "+
+					"error_upstream and error_transport are also classified generically by step_errors_total.",
+				compbasemetrics.ALPHA),
+		},
+		withLabel(modelLabel, "result"),
+	)
+)
+
 // Per-request pipeline amplification, orchestration cost, media processing,
 // and outbound response size. Recorded once per client request except
 // media_download_duration_seconds, which is one observation per download
