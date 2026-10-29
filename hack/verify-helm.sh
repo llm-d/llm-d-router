@@ -244,6 +244,7 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
 test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
@@ -344,6 +345,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c "priorityClassName: router-critical" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
+      echo "Validation failed: EPP and proxy priorityClassName, podLabels or topologySpreadConstraints not rendered for test: ${key}"
       exit 1
     fi
   fi

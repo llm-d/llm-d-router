@@ -155,6 +155,12 @@ epp:
   nodeSelector: {}
   affinity: {}
   tolerations: []
+  # Each constraint needs a labelSelector matching the EPP pods, for example
+  # llm-d-router-standalone: <release>-epp (llm-d-router-gateway: <release>-epp in the gateway chart).
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  # Extra labels added to the EPP pod template. Must not reuse the chart's selector label keys.
+  podLabels: {}
 
   # Annotations added to the EPP pod template. Useful for clusters that rely on
   # annotation-based Prometheus scraping (prometheus.io/{scrape,port,path}) or
