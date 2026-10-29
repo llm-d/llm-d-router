@@ -66,6 +66,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -82,6 +84,78 @@ var (
 func newOpenAIParserWithPriorityPropagation(t *testing.T) *openai.OpenAIParser {
 	t.Helper()
 	return openai.NewOpenAIParser()
+}
+
+func TestDirector_ModelRewriteIfNeeded(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		parser       fwkrh.Parser
+		path         string
+		raw          []byte
+		targetModel  string
+		wantModel    string
+		wantBody     string
+		wantMutated  bool
+		wantBadModel bool
+	}{
+		{
+			name:        "SGLang missing model with header rewrite",
+			parser:      sglanghttp.NewSGLangHTTPParser(),
+			path:        "/generate",
+			raw:         []byte(`{"text":"Hello"}`),
+			targetModel: "llama-3-8b",
+			wantModel:   "llama-3-8b",
+			wantBody:    `{"text":"Hello","model":"llama-3-8b"}`,
+			wantMutated: true,
+		},
+		{
+			name:        "SGLang explicit model with header rewrite",
+			parser:      sglanghttp.NewSGLangHTTPParser(),
+			path:        "/generate",
+			raw:         []byte(`{"text":"Hello","model":"alias"}`),
+			targetModel: "llama-3-8b",
+			wantModel:   "llama-3-8b",
+			wantBody:    `{"text":"Hello","model":"llama-3-8b"}`,
+			wantMutated: true,
+		},
+		{
+			name:         "OpenAI missing model remains invalid",
+			parser:       openai.NewOpenAIParser(),
+			path:         "/v1/completions",
+			raw:          []byte(`{"prompt":"Hello"}`),
+			wantBadModel: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			parsed, err := tt.parser.ParseRequest(ctx, tt.raw, map[string]string{":path": tt.path})
+			require.NoError(t, err)
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{RawBody: tt.raw},
+				Parser:            tt.parser,
+				IncomingModelName: parsed.Body.Model,
+				TargetModelName:   tt.targetModel,
+			}
+			ds := &mockDatastore{}
+			director := NewDirectorWithConfig(ds, &mockScheduler{}, &mockAdmissionController{}, NewDatastoreEndpointCandidates(ds), NewConfig())
+			err = director.modelRewriteIfNeeded(ctx, reqCtx, parsed.Body)
+			if tt.wantBadModel {
+				var modelErr errcommon.Error
+				require.ErrorAs(t, err, &modelErr)
+				require.Equal(t, errcommon.BadRequest, modelErr.Code)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantModel, reqCtx.TargetModelName)
+			require.Equal(t, tt.wantMutated, parsed.Body.Mutated)
+			require.NoError(t, director.repackage(ctx, reqCtx, parsed.Body))
+			if tt.wantMutated {
+				require.JSONEq(t, tt.wantBody, string(reqCtx.Request.RawBody))
+			} else {
+				require.Equal(t, tt.raw, reqCtx.Request.RawBody)
+			}
+		})
+	}
 }
 
 func TestRepackagePreservesNativeRenderContent(t *testing.T) {
@@ -248,6 +322,7 @@ type mockRequestHeaderPlugin struct {
 	name           string
 	attributeKey   fwkplugin.DataKey
 	attributeValue string
+	modifyFn       func(*fwksched.InferenceRequest)
 }
 
 func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
@@ -255,6 +330,9 @@ func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
 }
 
 func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
+	if m.modifyFn != nil {
+		m.modifyFn(request)
+	}
 	request.PutAttribute(m.attributeKey, m.attributeValue)
 	return nil
 }
@@ -492,6 +570,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 	tests := []struct {
 		name                    string
 		reqBodyMap              map[string]any
+		requestPath             string
 		mockAdmissionController *mockAdmissionController
 		inferenceObjectiveName  string
 		schedulerMockSetup      func(m *mockScheduler)
@@ -1137,6 +1216,91 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantSource:              tracing.AttributionSourceDefault,
 		},
 		{
+			name:                    "native SGLang text without model",
+			reqBodyMap:              map[string]any{"text": "Hello"},
+			requestPath:             "/generate",
+			parser:                  sglanghttp.NewSGLangHTTPParser(),
+			mockAdmissionController: &mockAdmissionController{},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantReqCtx: &handlers.RequestContext{
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantRawBodyUnchanged: true,
+		},
+		{
+			name:                    "native SGLang input_ids without model",
+			reqBodyMap:              map[string]any{"input_ids": []int{1, 2, 3}},
+			requestPath:             "/generate",
+			parser:                  sglanghttp.NewSGLangHTTPParser(),
+			mockAdmissionController: &mockAdmissionController{},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantReqCtx: &handlers.RequestContext{
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantRawBodyUnchanged: true,
+		},
+		{
+			name:                    "native vLLM token_ids without model",
+			reqBodyMap:              map[string]any{"token_ids": []int{1, 2, 3}},
+			requestPath:             "/inference/v1/generate",
+			parser:                  vllmhttp.NewVllmHTTPParser(),
+			mockAdmissionController: &mockAdmissionController{},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantReqCtx: &handlers.RequestContext{
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantRawBodyUnchanged: true,
+		},
+		{
+			name:                    "native SGLang missing model resolved by generic rewrite",
+			reqBodyMap:              map[string]any{"text": "Hello"},
+			requestPath:             "/generate",
+			parser:                  sglanghttp.NewSGLangHTTPParser(),
+			mockAdmissionController: &mockAdmissionController{},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			wantReqCtx: &handlers.RequestContext{
+				TargetModelName: genericRewriteTarget,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantMutatedBody: map[string]any{
+				"model": genericRewriteTarget,
+				"text":  "Hello",
+			},
+			rewrites: []*v1alpha2.InferenceModelRewrite{genericRewrite},
+		},
+		{
 			name:                    "missing model field resolved by generic rewrite",
 			reqBodyMap:              map[string]any{"prompt": "p"},
 			mockAdmissionController: &mockAdmissionController{admitErr: nil},
@@ -1362,7 +1526,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				originalRawBody := append([]byte(nil), reqCtx.Request.RawBody...)
 
 				// Add appropriate path header based on request body content for path-based API detection
-				if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
+				if test.requestPath != "" {
+					reqCtx.Request.Headers[":path"] = test.requestPath
+				} else if _, hasPrompt := test.reqBodyMap["prompt"]; hasPrompt {
 					reqCtx.Request.Headers[":path"] = "/v1/completions"
 				} else if _, hasMessages := test.reqBodyMap["messages"]; hasMessages {
 					reqCtx.Request.Headers[":path"] = "/v1/chat/completions"
@@ -1425,6 +1591,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 
 				if test.wantReqCtx != nil {
+					require.NotNil(t, returnedReqCtx.SchedulingRequest)
+					assert.Equal(t, test.wantReqCtx.TargetModelName, returnedReqCtx.SchedulingRequest.TargetModel)
 					assert.Equal(t, test.wantReqCtx.ObjectiveKey, returnedReqCtx.ObjectiveKey, "reqCtx.Model mismatch")
 					assert.Equal(t, test.wantReqCtx.TargetModelName, returnedReqCtx.TargetModelName,
 						"reqCtx.ResolvedTargetModel mismatch")

@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/rest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -134,7 +135,7 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 
 	received := time.Now()
 	require.True(t, eppmetrics.RecordRequestLatencies(
-		ctx, wireTestModel, "target-model", "fairness", "priority",
+		ctx, wireTestModel, "target-model", reqcommon.APITypeMessages.Surface(), "fairness", "priority",
 		received, received.Add(420*time.Millisecond),
 	))
 

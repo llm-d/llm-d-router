@@ -77,7 +77,9 @@ func (s *Server) runConcurrentPD(
 
 	// Prefill runs in a goroutine: response is discarded (status/duration only).
 	// Decode runs on the calling goroutine: writes the actual response back via w.
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
+	// Both spans start from the request context so they come out as siblings, and
+	// each outbound request carries its own stage span.
+	_, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillReq = prefillReq.WithContext(trace.ContextWithSpan(prefillReq.Context(), prefillSpan))
@@ -126,7 +128,7 @@ func (s *Server) runConcurrentPD(
 	}()
 
 	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
+	dCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -137,7 +139,7 @@ func (s *Server) runConcurrentPD(
 	)
 	decodeStart := time.Now()
 
-	decodeReq = decodeReq.WithContext(ctx)
+	decodeReq = decodeReq.WithContext(dCtx)
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
@@ -178,7 +180,8 @@ func (s *Server) runConcurrentPD(
 
 	// End-to-end P/D timing. True TTFT captures time from gateway request start
 	// to decode start; prefill duration is tracked in the async prefill span.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
+	// Set on the decode span explicitly, since ctx is the forward_request context.
+	if decodeSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration
 		var trueTTFT time.Duration
 		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
@@ -188,7 +191,7 @@ func (s *Server) runConcurrentPD(
 			}
 		}
 
-		currentSpan.SetAttributes(
+		decodeSpan.SetAttributes(
 			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
 			semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
 			semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),

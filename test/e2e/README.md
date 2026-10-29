@@ -117,3 +117,16 @@ inside the builder, run:
 helm dependency build --skip-refresh config/charts/llm-d-router-standalone
 go test ./test/e2e/utils/... -count=1
 ```
+
+The `Messages API` specs verify Messages JSON/SSE responses through aggregated and P/D routing,
+with Chat Completions checks for regressions and separate API attribution.
+They verify model rewriting, native Messages events, token usage
+against EPP metrics, separate API surfaces, and parser/backend errors. Each API and response
+format has a separate case for each topology. Request trace attribution is covered by handler
+unit tests. The e2e specs use the pinned simulator; real-model tool/thinking behavior and SDK
+compatibility require separate product runs.
+With the suite's images and builder environment prepared, select them with:
+
+```sh
+ginkgo run --procs=1 --focus='Messages API' ./test/e2e
+```
