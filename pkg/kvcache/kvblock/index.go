@@ -138,8 +138,13 @@ type Index interface {
 	// The interface does not define whether a failed call leaves the index untouched
 	// or partially evicted; each implementation documents its own failure semantics.
 	Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error
-	// GetRequestKey returns the requestKey associated with the given engineKey.
+	// GetRequestKey returns the last request key mapped to engineKey. Parent-hash
+	// resolution uses this last key; callers that need every mapped request key
+	// must use GetRequestKeys.
 	GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error)
+	// GetRequestKeys returns every request key mapped to engineKey, in chain
+	// order from first to last. An error means the mapping is missing.
+	GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error)
 	// Clear removes all index entries for the given pod, across every device tier.
 	// It backs the AllBlocksCleared KV-event (a vLLM prefix-cache reset, e.g. after
 	// an RLHF weight update), which is pod-wide — vLLM emits it with no tier. Clear is

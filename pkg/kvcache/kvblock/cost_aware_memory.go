@@ -527,12 +527,24 @@ func (m *CostAwareMemoryIndex) clearChunk(podIdentifier string, keys []string) {
 	}
 }
 
+// GetRequestKeys returns every request key mapped to engineKey, in chain order.
+// Returns an error if the engineKey is not mapped (e.g., evicted earlier).
+func (m *CostAwareMemoryIndex) GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	rks, found := m.requestKeys.Get(engineKey)
+	if !found || len(rks) == 0 {
+		return nil, fmt.Errorf("engine key not found: %s", engineKey.String())
+	}
+	out := make([]BlockHash, len(rks))
+	copy(out, rks)
+	return out, nil
+}
+
 // GetRequestKey returns the last request key (highest index in the chain) associated with the given engineKey.
 // Returns an error if the engineKey is not mapped (e.g., evicted earlier).
 func (m *CostAwareMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	rks, found := m.requestKeys.Get(engineKey)
-	if !found || len(rks) == 0 {
-		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
+	rks, err := m.GetRequestKeys(ctx, engineKey)
+	if err != nil {
+		return EmptyBlockHash, err
 	}
 	return rks[len(rks)-1], nil
 }

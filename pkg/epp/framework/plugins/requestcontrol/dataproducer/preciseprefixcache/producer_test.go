@@ -110,6 +110,10 @@ func (f *fakeKVBlockIndex) GetRequestKey(_ context.Context, _ kvblock.BlockHash)
 	return kvblock.EmptyBlockHash, nil
 }
 
+func (f *fakeKVBlockIndex) GetRequestKeys(_ context.Context, _ kvblock.BlockHash) ([]kvblock.BlockHash, error) {
+	return nil, nil
+}
+
 func (f *fakeKVBlockIndex) Clear(ctx context.Context, podIdentifier string) error {
 	if f.clearFn != nil {
 		return f.clearFn(ctx, podIdentifier)
