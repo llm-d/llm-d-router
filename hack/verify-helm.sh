@@ -242,6 +242,7 @@ test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.la
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
+test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"app\":\"proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
 test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
@@ -328,6 +329,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q -- "/proxy-drain" "${epp_yaml}"; then
       echo "Validation failed: proxy lifecycle override not found in service-mode render for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-scheduling" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pool: router" "${epp_yaml}" || ! grep -q "key: dedicated" "${epp_yaml}" || ! grep -q "podAntiAffinity:" "${epp_yaml}"; then
+      echo "Validation failed: proxy nodeSelector, tolerations or affinity not rendered for test: ${key}"
       exit 1
     fi
   fi

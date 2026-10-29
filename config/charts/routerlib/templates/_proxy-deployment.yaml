@@ -111,6 +111,18 @@ spec:
       {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
       {{- end }}
+      {{- with $proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 ---
 {{- end -}}
 {{- end -}}
