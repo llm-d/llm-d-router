@@ -282,6 +282,9 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.nodeSelector` | Node selector for EPP pods. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
+| `router.epp.topologySpreadConstraints` | Topology spread constraints for EPP pods. Each entry needs a `labelSelector` matching the EPP pod labels. | `[]` |
+| `router.epp.priorityClassName` | PriorityClass for EPP pods. | `""` |
+| `router.epp.podLabels` | Extra labels added to the EPP pod template. | `{}` |
 | `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |
 | `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
 | `router.epp.podDisruptionBudget` | PodDisruptionBudget for EPP pods: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. Integer `minAvailable` requires at least 2 effective replicas: `replicas` (or `autoscaling.minReplicas` when autoscaled), `preferredReplicas` + `defaultReplicas` with GKE `preferredBackends`, or `primaryReplicas` + `standbyReplicas` with `priorityRouting`. A single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
@@ -747,6 +750,9 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
 | `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
+| `router.proxy.topologySpreadConstraints` | Topology spread constraints for the proxy Deployment when `mode=service`. Each entry needs a `labelSelector` matching `llm-d-router-proxy: <release>-proxy`. | `[]` |
+| `router.proxy.priorityClassName` | PriorityClass for the proxy Deployment when `mode=service`. | `""` |
+| `router.proxy.podLabels` | Extra labels added to the proxy pod template when `mode=service`. | `{}` |
 | `router.proxy.podAnnotations` | Annotations added to the proxy pod template when `mode=service`. | `{}` |
 | `router.proxy.podSecurityContext` | Pod-level `securityContext` for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |

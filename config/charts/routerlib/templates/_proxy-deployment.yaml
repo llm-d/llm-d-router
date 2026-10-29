@@ -25,6 +25,9 @@ spec:
       labels:
         {{- include "llm-d-router.labels" . | nindent 8 }}
         {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
+        {{- with $proxy.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
         {{- with $proxy.podAnnotations }}
@@ -38,6 +41,9 @@ spec:
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.priorityClassName }}
+      priorityClassName: {{ . }}
       {{- end }}
       terminationGracePeriodSeconds: {{ dig "terminationGracePeriodSeconds" 70 .Values.router.proxy }}
       containers:
@@ -128,6 +134,10 @@ spec:
       {{- end }}
       {{- with $proxy.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 ---
