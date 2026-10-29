@@ -389,6 +389,18 @@ func (r *RedisIndex) getRequestKeys(ctx context.Context, engineKeys []BlockHash)
 	return groups, nil
 }
 
+// GetRequestKeys returns every request key mapped to engineKey, in chain order.
+func (r *RedisIndex) GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	groups, err := r.getRequestKeys(ctx, []BlockHash{engineKey})
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 || len(groups[0]) == 0 {
+		return nil, fmt.Errorf("engine key not found: %s", engineKey.String())
+	}
+	return groups[0], nil
+}
+
 // GetRequestKey returns the last request key (highest score) associated with the given engineKey.
 func (r *RedisIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
 	vals, err := r.RedisClient.ZRangeArgs(ctx, redis.ZRangeArgs{
