@@ -25,8 +25,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 )
 
 func tokenized(ids ...uint32) *requesthandling.TokenizedRequest {
@@ -116,8 +119,6 @@ func TestSkips(t *testing.T) {
 		"multi-prompt":      chat(requesthandling.PayloadMap{}, multi),
 		"raw payload":       chat(requesthandling.RawPayload(`{}`), tokenized(1, 2, 3)),
 		"params not object": chat(requesthandling.PayloadMap{"kv_transfer_params": "x"}, tokenized(1, 2, 3)),
-		"completions": {Completions: &requesthandling.CompletionsRequest{},
-			Payload: requesthandling.PayloadMap{}, TokenizedRequest: tokenized(1, 2, 3)},
 		"generate": {Generate: &requesthandling.GenerateRequest{},
 			Payload: requesthandling.PayloadMap{}, TokenizedRequest: tokenized(1, 2, 3)},
 	}
@@ -152,4 +153,88 @@ func TestForwardsForEveryChatShapedAPI(t *testing.T) {
 			assert.Equal(t, []uint32{4, 5}, payload["kv_transfer_params"].(map[string]any)["prompt_token_ids"])
 		})
 	}
+}
+
+// Only the vllm backend produces engine tokens; the estimate backend's byte-packed IDs must not be
+// forwarded, so the dependency check refuses that producer at startup.
+func TestConsumesRequiresVLLMBackend(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	dep, ok := p.Consumes().Required[tokenproducer.TokenizedPromptDataKey].(plugin.ConsumedData)
+	require.True(t, ok)
+	require.NotNil(t, dep.Matches)
+	assert.NoError(t, dep.Matches(map[string]string{"backend": tokenproducer.BackendVLLM}))
+	assert.Error(t, dep.Matches(map[string]string{"backend": tokenproducer.BackendEstimate}))
+	assert.Error(t, dep.Matches(map[string]string{}))
+}
+
+// A stateful Responses request is rendered from history the worker stores, so the router's IDs
+// would leave it out.
+func TestSkipsStatefulResponses(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	for name, payload := range map[string]requesthandling.PayloadMap{
+		"previous_response_id": {"input": "hi", "previous_response_id": "resp-1"},
+		"conversation":         {"input": "hi", "conversation": "conv-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := &requesthandling.InferenceRequestBody{Responses: &requesthandling.ResponsesRequest{},
+				Payload: payload, TokenizedRequest: tokenized(1, 2)}
+			run(t, p, body)
+			assert.False(t, body.Mutated)
+			assert.NotContains(t, payload, "kv_transfer_params")
+		})
+	}
+	// An explicit null is unset, so the request is stateless and forwarded.
+	payload := requesthandling.PayloadMap{"input": "hi", "previous_response_id": nil}
+	body := &requesthandling.InferenceRequestBody{Responses: &requesthandling.ResponsesRequest{},
+		Payload: payload, TokenizedRequest: tokenized(1, 2)}
+	run(t, p, body)
+	assert.True(t, body.Mutated)
+}
+
+func completions(payload requesthandling.PayloadMap, prompt requesthandling.Prompt) *requesthandling.InferenceRequestBody {
+	return &requesthandling.InferenceRequestBody{Completions: &requesthandling.CompletionsRequest{Prompt: prompt},
+		Payload: payload, TokenizedRequest: tokenized(4, 5, 6)}
+}
+
+// vLLM's completions path takes a token array as the prompt without tokenizing it.
+func TestForwardsCompletionsPrompt(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	payload := requesthandling.PayloadMap{"model": "m", "prompt": "hello", "echo": false}
+	body := completions(payload, requesthandling.Prompt{Raw: "hello"})
+	run(t, p, body)
+	assert.True(t, body.Mutated)
+	assert.Equal(t, []uint32{4, 5, 6}, payload["prompt"])
+	assert.NotContains(t, payload, "kv_transfer_params")
+}
+
+func TestSkipsCompletions(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	tests := map[string]*requesthandling.InferenceRequestBody{
+		"already token IDs": completions(requesthandling.PayloadMap{"prompt": []any{1, 2}},
+			requesthandling.Prompt{TokenIDs: [][]uint32{{1, 2}}}),
+		"echo":          completions(requesthandling.PayloadMap{"prompt": "hi", "echo": true}, requesthandling.Prompt{Raw: "hi"}),
+		"echo raw json": completions(requesthandling.PayloadMap{"prompt": "hi", "echo": json.RawMessage(`true`)}, requesthandling.Prompt{Raw: "hi"}),
+		"suffix":        completions(requesthandling.PayloadMap{"prompt": "hi", "suffix": "end"}, requesthandling.Prompt{Raw: "hi"}),
+		"multi-prompt": {Completions: &requesthandling.CompletionsRequest{}, Payload: requesthandling.PayloadMap{"prompt": []any{"a", "b"}},
+			TokenizedRequest: &requesthandling.TokenizedRequest{Prompts: []requesthandling.PromptTokens{{TokenIDs: []uint32{1}}, {TokenIDs: []uint32{2}}}}},
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := body.Payload.(requesthandling.PayloadMap)["prompt"]
+			run(t, p, body)
+			assert.False(t, body.Mutated)
+			assert.Equal(t, before, body.Payload.(requesthandling.PayloadMap)["prompt"])
+		})
+	}
+}
+
+// The EPP's dependency check refuses the plugin alongside an estimate token-producer, which is
+// also what it auto-creates when no token-producer is configured.
+func TestStartupRejectsEstimateTokenProducer(t *testing.T) {
+	fwd, _ := New("fwd", Config{})
+	estimate, err := tokenproducer.PluginFactory(tokenproducer.PluginType, nil, plugin.NewEppHandle(context.Background(), nil))
+	require.NoError(t, err)
+	_, err = datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{fwd, estimate})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"backend"="estimate"`)
 }

@@ -168,3 +168,25 @@ var _ = Describe("prompt_token_ids passthrough", func() {
 		})
 	}
 })
+
+// The EPP replaces a /v1/completions text prompt with its token IDs; both P/D hops must send that
+// prompt as received so neither engine tokenizes it.
+var _ = Describe("token-ID completions prompt", func() {
+	It("reaches prefill and decode unchanged with the nixlv2 connector", func() {
+		testInfo := sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
+		proxyBaseAddr := testInfo.startProxy()
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathCompletions,
+			bytes.NewReader([]byte(`{"model": "Qwen/Qwen2-0.5B", "prompt": [5, 6, 7], "max_tokens": 50}`)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+		Expect(testInfo.prefillHandler.GetCompletionRequests()[0]["prompt"]).To(Equal(wantPromptTokenIDs))
+		Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
+		Expect(testInfo.decodeHandler.GetCompletionRequests()[0]["prompt"]).To(Equal(wantPromptTokenIDs))
+	})
+})

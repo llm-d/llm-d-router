@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
@@ -38,9 +39,14 @@ const (
 	PluginType = "forward-prompt-token-ids"
 
 	fieldPromptTokenIDs = "prompt_token_ids"
+	fieldPrompt         = "prompt"
+	fieldSuffix         = "suffix"
 )
 
-var _ requestcontrol.PreRequest = &Plugin{}
+var (
+	_ requestcontrol.PreRequest = &Plugin{}
+	_ plugin.ConsumerPlugin     = &Plugin{}
+)
 
 // Config configures token forwarding.
 type Config struct {
@@ -49,8 +55,9 @@ type Config struct {
 	MinTokens int `json:"minTokens,omitempty"`
 }
 
-// Plugin writes the token-producer's IDs into kv_transfer_params.prompt_token_ids, which
-// vLLM's chat and completions paths read to skip their own templating and tokenization.
+// Plugin hands the token-producer's IDs to the model server so it does not render the prompt again:
+// in kv_transfer_params.prompt_token_ids for the chat-shaped APIs, and as the prompt itself for
+// /v1/completions.
 type Plugin struct {
 	typedName plugin.TypedName
 	minTokens int
@@ -83,7 +90,20 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// PreRequest adds the rendered token IDs to a single-prompt JSON request. Other
+// Consumes requires a token-producer with the vllm backend. The estimate backend's IDs are packed
+// bytes, not engine tokens, so forwarding them would serve a different prompt; startup fails instead.
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
+				Type:    scheduling.TokenizedRequest{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": tokenproducer.BackendVLLM}),
+			},
+		},
+	}
+}
+
+// PreRequest adds the rendered token IDs to a single-prompt JSON request. For chat-shaped APIs other
 // kv_transfer_params fields are preserved, and an ID list the client sent is kept.
 func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	_ *scheduling.SchedulingResult) error {
@@ -92,9 +112,7 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 		return nil
 	}
 	body := request.Body
-	// vLLM reads the IDs only on its chat path, which also serves Messages and Responses.
-	// Completions and native generate already send tokens or skip templating.
-	if !isChatShaped(body) || len(body.TokenizedRequest.Prompts) != 1 {
+	if len(body.TokenizedRequest.Prompts) != 1 {
 		return nil
 	}
 	prompt := body.TokenizedRequest.Prompts[0]
@@ -108,20 +126,72 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 			"requestID", request.RequestID)
 		return nil
 	}
+	switch {
+	case body.Completions != nil:
+		p.forwardCompletions(body, payload, prompt.TokenIDs)
+	case isChatShaped(body):
+		// A stateful Responses request is rendered by the worker from history it stores, which the
+		// router's render does not include.
+		if body.Responses != nil && commonrequest.RejectStatefulResponsesFields(payload) != nil {
+			return nil
+		}
+		p.forwardChat(ctx, request, payload, prompt.TokenIDs)
+	}
+	return nil
+}
+
+// forwardChat writes the IDs into kv_transfer_params.prompt_token_ids, which vLLM's chat path
+// (also serving Messages and Responses) reads to skip templating and tokenization.
+func (p *Plugin) forwardChat(ctx context.Context, request *scheduling.InferenceRequest,
+	payload requesthandling.PayloadMap, ids []uint32) {
 	params, ok := kvTransferParams(payload)
 	if !ok {
-		logger.Info("skipping token forwarding: kv_transfer_params is not an object",
-			"requestID", request.RequestID)
-		return nil
+		log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEBUG).Info(
+			"skipping token forwarding: kv_transfer_params is not an object", "requestID", request.RequestID)
+		return
 	}
 	if _, exists := params[fieldPromptTokenIDs]; exists {
-		return nil
+		return
 	}
-	params[fieldPromptTokenIDs] = prompt.TokenIDs
-	body.MutatePayloadMap(func(m requesthandling.PayloadMap) {
+	params[fieldPromptTokenIDs] = ids
+	request.Body.MutatePayloadMap(func(m requesthandling.PayloadMap) {
 		m[commonrequest.FieldKVTransferParams] = params
 	})
-	return nil
+}
+
+// forwardCompletions replaces a text prompt with its IDs; vLLM's completions path takes a token
+// array as the prompt without tokenizing it. It leaves alone prompts that are already token IDs,
+// and echo and suffix requests, whose responses or rendering depend on the prompt text.
+func (p *Plugin) forwardCompletions(body *requesthandling.InferenceRequestBody,
+	payload requesthandling.PayloadMap, ids []uint32) {
+	if len(body.Completions.Prompt.TokenIDs) > 0 || hasField(payload, commonrequest.FieldEcho) || hasField(payload, fieldSuffix) {
+		return
+	}
+	body.MutatePayloadMap(func(m requesthandling.PayloadMap) {
+		m[fieldPrompt] = ids
+	})
+}
+
+// hasField reports whether payload sets field to a value other than null, false or an empty string.
+func hasField(payload requesthandling.PayloadMap, field string) bool {
+	v, ok := payload[field]
+	if !ok {
+		return false
+	}
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		if err := parserutil.Unmarshal(raw, &v); err != nil {
+			return true
+		}
+	}
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case string:
+		return t != ""
+	}
+	return true
 }
 
 // isChatShaped reports whether vLLM renders the request through its chat path, the only path

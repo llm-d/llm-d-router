@@ -2,10 +2,13 @@
 
 **Type:** `forward-prompt-token-ids`
 
-`PreRequest` plugin that writes the token IDs the `token-producer` already rendered into the forwarded
-request as `kv_transfer_params.prompt_token_ids`. vLLM's chat path, which also serves `/v1/messages` and
-`/v1/responses`, reads that field and skips its own chat templating and tokenization ([vLLM #48145](https://github.com/vllm-project/vllm/pull/48145)),
-so the prompt is tokenized once per request instead of once in the router and again on every model server.
+`PreRequest` plugin that hands the token IDs the `token-producer` already rendered to the model server, so
+the prompt is tokenized once per request instead of once in the router and again on every model server:
+
+- `/v1/chat/completions`, `/v1/messages`, `/v1/responses`: written as `kv_transfer_params.prompt_token_ids`.
+  vLLM's chat path, which serves all three, reads that field and skips its own chat templating and
+  tokenization ([vLLM #48145](https://github.com/vllm-project/vllm/pull/48145)).
+- `/v1/completions`: the text `prompt` is replaced with its token IDs, which vLLM uses without tokenizing.
 
 At long context the second tokenization is a large share of first-token latency: about 1.8 ms per 1k
 prompt tokens for a byte-level BPE tokenizer, single-threaded.
@@ -23,18 +26,20 @@ Because the plugin is Alpha, the EPP process must include `--allow-experimental-
 `minTokens` skips prompts shorter than the given count, where re-tokenizing costs the server little and the
 ID list only grows the body. `0`, the default, forwards every prompt.
 
-The plugin needs a `token-producer` with a `vllm` backend earlier in the chain; it forwards whatever IDs that
-producer published and does nothing when none are present. The IDs must come from the same tokenizer and
-chat template the model server uses, or the server serves a different prompt from the one the client sent.
+The plugin requires a `token-producer` with a `vllm` backend. The EPP refuses to start with the `estimate`
+backend, including the one it auto-creates when no `token-producer` is configured: its IDs are packed bytes,
+not engine tokens. The IDs must come from the same tokenizer and chat template the model server uses, or the
+server serves a different prompt from the one the client sent.
 
 ## Behaviour
 
-The plugin forwards IDs only for single-prompt, text-only `/v1/chat/completions`, `/v1/messages` and
-`/v1/responses` requests. It skips:
+The plugin forwards IDs only for single-prompt, text-only requests. It skips:
 
 - requests with no tokenization result;
-- `/v1/completions` and native generate requests, which vLLM does not template, or which already carry
-  token IDs;
+- native generate requests and `/v1/completions` prompts that already carry token IDs;
+- `/v1/completions` requests with `echo` or `suffix`, whose response or rendering depends on the prompt text;
+- `/v1/responses` requests with `previous_response_id`, `conversation` or other stateful fields: the worker
+  renders them from history it stores, which the router's render does not include;
 - requests with more than one prompt;
 - prompts with multimodal features, which vLLM renders from `messages` regardless;
 - payloads that are not mutable JSON, or whose `kv_transfer_params` is not an object;
