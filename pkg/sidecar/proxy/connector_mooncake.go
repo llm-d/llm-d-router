@@ -58,10 +58,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		}
 		return
 	}
-	// golang map randomnize key(rankid) order to spread prefill load for multi-ranks.
-	var dpRank, engineID string
-	for dpRank, engineID = range engineMap {
-		break
+	// Use the prefill rank the EPP picked; otherwise golang map randomnize key(rankid)
+	// order to spread prefill load for multi-ranks.
+	dpRank, _ := r.Context().Value(prefillDPRankKey).(string)
+	engineID, ok := engineMap[dpRank]
+	if !ok {
+		for dpRank, engineID = range engineMap {
+			break
+		}
 	}
 	transferID := "xfer-" + newUUID()
 	s.logger.V(logging.TRACE).Info("mooncake protocol info",

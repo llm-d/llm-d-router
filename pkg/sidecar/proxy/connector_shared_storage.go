@@ -303,6 +303,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		return err
 	}
 	preq := cloneRequestWithBody(r.Context(), r, pbody)
+	setPrefillDPRank(preq)
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {

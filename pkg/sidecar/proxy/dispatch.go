@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,9 @@ import (
 type contextKey string
 
 const requestStartTimeKey contextKey = "request_start_time"
+
+// prefillDPRankKey holds the data-parallel rank the EPP picked on the prefill worker.
+const prefillDPRankKey contextKey = "prefill_dp_rank"
 
 func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 	return semconv.LLMDOpenAIAPI(apiType.String())
@@ -127,6 +131,14 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				return
 			}
 			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
+		}
+
+		if rank := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.PrefillDataParallelRankHeader)); rank != "" {
+			if n, err := strconv.Atoi(rank); err != nil || n < 0 {
+				logger.Info("ignoring malformed prefill data-parallel rank header", "value", rank)
+			} else {
+				r = r.WithContext(context.WithValue(r.Context(), prefillDPRankKey, rank))
+			}
 		}
 
 		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))

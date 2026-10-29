@@ -1539,6 +1539,35 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
 }
 
+func TestHandler_PreRequest_PrefillDataParallelRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	h := NewDisaggProfileHandler("decode", "prefill", "", nil, nil)
+	resultWith := func(md *fwkdl.EndpointMetadata) *scheduling.SchedulingResult {
+		return &scheduling.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*scheduling.ProfileRunResult{
+				"prefill": {TargetEndpoints: []scheduling.Endpoint{scheduling.NewEndpoint(md, nil, nil)}},
+			},
+		}
+	}
+
+	t.Run("rank endpoint sends its rank", func(t *testing.T) {
+		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{
+			Address: "10.0.0.1", Port: "8000", RankIndex: 1, RanksPerPort: 2,
+		}))
+		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
+		assert.Equal(t, "1", request.Headers[routing.PrefillDataParallelRankHeader])
+	})
+
+	t.Run("endpoint with one rank per port sends no rank and drops a client value", func(t *testing.T) {
+		request := &scheduling.InferenceRequest{Headers: map[string]string{routing.PrefillDataParallelRankHeader: "3"}}
+		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"}))
+		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
+		assert.NotContains(t, request.Headers, routing.PrefillDataParallelRankHeader)
+	})
+}
+
 func TestHandler_Pick_PD_StampsPeerEndpointBeforePrefill(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	req := completionsRequest(testLongPrompt)

@@ -153,7 +153,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	pw := &bufferedResponseWriter{}
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
-	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
+	prefillReq := cloneRequestWithBody(prefillCtx, r, prefillBody)
+	setPrefillDPRank(prefillReq)
+	prefillHandler.ServeHTTP(pw, prefillReq)
 	prefillDuration := time.Since(prefillStart)
 	metrics.RecordPrefillDuration(prefillDuration)
 

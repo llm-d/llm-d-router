@@ -206,6 +206,7 @@ router:
                                         request_headers_to_remove:
                                           - x-llm-d-prefiller-host-port
                                           - x-prefiller-host-port
+                                          - x-llm-d-prefiller-data-parallel-rank
                                           - x-llm-d-encoder-hosts-ports
                                           - x-encoder-hosts-ports
                                           - x-data-parallel-host-port

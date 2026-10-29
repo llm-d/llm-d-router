@@ -19,6 +19,12 @@ The plugin acts only on endpoints that share their port with other ranks, which 
 
 The plugin reads the endpoint selected by the primary scheduling profile.
 
+## Prefill/decode disaggregation
+
+With the coordinator, each phase is a separate request that the EPP schedules on its own, so the prefill call carries the prefill rank and the decode call carries the decode rank.
+
+With the P/D sidecar, one scheduling run picks the decode endpoint (primary profile) and the prefill endpoint. The header carries the decode rank. The disaggregation profile handler sends the prefill rank to the sidecar in `x-llm-d-prefiller-data-parallel-rank`, and the sidecar sets `x-data-parallel-rank` on the prefill request from it. See [Routing headers](../../../../../../docs/disaggregation.md#routing-headers).
+
 ## gRPC
 
 Envoy forwards request headers to a gRPC upstream as metadata, so the same header reaches vLLM as the `x-data-parallel-rank` metadata key.

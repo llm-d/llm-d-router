@@ -113,6 +113,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// 1. Prepare prefill request
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 
 	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -666,6 +667,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
 		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))

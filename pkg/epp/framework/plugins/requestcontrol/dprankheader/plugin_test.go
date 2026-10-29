@@ -115,3 +115,20 @@ func TestFactory_RejectsEPPOwnedHeaderNames(t *testing.T) {
 		})
 	}
 }
+
+// In P/D through the sidecar, one scheduling run picks decode (primary) and
+// prefill. The header carries the decode rank: the request is sent to the
+// decode pod, and the prefill rank travels in its own routing header.
+func TestPreRequest_UsesPrimaryProfileRank(t *testing.T) {
+	h := newHandler(t, "")
+	request := &fwksched.InferenceRequest{}
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{makeEndpoint(0, 2)}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{makeEndpoint(1, 2)}},
+		},
+	}
+	require.NoError(t, h.PreRequest(context.Background(), request, result))
+	assert.Equal(t, "0", request.Headers[routing.DataParallelRankHeader])
+}
