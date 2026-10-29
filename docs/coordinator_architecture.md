@@ -818,7 +818,7 @@ only the request carrier differs.
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. | `kv_connector` |
+| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step
