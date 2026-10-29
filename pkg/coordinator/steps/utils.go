@@ -117,6 +117,30 @@ func parseUseOpenAIFormat(params map[string]any) (bool, error) {
 	return v, nil
 }
 
+// parseOutputMode reads the output_mode step parameter, defaulting to text so a
+// tokens-in pipeline answers the client with readable text. derender asks the
+// worker to apply its own parsers and answer with a parsed assistant message.
+//
+// tokens is refused: decode streams its response straight to the client, so
+// that mode would answer with token IDs and no text at all. Any other value is
+// a configuration error rather than a field forwarded to the worker, which
+// rejects an unknown mode with 400.
+func parseOutputMode(params map[string]any) (string, error) {
+	mode, err := paramString(params, reqcommon.FieldOutputMode)
+	if err != nil {
+		return "", err
+	}
+	switch mode {
+	case "":
+		return reqcommon.OutputModeText, nil
+	case reqcommon.OutputModeText, reqcommon.OutputModeDerender:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%s must be %q or %q, got %q",
+			reqcommon.FieldOutputMode, reqcommon.OutputModeText, reqcommon.OutputModeDerender, mode)
+	}
+}
+
 // rejectUseOpenAIFormatOverride returns an error if params sets use_openai_format.
 // decode and conditional-decode derive their body format directly from the
 // request's original path, so a step-level override has no effect; rejecting

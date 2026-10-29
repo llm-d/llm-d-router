@@ -50,7 +50,7 @@ func TestNewDecodeProxyRequest_ForwardsPeerTopology(t *testing.T) {
 		PeerTopology: "host=node12,zone=us-east1-a",
 	}
 
-	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, reqCtx.OriginalPath, map[string]any{}, nil)
 	if err != nil {
 		t.Fatalf("newDecodeProxyRequest: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestNewDecodeProxyRequest_OmitsPeerTopologyWhenEmpty(t *testing.T) {
 		OriginalPath: "/inference/v1/generate",
 	}
 
-	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, reqCtx.OriginalPath, map[string]any{}, nil)
 	if err != nil {
 		t.Fatalf("newDecodeProxyRequest: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestNewDecodeProxyRequest_PreferComesFromTheStepOnly(t *testing.T) {
 		OriginalHeaders: http.Header{"Prefer": {"if-available"}},
 	}
 
-	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, map[string]any{}, nil)
+	req, err := newDecodeProxyRequest(context.Background(), logr.Discard(), "decode", reqCtx, gwClient, reqCtx.OriginalPath, map[string]any{}, nil)
 	if err != nil {
 		t.Fatalf("newDecodeProxyRequest: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestNewDecodeProxyRequest_PreferComesFromTheStepOnly(t *testing.T) {
 		t.Fatalf("client-supplied Prefer reached the decode request: %q", got)
 	}
 
-	probe, err := newDecodeProxyRequest(context.Background(), logr.Discard(), ConditionalDecodeStepName, reqCtx, gwClient, map[string]any{}, map[string]string{"Prefer": "if-available"})
+	probe, err := newDecodeProxyRequest(context.Background(), logr.Discard(), ConditionalDecodeStepName, reqCtx, gwClient, reqCtx.OriginalPath, map[string]any{}, map[string]string{"Prefer": "if-available"})
 	if err != nil {
 		t.Fatalf("newDecodeProxyRequest: %v", err)
 	}

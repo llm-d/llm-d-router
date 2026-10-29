@@ -46,17 +46,21 @@ import (
 var errCacheMiss = errors.New("cache miss")
 
 // newDecodeProxyRequest builds the decode-phase POST to the gateway: it marshals
-// body, targets gwClient.BaseURL()+reqCtx.OriginalPath, and stamps the JSON
-// content-type, forwarded headers, request id, and decode phase header. step
-// names the caller for error wrapping; extraHeaders carries step-specific
-// headers (the conditional cache probe sets Prefer).
-func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, gwClient *gateway.Client, body map[string]any, extraHeaders map[string]string) (*http.Request, error) {
+// body, targets gwClient.BaseURL()+path, and stamps the JSON content-type,
+// forwarded headers, request id, and decode phase header. step names the caller
+// for error wrapping; extraHeaders carries step-specific headers (the
+// conditional cache probe sets Prefer).
+//
+// path is the client's own route on an OpenAI-format leg, and the generate route
+// when the step emits the tokens-in format, so it is passed in rather than read
+// from reqCtx.OriginalPath.
+func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, gwClient *gateway.Client, path string, body map[string]any, extraHeaders map[string]string) (*http.Request, error) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("%s: marshal: %w", step, err)
 	}
 
-	upstreamURL, err := url.Parse(gwClient.BaseURL() + reqCtx.OriginalPath)
+	upstreamURL, err := url.Parse(gwClient.BaseURL() + path)
 	if err != nil {
 		return nil, fmt.Errorf("%s: parse url: %w", step, err)
 	}
@@ -80,7 +84,7 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 	}
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
+		v.Info("request body", "method", "POST", "path", path, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(proxyReq.Header))
 	}
 
 	// The decode request is proxied straight to the gateway and never passes through
@@ -88,7 +92,7 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 	// the prefill and encode requests. Log the redacted body here so the decode request's
 	// fields (min_tokens, max_tokens, ...) are observable at the same verbosity.
 	if v := logger.V(logutil.TRACE); v.Enabled() {
-		v.Info("request body", "method", "POST", "path", reqCtx.OriginalPath, "headers", httplog.RedactedHeaders(proxyReq.Header), logutil.HTTPBodyKey, gateway.RedactBody(bodyBytes))
+		v.Info("request body", "method", "POST", "path", path, "headers", httplog.RedactedHeaders(proxyReq.Header), logutil.HTTPBodyKey, gateway.RedactBody(bodyBytes))
 	}
 
 	return proxyReq, nil
