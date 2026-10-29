@@ -78,6 +78,7 @@ type ExtProcServerRunner struct {
 	GRPCMaxSendMsgSize               int
 	EnableGRPCStreamMetrics          bool
 	EmitEndpointScores               bool
+	EnableToolCallingTelemetry       bool
 
 	// EvictChannelLookup, when set, enables the ext_proc server to terminate in-flight requests
 	// selected for eviction by flow control. See docs/flow-control-eviction.md.
@@ -127,6 +128,7 @@ func NewExtProcServerRunner(
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
+		EnableToolCallingTelemetry:       opts.EnableToolCallingTelemetry,
 	}
 }
 
@@ -278,6 +280,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		}
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
+		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
 		extProcServer.SetResponders(r.Responders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)

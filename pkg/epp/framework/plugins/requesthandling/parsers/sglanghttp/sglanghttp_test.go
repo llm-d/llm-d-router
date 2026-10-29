@@ -388,6 +388,11 @@ func TestSGLangHTTPParser_ParseRequest_ErrorPaths(t *testing.T) {
 			errContains: "input_ids must be an array of uint32 integers",
 		},
 		{
+			name:        "a non string cache_salt",
+			body:        `{"input_ids":[1,2,5],"cache_salt":7}`,
+			errContains: "cache_salt must be a string",
+		},
+		{
 			name:        "empty input_ids",
 			body:        `{"input_ids":[]}`,
 			errContains: "input_ids cannot be empty",

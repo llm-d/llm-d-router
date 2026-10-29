@@ -346,7 +346,11 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 	// Find max queue for relative scoring.
 	maxQ := 0
 	for _, ep := range endpoints {
-		if q := ep.GetMetrics().WaitingQueueSize; q > maxQ {
+		podMetrics := ep.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		if q := podMetrics.WaitingQueueSize; q > maxQ {
 			maxQ = q
 		}
 	}
@@ -354,13 +358,17 @@ func (s *Plugin) compositeScores(ctx context.Context, endpoints []fwksched.Endpo
 
 	logger := log.FromContext(ctx)
 	for _, ep := range endpoints {
-		q := ep.GetMetrics().WaitingQueueSize
+		podMetrics := ep.GetMetrics()
+		if !podMetrics.Updated() {
+			continue
+		}
+		q := podMetrics.WaitingQueueSize
 		relQueue := 1.0
 		if qRange > 0 {
 			relQueue = float64(maxQ-q) / qRange
 		}
 
-		kvFree := 1.0 - ep.GetMetrics().KVCacheUsagePercent
+		kvFree := 1.0 - podMetrics.KVCacheUsagePercent
 		prefix := s.prefixCacheScore(ep)
 
 		composite := wkv*kvFree + wq*relQueue + wpref*prefix

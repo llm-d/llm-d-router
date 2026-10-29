@@ -27,6 +27,7 @@ import (
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // validatePlugins validates the plugins section of the configuration file.
@@ -63,6 +64,34 @@ func validateConfig(cfg *configapiv1.EndpointPickerConfig) error {
 	}
 	if err := validateParsers(cfg); err != nil {
 		return fmt.Errorf("parser validation failed: %w", err)
+	}
+	if err := validateMetrics(cfg); err != nil {
+		return fmt.Errorf("metrics validation failed: %w", err)
+	}
+	return nil
+}
+
+// validateMetrics validates the metrics section of the configuration file. A
+// nil ladder was left out of the file and keeps its built-in edges; a present
+// one is checked. The ladders are walked in a fixed order so a file with two
+// invalid ladders always names the same one.
+func validateMetrics(cfg *configapiv1.EndpointPickerConfig) error {
+	if cfg.Metrics == nil {
+		return nil
+	}
+	for _, ladder := range []struct {
+		field string
+		edges []float64
+	}{
+		{"requestTPOTBuckets", cfg.Metrics.RequestTPOTBuckets},
+		{"requestITLBuckets", cfg.Metrics.RequestITLBuckets},
+	} {
+		if ladder.edges == nil {
+			continue
+		}
+		if err := eppmetrics.ValidateHistogramBuckets(ladder.edges); err != nil {
+			return fmt.Errorf("metrics.%s: %w", ladder.field, err)
+		}
 	}
 	return nil
 }

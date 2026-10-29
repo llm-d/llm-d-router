@@ -294,12 +294,12 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
+		}
 		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", "ENQUEUE_FAILED",
 			"failed to enqueue request")
-		if ctx.Err() != nil {
-			return pipeline.ErrPipelineDone
-		}
 		return responded(http.StatusServiceUnavailable, &pipeline.UpstreamError{Step: StepName, StatusCode: 0})
 	}
 
@@ -444,7 +444,7 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
 					logger.Error(err, "failed to cancel abandoned request", "id", id)
 				}
-				return pipeline.ErrPipelineDone
+				return fmt.Errorf("%s: wait: %w", StepName, ctx.Err())
 			}
 			if holdIsDeadline {
 				// Past the deadline the AP refuses the work at gate, pop,

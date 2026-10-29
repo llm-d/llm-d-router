@@ -78,14 +78,19 @@ to estimation when rendering fails.
 
 Legacy conversion uses the configured `modelName` and logs a deprecation
 warning once per plugin instance. It reshapes string Input, Input items that
-are simple `{role, content}` messages, and Instructions as a leading system
-message; `input_text`/`output_text` and `input_image` content parts convert,
-the latter carrying its URL as a bare string rather than chat completions'
+are `{role, content}` messages, `function_call`, `function_call_output` and
+`reasoning` items, and Instructions as a leading system message. Items fold
+into chat messages the way vLLM's Responses serving folds them: a
+`function_call` joins the `tool_calls` of the assistant message before it, a
+`reasoning` item or an assistant message fills the reasoning or content that
+message still lacks, and a `function_call_output` becomes a `tool` message.
+`input_text`/`output_text` and `input_image` content parts convert, the
+latter carrying its URL as a bare string rather than chat completions'
 nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
-cannot represent this way — for example `function_call`,
-`function_call_output`, `reasoning`, or `input_audio` — fails the conversion
-rather than tokenizing a prompt shorter than the one vLLM serves. The
-forwarded request is unchanged.
+cannot represent this way fails the conversion rather than tokenizing a
+prompt shorter than the one vLLM serves: `input_audio` parts, `reasoning`
+items with `encrypted_content`, namespaced `function_call` items, and item
+types such as `web_search_call`. The forwarded request is unchanged.
 
 The compatibility implementation and tests are contained in `responses.go`
 and `responses_test.go`. Its integration points are the
@@ -476,11 +481,14 @@ the existing token-producer error behavior.
 Set `vllm.prefillOnly: true` when the renderer should validate the full prompt
 without reserving the client's generation budget. The render copy uses
 `max_tokens: 1`, caps `max_completion_tokens` and `max_output_tokens` at one
-when present, and sets `min_tokens` to zero when present. The inference
-payload, prompt, and requested generation budget are unchanged. The render
-copy re-serializes the JSON envelope; nested content such as messages and tool
-schemas keeps its key order. This option is false by default and also works
-with `vllm.url`.
+when present, and sets `min_tokens` to zero when present. A Messages render
+copy also drops a `thinking` of type `enabled`: vLLM requires its
+`budget_tokens` to be less than `max_tokens` and applies it only during
+sampling, so the rendered prompt is unchanged. Other `thinking` types stay.
+The inference payload, prompt, and requested generation budget are unchanged.
+The render copy re-serializes the JSON envelope; nested content such as
+messages and tool schemas keeps its key order. This option is false by default
+and also works with `vllm.url`.
 
 This avoids rejecting a prompt solely because its requested output would
 exceed the renderer's context capacity. The prompt itself must still fit;

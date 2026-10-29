@@ -17,9 +17,9 @@ limitations under the License.
 // This file holds the encoder fan-out scaffolding shared by every EC
 // connector: multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
-// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect)
-// supplies its own per-response perItem callback and otherwise reuses
-// these helpers verbatim.
+// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect,
+// ec-mooncake via fanoutEncoderMooncake) supplies its own per-response perItem
+// callback and otherwise reuses these helpers verbatim.
 
 package proxy
 
@@ -62,31 +62,6 @@ func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	}
 }
 
-// truncateLongStrings recursively shortens long string values for logging.
-func truncateLongStrings(v any, maxLen int) any {
-	switch x := v.(type) {
-	case string:
-		if len(x) > maxLen {
-			return fmt.Sprintf("%s...(%d bytes)", x[:maxLen], len(x))
-		}
-		return x
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, vv := range x {
-			out[k] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, vv := range x {
-			out[i] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
 // extractMMItems extracts all multimodal content parts from the request: the
 // messages array of chat completions or Messages, or a Responses input array.
 // Which field to walk is gated on apiType rather than presence, since a client
@@ -109,7 +84,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		wrapped, err = requestMessages(requestData)
 	}
 	if err != nil {
-		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", err)
+		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", jsonErrorForLog(err))
 		return items
 	}
 
@@ -193,7 +168,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(&turn); err != nil {
-			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", err)
+			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", jsonErrorForLog(err))
 			droppedTurns++
 			continue
 		}
@@ -239,6 +214,8 @@ func anthropicImagePart(part map[string]any) (map[string]any, bool) {
 // positional index and the buffered encoder response. The
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
+// prepare, when non-nil, may add fields to an item's encoder request body
+// before it is sent.
 //
 // The first goroutine to fail cancels the group context so sibling encoder
 // requests are aborted at the transport layer. Every failure is logged before
@@ -250,6 +227,7 @@ func (s *Server) fanoutEncoder(
 	encoderHostPorts []string,
 	requestID string,
 	apiType reqcommon.APIType,
+	prepare func(idx int, body map[string]any),
 	perItem func(idx int, pw *bufferedResponseWriter) error,
 ) error {
 	if len(encoderHostPorts) == 0 {
@@ -280,6 +258,9 @@ func (s *Server) fanoutEncoder(
 			// A Messages request gets NewEncoderPrimingBody's Messages body at
 			// the chat path; see its doc for why that holds.
 			encoderRequest := reqcommon.NewEncoderPrimingBody(originalRequest, mmItem, apiType)
+			if prepare != nil {
+				prepare(idx, encoderRequest)
+			}
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
@@ -312,14 +293,14 @@ func (s *Server) fanoutEncoder(
 			// bufferedResponseWriter.Write back-fills 200, so statusCode 0 means
 			// the handler wrote nothing at all. isHTTPError treats it as an error.
 			if isHTTPError(pw.statusCode) {
-				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
+				err := fmt.Errorf("encoder request failed for item %d with status %d", idx, pw.statusCode)
 				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			if perItem != nil {
 				if err := perItem(idx, pw); err != nil {
-					s.logger.Error(err, "encoder fanout perItem", "item", idx, "requestID", requestID)
+					s.logger.Error(jsonErrorForLog(err), "encoder fanout perItem", "item", idx, "requestID", requestID)
 					return err
 				}
 			}
@@ -370,10 +351,7 @@ func (s *Server) runPDPipeline(
 			"requestID", requestID,
 			"destination", destination,
 			"prefiller", prefillEndPoint,
-			"bodyBytes", len(modifiedBody),
-		}
-		if ec, ok := body[reqcommon.FieldECTransferParams]; ok {
-			kv = append(kv, reqcommon.FieldECTransferParams, truncateLongStrings(ec, 64))
+			logBodyBytesKey, len(modifiedBody),
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}
@@ -388,11 +366,16 @@ func (s *Server) runPDPipeline(
 	}
 
 	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
+	toolFields, _ := captureInferenceToolCallingRequest(pdRequest, apiType, modifiedBody)
+	defer toolFields.report(r.Context())
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest) {
+	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
+		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
+	}) {
+		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
 	}
 	decodeReturned = true

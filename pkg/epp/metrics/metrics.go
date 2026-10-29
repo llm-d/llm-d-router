@@ -24,13 +24,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -42,9 +42,40 @@ var (
 
 var registerMetrics sync.Once
 
-// Register all metrics.
+// RegisterOptions carries the parts of the EPP configuration that change how
+// collectors are built rather than how they are observed. The zero value keeps
+// every default.
+type RegisterOptions struct {
+	// RequestTPOTBuckets overrides the bucket edges of
+	// request_streaming_tpot_seconds. An empty slice keeps
+	// DefaultRequestTPOTBuckets.
+	RequestTPOTBuckets []float64
+
+	// RequestITLBuckets overrides the bucket edges of
+	// request_streaming_itl_seconds. An empty slice keeps
+	// DefaultInterTokenLatencyBuckets.
+	RequestITLBuckets []float64
+}
+
+// Register all metrics with the default collector configuration.
 func Register(customCollectors ...prometheus.Collector) {
+	RegisterWithOptions(RegisterOptions{}, customCollectors...)
+}
+
+// RegisterWithOptions registers all metrics after rebuilding the streaming
+// latency histograms from opts. The rebuild happens before registration
+// because a registered HistogramVec has no API to change its buckets, and the
+// recording helpers read these package variables on each call, so they observe
+// the replacement.
+func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Collector) {
 	registerMetrics.Do(func() {
+		if len(opts.RequestTPOTBuckets) > 0 {
+			llmdRequestTPOT = newRequestTPOTHistogram(opts.RequestTPOTBuckets)
+		}
+		if len(opts.RequestITLBuckets) > 0 {
+			llmdInterTokenLatency = newInterTokenLatencyHistogram(opts.RequestITLBuckets)
+		}
+
 		// Register other metrics
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
@@ -68,6 +99,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		metrics.Registry.MustRegister(llmdInferencePoolReadyEndpoints)
 		metrics.Registry.MustRegister(llmdSchedulerE2ELatency)
 		metrics.Registry.MustRegister(llmdSchedulerAttemptsTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFilterEliminatedTotal)
+		metrics.Registry.MustRegister(llmdSchedulerFailuresTotal)
 		metrics.Registry.MustRegister(llmdPluginProcessingLatencies)
 		metrics.Registry.MustRegister(llmdPluginDataScopeViolations)
 		metrics.Registry.MustRegister(llmdRequestProcessingLatency)
@@ -128,6 +161,8 @@ func Reset() {
 	llmdInferencePoolReadyEndpoints.Reset()
 	llmdSchedulerE2ELatency.Reset()
 	llmdSchedulerAttemptsTotal.Reset()
+	llmdSchedulerFilterEliminatedTotal.Reset()
+	llmdSchedulerFailuresTotal.Reset()
 	llmdPluginProcessingLatencies.Reset()
 	llmdPluginDataScopeViolations.Reset()
 	llmdRequestProcessingLatency.Reset()
@@ -158,31 +193,31 @@ func Reset() {
 }
 
 // RecordRequestCounter records the number of requests.
-func RecordRequestCounter(modelName, targetModelName, fairnessID string, priority int) {
+func RecordRequestCounter(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID string, priority int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	prioStr := strconv.Itoa(priority)
-	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr).Inc()
+	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr, apiSurface.String()).Inc()
 }
 
 // RecordRequestErrCounter records the number of error requests.
-func RecordRequestErrCounter(modelName, targetModelName, fairnessID, priority string, code string) {
+func RecordRequestErrCounter(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, code string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if code != "" {
-		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, code).Inc()
+		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code).Inc()
 	}
 }
 
 // RecordRequestSizes records the request sizes.
-func RecordRequestSizes(modelName, targetModelName, fairnessID, priority string, reqSize int) {
+func RecordRequestSizes(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, reqSize int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	llmdRequestSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(reqSize))
+	llmdRequestSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Observe(float64(reqSize))
 }
 
 // RecordRequestLatencies records duration of request.
-func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time) bool {
+func RecordRequestLatencies(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, received time.Time, complete time.Time) bool {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if !complete.After(received) {
@@ -191,87 +226,46 @@ func RecordRequestLatencies(ctx context.Context, modelName, targetModelName, fai
 		return false
 	}
 	elapsedSeconds := complete.Sub(received).Seconds()
-	observeWithTraceExemplar(ctx,
-		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority),
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestLatencies.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()),
 		elapsedSeconds)
 	return true
 }
 
-// Exemplar label names. Grafana links exemplars to traces by the trace_id label
-// name, so don't rename it.
-const (
-	exemplarTraceIDLabel = "trace_id"
-	exemplarSpanIDLabel  = "span_id"
-)
-
-// observeWithTraceExemplar records an observation and attaches the request's
-// trace as a Prometheus exemplar, so a point on a latency graph links to its trace.
-//
-// Nothing is attached for unsampled spans: they have a trace ID, but no trace was
-// exported, so the link would go nowhere.
-//
-// span_id is only added when the span is recording, meaning the EPP started it.
-// With EPP tracing off the context still holds the caller's span, which isn't
-// the EPP's, so only trace_id is attached.
-//
-// Exemplars only reach the wire over OpenMetrics; see newMetricsServerOptions
-// in cmd/epp/runner.
-func observeWithTraceExemplar(ctx context.Context, observer prometheus.Observer, value float64) {
-	exemplarObserver, ok := observer.(prometheus.ExemplarObserver)
-	if !ok {
-		observer.Observe(value)
-		return
-	}
-
-	span := trace.SpanFromContext(ctx)
-	spanCtx := span.SpanContext()
-	if !spanCtx.IsSampled() {
-		observer.Observe(value)
-		return
-	}
-
-	// trace_id + span_id is 63 runes, under OpenMetrics' 128-rune exemplar limit.
-	labels := prometheus.Labels{exemplarTraceIDLabel: spanCtx.TraceID().String()}
-	if span.IsRecording() {
-		labels[exemplarSpanIDLabel] = spanCtx.SpanID().String()
-	}
-	exemplarObserver.ObserveWithExemplar(value, labels)
-}
-
 // RecordResponseSizes records the response sizes.
-func RecordResponseSizes(modelName, targetModelName, fairnessID, priority string, size int) {
+func RecordResponseSizes(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, size int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	llmdResponseSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+	llmdResponseSizes.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Observe(float64(size))
 }
 
 // RecordInputTokens records input tokens count.
-func RecordInputTokens(modelName, targetModelName, fairnessID, priority string, size int) {
+func RecordInputTokens(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, size int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if size > 0 {
-		llmdInputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+		llmdInputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Observe(float64(size))
 	}
 }
 
 // RecordOutputTokens records output tokens count.
-func RecordOutputTokens(modelName, targetModelName, fairnessID, priority string, size int) {
+func RecordOutputTokens(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, size int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if size > 0 {
-		llmdOutputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+		llmdOutputTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Observe(float64(size))
 	}
 }
 
 // RecordPromptCachedTokens records prompt cached tokens count.
-func RecordPromptCachedTokens(modelName, targetModelName, fairnessID, priority string, size int) {
+func RecordPromptCachedTokens(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, size int) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
-	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority).Observe(float64(size))
+	llmdPromptCachedTokens.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Observe(float64(size))
 }
 
 // RecordNormalizedTimePerOutputToken (NTPOT) records the normalized time per output token.
-func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName, fairnessID, priority string, received time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, received time.Time, complete time.Time, outputTokenCount int) bool {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if outputTokenCount <= 0 {
@@ -287,12 +281,12 @@ func RecordNormalizedTimePerOutputToken(ctx context.Context, modelName, targetMo
 	elapsedSeconds := complete.Sub(received).Seconds()
 	secondsPerToken := elapsedSeconds / float64(outputTokenCount)
 
-	observeWithTraceExemplar(ctx, llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority), secondsPerToken)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdNormalizedTimePerOutputToken.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()), secondsPerToken)
 	return true
 }
 
 // RecordRequestTTFT records the time to first token.
-func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time) bool {
+func RecordRequestTTFT(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time) bool {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if firstToken.IsZero() {
@@ -309,7 +303,7 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 		streamingLabel = "true"
 	}
 	ttftSeconds := firstToken.Sub(received).Seconds()
-	observeWithTraceExemplar(ctx, llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, streamingLabel), ttftSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdRequestTTFT.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), streamingLabel), ttftSeconds)
 	return true
 }
 
@@ -319,7 +313,7 @@ func RecordRequestTTFT(ctx context.Context, modelName, targetModelName, fairness
 // no inter-token timing exists. Such requests are skipped silently instead of
 // being logged as invalid (they would otherwise emit an error-level line per
 // request on non-streaming workloads).
-func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
+func RecordRequestTPOT(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, streaming bool, received time.Time, firstToken time.Time, complete time.Time, outputTokenCount int) bool {
 	if !streaming {
 		return false
 	}
@@ -338,12 +332,12 @@ func RecordRequestTPOT(ctx context.Context, modelName, targetModelName, fairness
 	e2eSeconds := complete.Sub(received).Seconds()
 	ttftSeconds := firstToken.Sub(received).Seconds()
 	tpotSeconds := (e2eSeconds - ttftSeconds) / float64(outputTokenCount-1)
-	observeWithTraceExemplar(ctx, llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority), tpotSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdRequestTPOT.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()), tpotSeconds)
 	return true
 }
 
 // RecordInterTokenLatency records the time between consecutive response body chunks for streaming requests.
-func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fairnessID, priority string, itlSeconds float64) bool {
+func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, itlSeconds float64) bool {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if itlSeconds < 0 {
@@ -351,25 +345,25 @@ func RecordInterTokenLatency(ctx context.Context, modelName, targetModelName, fa
 			"modelName", modelName, "targetModelName", targetModelName, "itlSeconds", itlSeconds)
 		return false
 	}
-	observeWithTraceExemplar(ctx, llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority), itlSeconds)
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdInterTokenLatency.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()), itlSeconds)
 	return true
 }
 
 // IncRunningRequests increases the current running requests.
-func IncRunningRequests(modelName, targetModelName, fairnessID, priority string) {
+func IncRunningRequests(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if modelName != "" {
-		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority).Inc()
+		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Inc()
 	}
 }
 
 // DecRunningRequests decreases the current running requests.
-func DecRunningRequests(modelName, targetModelName, fairnessID, priority string) {
+func DecRunningRequests(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if modelName != "" {
-		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority).Dec()
+		llmdRunningRequests.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String()).Dec()
 	}
 }
 
@@ -403,19 +397,19 @@ func RecordInferencePoolReadyPods(name string, runningPods float64) {
 
 // RecordSchedulerE2ELatency records the end-to-end scheduling latency.
 func RecordSchedulerE2ELatency(ctx context.Context, duration time.Duration) {
-	observeWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdSchedulerE2ELatency.WithLabelValues(), duration.Seconds())
 }
 
 // RecordRequestProcessingLatency records the EPP request processing latency,
 // measured from request receipt until the request body has been handled.
-func RecordRequestProcessingLatency(duration time.Duration) {
-	llmdRequestProcessingLatency.WithLabelValues().Observe(duration.Seconds())
+func RecordRequestProcessingLatency(apiSurface reqcommon.APISurface, duration time.Duration) {
+	llmdRequestProcessingLatency.WithLabelValues(apiSurface.String()).Observe(duration.Seconds())
 }
 
 // RecordResponseProcessingLatency records the EPP response processing latency
 // for a single request.
-func RecordResponseProcessingLatency(duration time.Duration) {
-	llmdResponseProcessingLatency.WithLabelValues().Observe(duration.Seconds())
+func RecordResponseProcessingLatency(apiSurface reqcommon.APISurface, duration time.Duration) {
+	llmdResponseProcessingLatency.WithLabelValues(apiSurface.String()).Observe(duration.Seconds())
 }
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
@@ -448,6 +442,24 @@ const (
 	SchedulerStatusFailure = "failure"
 )
 
+// RecordSchedulerFilterEliminated records the number of candidate endpoints a
+// filter removed in a scheduler profile run.
+func RecordSchedulerFilterEliminated(profile, pluginType, pluginName string, count int) {
+	llmdSchedulerFilterEliminatedTotal.WithLabelValues(profile, pluginType, pluginName).Add(float64(count))
+}
+
+// Reasons for RecordSchedulerFailure.
+const (
+	SchedulerFailureReasonAllFiltered         = "all_filtered"
+	SchedulerFailureReasonNoProfileSelected   = "no_profile_selected"
+	SchedulerFailureReasonProfileHandlerError = "profile_handler_error"
+)
+
+// RecordSchedulerFailure records a failed scheduling attempt with its reason.
+func RecordSchedulerFailure(reason string) {
+	llmdSchedulerFailuresTotal.WithLabelValues(reason).Inc()
+}
+
 // RecordPluginProcessingLatency records the processing latency for a plugin.
 func RecordPluginProcessingLatency(extensionPoint, pluginType, pluginName string, duration time.Duration) {
 	llmdPluginProcessingLatencies.WithLabelValues(extensionPoint, pluginType, pluginName).Observe(duration.Seconds())
@@ -479,7 +491,7 @@ func RecordFlowControlRequestQueueDuration(
 ) {
 	fairnessID = boundFairnessID(fairnessID)
 	modelName, targetModelName = boundModels(modelName, targetModelName)
-	observeWithTraceExemplar(ctx, llmdFlowControlRequestQueueDuration.WithLabelValues(
+	metricsutil.ObserveWithTraceExemplar(ctx, llmdFlowControlRequestQueueDuration.WithLabelValues(
 		fairnessID, priority, outcome,
 		inferencePool,
 		modelName, targetModelName,

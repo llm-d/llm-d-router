@@ -128,6 +128,29 @@ func TestEstimateBackend_EmbeddingsNestedTokenIDsPassthrough(t *testing.T) {
 	assert.Equal(t, 5, tp.TokenCount())
 }
 
+// TestEstimateBackend_EmbeddingsTextEstimatesPlainText asserts string
+// embeddings input is byte-estimated from its text, like completions.
+func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input fwkrh.EmbeddingsInput
+		want  string
+	}{
+		{name: "single string", input: fwkrh.EmbeddingsInput{Raw: "abcdefgh"}, want: "abcdefgh"},
+		{name: "string array", input: fwkrh.EmbeddingsInput{Strings: []string{"abcd", "efgh"}}, want: "abcd efgh"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+				Embeddings: &fwkrh.EmbeddingsRequest{Input: tt.input},
+			})
+			require.NoError(t, err)
+			require.Len(t, tp.Prompts, 1)
+			assert.Equal(t, packBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
+		})
+	}
+}
+
 // TestEstimateBackend_CompletionsDeterministic asserts the same prompt produces
 // the same tokens (locality precondition) and that distinct prompts differ.
 func TestEstimateBackend_CompletionsDeterministic(t *testing.T) {

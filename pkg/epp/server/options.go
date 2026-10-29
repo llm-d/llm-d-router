@@ -116,23 +116,24 @@ type Options struct {
 	//
 	// Diagnostics.
 	//
-	logging.LoggingOptions           // Logging configuration.
-	Tracing                 bool     // Enables emitting traces.
-	HealthChecking          bool     // Enables health checking.
-	MetricsPort             uint16   // The metrics port exposed by EPP.
-	GRPCHealthPort          uint16   // The port used for gRPC liveness and readiness probes.
-	EnablePprof             bool     // Enables pprof handlers.
-	CertPath                string   // The path to the certificate for secure serving.
-	EnableCertReload        bool     // Enables certificate reloading of the certificates specified in --cert-path.
-	SecureServing           bool     // Enables secure serving.
-	TLSMinVersion           string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
-	TLSCipherSuites         []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
-	tlsMinVersionValue      uint16   // Parsed TLS min version value.
-	tlsCipherSuiteValues    []uint16 // Parsed TLS cipher suite values.
-	MetricsEndpointAuth     bool     // Enables authentication and authorization of the metrics endpoint.
-	MetricsClientCAFile     string   // PEM CA that requires a verified client cert on the metrics endpoint.
-	MetricsCertDir          string   // Directory with the metrics server certificates that enables metrics TLS.
-	EnableGRPCStreamMetrics bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	logging.LoggingOptions              // Logging configuration.
+	Tracing                    bool     // Enables emitting traces.
+	EnableToolCallingTelemetry bool     // Enables tool-calling request and response telemetry.
+	HealthChecking             bool     // Enables health checking.
+	MetricsPort                uint16   // The metrics port exposed by EPP.
+	GRPCHealthPort             uint16   // The port used for gRPC liveness and readiness probes.
+	EnablePprof                bool     // Enables pprof handlers.
+	CertPath                   string   // The path to the certificate for secure serving.
+	EnableCertReload           bool     // Enables certificate reloading of the certificates specified in --cert-path.
+	SecureServing              bool     // Enables secure serving.
+	TLSMinVersion              string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
+	TLSCipherSuites            []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
+	tlsMinVersionValue         uint16   // Parsed TLS min version value.
+	tlsCipherSuiteValues       []uint16 // Parsed TLS cipher suite values.
+	MetricsEndpointAuth        bool     // Enables authentication and authorization of the metrics endpoint.
+	MetricsClientCAFile        string   // PEM CA that requires a verified client cert on the metrics endpoint.
+	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
+	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
 	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. Bounds metric cardinality in
 	// deployments with many distinct fairness IDs.
@@ -140,9 +141,10 @@ type Options struct {
 	//
 	// Configuration.
 	//
-	ConfigFile   string   // The path to the configuration file.
-	ConfigText   string   // The configuration specified as text, in lieu of a file.
-	FeatureGates []string // Feature gates applied on top of the configuration's featureGates.
+	ConfigFile     string   // The path to the configuration file.
+	ConfigText     string   // The configuration specified as text, in lieu of a file.
+	ObjectivesFile string   // Objectives (name, priority) loaded in file-discovery mode.
+	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
 
@@ -252,6 +254,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	opts.LoggingOptions.AddFlags(fs) // Add logging flags.
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
+	fs.BoolVar(&opts.EnableToolCallingTelemetry, "enable-tool-calling-telemetry", opts.EnableToolCallingTelemetry, "Enable tool-calling request and response telemetry.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
 	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
 	fs.Uint16Var(&opts.GRPCHealthPort, "grpc-health-port", opts.GRPCHealthPort,
@@ -280,6 +283,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+	fs.StringVar(&opts.ObjectivesFile, "objectives-file", opts.ObjectivesFile,
+		"YAML file of objectives (name, priority) loaded at startup. File-discovery mode only.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
 		"Comma-separated list of feature gates to enable or disable, in kubelet style "+
 			"(e.g., 'flowControl=true'). A bare name enables the gate. Applied after the "+

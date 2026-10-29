@@ -93,7 +93,7 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 
 ## LoRA Adapter Serving
 
-**Required by:** `lora-affinity-scorer`
+**Required by:** `lora-affinity-scorer`; `lora-residency-scorer` reads only `max_lora` and `running_lora_adapters`
 
 Model servers that support dynamic LoRA serving can benefit from the LoRA affinity algorithm. Note
 the current LoRA affinity algorithm in this EPP is highly biased towards vLLM's current
@@ -113,8 +113,8 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
     requested adapter. Example: `"max_lora": "8"`.
   * `running_lora_adapters`: A comma separated list of adapters that are currently loaded in GPU
     memory and ready to serve requests. Example: `"running_lora_adapters": "adapter1, adapter2"`
-  * `waiting_lora_adapters`: A comma separated list of adapters that are waiting to be served.
-    Example: `"waiting_lora_adapters": "adapter1, adapter2"`
+  * `waiting_lora_adapters` (required by `lora-affinity-scorer` only): A comma separated list of
+    adapters that are waiting to be served. Example: `"waiting_lora_adapters": "adapter1, adapter2"`
 
 ## Prefix Cache Reuse
 

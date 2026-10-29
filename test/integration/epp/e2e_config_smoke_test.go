@@ -195,10 +195,10 @@ schedulingProfiles:
 `,
 	// Regression test for #1471: a precise-prefix-cache-producer paired with
 	// an explicit vllm-backed token-producer must load cleanly through the full
-	// runner path, which is where ValidateTokenProducer runs (after auto-defaults,
-	// order-independent). The mirror case (no token-producer or estimate-backed)
-	// is covered by the unit test TestValidateTokenProducer in the
-	// preciseprefixcache producer package.
+	// runner path, which is where ValidateAndOrderDataDependencies runs Level-2
+	// attribute validation (after auto-defaults, order-independent). The mirror
+	// case (no token-producer or estimate-backed) is covered by the unit test
+	// TestTokenProducerDependencyValidation in the preciseprefixcache producer package.
 	"preciseConfigWithVLLMTokenProducer": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:

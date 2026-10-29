@@ -57,7 +57,9 @@ func (s *Server) runConcurrentPD(
 	// prepareRequests lets a connector mutate the cloned requests before dispatch,
 	// e.g. Mooncake sets a DP-rank header so prefill lands on the same rank decode reads from.
 	prepareRequests func(prefillReq, decodeReq *http.Request),
+	toolFields *toolCallingRequest,
 ) {
+	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx, cancelDecode := context.WithCancel(r.Context())
 	defer cancelDecode()
@@ -75,9 +77,12 @@ func (s *Server) runConcurrentPD(
 
 	// Prefill runs in a goroutine: response is discarded (status/duration only).
 	// Decode runs on the calling goroutine: writes the actual response back via w.
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
+	// Both spans start from the request context so they come out as siblings, and
+	// each outbound request carries its own stage span.
+	_, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	prefillReq = prefillReq.WithContext(trace.ContextWithSpan(prefillReq.Context(), prefillSpan))
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillTarget(prefillHost),
 		semconv.LLMDPDProxyConnector(connector),
@@ -95,12 +100,14 @@ func (s *Server) runConcurrentPD(
 		return
 	}
 
+	// Aggregate before starting the worker so reporting does not wait for prefill.
+	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	go func() {
 		defer cancelPrefill()
 		defer prefillSpan.End()
 		defer func() {
 			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("panic: %v", rec), "panic in prefill request")
+				s.logger.Error(fmt.Errorf("prefill handler panicked (%T)", rec), "panic in prefill request")
 			}
 		}()
 		pw := &bufferedResponseWriter{}
@@ -121,7 +128,7 @@ func (s *Server) runConcurrentPD(
 	}()
 
 	// Decode Stage
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
+	dCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -132,7 +139,7 @@ func (s *Server) runConcurrentPD(
 	)
 	decodeStart := time.Now()
 
-	decodeReq = decodeReq.WithContext(ctx)
+	decodeReq = decodeReq.WithContext(dCtx)
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
@@ -156,6 +163,7 @@ func (s *Server) runConcurrentPD(
 		})
 		context.AfterFunc(prefillCtx, func() { graceTimer.Stop() })
 	}()
+	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
 
@@ -172,7 +180,8 @@ func (s *Server) runConcurrentPD(
 
 	// End-to-end P/D timing. True TTFT captures time from gateway request start
 	// to decode start; prefill duration is tracked in the async prefill span.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
+	// Set on the decode span explicitly, since ctx is the forward_request context.
+	if decodeSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration
 		var trueTTFT time.Duration
 		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
@@ -182,7 +191,7 @@ func (s *Server) runConcurrentPD(
 			}
 		}
 
-		currentSpan.SetAttributes(
+		decodeSpan.SetAttributes(
 			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
 			semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
 			semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),

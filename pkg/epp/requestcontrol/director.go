@@ -368,7 +368,8 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
-	if reqCtx.TargetModelName == "" {
+	// Native generate APIs allow requests without a model.
+	if reqCtx.TargetModelName == "" && inferenceRequestBody.Generate == nil {
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
 	if reqCtx.TargetModelName == inferenceRequestBody.Model {
@@ -568,7 +569,7 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		result[i] = fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		result[i] = fwksched.NewEndpointFromSnapshot(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
 	}
 
 	return result

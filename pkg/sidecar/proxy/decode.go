@@ -53,11 +53,13 @@ const (
 // chat completions requests when s.config.DecodeChunkSize > 0.
 // body is the already-parsed JSON map; callers that hold it
 // should use this instead of calling s.decoderProxy directly.
-func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any) {
+// raw supplies regular-decode bytes without rereading the request body.
+func (s *Server) dispatchDecode(w http.ResponseWriter, r *http.Request, body map[string]any, raw []byte, toolFields *toolCallingRequest) {
 	if s.config.DecodeChunkSize > 0 && r.URL.Path == reqcommon.PathChatCompletions {
-		s.runChunkedDecodeFromMap(w, r, body)
+		s.runChunkedDecodeFromMap(w, r, body, raw, toolFields)
 		return
 	}
+	toolFields.compareValidatedDispatchedForSpan(raw, trace.SpanFromContext(r.Context()))
 	s.decoderProxy.ServeHTTP(w, r)
 }
 
@@ -69,19 +71,45 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body)
+	toolFields, _ := captureInferenceToolCallingRequest(r, reqcommon.APITypeChatCompletions, original)
+	defer toolFields.report(r.Context())
+	s.runChunkedDecodeFromMap(w, cloneRequestWithBody(r.Context(), r, original), body, original, toolFields)
 }
 
 // runChunkedDecodeFromMap executes chunked decode given an already-parsed body map.
 // Non-streaming: accumulated chunks are reassembled into a single JSON response.
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
-func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any) {
+// The caller owns aggregate reporting across prefill and decode chunks.
+func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any, raw []byte, toolFields *toolCallingRequest) {
 	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
+	// Chunk outcomes exclude prefill results held by the request aggregate.
+	var chunkFields *toolCallingRequest
+	if toolFields != nil && span.IsRecording() {
+		chunkFields = &toolCallingRequest{original: toolFields.original}
+		defer func() {
+			if len(chunkFields.statuses) == 0 {
+				return
+			}
+			attrs := chunkFields.original.SpanAttributes(chunkFields.statuses)
+			span.SetAttributes(attrs...)
+			trace.SpanFromContext(r.Context()).SetAttributes(attrs...)
+		}()
+	}
+	compareChunk := func(raw []byte) {
+		statuses, err := toolFields.compareValidatedDispatched(raw)
+		if chunkFields != nil && err == nil {
+			chunkFields.mergeStatuses(statuses)
+		}
+	}
+	regularDecode := func() {
+		compareChunk(raw)
+		s.decoderProxy.ServeHTTP(w, r.WithContext(ctx))
+	}
 
 	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
@@ -94,14 +122,25 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// The decoder echoes the final assistant message, which under chunking is the text of all earlier chunks.
 	if echo, _ := body[reqcommon.FieldEcho].(bool); echo {
 		s.logger.V(logging.DEBUG).Info("chunked decode: echo enabled, using regular decode")
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
 	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
 		s.logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
+		return
+	}
+
+	// A tool call cannot be reassembled across chunk boundaries: vLLM parses it
+	// from a single request's output, and a call split by the chunk budget comes
+	// back as plain content. Bypass chunking when tools may be called. tools and
+	// tool_choice stay raw (not in inspectedRequestFields), so inspect their bytes
+	// without re-encoding them.
+	if requestMayCallTools(body) {
+		s.logger.V(logging.DEBUG).Info("chunked decode: tools requested, using regular decode")
+		regularDecode()
 		return
 	}
 
@@ -109,13 +148,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 
 	messages, err := requestMessages(body)
 	if err != nil {
-		s.decoderProxy.ServeHTTP(w, r)
+		regularDecode()
 		return
 	}
 	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + roleAssistant + `"`)}
@@ -126,13 +165,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Only an assistant message can carry the accumulated text; any other final message is sent as is.
 		if len(messages) == 0 || json.Unmarshal(messages[len(messages)-1], &finalMessage) != nil ||
 			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != roleAssistant {
-			s.decoderProxy.ServeHTTP(w, r)
+			regularDecode()
 			return
 		}
 		content := finalMessage[reqcommon.FieldContent]
 		// Content parts arrays and null have no string to extend.
 		if len(content) == 0 || content[0] != '"' || json.Unmarshal(content, &prefix) != nil {
-			s.decoderProxy.ServeHTTP(w, r)
+			regularDecode()
 			return
 		}
 		messages = messages[:len(messages)-1]
@@ -213,6 +252,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
+		compareChunk(chunkBody)
 		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(ctx, r, chunkBody))
 
 		if isHTTPError(bw.statusCode) {
@@ -227,7 +267,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		var chunkResponse map[string]any
 		if err := json.Unmarshal(bw.bodyBytes(), &chunkResponse); err != nil {
-			s.logger.Error(err, "failed to unmarshal chunk response", "chunk", chunkIndex)
+			s.logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
 			if err := errorInternalServerError(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}
@@ -273,7 +313,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			break
 		}
 
-		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkText", chunkText)
+		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkTextBytes", len(chunkText))
 	}
 
 	span.SetAttributes(
@@ -319,8 +359,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	lastResponse[reqcommon.FieldUsage] = cumulativeUsage
 
-	if choices, ok := lastResponse[responseFieldChoices].([]any); ok && len(choices) > 0 {
-		choice := maps.Clone(choices[0].(map[string]any))
+	if choice := firstChoice(lastResponse); choice != nil {
+		choice = maps.Clone(choice)
 		fullText := textAccum.String()
 		if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
 			msg = maps.Clone(msg)
@@ -468,4 +508,26 @@ func toInt(v any) (int, bool) {
 		return int(i), err == nil
 	}
 	return 0, false
+}
+
+// requestMayCallTools reports whether the request declares a non-empty tools list
+// and does not disable tool calls via tool_choice: "none". tools and tool_choice
+// are not in inspectedRequestFields, so they arrive as json.RawMessage; this reads
+// their bytes without decoding and re-encoding them.
+func requestMayCallTools(body map[string]any) bool {
+	raw, ok := body[reqcommon.FieldTools].(json.RawMessage)
+	if !ok {
+		return false
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil || len(tools) == 0 {
+		return false
+	}
+	if choice, ok := body[reqcommon.FieldToolChoice].(json.RawMessage); ok {
+		var value string
+		if json.Unmarshal(choice, &value) == nil && value == reqcommon.ToolChoiceNone {
+			return false
+		}
+	}
+	return true
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -59,6 +60,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -73,6 +76,7 @@ const (
 	testExtractorType          = "test-extractor"
 	testWithDependencies       = "test-with-dependencies"
 	testWithNestedDependencies = "test-with-nested-dependencies"
+	testDrainFilterType        = "test-drain-filter"
 
 	testFeatureGate = "test-feature-gate"
 )
@@ -1183,6 +1187,16 @@ func (m *mockPicker) Pick(context.Context, []*fwksched.ScoredEndpoint) *fwksched
 	return nil
 }
 
+// Mock Filter that removes every endpoint
+type mockDrainFilter struct{ mockPlugin }
+
+// compile-time type assertion
+var _ fwksched.Filter = &mockDrainFilter{}
+
+func (m *mockDrainFilter) Filter(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) []fwksched.Endpoint {
+	return nil
+}
+
 // Mock Handler
 type mockHandler struct{ mockPlugin }
 
@@ -1548,6 +1562,56 @@ func TestFilterExecutionOrderFromYAML(t *testing.T) {
 	}
 	require.Equal(t, []string{"filter-A", "filter-B", "filter-C", "scorer-X", "scorer-Y", "maxScorePicker"}, pluginRefs,
 		"Plugins slice must preserve YAML declaration order")
+}
+
+func TestFilterMetricsCarryConfiguredProfileName(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.Register(testDrainFilterType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDrainFilter{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testDrainFilterType}}}, nil
+	})
+	metrics.Register()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+
+	const text = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: drain
+  type: test-drain-filter
+- type: max-score-picker
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: drain
+  - pluginRef: max-score-picker
+`
+	logger := logging.NewTestLogger()
+	rawConfig, _, err := LoadRawConfig([]byte(text), logger)
+	require.NoError(t, err)
+	cfg, err := InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(context.Background()), logger)
+	require.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, nil)
+	_, err = scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig).Schedule(context.Background(),
+		&fwksched.InferenceRequest{RequestID: "req"}, []fwksched.Endpoint{endpoint})
+	require.Error(t, err, "the drain filter removes the only endpoint")
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var profiles []string
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_scheduler_filter_eliminated_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "profile" {
+					profiles = append(profiles, label.GetValue())
+				}
+			}
+		}
+	}
+	require.Equal(t, []string{"decode"}, profiles)
 }
 
 func TestAllowExperimentalPluginsFlag(t *testing.T) {

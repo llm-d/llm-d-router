@@ -280,7 +280,7 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(err).ToNot(HaveOccurred())
 			response := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(string(original)))
-			server.runChunkedDecodeFromMap(response, request, body)
+			server.runChunkedDecodeFromMap(response, request, body, original, nil)
 			Expect(calls).To(Equal(wantCalls))
 			Expect(response.Code).To(Equal(http.StatusOK))
 			after, err := json.Marshal(body)
@@ -360,6 +360,53 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("streaming", true),
 	)
 
+	DescribeTable("forwards tool requests unchanged",
+		func(toolChoice string) {
+			tools := `[{"type":"function","function":{"name":"get_weather"}}]`
+			raw := fmt.Sprintf(
+				`{"messages":[{"role":"user","content":"Weather?"}],"max_tokens":20,"tools":%s%s,"stream":true}`,
+				tools,
+				toolChoice,
+			)
+
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+			})
+
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+		},
+		Entry("tool_choice omitted", ""),
+		Entry("tool_choice auto", `,"tool_choice":"auto"`),
+		Entry("tool_choice required", `,"tool_choice":"required"`),
+	)
+
+	It("still chunks when tools are declared but tool_choice is none", func() {
+		ti := newChunkedTestSetup(5, []string{
+			chatResponse("hello ", "length", 8, 5),
+			chatResponse("world", "stop", 9, 5),
+		})
+		defer ti.stop()
+
+		resp := doPost(ti.addr,
+			`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10, "tools": [{"type":"function","function":{"name":"f"}}], "tool_choice": "none"}`)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		var body map[string]any
+		Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+
+		content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
+		Expect(content).To(Equal("hello world"))
+	})
+
 	Describe("non-streaming", func() {
 
 		It("falls back to regular decode when budget fits in one chunk", func() {
@@ -433,6 +480,23 @@ var _ = Describe("Chunked Decode", func() {
 			resp := doPost(ti.addr,
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusBadGateway))
+		})
+
+		It("returns the response unmodified when the first choice is not an object", func() {
+			// completion_tokens equals max_tokens so the budget is exhausted
+			// after one chunk.
+			ti := newChunkedTestSetup(5, []string{
+				`{"choices":[null],"usage":{"prompt_tokens":3,"completion_tokens":10,"total_tokens":13}}`,
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]any
+			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+			Expect(body["choices"]).To(Equal([]any{nil}))
 		})
 	})
 

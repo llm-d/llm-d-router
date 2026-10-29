@@ -463,7 +463,7 @@ func parseFloatHeader(request fwksched.InferenceRequest, headerName string) (flo
 		return 0, nil
 	}
 	parsedFloat, err := strconv.ParseFloat(headerValue, 64)
-	if err != nil || math.IsNaN(parsedFloat) || math.IsInf(parsedFloat, 0) {
+	if err != nil || !metadata.IsFiniteFloat(parsedFloat) {
 		return 0, errcommon.Error{
 			Code: errcommon.BadRequest,
 			Msg:  headerName + " must be a finite float",

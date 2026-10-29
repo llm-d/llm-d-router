@@ -246,6 +246,8 @@ completions prompt is already a token array). See
      the Gateway) is forwarded with that same `4xx`, since the request was the root cause;
    - any other error, including an upstream `5xx`, returns `502 Bad Gateway`.
 
+   A client disconnect is logged at verbosity `VERBOSE`, not as an error.
+
    Upstream response bodies are logged server-side only and never returned to the client.
    A step returning `ErrPipelineDone` instead stops the pipeline and reports success, used
    by `conditional-decode` when the decode worker serves the request directly. A step that
@@ -272,6 +274,7 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| `PrefillCachedTokens` | `prefill` (from the prefill response `usage` block) | `decode` |
 | Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
@@ -279,10 +282,13 @@ steps read and mutate. The load-bearing fields:
 `Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
 it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
-request. Any client-provided value under that name is discarded.
-A client-provided `x-llm-d-pin-host-port` is also discarded, on the pipeline and on
-the passthrough, because EPP routes on it
-(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)).
+request. Client-provided values of the coordinator-owned headers are discarded: EPP
+routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
+`x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)),
+and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
+any other leg. The same headers are removed from the upstream response before it
+reaches the client. Both apply on the pipeline and on the passthrough.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -444,7 +450,18 @@ State produced by one phase and consumed by a later one is carried on the
 | :---- | :---- | :---- |
 | `render` | `TokenIDs`, multimodal hashes/placeholders | encode, prefill, decode (EPP uses token IDs for prefix matching) |
 | `encode` | `ECTransferParams` (merged per `mm_hash`) | prefill |
-| `prefill` | `KVTransferParams` (from the prefill response body) | decode |
+| `prefill` | `KVTransferParams` (from the response body), `PrefillCachedTokens` (from its `usage` block) | decode |
+
+A decode worker counts the KV blocks transferred from prefill as prompt-cache hits
+of its own, so the cached-token count it reports describes the handoff rather than
+the prompt cache. The `decode` step substitutes the prefill worker's count into the
+usage block it streams to the client, in the single JSON document or in the SSE usage
+frame, so a disaggregated request reports the cache hits a single-worker request
+would. The count is written to the field the route documents:
+`prompt_tokens_details`, or `input_tokens_details` on the Responses routes. Where no
+prefill measurement applies, the decode worker's own count reaches the client
+unchanged; `PrefillCachedTokens` documents those cases. The rewriting lives in
+[pkg/common/usage](../pkg/common/usage) and is shared with the routing sidecar.
 
 ## Coordinator vs. the llm-d-router sidecar model
 
@@ -624,7 +641,7 @@ edit: registration is the only wiring step.
   step can read them without the operator repeating them per step. The constants are
   `steps.ParamKVConnector` and `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildMMFeatures`, `copyBody`,
+  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection

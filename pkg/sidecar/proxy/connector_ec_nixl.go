@@ -55,7 +55,7 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
@@ -64,7 +64,7 @@ func (s *Server) fanoutEncoderCollect(
 			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
-				reqcommon.FieldECTransferParams, truncateLongStrings(encoderResponse[reqcommon.FieldECTransferParams], 64))
+				logBodyBytesKey, len(pw.bodyBytes()))
 		}
 		ec, ok := encoderResponse[reqcommon.FieldECTransferParams]
 		if !ok || ec == nil {
@@ -88,7 +88,7 @@ func (s *Server) fanoutEncoderCollect(
 		for k, v := range ecMap {
 			if _, exists := params[k]; exists {
 				s.logger.V(logging.DEBUG).Info("duplicate ec_transfer_params key across encoder responses; overwriting",
-					"item", idx, "requestID", requestID, "key", k)
+					"item", idx, "requestID", requestID)
 			}
 			params[k] = v
 		}
@@ -107,10 +107,12 @@ func (s *Server) fanoutEncoderCollect(
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
-	_, body, ok := s.readJSONBody(r, w)
+	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
 
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
@@ -127,7 +129,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
+			s.logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				s.logger.Error(err, "failed to send error response to client")
 			}

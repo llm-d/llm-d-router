@@ -267,7 +267,7 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
 	default:
@@ -455,16 +455,16 @@ func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiM
 			out = append(out, []byte(role)...)
 		}
 		return b.appendResponsesContent(out, features, m["content"])
-	case "function_call":
+	case responsesItemTypeFunctionCall:
 		if name, ok := m["name"].(string); ok {
 			out = append(out, []byte(name)...)
 		}
 		if args, ok := m["arguments"].(string); ok {
 			out = append(out, []byte(args)...)
 		}
-	case "function_call_output":
+	case responsesItemTypeFunctionCallOutput:
 		out = appendResponsesOutputText(out, m["output"])
-	case "reasoning":
+	case responsesItemTypeReasoning:
 		out = appendResponsesSummaryText(out, m["summary"])
 	}
 	return out, features

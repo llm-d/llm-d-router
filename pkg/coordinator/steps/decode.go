@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -74,8 +76,25 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	out := serveDecode(logger, s.gwClient.Transport(), reqCtx.ResponseWriter, proxyReq, coordmetrics.UpstreamDecode, nil)
+	writer, finalize := s.responseWriter(reqCtx)
+	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
+	if err := finalize(); err != nil {
+		// The buffered tail could not be forwarded, so the client holds a
+		// truncated response. Nothing can be written to say so: the status and
+		// the body before the tail are already on the wire.
+		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
+	}
 	return out.streamedError(DecodeStepName)
+}
+
+// responseWriter returns the writer the decode response is streamed through,
+// and the function that flushes whatever it buffered. Without a prefill count
+// the client gets the decode worker's bytes untouched.
+func (s *DecodeStep) responseWriter(reqCtx *pipeline.RequestContext) (http.ResponseWriter, func() error) {
+	if reqCtx.PrefillCachedTokens == nil {
+		return reqCtx.ResponseWriter, func() error { return nil }
+	}
+	return usage.NewCachedTokensResponseWriter(reqCtx.ResponseWriter, *reqCtx.PrefillCachedTokens, reqCtx.Stream)
 }
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike

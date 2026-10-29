@@ -379,6 +379,8 @@ Enable chunked decode via the pd-sidecar flag:
 >   every chunk.
 > - the request sets `n` greater than 1, because each chunk would continue the text of the first
 >   choice for every choice.
+> - the request declares a non-empty `tools` array and does not set `tool_choice: none`, because a
+>   tool call cannot be reassembled across chunk boundaries.
 
 ---
 

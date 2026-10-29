@@ -1275,3 +1275,15 @@ func TestDecodeVLLMEvent_LargeExtraKeyOrder(t *testing.T) {
 		})
 	}
 }
+
+func TestTypedBatchRequiresExplicitSchema(t *testing.T) {
+	payload, err := msgpack.Marshal([]any{1.0, []any{}})
+	require.NoError(t, err)
+	var batch msgpackTypedEventBatch
+	require.EqualError(t, msgpack.Unmarshal(payload, &batch), "event batch schema is required")
+
+	batch.schema = &vllmWireSchema
+	require.NoError(t, msgpack.Unmarshal(payload, &batch))
+	batch.schema = &sglangWireSchema
+	require.ErrorContains(t, msgpack.Unmarshal(payload, &batch), "SGLang event batch: need at least 3 fields")
+}

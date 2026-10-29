@@ -38,7 +38,9 @@ VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
 # CPU-only vLLM image that exposes `vllm launch render` for the token-producer
-# plugin's HTTP backend.
+# plugin's HTTP backend. The dev renderer manifest overrides the image's command
+# with that CLI, so this image cannot be swapped for the simulator there. The
+# e2e suites render through the simulator instead and override this per target.
 export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
@@ -317,6 +319,10 @@ test-integration-hermetic: image-build-builder ## Run hermetic integration tests
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
 
+# The simulator serves every /render route the token-producer plugin calls, so
+# the e2e suites render through it and no real-vLLM image is pulled or loaded.
+# Set on the target so image-pull inherits it.
+test-e2e-run: export VLLM_RENDER_IMAGE = $(VLLM_IMAGE)
 .PHONY: test-e2e-run
 test-e2e-run: image-pull ## Ensure images are present, then run e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"

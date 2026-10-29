@@ -176,7 +176,7 @@ func TestRequestAnsweredLocalSendsImmediateResponse(t *testing.T) {
 		}),
 	}
 
-	require.NoError(t, reqCtx.updateStateAndSendIfNeeded(server, logr.Discard()))
+	require.NoError(t, reqCtx.updateStateAndSendIfNeeded(server, logr.Discard(), nil))
 	require.Len(t, server.sentResponses, 1)
 	assert.Equal(t, []byte("local"), server.sentResponses[0].GetImmediateResponse().Body)
 }

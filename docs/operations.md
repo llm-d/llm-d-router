@@ -53,15 +53,16 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
     In Active-Active mode, priority and fairness are enforced
     only within each replica's share of the traffic, and per-band capacity limits apply per
     replica, so the fleet-wide queued volume scales with the replica count.
-  - **Plugin Compatibility**: Without a syncer, EPP replicas keep routing state locally. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix-cache state remains local even with the syncer, so approximate prefix routing can make inconsistent cache decisions across replicas.
+  - **Plugin Compatibility**: EPP replicas do not share routing state by default. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix routing (`approx-prefix-cache-producer`) is supported in Active-Active when a `CrossReplicaSyncer` (for example `redis-syncer`) is configured and `syncCrossReplicaState` is left enabled (the default); without that sync path, each replica only learns prefixes from traffic it routed, so approximate hit rate drops under Active-Active.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
 ##### Sharing in-flight load with Redis (Alpha)
 
 Choose active-active with the syncer when several EPP replicas must handle traffic
-concurrently and the routing plugins need peer in-flight load. Use leader election
-when one active EPP has sufficient capacity and the scheduling profile relies on
-local state that the syncer does not cover, such as approximate prefix state.
+concurrently and the routing plugins need peer in-flight load or shared approximate
+prefix state. Use leader election when one active EPP has sufficient capacity and
+the scheduling profile relies on local state that the syncer does not cover, such
+as flow-control queues.
 
 In the official charts, set `router.epp.crossReplica.enabled: true` and configure
 an external Redis address. This disables leader election, enables the Alpha
@@ -73,8 +74,10 @@ the chart does not deploy it. For values and Secret-based authentication, see
 The `inflight-load-producer` shares its per-endpoint load when
 `syncCrossReplicaState` is true (the default). Consumers such as
 `active-request-scorer` and `token-load-scorer` can use that shared view.
+The `approx-prefix-cache-producer` shares a capped recent window of prefix
+hashes the same way when `syncCrossReplicaState` is true (the default).
 Configuring a syncer does not change the scheduling profile or synchronize
-approximate prefix-cache state, flow-control queues, or fairness accounting.
+flow-control queues or fairness accounting.
 
 Load sharing is eventually consistent. Replicas can make simultaneous decisions
 before receiving each other's updates; this does not provide an atomic
@@ -87,6 +90,64 @@ calls return Redis errors. Set `stateTTL` above the observed interval between
 successful endpoint refreshes, including latency variation; see the
 [Redis syncer README](../pkg/epp/framework/plugins/datalayer/cross_plugin/redis/README.md)
 for transport restrictions and publisher timing.
+
+##### Approximate prefix cross-replica sync cost (microbenchmarks)
+
+These numbers are in-process Go benchmarks (`go test -bench`), not full-cluster
+llm-d-simulator runs. They isolate CPU on the request path and Redis publish
+latency against miniredis. Production Valkey/Redis adds network RTT to publish
+and read misses; the publisher runs off the request path on the cross-replica
+sync interval (default `200ms`, `publishTimeout` default `1s`).
+
+**Request-path `Produce` (96 decode pods, `sharedPrefix` layout, Apple M5 Pro):**
+
+Default window budget is `maxSyncedTokens` = 2_000_000 (31250 hashes at
+`blockSizeTokens` = 64), matching `lruCapacityPerServer`. Steady-window
+fixture is 4 prompts filling that budget (same shape as the earlier 256-hash
+bench, scaled up).
+
+| Mode | Median of 5 | Allocs/op | Relative to sync off |
+| --- | ---: | ---: | ---: |
+| `syncCrossReplicaState=false` | 37 µs | 424 | 1.0x |
+| Syncer configured, empty peer window | 40 µs | 424 | 1.06x |
+| Syncer configured, steady peer window (default budget, already merged) | 38 µs | 520 | 1.03x |
+
+Empty-window overhead is a `syncerActive` check plus a miss on the optional
+attribute. Steady-state merge skips work when the sync attribute digest is
+unchanged (Peek + cached `ContentDigest`), so cost stays near sync-off.
+Novel prompts (window slides) pay snapshot, prompt-key, and indexer `Add` work.
+Reproduce with:
+
+```bash
+go test ./pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ \
+  -run='^$' -bench=BenchmarkProduceCrossSync -benchmem -count=5
+```
+
+**`redis-syncer` publish/read (miniredis, same host):**
+
+| Operation | Payload | Median of 5 |
+| --- | --- | ---: |
+| `Set` (publish) | 4 prompts × 64 hashes (default window shape) | 47 µs |
+| `Set` (publish) | 1 prompt × 256 hashes | 48 µs |
+| `Set` (publish) | 8 prompts × 256 hashes | 88 µs |
+| `Get` (cached peer aggregate) | after prior `Set` | 0.40 µs |
+
+Reproduce with:
+
+```bash
+go test ./pkg/epp/framework/plugins/datalayer/cross_plugin/redis/ \
+  -run='^$' -bench='BenchmarkSyncer(Set|Get)' -benchmem -count=5
+```
+
+Operational takeaways:
+
+- Steady peer windows are cheap on the request path when the attribute is
+  unchanged; cost spikes when the window slides (novel peer prompts). Prefer
+  sizing `maxSyncedTokens` for publish payload and hit-rate, not for steady CPU.
+- Publish latency is on the sync interval, not in `Produce`. Keep `stateTTL`
+  above the refresh interval plus observed publish RTT (include Redis/Valkey
+  network time in cluster measurements).
+- Redis/Valkey must support hash-field TTL (`HPEXPIRE`: Redis 7.4+ or Valkey 9+).
 
 ### Performance Reference Data
 

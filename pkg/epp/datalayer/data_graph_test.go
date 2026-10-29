@@ -456,6 +456,23 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			wantTypes: []string{producerTypeA},
 		},
 		{
+			name: "poll status of a configured polling source is produced",
+			existingPlugins: []fwkplugin.Plugin{
+				NewPollStatusProducer(&Config{Sources: []DataSourceConfig{{Plugin: &toggleSource{}}}}),
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{fwkdl.PollStatusDataKey("toggle"): nil}},
+			},
+			wantTypes: nil,
+		},
+		{
+			name: "poll status of a polling source missing from the data layer config is missing",
+			existingPlugins: []fwkplugin.Plugin{
+				&toggleSource{},
+				NewPollStatusProducer(&Config{}),
+				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{fwkdl.PollStatusDataKey("toggle"): nil}},
+			},
+			wantErr: true,
+		},
+		{
 			name:            "no consumers - nothing created",
 			existingPlugins: []fwkplugin.Plugin{},
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
@@ -742,4 +759,61 @@ func TestValidateAndOrder_RegistryChecks(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestValidateAndOrder_Level2AttributeChecks(t *testing.T) {
+	dk := fwkplugin.NewDataKey("TokenizedPrompt", "token-producer")
+
+	producerVLLM := &mockDataProducerP{
+		name: "token-producer",
+		produces: map[fwkplugin.DataKey]any{
+			dk: fwkplugin.ProducedData{
+				Type:       &mockProducedDataType{},
+				Attributes: map[string]string{"backend": "vllm"},
+			},
+		},
+	}
+	producerEstimate := &mockDataProducerP{
+		name: "token-producer",
+		produces: map[fwkplugin.DataKey]any{
+			dk: fwkplugin.ProducedData{
+				Type:       &mockProducedDataType{},
+				Attributes: map[string]string{"backend": "estimate"},
+			},
+		},
+	}
+
+	preciseConsumer := &mockDataProducerP{
+		name: "precise-prefix-cache-producer",
+		consumes: map[fwkplugin.DataKey]any{
+			dk: fwkplugin.ConsumedData{
+				Type:    &mockProducedDataType{},
+				Matches: fwkplugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+		},
+	}
+	approxConsumer := &mockDataProducerP{
+		name: "approx-prefix-cache-producer",
+		consumes: map[fwkplugin.DataKey]any{
+			dk: &mockProducedDataType{},
+		},
+	}
+
+	t.Run("precise consumer with vllm producer succeeds and orders producer before consumer", func(t *testing.T) {
+		ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{preciseConsumer, producerVLLM})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"token-producer/mock", "precise-prefix-cache-producer/mock"}, ordered)
+	})
+
+	t.Run("precise consumer with estimate producer fails Level-2 attribute check", func(t *testing.T) {
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{preciseConsumer, producerEstimate})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+	})
+
+	t.Run("approx consumer (no Level-2 matcher) accepts estimate producer", func(t *testing.T) {
+		ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{approxConsumer, producerEstimate})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"token-producer/mock", "approx-prefix-cache-producer/mock"}, ordered)
+	})
 }

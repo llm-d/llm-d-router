@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -123,16 +124,34 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	// Buffer the body only to log it at TRACE; otherwise hand the caller the
 	// unread stream so large prefill/encode responses are not held in memory.
 	if v := logger.V(logutil.TRACE); v.Enabled() {
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("reading response from gateway: %w", err)
+		var replay io.Reader = bytes.NewReader(respBody)
+		if readErr == nil {
+			v.Info("response body", "status", resp.StatusCode, logutil.HTTPBodyKey, RedactBody(respBody))
+		} else {
+			v.Info("response body", "status", resp.StatusCode, "error", readErr, logutil.HTTPBodyKey, RedactBody(respBody))
+			// Replay the failure too, so TRACE does not change what the caller sees.
+			replay = &readThenFail{Reader: replay, err: readErr}
 		}
-		v.Info("response body", "status", resp.StatusCode, logutil.HTTPBodyKey, RedactBody(respBody))
-		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		resp.Body = io.NopCloser(replay)
 	}
 
 	return resp, nil
+}
+
+// readThenFail yields Reader's bytes and then err in place of io.EOF.
+type readThenFail struct {
+	io.Reader
+	err error
+}
+
+func (r *readThenFail) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, r.err
+	}
+	return n, err
 }
 
 // Post is a convenience method for POST requests.
