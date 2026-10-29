@@ -103,8 +103,8 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var partsByMod map[reqcommon.Modality][]mediaPart
-	if items, ok := promptItems(reqCtx.Body, format); ok {
-		partsByMod = groupMediaPartsByModality(collectMediaParts(items, format))
+	if format != reqcommon.APITypeVLLMGenerate || reqCtx.MMKwargsOmitted {
+		partsByMod = clientMediaParts(reqCtx)
 	}
 
 	// Each entry's position among the entries sharing its modality, resolved up
@@ -260,6 +260,9 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// preprocesses nothing, so the client's mm_processor_kwargs and
 		// media_io_kwargs have no effect here. Render already applied them and
 		// returned the result as entry.Hash and entry.KwargsData.
+		if reqCtx.MMKwargsOmitted {
+			return s.buildEncodeContentPartsBody(reqCtx, entry, localIdx, partsByMod)
+		}
 		body := map[string]any{
 			"model":     reqCtx.Model,
 			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
@@ -280,6 +283,25 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// silently sending a generate-shaped body to the wrong endpoint.
 		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
+}
+
+// buildEncodeContentPartsBody builds a generate sub-request for an entry render
+// returned without kwargs_data: the encoder processes the client's media from
+// content_parts, and the prompt is BOS plus one unexpanded placeholder token.
+func (s *EncodeStep) buildEncodeContentPartsBody(reqCtx *pipeline.RequestContext, entry pipeline.MultimodalEntry, localIdx int, partsByMod map[reqcommon.Modality][]mediaPart) (map[string]any, error) {
+	part, err := generateContentPart(entry, localIdx, partsByMod)
+	if err != nil {
+		return nil, err
+	}
+	collapsed := entry
+	collapsed.Placeholder.Length = 1
+	body := map[string]any{
+		"model":         reqCtx.Model,
+		"token_ids":     s.buildEncodeTokenIDs(reqCtx.TokenIDs, collapsed),
+		"content_parts": []map[string]any{part},
+	}
+	reqcommon.CapSingleToken(body, reqcommon.APITypeVLLMGenerate)
+	return body, nil
 }
 
 type encodeResponse struct {

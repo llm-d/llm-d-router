@@ -187,7 +187,7 @@ POST <rendering_service_address>/v1/chat/completions/render
 Content-Type: application/json
 ```
 
-Body is the full `reqCtx.Body` (with data: URIs from stage 1):
+Body is the full `reqCtx.Body` (with data: URIs from stage 1), plus `"return_mm_kwargs": false` unless the render step sets `return_mm_kwargs: true`. The field is added to the render copy only; later stages see the client body without it.
 
 ```json
 {
@@ -304,6 +304,23 @@ For a multi-entry request the coordinator walks `reqCtx.MultimodalEntries` in or
 For an image-only request `k == i`, so this is the same positional pairing as `features.mm_hashes.image[i]`.
 
 The coordinator validates that the per-modality lengths of `mm_hashes`, `mm_placeholders`, and `kwargs_data` each **sum** to `len(reqCtx.MultimodalEntries)`, and that every entry finds an element at its per-modality position. Either failure fails the request, so a response with the right total split across the wrong modalities is rejected rather than silently mispaired.
+
+#### Response with `return_mm_kwargs: false`
+
+vLLM returns `token_ids`, `mm_hashes` and `mm_placeholders` unchanged and sets `kwargs_data` and `mm_metadata` to `null`:
+
+```json
+"features": {
+  "mm_hashes": {"image": ["2b622017706939546ca39ffbc7b610fe1fcbd4f9154d33b4ef13aaf5860c473e"]},
+  "mm_placeholders": {"image": [{"offset": 8, "length": 70}]},
+  "kwargs_data": null,
+  "mm_metadata": null
+}
+```
+
+The coordinator skips the `kwargs_data` length check, leaves every `KwargsData` empty, and sets `reqCtx.MMKwargsOmitted`. Generate-format encode and prefill requests then carry the client's media as `content_parts` (see [Stage 4](#stage-4-encode-fan-out-one-per-media-entry) and [Stage 5](#stage-5-prefill)). A renderer without the field ignores it and returns the tensors, and the request takes the `features` path.
+
+Measured with Qwen3-VL-32B and one 640x448 JPEG, the render response is 575,449 bytes by default and 1,641 bytes with `return_mm_kwargs: false`.
 
 ---
 
@@ -626,6 +643,23 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 
 `model` is required by the `/inference/v1/generate` request validator and must match the served model name. Coordinator sources it from `reqCtx.Model` (populated from the inbound request body's `model` field).
 
+#### Request when render omitted the tensors
+
+When `reqCtx.MMKwargsOmitted` is set (see [2.A](#response-with-return_mm_kwargs-false)), the request carries the entry's media from the client request as one `content_parts` item and no `features`. vLLM accepts `content_parts` or `features` but not both, and expands the placeholder of a `content_parts` prompt itself, so `token_ids` is BOS plus one placeholder token:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000],
+  "content_parts": [
+    {"type": "image_url", "url": "data:image/jpeg;base64,/9j/4AAQ...", "uuid": "abc123hash"}
+  ],
+  "sampling_params": {"max_tokens": 1}
+}
+```
+
+The part type is `image_url`, `audio_url` or `video_url` by modality. `url` is the media URL from the client part; an inline `input_audio` part becomes a `data:` URL. `uuid` is the entry's render hash, so the encode response keys `ec_transfer_params` by the same hash prefill looks up.
+
 #### Response
 
 ```json
@@ -855,6 +889,25 @@ x-llm-d-epp-profile: prefill
 
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
+#### Request when render omitted the tensors
+
+When `reqCtx.MMKwargsOmitted` is set (see [2.A](#response-with-return_mm_kwargs-false)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. `ec_transfer_params` from the encode stage is sent as in the `features` form:
+
+```json
+{
+  "request_id": "req-abc-123",
+  "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000, 32000, 2345, 6789],
+  "content_parts": [
+    {"type": "image_url", "url": "data:image/jpeg;base64,/9j/4AAQ...", "uuid": "abc123hash"},
+    {"type": "image_url", "url": "data:image/png;base64,iVBORw0K...", "uuid": "def456hash"}
+  ],
+  "ec_transfer_params": {"abc123hash": {"...": "..."}, "def456hash": {"...": "..."}},
+  "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false},
+  "sampling_params": {"max_tokens": 1}
+}
+```
+
 #### Response
 
 ```json
@@ -1029,6 +1082,8 @@ Identical to Option B.
 With a renderer that emits `features.mm_metadata` (see vLLM
 [#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
 `kwargs_data` for an entry when `ec_transfer_params` covers that entry.
+
+It applies only when render returns the tensors (render step `return_mm_kwargs: true`, or a renderer that ignores the field). With the default `return_mm_kwargs: false`, prefill carries `content_parts` instead of `features`, so neither `kwargs_data` nor `mm_metadata` is sent.
 
 This applies to prefill legs that carry a `features` map: the completions and
 generate wire formats. A chat-completions client reaches those legs when

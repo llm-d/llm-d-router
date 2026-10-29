@@ -79,6 +79,19 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		})
 	}))
 
+	ginkgo.When("the renderer ignores return_mm_kwargs and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
+		// The render step asks for no tensors by default. The simulator returns
+		// kwargs_data anyway, as a vLLM without the field does, so encode and
+		// prefill keep the features path and send no content_parts.
+		ginkgo.It("keeps the features path on encode and prefill", func() {
+			logs := runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{}, coordinatorConfigNIXLGenerate)
+			verifyFeaturesPath(logs)
+		})
+	}))
+
 	ginkgo.When("the request carries one remote image", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
 			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
@@ -534,6 +547,23 @@ func verifyEncodeSkipped(logs string) {
 	ginkgo.By("Verifying encode was skipped for the generate request")
 	gomega.Expect(logHasLine(logs, `"body":"skipping encode for generate request"`)).To(gomega.BeTrue(),
 		"coordinator logs missing 'skipping encode for generate request'")
+}
+
+// verifyFeaturesPath asserts that generate-format encode and prefill requests
+// carried the render tensors as features and no content_parts.
+func verifyFeaturesPath(logs string) {
+	ginkgo.By("Verifying encode requests carry features and no content_parts")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"kwargs_data"`)).To(gomega.BeTrue(),
+		"coordinator logs have no encode request body carrying kwargs_data")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"content_parts"`)).To(gomega.BeFalse(),
+		"encode request body must not carry content_parts when render returned kwargs_data")
+
+	ginkgo.By("Verifying the prefill request carries features and no content_parts")
+	body := parsePrefillGenerateBody(logs)
+	features, ok := body["features"].(map[string]any)
+	gomega.Expect(ok).To(gomega.BeTrue(), "generate prefill body has no features object: %v", body)
+	gomega.Expect(features).To(gomega.HaveKey("kwargs_data"), "generate prefill features has no kwargs_data: %v", features)
+	gomega.Expect(body).NotTo(gomega.HaveKey("content_parts"), "generate prefill body must not carry content_parts: %v", body)
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.

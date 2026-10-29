@@ -170,6 +170,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMKwargsOmitted reports that render returned no kwargs_data for the
+	// entries (render step return_mm_kwargs false), so generate-format encode
+	// and prefill requests carry the client's media as content_parts.
+	MMKwargsOmitted bool
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).

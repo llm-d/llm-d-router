@@ -180,11 +180,24 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
-		// see buildPrefillMMFeatures. Built inside this branch rather than
-		// above the switch so chat-completions requests never build-and-drop
-		// a features map they do not ship.
-		if features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams); features != nil {
+		if reqCtx.MMKwargsOmitted {
+			// vLLM takes content_parts or features, not both, and expands
+			// the placeholders of a content_parts prompt itself.
+			tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, reqCtx.MultimodalEntries)
+			if err != nil {
+				return nil, err
+			}
+			parts, err := generateContentParts(reqCtx)
+			if err != nil {
+				return nil, err
+			}
+			body["token_ids"] = tokenIDs
+			body["content_parts"] = parts
+		} else if features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams); features != nil {
+			// The only consumer of the per-entry mm_metadata/kwargs_data
+			// choice; see buildPrefillMMFeatures. Built inside this branch
+			// rather than above the switch so chat-completions requests never
+			// build-and-drop a features map they do not ship.
 			body["features"] = features
 		}
 		if len(ecParams) > 0 {

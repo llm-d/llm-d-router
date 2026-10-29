@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"time"
@@ -46,6 +47,7 @@ type RenderStep struct {
 	serviceAddress            string
 	maxTotalTokens            int
 	maxTotalPlaceholderTokens int
+	returnMMKwargs            bool
 	client                    *http.Client
 }
 
@@ -99,6 +101,11 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		maxPlaceholders = v
 	}
 
+	returnMMKwargs, _, err := paramBool(params, "return_mm_kwargs")
+	if err != nil {
+		return nil, err
+	}
+
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -113,6 +120,7 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		serviceAddress:            address,
 		maxTotalTokens:            maxTokens,
 		maxTotalPlaceholderTokens: maxPlaceholders,
+		returnMMKwargs:            returnMMKwargs,
 		client:                    &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
 }
@@ -328,13 +336,16 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		totalMetadata += len(metadata)
 	}
 	expected := len(reqCtx.MultimodalEntries)
+	// A renderer without the return_mm_kwargs field ignores it and returns the
+	// tensors, which keep the features path.
+	omitted := !s.returnMMKwargs && expected > 0 && totalKwargs == 0
 	if totalHashes != expected {
 		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
 	if totalPlaceholders != expected {
 		return fmt.Errorf("render returned %d mm_placeholders but expected %d", totalPlaceholders, expected)
 	}
-	if totalKwargs != expected {
+	if !omitted && totalKwargs != expected {
 		return fmt.Errorf("render returned %d kwargs_data but expected %d", totalKwargs, expected)
 	}
 	// mm_metadata is optional for backward compatibility with older renderers.
@@ -386,11 +397,13 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		placeholders := renderResp.Features.MMPlaceholders[mod]
 		kwargs := renderResp.Features.KwargsData[mod]
 		metadata := renderResp.Features.MMMetadata[mod]
-		if idx >= len(hashes) || idx >= len(placeholders) || idx >= len(kwargs) {
+		if idx >= len(hashes) || idx >= len(placeholders) || (!omitted && idx >= len(kwargs)) {
 			return fmt.Errorf("render response missing slot %d for modality %s", idx, mod)
 		}
 		reqCtx.MultimodalEntries[i].Hash = hashes[idx]
-		reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		if !omitted {
+			reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		}
 		reqCtx.MultimodalEntries[i].Placeholder = placeholders[idx]
 		if idx < len(metadata) {
 			reqCtx.MultimodalEntries[i].MMMetadata = metadata[idx]
@@ -400,6 +413,7 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
+	reqCtx.MMKwargsOmitted = omitted
 
 	logger.V(logutil.DEBUG).Info("response",
 		"mm_hashes", renderResp.Features.MMHashes,
@@ -410,7 +424,8 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	return nil
 }
 
-// postRender marshals reqCtx.Body, POSTs it to <serviceAddress><basePath>/render,
+// postRender marshals reqCtx.Body, with return_mm_kwargs false unless the
+// step enables it, POSTs it to <serviceAddress><basePath>/render,
 // and decodes the JSON response into out.
 func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) error {
 	if s.serviceAddress == "" {
@@ -419,7 +434,12 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
-	body, err := json.Marshal(reqCtx.Body)
+	renderBody := reqCtx.Body
+	if !s.returnMMKwargs {
+		renderBody = maps.Clone(reqCtx.Body)
+		renderBody["return_mm_kwargs"] = false
+	}
+	body, err := json.Marshal(renderBody)
 	if err != nil {
 		return fmt.Errorf("marshaling request for render: %w", err)
 	}
