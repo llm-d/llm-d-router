@@ -1,0 +1,36 @@
+# data-parallel-rank-header
+
+A PreRequest plugin that writes the data-parallel rank of the scheduling-selected endpoint to a request header. vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ranks on one port and sends a request to the rank named in the `x-data-parallel-rank` header.
+
+The plugin acts only on endpoints that share their port with other ranks, which the EPP creates when it runs with `--data-parallel-ranks-per-port` greater than 1. For those endpoints it sets the header to the endpoint's `RankIndex` and replaces any value the client sent. For other endpoints it leaves the request headers unchanged.
+
+## Configuration
+
+```yaml
+- type: data-parallel-rank-header
+  parameters:
+    # Optional. Defaults to x-data-parallel-rank.
+    headerName: x-data-parallel-rank
+```
+
+| field | meaning |
+|---|---|
+| `headerName` | Request header the rank is written to. EPP-owned names (stripped on the way out) and internal routing headers (`x-llm-d-prefiller-host-port` and siblings) are rejected at startup. |
+
+The plugin reads the endpoint selected by the primary scheduling profile.
+
+## gRPC
+
+Envoy forwards request headers to a gRPC upstream as metadata, so the same header reaches vLLM as the `x-data-parallel-rank` metadata key.
+
+## Example
+
+Each model server pod runs `vllm-rs serve --data-parallel-size 2` on port 8000, selected by an InferencePool with one target port. The EPP runs with `--data-parallel-ranks-per-port=2`, so each pod becomes two endpoints, `<pod>-rank-0` and `<pod>-rank-1`, both on port 8000.
+
+```yaml
+# EndpointPickerConfig (excerpt)
+plugins:
+  - type: data-parallel-rank-header
+```
+
+When the EPP selects `<pod>-rank-1`, the request reaches the pod's port 8000 with `x-data-parallel-rank: 1`.

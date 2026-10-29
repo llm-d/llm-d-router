@@ -32,10 +32,6 @@ import (
 )
 
 const (
-	// requestHeaderDataParallelRank pins a request to a specific vLLM
-	// data-parallel rank, set on both requests of a disagg pair (see pickDPRank).
-	requestHeaderDataParallelRank = "x-data-parallel-rank"
-
 	requestFieldTransferID = "transfer_id"
 )
 
