@@ -374,7 +374,12 @@ func (r *RedisIndex) getRequestKeys(ctx context.Context, engineKeys []BlockHash)
 	for i, cmd := range cmds {
 		vals, err := cmd.Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, fmt.Errorf("failed to resolve engine key %s: %w", engineKeys[i], err)
+			// cmds is built 1:1 with engineKeys; bound-check for gosec G602.
+			ek := EmptyBlockHash
+			if i < len(engineKeys) {
+				ek = engineKeys[i]
+			}
+			return nil, fmt.Errorf("failed to resolve engine key %s: %w", ek, err)
 		}
 		rks := make([]BlockHash, 0, len(vals))
 		for _, val := range vals {
