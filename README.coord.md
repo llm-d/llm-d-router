@@ -143,7 +143,7 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `E2E_NUM_PROCS` | `5` | Number of spec groups run in parallel. `1` runs the suite serially |
 | `E2E_KEEP_CLUSTER_ON_FAILURE` | `false` | Preserve the Kind cluster when the suite fails |
 | `E2E_GATEWAY_PORT` | `30080` | Host port mapped to the gateway NodePort of the first process; each further process adds 100 |
-| `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, Envoy, workers) for every spec, not just on failure |
+| `E2E_PRINT_LOGS` | `false` | Print all pod logs (coordinator, EPPs, the gateway, workers) for every spec, not just on failure |
 | `CONTAINER_RUNTIME` | `docker` | Container runtime used to load images into Kind (`docker` or `podman`) |
 | `EPP_IMAGE` | `ghcr.io/llm-d/llm-d-router-endpoint-picker:dev` | EPP image loaded into the Kind cluster |
 | `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.0.0` | vLLM image loaded into the Kind cluster |
@@ -155,3 +155,4 @@ kubectl --context kind-e2e-coordinator-tests get pods
 | `K8S_CONTEXT` | _(empty)_ | Use an existing cluster context instead of creating a Kind cluster |
 | `READY_TIMEOUT` | `10m` | How long to wait for resources to become ready. The shared test helpers in `test/utils` read the same variable with a `3m` default, so an unset value gives the coordinator suite `10m` and helper waits such as namespace deletion `3m` |
 | `E2E_EPP_TOPOLOGY` | `single` | EPP topology: `single` (one EPP + one pool) or `3epp` (per-role EPP + pool). `test-e2e-coordinator-3epp` sets `3epp` |
+| `E2E_GATEWAY` | `envoy` | Gateway in front of the coordinator and EPP: `envoy` or `agentgateway`. `agentgateway` supports only the `single` topology |
