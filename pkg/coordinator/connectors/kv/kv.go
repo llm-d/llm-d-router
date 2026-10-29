@@ -24,7 +24,9 @@ package kv
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
@@ -38,8 +40,8 @@ const DefaultKVConnectorName = SharedStorage
 const loggerName = "kv"
 
 // Connector controls the kv_transfer_params wire shape on the prefill and
-// decode requests. Implementations are stateless and safe to share across
-// requests; per-request state lives on reqCtx.
+// decode requests. Implementations hold only configuration fixed by Build and
+// are safe to share across requests; per-request state lives on reqCtx.
 type Connector interface {
 	Name() string
 	// PreparePrefillKVParams returns the kv_transfer_params map written into
@@ -61,21 +63,27 @@ type PrefillResponseReader interface {
 	ReadPrefillResponse(reqCtx *pipeline.RequestContext, headers http.Header) error
 }
 
-// Build returns the KV connector for name. An empty name selects DefaultKVConnectorName.
-func Build(name string) (Connector, error) {
+// Build returns the KV connector for name, configured by params (the
+// kv_connector_params config map). An empty name selects DefaultKVConnectorName.
+func Build(name string, params map[string]any) (Connector, error) {
 	if name == "" {
 		name = DefaultKVConnectorName
 	}
+	var c Connector
 	switch name {
 	case NIXL:
-		return nixlKV{}, nil
+		c = nixlKV{}
 	case SharedStorage:
-		return sharedStorageKV{}, nil
+		c = sharedStorageKV{}
 	case SGLang:
-		return sglangKV{}, nil
+		return newSGLangKV(params)
 	case Offloading:
-		return offloadingKV{}, nil
+		c = offloadingKV{}
 	default:
 		return nil, fmt.Errorf("unknown kv_connector: %q", name)
 	}
+	if len(params) > 0 {
+		return nil, fmt.Errorf("kv_connector_params: %s takes no parameters, got %v", name, slices.Sorted(maps.Keys(params)))
+	}
+	return c, nil
 }
