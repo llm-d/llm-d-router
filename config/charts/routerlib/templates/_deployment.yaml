@@ -11,6 +11,9 @@
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
+      {{- with .Values.router.epp.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- with .Values.router.epp.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -319,6 +322,10 @@
       tolerations:
         {{- toYaml .Values.router.epp.tolerations | nindent 8 }}
       {{- end }}
+      {{- with .Values.router.epp.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 {{- end }}
 
 {{- define "llm-d-epp.deployment" -}}
@@ -353,6 +360,9 @@ spec:
       labels:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
+        {{- with .Values.router.epp.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         {{- include "llm-d-epp.podAnnotations" . | nindent 8 }}
     spec:
@@ -403,6 +413,9 @@ spec:
       labels:
         {{- include "llm-d-router.selectorLabels" . | nindent 8 }}
         {{- include "llm-d-router.modeLabels" . | nindent 8 }}
+        {{- with .Values.router.epp.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         {{- include "llm-d-epp.podAnnotations" . | nindent 8 }}
     spec:
