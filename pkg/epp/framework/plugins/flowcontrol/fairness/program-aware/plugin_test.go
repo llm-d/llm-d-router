@@ -19,14 +19,17 @@ package programaware
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -305,6 +308,41 @@ func TestEvictIdle_EvictsNeverCompletedAfterTTL(t *testing.T) {
 
 	_, exists := p.programMetrics.Load("alpha")
 	assert.False(t, exists)
+}
+
+// program_id carries the fairness ID, so it shares the fairness ID label cap: a flood of
+// distinct program IDs collapses to the bounded set plus one overflow series.
+func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
+	const testCap = 3
+	avgWaitTimeMs.Reset()
+	attainedServiceTokens.Reset()
+	metricsutil.SetFairnessIDLabelLimit(testCap)
+	t.Cleanup(func() {
+		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
+		avgWaitTimeMs.Reset()
+		attainedServiceTokens.Reset()
+	})
+
+	p, err := ProgramAwarePluginFactory("test", nil, nil)
+	require.NoError(t, err)
+	pa := p.(*ProgramAwarePlugin)
+	ctx := context.Background()
+
+	for i := 0; i < 100; i++ {
+		req := &fwksched.InferenceRequest{FairnessID: fmt.Sprintf("program-%d", i)}
+		require.NoError(t, pa.PreRequest(ctx, req, nil))
+		pa.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true}, nil)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(avgWaitTimeMs),
+		"100 distinct program IDs must collapse to cap+overflow series")
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(attainedServiceTokens),
+		"the attained service gauge must be bounded identically")
+
+	// A program named like the overflow value must not delete the shared overflow series.
+	pa.evictKey(metricsutil.OverflowValue)
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(avgWaitTimeMs))
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(attainedServiceTokens))
 }
 
 func TestComputeFairnessIndex_EqualWaits(t *testing.T) {

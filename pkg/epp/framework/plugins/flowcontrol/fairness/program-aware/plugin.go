@@ -272,7 +272,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 	enqueueTime, _ := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey)
 	metrics.RecordDispatched(enqueueTime)
-	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
+	avgWaitTimeMs.WithLabelValues(programIDLabel(id)).Set(metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
 	return nil

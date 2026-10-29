@@ -190,12 +190,12 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
-	attainedServiceTokens.WithLabelValues(id).Set(service)
+	attainedServiceTokens.WithLabelValues(programIDLabel(id)).Set(service)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
-	attainedServiceTokens.DeleteLabelValues(id)
+	deleteProgramSeries(attainedServiceTokens, id)
 }
 
 func (s *LASStrategy) Collectors() []prometheus.Collector {
