@@ -27,7 +27,14 @@ spec:
         {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
+        {{- with $proxy.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- with $proxy.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}

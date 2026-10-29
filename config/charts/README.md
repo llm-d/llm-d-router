@@ -746,6 +746,8 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
 | `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
+| `router.proxy.podAnnotations` | Annotations added to the proxy pod template when `mode=service`. | `{}` |
+| `router.proxy.podSecurityContext` | Pod-level `securityContext` for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
 | `router.proxy.lifecycle` | Container lifecycle for the proxy container, rendered verbatim in both sidecar and service mode. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. For preStop drains that outlast the default window, raise the grace period: `router.epp.terminationGracePeriodSeconds` in sidecar mode, `router.proxy.terminationGracePeriodSeconds` in service mode. | `null` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |
