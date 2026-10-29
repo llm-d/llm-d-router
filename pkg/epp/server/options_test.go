@@ -450,6 +450,30 @@ func TestDrainTimeoutFlag(t *testing.T) {
 	}
 }
 
+func TestDataParallelRanksPerPortFlag(t *testing.T) {
+	def := NewOptions()
+	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
+	if def.DataParallelRanksPerPort != 1 {
+		t.Errorf("DataParallelRanksPerPort default = %d, want 1", def.DataParallelRanksPerPort)
+	}
+
+	opts := NewOptions()
+	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	if err := fs.Parse([]string{"--data-parallel-ranks-per-port=4"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	if opts.DataParallelRanksPerPort != 4 {
+		t.Errorf("DataParallelRanksPerPort = %d, want 4", opts.DataParallelRanksPerPort)
+	}
+
+	opts.PoolName = testPoolName
+	opts.DataParallelRanksPerPort = 0
+	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-ranks-per-port") {
+		t.Errorf("Expected Validate() to reject zero data-parallel-ranks-per-port, got: %v", err)
+	}
+}
+
 func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
 	opts := NewOptions()
 	opts.PoolName = "config-flags-pool" // bypass the pool/selector validation

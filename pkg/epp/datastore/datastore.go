@@ -72,6 +72,9 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
+	// WithDataParallelRanksPerPort expands each target port of a pod into n rank endpoints
+	// sharing that port. Values below 2 keep one endpoint per port.
+	WithDataParallelRanksPerPort(n int) Datastore
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *apixv1.InferenceObjective)
@@ -123,6 +126,7 @@ func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory
 		modelRewrites: newModelRewriteStore(),
 		pods:          &sync.Map{},
 		epf:           epFactory,
+		ranksPerPort:  1,
 	}
 }
 
@@ -152,10 +156,17 @@ type datastore struct {
 	// resync failure would compare the incoming pool against the already-stored identical pool
 	// and skip the resync. Guarded by mu.
 	needsResync bool
+	// ranksPerPort is the number of rank endpoints per pod target port. Set once at startup.
+	ranksPerPort int
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 	ds.pool = pool
+	return ds
+}
+
+func (ds *datastore) WithDataParallelRanksPerPort(n int) Datastore {
+	ds.ranksPerPort = max(n, 1)
 	return ds
 }
 
@@ -364,12 +375,12 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
-	for idx, port := range pool.TargetPorts {
+	for portIdx, port := range pool.TargetPorts {
 		if !activePorts.Has(port) {
 			continue
 		}
-		pods = append(pods,
-			&fwkdl.EndpointMetadata{
+		for _, idx := range ds.rankIndexes(portIdx) {
+			meta := &fwkdl.EndpointMetadata{
 				ID:          createEndpointNamespacedName(pod, idx),
 				Name:        pod.Name,
 				Address:     pod.Status.PodIP,
@@ -378,7 +389,12 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				MetricsHost: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:      labels,
 				RankIndex:   idx,
-			})
+			}
+			if ds.ranksPerPort > 1 {
+				meta.RanksPerPort = ds.ranksPerPort
+			}
+			pods = append(pods, meta)
+		}
 	}
 
 	if len(pods) == 0 {
@@ -411,16 +427,17 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	}
 
 	// remove endpoints that are no longer active in the pool
-	for idx, port := range pool.TargetPorts {
+	for portIdx, port := range pool.TargetPorts {
 		if activePorts.Has(port) {
 			continue
 		}
-
-		namespacedName := createEndpointNamespacedName(pod, idx)
-		if ep, ok := ds.pods.Load(namespacedName); ok {
-			ds.pods.Delete(namespacedName)
-			ds.podsVersion.Add(1)
-			ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
+		for _, idx := range ds.rankIndexes(portIdx) {
+			namespacedName := createEndpointNamespacedName(pod, idx)
+			if ep, ok := ds.pods.Load(namespacedName); ok {
+				ds.pods.Delete(namespacedName)
+				ds.podsVersion.Add(1)
+				ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
+			}
 		}
 	}
 
@@ -507,8 +524,10 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 			continue
 		}
 		// Calculate expected endpoint names based on current targetPorts.
-		for idx := range ds.pool.TargetPorts {
-			activeEndpoints.Insert(createEndpointNamespacedName(&pod, idx))
+		for portIdx := range ds.pool.TargetPorts {
+			for _, idx := range ds.rankIndexes(portIdx) {
+				activeEndpoints.Insert(createEndpointNamespacedName(&pod, idx))
+			}
 		}
 		if err := ds.podUpdateOrAddIfNotExist(ctx, &pod, ds.pool); err != nil {
 			// Propagate so PoolSet fails; needsResync makes the retried PoolSet resync again.
@@ -551,6 +570,15 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 		}
 	}
 	return activePorts
+}
+
+// rankIndexes returns the RankIndex values of the endpoints served on the target port at portIdx.
+func (ds *datastore) rankIndexes(portIdx int) []int {
+	idxs := make([]int, ds.ranksPerPort)
+	for rank := range idxs {
+		idxs[rank] = portIdx*ds.ranksPerPort + rank
+	}
+	return idxs
 }
 
 // createEndpointNamespacedName creates a namespaced name for an endpoint based on pod and rank index.

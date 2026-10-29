@@ -844,6 +844,126 @@ func TestEndpointMetadata(t *testing.T) {
 	}
 }
 
+func TestDataParallelRanksPerPort(t *testing.T) {
+	readyPod := func(annotations map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "pod1",
+				Namespace:   "default",
+				Labels:      map[string]string{"app": "vllm"},
+				Annotations: annotations,
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				PodIP:      "10.0.0.1",
+				HostIP:     "192.168.1.10",
+			},
+		}
+	}
+	rankEndpoint := func(name string, port string, rank int) *fwkdl.EndpointMetadata {
+		return &fwkdl.EndpointMetadata{
+			ID:           types.NamespacedName{Name: name, Namespace: "default"},
+			Name:         "pod1",
+			Address:      "10.0.0.1",
+			NodeAddress:  "192.168.1.10",
+			Port:         port,
+			MetricsHost:  net.JoinHostPort("10.0.0.1", port),
+			Labels:       map[string]string{"app": "vllm"},
+			RankIndex:    rank,
+			RanksPerPort: 2,
+		}
+	}
+	sortByName := cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.ID.Name < b.ID.Name })
+
+	tests := []struct {
+		name        string
+		targetPorts []v1.Port
+		pod         *corev1.Pod
+		want        []*fwkdl.EndpointMetadata
+	}{
+		{
+			name:        "one port expands into one endpoint per rank on that port",
+			targetPorts: []v1.Port{{Number: 8000}},
+			pod:         readyPod(nil),
+			want: []*fwkdl.EndpointMetadata{
+				rankEndpoint("pod1-rank-0", "8000", 0),
+				rankEndpoint("pod1-rank-1", "8000", 1),
+			},
+		},
+		{
+			name:        "several ports number their ranks port-major",
+			targetPorts: []v1.Port{{Number: 8000}, {Number: 8001}},
+			pod:         readyPod(nil),
+			want: []*fwkdl.EndpointMetadata{
+				rankEndpoint("pod1-rank-0", "8000", 0),
+				rankEndpoint("pod1-rank-1", "8000", 1),
+				rankEndpoint("pod1-rank-2", "8001", 2),
+				rankEndpoint("pod1-rank-3", "8001", 3),
+			},
+		},
+		{
+			name:        "an inactive port drops all of its ranks",
+			targetPorts: []v1.Port{{Number: 8000}, {Number: 8001}},
+			pod:         readyPod(map[string]string{activePortsAnnotation: "8001"}),
+			want: []*fwkdl.EndpointMetadata{
+				rankEndpoint("pod1-rank-2", "8001", 2),
+				rankEndpoint("pod1-rank-3", "8001", 3),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			fakeClient := fake.NewClientBuilder().WithObjects(test.pod).Build()
+			ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).WithDataParallelRanksPerPort(2)
+			pool := testutil.MakeInferencePool("test-pool").Namespace("default").
+				Selector(map[string]string{"app": "vllm"}).ObjRef()
+			pool.Spec.TargetPorts = test.targetPorts
+
+			// PoolSet resyncs the pod; the resync must keep every rank endpoint.
+			require.NoError(t, ds.PoolSet(ctx, fakeClient, poolutil.InferencePoolToEndpointPool(pool)))
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, test.pod))
+
+			endpoints := ds.PodList(AllPodsPredicate)
+			got := make([]*fwkdl.EndpointMetadata, 0, len(endpoints))
+			for _, ep := range endpoints {
+				got = append(got, ep.GetMetadata())
+			}
+			if diff := cmp.Diff(test.want, got, sortByName); diff != "" {
+				t.Errorf("endpoints mismatch (-want +got):\n%s", diff)
+			}
+
+			ds.PodDelete(test.pod.Name)
+			assert.Empty(t, ds.PodList(AllPodsPredicate), "deleting the pod removes every rank endpoint")
+		})
+	}
+}
+
+func TestDataParallelRanksPerPort_PortDeactivationRemovesRanks(t *testing.T) {
+	ctx := context.Background()
+	ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).WithDataParallelRanksPerPort(2)
+	pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+	pool.Spec.TargetPorts = []v1.Port{{Number: 8000}, {Number: 8001}}
+	require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
+	require.Len(t, ds.PodList(AllPodsPredicate), 4)
+
+	pod.Annotations = map[string]string{activePortsAnnotation: "8000"}
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod))
+	endpoints := ds.PodList(AllPodsPredicate)
+	gotNames := make([]string, 0, len(endpoints))
+	for _, ep := range endpoints {
+		gotNames = append(gotNames, ep.GetMetadata().ID.Name)
+	}
+	assert.ElementsMatch(t, []string{"pod1-rank-0", "pod1-rank-1"}, gotNames)
+}
+
 func TestActivePortFiltering(t *testing.T) {
 	// Create pods that are ready
 	readyPod1 := &corev1.Pod{

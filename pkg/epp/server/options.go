@@ -96,6 +96,7 @@ type Options struct {
 	//
 	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
 	EndpointTargetPorts         []int           // Target ports of model server pods.
+	DataParallelRanksPerPort    int             // Data-parallel ranks served behind each target port of a pod.
 	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	EmitEndpointScores          bool            // Enables emitting per-endpoint scheduler scores in the request-path dynamic metadata.
 	//
@@ -163,6 +164,7 @@ func NewOptions() *Options {
 		RetryPeriod:                      DefaultRetryPeriod,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
+		DataParallelRanksPerPort:         1,
 		DisableEndpointSubsetFilter:      false,
 		EmitEndpointScores:               false,
 		RefreshMetricsInterval:           MinRefreshMetricsInterval,
@@ -222,6 +224,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
+	fs.IntVar(&opts.DataParallelRanksPerPort, "data-parallel-ranks-per-port", opts.DataParallelRanksPerPort,
+		"Number of data-parallel ranks a model server pod serves behind each target port, such as vLLM's Rust "+
+			"frontend with --data-parallel-size. Above 1, each target port of a pod becomes that many endpoints, "+
+			"one per rank, with RankIndex numbered port-major from 0.")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
@@ -427,6 +433,10 @@ func (opts *Options) Validate() error {
 				return fmt.Errorf("invalid port number %d in %q", port, "endpoint-target-ports")
 			}
 		}
+	}
+
+	if opts.DataParallelRanksPerPort < 1 {
+		return fmt.Errorf("data-parallel-ranks-per-port must be at least 1, got %d", opts.DataParallelRanksPerPort)
 	}
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
