@@ -23,6 +23,9 @@ import (
 // Internal llm-d specific attribute keys.
 // All custom router, scheduler, scorer, and sidecar attributes are namespaced under "llm_d.*".
 const (
+	// EPP API attribution
+	LLMDEPPAPISurfaceKey = attribute.Key("llm_d.epp.api_surface")
+
 	// Tool-calling request attributes
 	LLMDToolCallingAPISurfaceKey                   = attribute.Key("llm_d.tool_calling.api_surface")
 	LLMDToolCallingPresentKey                      = attribute.Key("llm_d.tool_calling.present")
@@ -181,6 +184,11 @@ const (
 )
 
 // Typed helper functions for llm-d internal attributes.
+
+// LLMDEPPAPISurface returns an attribute for the external inference API.
+func LLMDEPPAPISurface(surface string) attribute.KeyValue {
+	return LLMDEPPAPISurfaceKey.String(surface)
+}
 
 // EPP Fairness attribution helpers
 

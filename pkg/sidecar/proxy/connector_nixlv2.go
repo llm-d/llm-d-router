@@ -98,7 +98,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
+	// prefill and decode are sequential stages of forward_request, so both
+	// spans start from the request context and come out as siblings.
+	pCtx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -109,7 +111,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillStart := time.Now()
 
 	// 1. Prepare prefill request
-	preq := r.Clone(ctx)
+	preq := r.Clone(pCtx)
 
 	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -309,7 +311,7 @@ retryLoop:
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
+	dCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -321,7 +323,7 @@ retryLoop:
 	decodeStart := time.Now()
 
 	// 1. Prepare decode request
-	dreq := r.Clone(ctx)
+	dreq := r.Clone(dCtx)
 
 	dreq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -461,8 +463,9 @@ retryLoop:
 	// Calculate end-to-end P/D timing metrics.
 	// True TTFT captures time from gateway request start to decode start, including
 	// gateway routing, scheduling, prefill, and coordination overhead that
-	// per-instance vLLM metrics miss.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
+	// per-instance vLLM metrics miss. Set on the decode span explicitly, since ctx
+	// is the forward_request context.
+	if decodeSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration
 		var trueTTFT time.Duration
 		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
@@ -474,7 +477,7 @@ retryLoop:
 
 		coordinatorOverhead := decodeStart.Sub(prefillStart.Add(prefillDuration))
 
-		currentSpan.SetAttributes(
+		decodeSpan.SetAttributes(
 			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
 			semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
 			semconv.LLMDPDProxyPrefillDurationMsSummary(float64(prefillDuration.Milliseconds())),

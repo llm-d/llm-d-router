@@ -34,6 +34,7 @@ import (
 
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
@@ -165,9 +166,9 @@ dataLayer:
 
 	// A histogram with no children is absent from a gather, so each one needs an
 	// observation before its buckets can be read.
-	require.True(t, eppmetrics.RecordRequestTPOT(ctx, "m", "tm", "f", "p", true,
+	require.True(t, eppmetrics.RecordRequestTPOT(ctx, "m", "tm", reqcommon.APITypeMessages.Surface(), "f", "p", true,
 		time.Now().Add(-2*time.Second), time.Now().Add(-time.Second), time.Now(), 4))
-	require.True(t, eppmetrics.RecordInterTokenLatency(ctx, "m", "tm", "f", "p", 0.005))
+	require.True(t, eppmetrics.RecordInterTokenLatency(ctx, "m", "tm", reqcommon.APITypeMessages.Surface(), "f", "p", 0.005))
 
 	assert.Equal(t, configuredTPOTEdges, gatheredBucketEdges(t, "llm_d_epp_request_streaming_tpot_seconds"))
 	assert.Equal(t, configuredITLEdges, gatheredBucketEdges(t, "llm_d_epp_request_streaming_itl_seconds"))

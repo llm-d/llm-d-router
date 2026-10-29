@@ -42,6 +42,18 @@ var (
 		[]string{"plugin_type", "plugin_name"},
 	)
 
+	revisionOverflowTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      metricsPrefix + "_revision_overflow_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Requests sent away from their drawn revision because its endpoints of the overflow role had no room.",
+				compbasemetrics.ALPHA,
+			),
+		},
+		[]string{"plugin_type", "plugin_name", "from_revision", "to_revision"},
+	)
+
 	revisionGatingShare = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -61,6 +73,7 @@ func registerMetrics() {
 	registerMetricsOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(
 			strictRevisionNoMatchTotal,
+			revisionOverflowTotal,
 			revisionGatingShare,
 		)
 	})
@@ -68,6 +81,10 @@ func registerMetrics() {
 
 func recordStrictRevisionNoMatch(pluginName string) {
 	strictRevisionNoMatchTotal.WithLabelValues(PluginType, pluginName).Inc()
+}
+
+func recordRevisionOverflow(pluginName, from, to string) {
+	revisionOverflowTotal.WithLabelValues(PluginType, pluginName, from, to).Inc()
 }
 
 func recordRevisionGatingShares(
@@ -79,6 +96,8 @@ func recordRevisionGatingShares(
 	for revision := range previous.roleCounts {
 		if _, exists := current.roleCounts[revision]; !exists {
 			revisionGatingShare.DeleteLabelValues(PluginType, pluginName, string(mode), revision)
+			revisionOverflowTotal.DeletePartialMatch(prometheus.Labels{"plugin_name": pluginName, "from_revision": revision})
+			revisionOverflowTotal.DeletePartialMatch(prometheus.Labels{"plugin_name": pluginName, "to_revision": revision})
 		}
 	}
 	for revision := range current.roleCounts {
