@@ -200,12 +200,16 @@ func RecordRequestCounter(modelName, targetModelName string, apiSurface reqcommo
 	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr, apiSurface.String()).Inc()
 }
 
-// RecordRequestErrCounter records the number of error requests.
-func RecordRequestErrCounter(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, code string) {
+// RecordRequestErrCounter records the number of error requests. The request's
+// trace is attached as an exemplar, so an error-rate spike links to a failing
+// request.
+func RecordRequestErrCounter(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, code string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if code != "" {
-		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code).Inc()
+		metricsutil.AddWithTraceExemplar(ctx,
+			llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code),
+			1)
 	}
 }
 

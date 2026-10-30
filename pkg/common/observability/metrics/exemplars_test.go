@@ -173,3 +173,87 @@ func (o *countingObserver) Observe(value float64) {
 	o.calls++
 	o.last = value
 }
+
+// newCounter returns a bare counter to add to.
+func newCounter() prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{Name: "test_exemplar_total"})
+}
+
+// writeCounter returns a counter's current state.
+func writeCounter(t *testing.T, c prometheus.Counter) *dto.Counter {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, c.(prometheus.Metric).Write(&m))
+	require.NotNil(t, m.Counter)
+	return m.Counter
+}
+
+func TestAddWithTraceExemplar_RecordingSpanAttachesBothIDs(t *testing.T) {
+	c := newCounter()
+
+	ctx, span := ctxWithRecordingSpan(t)
+	defer span.End()
+	AddWithTraceExemplar(ctx, c, 1)
+
+	counter := writeCounter(t, c)
+	require.InDelta(t, 1, counter.GetValue(), 1e-9)
+	require.NotNil(t, counter.Exemplar, "a sampled span should attach an exemplar")
+	sc := span.SpanContext()
+	require.Equal(t, map[string]string{
+		ExemplarTraceIDLabel: sc.TraceID().String(),
+		ExemplarSpanIDLabel:  sc.SpanID().String(),
+	}, exemplarLabels(counter.Exemplar))
+	require.InDelta(t, 1, counter.Exemplar.GetValue(), 1e-9)
+}
+
+func TestAddWithTraceExemplar_PropagatedSpanAttachesTraceIDOnly(t *testing.T) {
+	c := newCounter()
+
+	AddWithTraceExemplar(ctxWithSpan(t, true), c, 1)
+
+	counter := writeCounter(t, c)
+	require.NotNil(t, counter.Exemplar)
+	require.Equal(t, map[string]string{
+		ExemplarTraceIDLabel: "4bf92f3577b34da6a3ce929d0e0e4736",
+	}, exemplarLabels(counter.Exemplar), "the span ID would name a span this component never created")
+}
+
+func TestAddWithTraceExemplar_UnsampledOrNoSpanStillCounts(t *testing.T) {
+	for name, ctx := range map[string]context.Context{
+		"unsampled": ctxWithSpan(t, false),
+		"no span":   context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newCounter()
+
+			AddWithTraceExemplar(ctx, c, 1)
+
+			counter := writeCounter(t, c)
+			require.Nil(t, counter.Exemplar, "no exported trace means no exemplar")
+			require.InDelta(t, 1, counter.GetValue(), 1e-9, "the error itself must still be counted")
+		})
+	}
+}
+
+// A plain Counter that cannot carry exemplars still counts.
+func TestAddWithTraceExemplar_NonExemplarCounterStillCounts(t *testing.T) {
+	c := &countingCounter{Counter: newCounter()}
+
+	ctx, span := ctxWithRecordingSpan(t)
+	defer span.End()
+	AddWithTraceExemplar(ctx, c, 1)
+
+	require.Equal(t, 1, c.adds, "a non-exemplar counter must still be added to")
+}
+
+// countingCounter hides the wrapped counter's AddWithExemplar, so it implements
+// prometheus.Counter and not ExemplarAdder.
+type countingCounter struct {
+	prometheus.Counter
+	adds int
+}
+
+func (c *countingCounter) Add(value float64) {
+	c.adds++
+	c.Counter.Add(value)
+}

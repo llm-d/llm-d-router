@@ -36,7 +36,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 	received := time.Now()
 	record := func(surface reqcommon.APISurface) {
 		RecordRequestCounter("model", "target", surface, "", 0)
-		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
+		RecordRequestErrCounter(context.Background(), "model", "target", surface, "", "0", "502")
 		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
 		RecordRequestSizes("model", "target", surface, "", "0", 100)
 		RecordResponseSizes("model", "target", surface, "", "0", 200)
