@@ -366,7 +366,7 @@ func flattenECMetadata(md map[string]any) map[string]any {
 // handleECMooncake fans out per-item encoder requests that push embeddings to
 // the consumer over Mooncake, rewrites the request to reference them, and
 // hands off to the configured P/D connector.
-func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
+func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, prefill *p2pPeer, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
@@ -416,5 +416,5 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, prefill, apiType)
 }

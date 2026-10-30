@@ -209,6 +209,8 @@ router:
                                           - x-llm-d-encoder-hosts-ports
                                           - x-encoder-hosts-ports
                                           - x-data-parallel-host-port
+                                          - x-llm-d-kv-cache-prefill-p2p-host-port
+                                          - x-llm-d-kv-cache-source-p2p-host-port
                                           - x-llm-d-kv-cache-source-host-port
                                           - x-kv-cache-source-host-port
                                           - x-llm-d-pin-host-port
