@@ -350,7 +350,7 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   fi
   if [ "${key}" == "pod-placement" ]; then
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
-    if [ "$(grep -c "priorityClassName: router-critical" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
+    if [ "$(grep -c 'priorityClassName: "router-critical"' "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
       echo "Validation failed: EPP and proxy priorityClassName, podLabels or topologySpreadConstraints not rendered for test: ${key}"
       exit 1
     fi

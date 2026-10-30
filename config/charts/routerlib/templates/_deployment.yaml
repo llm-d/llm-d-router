@@ -12,7 +12,7 @@
       {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
       {{- with .Values.router.epp.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       {{- with .Values.router.epp.podSecurityContext }}
       securityContext:
