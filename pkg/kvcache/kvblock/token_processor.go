@@ -356,7 +356,7 @@ func (db *chunkedTokenDatabase) TokensToBigramKVBlockKeys(
 	if blockSize <= 0 {
 		return nil, fmt.Errorf("bigram block size must be greater than 0, got %d", blockSize)
 	}
-	var chunks [][]uint32
+	chunks := make([][]uint32, 0, max(0, (len(tokens)-1)/blockSize))
 	for i := 0; blockSize < len(tokens)-i; i += blockSize {
 		chunks = append(chunks, tokens[i:i+blockSize+1])
 	}
