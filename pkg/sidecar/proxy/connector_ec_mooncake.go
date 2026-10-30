@@ -330,10 +330,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 // isFanoutMediaPart applies extractMMItems' chat-completions rule for which
 // parts become encoder items.
 func isFanoutMediaPart(part map[string]any) bool {
-	partType, ok := part[reqcommon.FieldType].(string)
-	if !ok {
-		return false
-	}
+	partType := reqcommon.NormalizeChatPart(part)
 	if _, isMedia := reqcommon.PartModality(partType); !isMedia {
 		return false
 	}

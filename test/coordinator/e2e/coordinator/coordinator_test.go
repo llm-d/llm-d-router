@@ -106,6 +106,15 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		})
 	}))
 
+	ginkgo.When("the request carries an inline image without a type", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes an untyped image through the full pipeline", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"image_url":{"url":%q}},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{})
+		})
+	}))
+
 	ginkgo.When("the request mixes an inline and a remote image", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("routes a multimodal chat completion with one inline and one remote image end-to-end", func() {
 			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
