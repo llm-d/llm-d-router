@@ -61,7 +61,10 @@ the Prefill Worker. The sidecar sends that rank to the Prefill Worker as
 `x-data-parallel-rank` from the prefill request, so the decode rank does not
 reach the Prefill Worker and vLLM picks the prefill rank itself. With
 `--moriio-dp-size` above 1, the sidecar picks both ranks itself and ignores the
-header.
+header. With `--kv-connector=sglang`, the sidecar also sets the prefill rank as
+`disagg_prefill_dp_rank` in both request bodies: SGLang's prefill otherwise
+requires the rank `bootstrap_room % dp_size`, and its decode uses the field to
+find the prefill rank.
 
 The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
