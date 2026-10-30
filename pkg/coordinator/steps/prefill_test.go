@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -1218,4 +1219,31 @@ func countLogMsgs(infos []capturedLog, substr string) int {
 		}
 	}
 	return n
+}
+
+func TestPrefillStep_SGLangRequestScope(t *testing.T) {
+	step, err := NewPrefillStep(gateway.NewWithTransport(nil, "http://gateway"), map[string]any{ParamKVConnector: kv.SGLang})
+	require.NoError(t, err)
+	for _, test := range []struct {
+		name  string
+		body  string
+		valid bool
+	}{
+		{name: "single sample", body: `{"stream":true,"sampling_params":{"n":1}}`, valid: true},
+		{name: "null rank", body: `{"stream":true,"disagg_prefill_dp_rank":null}`, valid: true},
+		{name: "multiple samples", body: `{"stream":true,"sampling_params":{"n":2}}`},
+		{name: "rank override", body: `{"stream":true,"disagg_prefill_dp_rank":0}`},
+		{name: "non-streaming", body: `{"stream":false}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var body map[string]any
+			require.NoError(t, json.Unmarshal([]byte(test.body), &body))
+			_, err := step.(*PrefillStep).buildPrefillBody(t.Context(), &pipeline.RequestContext{Stream: body[reqcommon.FieldStream] == true, Body: body}, reqcommon.APITypeSGLangGenerate)
+			if test.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, pipeline.ErrBadRequest)
+			}
+		})
+	}
 }
