@@ -443,15 +443,15 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, "", reqcommon.APITypeChatCompletions)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, "", reqcommon.APITypeChatCompletions)
 			}),
 		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECMooncake(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECMooncake(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, "", reqcommon.APITypeChatCompletions)
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -527,15 +527,15 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECNIXL(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECNIXL(w, r, upstream, []string{upstream}, "", reqcommon.APITypeResponses)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECSharedStorage(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECSharedStorage(w, r, upstream, []string{upstream}, "", reqcommon.APITypeResponses)
 			}),
 		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECMooncake(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECMooncake(w, r, upstream, []string{upstream}, "", reqcommon.APITypeResponses)
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {

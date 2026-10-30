@@ -186,7 +186,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			} else {
 				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
 			}
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, kvCacheSource, apiType)
 			return
 		}
 

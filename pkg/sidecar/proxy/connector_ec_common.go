@@ -325,6 +325,7 @@ func (s *Server) runPDPipeline(
 	r *http.Request,
 	body map[string]any,
 	prefillEndPoint string,
+	kvCacheSource string,
 	requestID string,
 	apiType reqcommon.APIType,
 ) {
@@ -362,10 +363,7 @@ func (s *Server) runPDPipeline(
 
 	if len(prefillEndPoint) > 0 {
 		logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
-		// The encoder path does not carry a KV cache source: the P2P prefix pull
-		// is not wired through encoder disaggregation. The empty source skips the
-		// p2p injection regardless of --enable-p2p-pull.
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, "", apiType)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, kvCacheSource, apiType)
 		return
 	}
 
@@ -379,8 +377,12 @@ func (s *Server) runPDPipeline(
 	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
 		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 	}) {
-		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
-		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
+		if kvCacheSource != "" {
+			s.decodeWithP2PSource(decodeWriter, pdRequest, kvCacheSource)
+		} else {
+			_, _ = toolFields.compareValidatedDispatched(modifiedBody)
+			s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
+		}
 	}
 	decodeReturned = true
 	metrics.RecordDecodeDuration(time.Since(decodeStart))

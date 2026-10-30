@@ -243,7 +243,7 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 					allowedTargets: set.New(tt.allowed...),
 				}
 			}
-			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {}
+			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {}
 			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {}
 			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				if tt.want != "" {
@@ -273,15 +273,15 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 func TestHandleECEncodeMetrics(t *testing.T) {
 	connectors := []struct {
 		name   string
-		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
 	}{
-		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
 			return s.handleECNIXL
 		}},
-		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
 			return s.handleECSharedStorage
 		}},
-		{name: "ec-mooncake", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-mooncake", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
 			return s.handleECMooncake
 		}},
 	}
@@ -356,7 +356,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				rw := httptest.NewRecorder()
 				req := chatRequest(t, o.body())
 				// Empty prefill endpoint routes straight to decoderProxy after encode.
-				c.handle(s)(rw, req, "", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+				c.handle(s)(rw, req, "", []string{encoderURL.Host}, "", reqcommon.APITypeChatCompletions)
 
 				assert.Equal(t, o.wantCode, rw.Code)
 				assert.Equal(t, o.wantDecoder, decoderCalled)
@@ -368,7 +368,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 
 func TestECToolCallingMetrics(t *testing.T) {
 	const fields = `"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}`
-	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType){
 		"ec-nixl": (*Server).handleECNIXL, "ec-shared-storage": (*Server).handleECSharedStorage,
 	}
 	for name, handle := range handlers {
@@ -377,6 +377,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 			api          reqcommon.APIType
 			route        string
 			fields       string
+			source       string
 			textOnly     bool
 			noEncoder    bool
 			encoderError bool
@@ -385,6 +386,10 @@ func TestECToolCallingMetrics(t *testing.T) {
 			wantCode     int
 		}{
 			{name: "chat direct", fields: fields, wantCode: 200},
+			{name: "chat direct P2P", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
+			{name: "messages direct P2P", api: reqcommon.APITypeMessages, fields: fields, source: "10.9.9.9:8000", wantCode: 200},
+			{name: "P2P decode error", fields: fields, source: "10.9.9.9:8000", decodeError: true, wantCode: 503},
+			{name: "P2P data parallel", route: "dp", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
 			{name: "messages direct", api: reqcommon.APITypeMessages, fields: fields, wantCode: 200},
 			{name: "chat PD", route: "pd", fields: fields, wantCode: 200},
 			{name: "messages PD", api: reqcommon.APITypeMessages, route: "pd", fields: fields, wantCode: 200},
@@ -492,7 +497,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 				}
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
-				handle(s, rw, r, target, encoders, tt.api)
+				handle(s, rw, r, target, encoders, tt.source, tt.api)
 				require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 				wantDecode := !tt.encoderError && tt.route != "missing"
 				require.Equal(t, wantDecode, len(decodeBodies) == 1)
@@ -584,7 +589,7 @@ func TestECPipelineToolCallingOutcomes(t *testing.T) {
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
 				dispatch := func() {
-					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "request", api)
+					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "", "request", api)
 				}
 				if tt.abort {
 					require.PanicsWithValue(t, http.ErrAbortHandler, dispatch)
@@ -665,7 +670,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 				case "shared":
 					s.handleSharedStorage(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, "", reqcommon.APITypeChatCompletions)
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				}
@@ -729,10 +734,10 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 					s.handleSharedStorage(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusInternalServerError
 				case "encoder-nixl":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "encoder-example":
-					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
@@ -871,7 +876,7 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "bootstrap":
 					s.handleMooncake(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
