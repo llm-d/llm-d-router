@@ -1554,10 +1554,18 @@ func TestHandler_PreRequest_PrefillDataParallelRank(t *testing.T) {
 	t.Run("rank endpoint sends its rank", func(t *testing.T) {
 		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
 		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{
-			Address: "10.0.0.1", Port: "8000", RankIndex: 1, RanksPerPort: 2,
+			Address: "10.0.0.1", Port: "8000", RankIndex: 1, RanksPerPort: 2, DataParallelRank: 1,
 		}))
 		assert.Equal(t, "10.0.0.1:8000", request.Headers[routing.PrefillEndpointHeader])
 		assert.Equal(t, "1", request.Headers[routing.PrefillDataParallelRankHeader])
+	})
+
+	t.Run("rank endpoint of a group spanning pods sends its global rank", func(t *testing.T) {
+		request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+		_ = h.PreRequest(ctx, request, resultWith(&fwkdl.EndpointMetadata{
+			Address: "10.0.0.2", Port: "8000", RankIndex: 1, RanksPerPort: 2, DataParallelRank: 3,
+		}))
+		assert.Equal(t, "3", request.Headers[routing.PrefillDataParallelRankHeader])
 	})
 
 	t.Run("endpoint with one rank per port sends no rank and drops a client value", func(t *testing.T) {

@@ -59,6 +59,10 @@ type EndpointMetadata struct {
 	// Above 1, the model server picks the rank from a request header, and
 	// its metrics series are labeled per rank.
 	RanksPerPort int
+	// DataParallelRank is the data-parallel rank the model server knows this
+	// endpoint by, set when RanksPerPort is above 1: the pod's start rank plus
+	// RankIndex. The start rank is non-zero when a data-parallel group spans pods.
+	DataParallelRank int
 }
 
 // String returns a string representation of the endpoint.
@@ -84,15 +88,16 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.ID.Name,
 			Namespace: epm.ID.Namespace,
 		},
-		Name:         epm.Name,
-		Address:      epm.Address,
-		NodeAddress:  epm.NodeAddress,
-		Port:         epm.Port,
-		MetricsHost:  epm.MetricsHost,
-		Labels:       clonedLabels,
-		Attributes:   clonedAttributes,
-		RankIndex:    epm.RankIndex,
-		RanksPerPort: epm.RanksPerPort,
+		Name:             epm.Name,
+		Address:          epm.Address,
+		NodeAddress:      epm.NodeAddress,
+		Port:             epm.Port,
+		MetricsHost:      epm.MetricsHost,
+		Labels:           clonedLabels,
+		Attributes:       clonedAttributes,
+		RankIndex:        epm.RankIndex,
+		RanksPerPort:     epm.RanksPerPort,
+		DataParallelRank: epm.DataParallelRank,
 	}
 }
 
@@ -110,6 +115,7 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
 		epm.RanksPerPort == other.RanksPerPort &&
+		epm.DataParallelRank == other.DataParallelRank &&
 		maps.Equal(epm.Labels, other.Labels) &&
 		maps.Equal(epm.Attributes, other.Attributes)
 }

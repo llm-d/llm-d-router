@@ -863,15 +863,16 @@ func TestDataParallelRanksPerPort(t *testing.T) {
 	}
 	rankEndpoint := func(name string, port string, rank int) *fwkdl.EndpointMetadata {
 		return &fwkdl.EndpointMetadata{
-			ID:           types.NamespacedName{Name: name, Namespace: "default"},
-			Name:         "pod1",
-			Address:      "10.0.0.1",
-			NodeAddress:  "192.168.1.10",
-			Port:         port,
-			MetricsHost:  net.JoinHostPort("10.0.0.1", port),
-			Labels:       map[string]string{"app": "vllm"},
-			RankIndex:    rank,
-			RanksPerPort: 2,
+			ID:               types.NamespacedName{Name: name, Namespace: "default"},
+			Name:             "pod1",
+			Address:          "10.0.0.1",
+			NodeAddress:      "192.168.1.10",
+			Port:             port,
+			MetricsHost:      net.JoinHostPort("10.0.0.1", port),
+			Labels:           map[string]string{"app": "vllm"},
+			RankIndex:        rank,
+			RanksPerPort:     2,
+			DataParallelRank: rank,
 		}
 	}
 	sortByName := cmpopts.SortSlices(func(a, b *fwkdl.EndpointMetadata) bool { return a.ID.Name < b.ID.Name })
@@ -918,6 +919,82 @@ func TestDataParallelRanksPerPort(t *testing.T) {
 			assert.Empty(t, ds.PodList(AllPodsPredicate), "deleting the pod removes every rank endpoint")
 		})
 	}
+}
+
+// A data-parallel group spanning pods (for example an LWS group with one
+// frontend per pod) numbers ranks globally: pod k serves k*N..k*N+N-1.
+func TestDataParallelStartRankLabel(t *testing.T) {
+	const indexLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+	podWithLabels := func(labels map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: labels},
+			Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+		}
+	}
+	ranks := func(ds Datastore) map[string][2]int {
+		got := map[string][2]int{}
+		for _, ep := range ds.PodList(AllPodsPredicate) {
+			md := ep.GetMetadata()
+			got[md.ID.Name] = [2]int{md.RankIndex, md.DataParallelRank}
+		}
+		return got
+	}
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   map[string][2]int // endpoint name -> {RankIndex, DataParallelRank}
+	}{
+		{
+			name:   "pod index 1 serves global ranks 2 and 3",
+			labels: map[string]string{"app": "vllm", indexLabel: "1"},
+			want:   map[string][2]int{"pod1-rank-0": {0, 2}, "pod1-rank-1": {1, 3}},
+		},
+		{
+			name:   "pod index 0 serves global ranks 0 and 1",
+			labels: map[string]string{"app": "vllm", indexLabel: "0"},
+			want:   map[string][2]int{"pod1-rank-0": {0, 0}, "pod1-rank-1": {1, 1}},
+		},
+		{
+			name:   "a pod without the label gets no endpoints",
+			labels: map[string]string{"app": "vllm"},
+			want:   map[string][2]int{},
+		},
+		{
+			name:   "a pod with a malformed label gets no endpoints",
+			labels: map[string]string{"app": "vllm", indexLabel: "-1"},
+			want:   map[string][2]int{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
+				WithDataParallelRanksPerPort(2).
+				WithDataParallelStartRankLabel(indexLabel)
+			pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+			pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
+			require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(test.labels)))
+			assert.Equal(t, test.want, ranks(ds))
+		})
+	}
+
+	t.Run("losing the label removes the pod's endpoints", func(t *testing.T) {
+		ctx := context.Background()
+		ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
+			WithDataParallelRanksPerPort(2).
+			WithDataParallelStartRankLabel(indexLabel)
+		pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+		pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
+		require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(map[string]string{indexLabel: "1"})))
+		require.Len(t, ds.PodList(AllPodsPredicate), 2)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(map[string]string{})))
+		assert.Empty(t, ds.PodList(AllPodsPredicate))
+	})
 }
 
 func TestDataParallelRanksPerPort_PortDeactivationRemovesRanks(t *testing.T) {

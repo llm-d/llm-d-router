@@ -2,7 +2,9 @@
 
 A PreRequest plugin that writes the data-parallel rank of the scheduling-selected endpoint to a request header. vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ranks on one port and sends a request to the rank named in the `x-data-parallel-rank` header.
 
-The plugin acts only on endpoints that share their port with other ranks, which the EPP creates when it runs with `--data-parallel-ranks-per-port` greater than 1. For those endpoints it sets the header to the endpoint's `RankIndex` and replaces any value the client sent. For other endpoints it leaves the request headers unchanged.
+The plugin acts only on endpoints that share their port with other ranks, which the EPP creates when it runs with `--data-parallel-ranks-per-port` greater than 1. For those endpoints it sets the header to the endpoint's data-parallel rank and replaces any value the client sent. For other endpoints it leaves the request headers unchanged.
+
+The rank is the one vLLM numbers its engines by. Within one pod it runs from 0 to N-1. When a data-parallel group spans pods, each with its own frontend (for example an LWS group where pod `k` serves ranks `k*N` to `k*N+N-1`), set `--data-parallel-start-rank-label` to the pod label holding `k`, such as `leaderworkerset.sigs.k8s.io/worker-index`; the header then carries the global rank.
 
 ## Configuration
 

@@ -609,7 +609,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
 		if targetPod.RanksPerPort > 1 {
-			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, strconv.Itoa(targetPod.RankIndex))
+			routing.SetRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader, strconv.Itoa(targetPod.DataParallelRank))
 		}
 		span.SetAttributes(
 			semconv.LLMDEPPPDDisaggregationUsed(true),

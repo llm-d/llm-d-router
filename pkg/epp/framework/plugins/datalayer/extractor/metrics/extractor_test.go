@@ -490,7 +490,7 @@ func TestExtractorReadsOwnEngineOfRankEndpoint(t *testing.T) {
 	}{
 		{
 			name:        "rank 0 endpoint reads engine 0",
-			meta:        &fwkdl.EndpointMetadata{RankIndex: 0, RanksPerPort: 2},
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 0, RanksPerPort: 2, DataParallelRank: 0},
 			wantWaiting: 6,
 			wantRunning: 40,
 			wantKV:      0.91,
@@ -498,7 +498,7 @@ func TestExtractorReadsOwnEngineOfRankEndpoint(t *testing.T) {
 		},
 		{
 			name:        "rank 1 endpoint reads engine 1",
-			meta:        &fwkdl.EndpointMetadata{RankIndex: 1, RanksPerPort: 2},
+			meta:        &fwkdl.EndpointMetadata{RankIndex: 1, RanksPerPort: 2, DataParallelRank: 1},
 			wantWaiting: 10,
 			wantRunning: 38,
 			wantKV:      0.52,
@@ -535,6 +535,29 @@ func TestExtractorReadsOwnEngineOfRankEndpoint(t *testing.T) {
 	}
 	if got := len(twoEngines[defaultTotalQueuedRequestsMetric].GetMetric()); got != 2 {
 		t.Errorf("Extract modified the scraped payload: %d series left, want 2", got)
+	}
+}
+
+// In a data-parallel group spanning pods, a pod's engines carry global ranks.
+func TestExtractorReadsGlobalEngineOfRankEndpoint(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	waiting := &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum()}
+	for engine, v := range map[string]float64{"2": 6, "3": 10} {
+		waiting.Metric = append(waiting.Metric, &dto.Metric{
+			Label: []*dto.LabelPair{{Name: proto.String("engine"), Value: proto.String(engine)}},
+			Gauge: &dto.Gauge{Value: ptr.To(v)},
+		})
+	}
+	data := sourcemetrics.PrometheusMetricMap{defaultTotalQueuedRequestsMetric: waiting}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{RankIndex: 1, RanksPerPort: 2, DataParallelRank: 3}, nil)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+	if got := ep.GetMetrics().WaitingQueueSize; got != 10 {
+		t.Errorf("WaitingQueueSize: want 10 (engine 3), got %d", got)
 	}
 }
 

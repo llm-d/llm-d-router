@@ -97,6 +97,6 @@ func (h *Handler) PreRequest(_ context.Context, req *fwksched.InferenceRequest, 
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
 	}
-	req.Headers[h.headerName] = strconv.Itoa(meta.RankIndex)
+	req.Headers[h.headerName] = strconv.Itoa(meta.DataParallelRank)
 	return nil
 }

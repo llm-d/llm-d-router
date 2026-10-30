@@ -44,11 +44,12 @@ func newHandler(t *testing.T, params string) *Handler {
 
 func makeEndpoint(rank, ranksPerPort int) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
-		ID:           types.NamespacedName{Name: "pod1-rank-1", Namespace: "default"},
-		Address:      "10.0.0.1",
-		Port:         "8000",
-		RankIndex:    rank,
-		RanksPerPort: ranksPerPort,
+		ID:               types.NamespacedName{Name: "pod1-rank-1", Namespace: "default"},
+		Address:          "10.0.0.1",
+		Port:             "8000",
+		RankIndex:        rank,
+		RanksPerPort:     ranksPerPort,
+		DataParallelRank: rank,
 	}
 	return fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
 }
@@ -131,4 +132,15 @@ func TestPreRequest_UsesPrimaryProfileRank(t *testing.T) {
 	}
 	require.NoError(t, h.PreRequest(context.Background(), request, result))
 	assert.Equal(t, "0", request.Headers[routing.DataParallelRankHeader])
+}
+
+// In a data-parallel group spanning pods, the header carries the global rank.
+func TestPreRequest_SetsGlobalRank(t *testing.T) {
+	h := newHandler(t, "")
+	request := &fwksched.InferenceRequest{}
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "10.0.0.2", Port: "8000", RankIndex: 1, RanksPerPort: 2, DataParallelRank: 3,
+	}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	require.NoError(t, h.PreRequest(context.Background(), request, schedulingResult(endpoint)))
+	assert.Equal(t, "3", request.Headers[routing.DataParallelRankHeader])
 }

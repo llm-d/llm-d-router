@@ -139,7 +139,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return fmt.Errorf("no mapping found for engine type %q and no default mapping registered", engineType)
 	}
 	if meta := ep.GetMetadata(); meta != nil && meta.RanksPerPort > 1 && mapping.RankLabel != "" {
-		families = rankSeries(families, mapping.RankLabel, strconv.Itoa(meta.RankIndex))
+		families = rankSeries(families, mapping.RankLabel, strconv.Itoa(meta.DataParallelRank))
 	}
 
 	var errs []error

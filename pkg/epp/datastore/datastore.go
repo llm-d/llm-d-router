@@ -76,6 +76,10 @@ type Datastore interface {
 	// sharing that port. Values below 2 keep one endpoint per port. Above 1, PoolSet rejects a
 	// pool with more than one target port.
 	WithDataParallelRanksPerPort(n int) Datastore
+	// WithDataParallelStartRankLabel names the pod label holding the pod's index in a
+	// data-parallel group that spans pods. A rank endpoint's DataParallelRank is
+	// index*ranksPerPort + RankIndex. Empty means every pod starts at rank 0.
+	WithDataParallelStartRankLabel(label string) Datastore
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *apixv1.InferenceObjective)
@@ -159,6 +163,9 @@ type datastore struct {
 	needsResync bool
 	// ranksPerPort is the number of rank endpoints per pod target port. Set once at startup.
 	ranksPerPort int
+	// startRankLabel names the pod label holding the pod's index in its data-parallel group.
+	// Set once at startup.
+	startRankLabel string
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
@@ -169,6 +176,27 @@ func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 func (ds *datastore) WithDataParallelRanksPerPort(n int) Datastore {
 	ds.ranksPerPort = max(n, 1)
 	return ds
+}
+
+func (ds *datastore) WithDataParallelStartRankLabel(label string) Datastore {
+	ds.startRankLabel = label
+	return ds
+}
+
+// dataParallelStartRank returns the global data-parallel rank of the pod's first rank endpoint.
+func (ds *datastore) dataParallelStartRank(pod *corev1.Pod) (int, error) {
+	if ds.startRankLabel == "" {
+		return 0, nil
+	}
+	value, ok := pod.GetLabels()[ds.startRankLabel]
+	if !ok {
+		return 0, fmt.Errorf("pod has no %q label", ds.startRankLabel)
+	}
+	index, err := strconv.Atoi(value)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("pod label %q is %q, not a non-negative integer", ds.startRankLabel, value)
+	}
+	return index * ds.ranksPerPort, nil
 }
 
 func (ds *datastore) Clear() {
@@ -380,6 +408,12 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
+	startRank, err := ds.dataParallelStartRank(pod)
+	if err != nil {
+		// Without its start rank the pod's ranks cannot be addressed; drop all of its endpoints.
+		log.FromContext(ctx).Error(err, "Pod will not receive traffic", "pod", pod.Name, "namespace", pod.Namespace)
+		activePorts = sets.New[int]()
+	}
 	for portIdx, port := range pool.TargetPorts {
 		if !activePorts.Has(port) {
 			continue
@@ -397,6 +431,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 			}
 			if ds.ranksPerPort > 1 {
 				meta.RanksPerPort = ds.ranksPerPort
+				meta.DataParallelRank = startRank + idx
 			}
 			pods = append(pods, meta)
 		}
