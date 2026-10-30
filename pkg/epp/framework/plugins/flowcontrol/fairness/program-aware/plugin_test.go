@@ -310,8 +310,8 @@ func TestEvictIdle_EvictsNeverCompletedAfterTTL(t *testing.T) {
 	assert.False(t, exists)
 }
 
-// program_id carries the fairness ID, so it shares the fairness ID label cap: a flood of
-// distinct program IDs collapses to the bounded set plus one overflow series.
+// program_id carries the fairness ID, so it shares the fairness ID label cap. Programs past the
+// cap get no series: a set-value gauge cannot merge them into one overflow series.
 func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 	const testCap = 3
 	avgWaitTimeMs.Reset()
@@ -334,15 +334,16 @@ func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 		pa.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true}, nil)
 	}
 
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(avgWaitTimeMs),
-		"100 distinct program IDs must collapse to cap+overflow series")
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(attainedServiceTokens),
+	require.Equal(t, testCap, promtestutil.CollectAndCount(avgWaitTimeMs),
+		"100 distinct program IDs must leave only the cap's series, with no overflow series")
+	require.Equal(t, testCap, promtestutil.CollectAndCount(attainedServiceTokens),
 		"the attained service gauge must be bounded identically")
 
-	// A program named like the overflow value must not delete the shared overflow series.
-	pa.evictKey(metricsutil.OverflowValue)
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(avgWaitTimeMs))
-	require.Equal(t, testCap+1, promtestutil.CollectAndCount(attainedServiceTokens))
+	// Eviction deletes an admitted program's series by its ID; a capped-out program has none.
+	pa.evictKey("program-0")
+	pa.evictKey("program-99")
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(avgWaitTimeMs))
+	require.Equal(t, testCap-1, promtestutil.CollectAndCount(attainedServiceTokens))
 }
 
 func TestComputeFairnessIndex_EqualWaits(t *testing.T) {

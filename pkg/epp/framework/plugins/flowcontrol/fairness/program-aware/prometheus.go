@@ -47,21 +47,14 @@ func GetCollectors() []prometheus.Collector {
 	return []prometheus.Collector{fairnessIndex, avgWaitTimeMs}
 }
 
-// programIDLabel caps the client-derived program_id label with the shared
-// fairness-ID limiter, so --fairness-id-metric-label-limit bounds it too.
-func programIDLabel(id string) string {
-	return metricsutil.BoundFairnessID(id)
-}
-
-// deleteProgramSeries drops a program's series from vec. Every capped-out
-// program shares the overflow series, so it is never deleted.
-func deleteProgramSeries(vec *prometheus.GaugeVec, id string) {
-	if id == metricsutil.OverflowValue {
-		return
+// setProgramGauge sets a per-program gauge under the shared fairness-ID label cap. Programs past
+// the cap are skipped: one overflow series would only hold whichever program wrote last.
+func setProgramGauge(vec *prometheus.GaugeVec, id string, v float64) {
+	if label := metricsutil.BoundFairnessID(id); label != metricsutil.OverflowValue {
+		vec.WithLabelValues(label).Set(v)
 	}
-	vec.DeleteLabelValues(id)
 }
 
 func DeleteSharedSeries(id string) {
-	deleteProgramSeries(avgWaitTimeMs, id)
+	avgWaitTimeMs.DeleteLabelValues(id)
 }
