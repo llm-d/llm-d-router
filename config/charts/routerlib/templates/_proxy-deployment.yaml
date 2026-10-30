@@ -43,7 +43,7 @@ spec:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
       {{- end }}
       {{- with $proxy.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       terminationGracePeriodSeconds: {{ dig "terminationGracePeriodSeconds" 70 .Values.router.proxy }}
       containers:
