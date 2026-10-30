@@ -174,13 +174,19 @@ func producedKeySet(handle plugin.Handle) map[string]bool {
 
 // Define constants for layer execution order. Lower value means earlier execution.
 const (
-	FlowControlLayer    = 0
-	RequestControlLayer = 1
-	SchedulingLayer     = 2
+	RequestHeaderLayer  = 0
+	FlowControlLayer    = 1
+	RequestControlLayer = 2
+	SchedulingLayer     = 3
 	DefaultLayer        = -1 // For plugins that don't fit into a known layer
 )
 
 func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
+	// Request-header plugins run after request assembly and before flow control.
+	if _, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
+		return RequestHeaderLayer
+	}
+
 	// Flow control plugins
 	if _, ok := plugin.(fwkfc.FairnessPolicy); ok {
 		return FlowControlLayer

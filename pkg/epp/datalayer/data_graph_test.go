@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -162,6 +163,28 @@ func (m *MockConsumerFairnessPolicy) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Required: m.consumes, Optional: m.optional}
 }
 
+type mockRequestHeaderProducer struct {
+	name     string
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *mockRequestHeaderProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
+}
+
+func (m *mockRequestHeaderProducer) Produces() map[fwkplugin.DataKey]any {
+	return m.produces
+}
+
+func (m *mockRequestHeaderProducer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
+}
+
+func (m *mockRequestHeaderProducer) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return nil
+}
+
 type MockSchedulingPlugin struct {
 	fwksched.Scorer
 	consumes map[fwkplugin.DataKey]any
@@ -179,6 +202,8 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
 	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+	// Request header plugin that produces data before flow control.
+	headerPlugin := &mockRequestHeaderProducer{name: "header", produces: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Flow control plugin.
 	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
@@ -203,6 +228,11 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 			expectedErr: "invalid plugin layer execution order",
 		},
 		{
+			name:        "FC depends on a request header plugin",
+			plugins:     []fwkplugin.Plugin{headerPlugin, &consumerFairnessPolicyPlugin},
+			expectedErr: "",
+		},
+		{
 			name:        "Scheduling plugin depends on a request control plugin",
 			plugins:     []fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin},
 			expectedErr: "",
@@ -220,6 +250,47 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestRequestHeaderIdentityFeedsFairnessAndDataProducer(t *testing.T) {
+	agentKey := fwkplugin.NewDataKey("agent-identity", "")
+	identityKey := fwkplugin.NewDataKey("SessionIdentity", "session-identity")
+	sessionTagKey := fwkplugin.NewDataKey("session-tag", "session-identity")
+	cacheRequestKey := fwkplugin.NewDataKey("SessionCacheRequestDataKey", "session-manager")
+
+	agent := &mockRequestHeaderProducer{
+		name:     "agent-identity",
+		produces: map[fwkplugin.DataKey]any{agentKey: ""},
+	}
+	identity := &mockRequestHeaderProducer{
+		name:     "session-identity",
+		consumes: map[fwkplugin.DataKey]any{agentKey: ""},
+		produces: map[fwkplugin.DataKey]any{identityKey: nil, sessionTagKey: ""},
+	}
+	fairness := &MockConsumerFairnessPolicy{
+		consumes: map[fwkplugin.DataKey]any{sessionTagKey: ""},
+	}
+	manager := &mockDataProducerP{
+		name:     "session-manager",
+		consumes: map[fwkplugin.DataKey]any{identityKey: nil},
+		produces: map[fwkplugin.DataKey]any{cacheRequestKey: nil},
+	}
+
+	ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{
+		manager,
+		fairness,
+		identity,
+		agent,
+	})
+	require.NoError(t, err)
+
+	position := make(map[string]int, len(ordered))
+	for i, name := range ordered {
+		position[name] = i
+	}
+	assert.Less(t, position[agent.TypedName().String()], position[identity.TypedName().String()])
+	assert.Less(t, position[identity.TypedName().String()], position[fairness.TypedName().String()])
+	assert.Less(t, position[identity.TypedName().String()], position[manager.TypedName().String()])
 }
 
 func TestDAGAndTopologicalOrder(t *testing.T) {

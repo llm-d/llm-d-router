@@ -112,12 +112,14 @@ import (
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionmanager"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/headerstamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/sessionidentity"
 	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responder/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responsereceived/topologystamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
@@ -789,6 +791,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, fwkplugin.StabilityBeta, sessionid.Factory, attrsession.SessionIDDataKey)
 	// Alpha
 	fwkplugin.RegisterAsDefaultProducer(sessionstate.SessionStateProducerType, fwkplugin.StabilityAlpha, sessionstate.Factory, sessionstate.SessionStateDataKey)
+	fwkplugin.Register(sessionmanager.PluginType, fwkplugin.StabilityAlpha, sessionmanager.Factory)
 	fwkplugin.RegisterAsDefaultProducer(latencyobserver.LatencyObserverProducerType, fwkplugin.StabilityAlpha, latencyobserver.LatencyObserverFactory, attrlatency.TTFTPercentilesDataKey)
 
 	// Latency predictor plugins
@@ -853,6 +856,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
+	fwkplugin.Register(sessionidentity.PluginType, fwkplugin.StabilityAlpha, sessionidentity.Factory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapiv1.EndpointPickerConfig, error) {
