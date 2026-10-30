@@ -461,7 +461,10 @@ pipeline:
       #   decode recomputes the prompt; the request still succeeds. Streamed
       #   chat and completions legs are asked for include_usage when the
       #   client did not, and that trailing frame is dropped from the
-      #   client's stream. The response is never changed otherwise.
+      #   client's stream; a client that set continuous_usage_stats is left
+      #   alone and not checked. On Messages the cached part of the prompt
+      #   (cache_read_input_tokens, cache_creation_input_tokens) counts
+      #   toward the prompt. The response is never changed otherwise.
       #     off   - no check
       #     warn  - count (prompt_token_mismatch_total) and log   (default)
       #     error - also record a decode step error

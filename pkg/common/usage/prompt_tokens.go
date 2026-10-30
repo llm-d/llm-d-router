@@ -49,18 +49,33 @@ func UsageBlock(response map[string]any) (map[string]any, bool) {
 	return nil, false
 }
 
-// PromptTokens reads the prompt token count out of a usage block: prompt_tokens
-// on the chat, completions and generate routes, input_tokens on Responses and
-// Messages. It reports false when neither is present.
+// Messages usage splits the prompt into the part served from cache and the
+// rest; input_tokens alone excludes the cached part.
+const (
+	fieldCacheReadInputTokens     = "cache_read_input_tokens"
+	fieldCacheCreationInputTokens = "cache_creation_input_tokens"
+)
+
+// PromptTokens reads the whole prompt's token count out of a usage block:
+// prompt_tokens on the chat, completions and generate routes, which already
+// includes cached tokens; input_tokens on Responses; and on Messages
+// input_tokens + cache_read_input_tokens + cache_creation_input_tokens, since
+// vLLM subtracts the cached and created counts from input_tokens there (the
+// EPP's Anthropic parser sums them the same way). It reports false when no
+// prompt count is present.
 func PromptTokens(block any) (int, bool) {
 	fields, ok := block.(map[string]any)
 	if !ok {
 		return 0, false
 	}
-	for _, field := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
-		if n, ok := intValue(fields[field]); ok {
-			return n, true
-		}
+	if n, ok := intValue(fields[reqcommon.FieldPromptTokens]); ok {
+		return n, true
 	}
-	return 0, false
+	n, ok := intValue(fields[reqcommon.FieldInputTokens])
+	if !ok {
+		return 0, false
+	}
+	read, _ := intValue(fields[fieldCacheReadInputTokens])
+	created, _ := intValue(fields[fieldCacheCreationInputTokens])
+	return n + read + created, true
 }

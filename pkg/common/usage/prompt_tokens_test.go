@@ -33,6 +33,9 @@ func TestPromptTokens(t *testing.T) {
 		{name: "chat prompt_tokens", block: map[string]any{"prompt_tokens": 12.0, "completion_tokens": 3.0}, want: 12, ok: true},
 		{name: "responses input_tokens", block: map[string]any{"input_tokens": 40.0, "output_tokens": 5.0}, want: 40, ok: true},
 		{name: "messages input_tokens int", block: map[string]any{"input_tokens": 9}, want: 9, ok: true},
+		// vLLM reports the cached part of a Messages prompt beside input_tokens, not inside it.
+		{name: "messages with cache split", block: map[string]any{"input_tokens": 3.0, "cache_read_input_tokens": 40.0, "cache_creation_input_tokens": 5.0}, want: 48, ok: true},
+		{name: "chat prompt_tokens ignores messages cache fields", block: map[string]any{"prompt_tokens": 12.0, "cache_read_input_tokens": 40.0}, want: 12, ok: true},
 		{name: "output only (messages delta)", block: map[string]any{"output_tokens": 5.0}, ok: false},
 		{name: "not an object", block: nil, ok: false},
 	}

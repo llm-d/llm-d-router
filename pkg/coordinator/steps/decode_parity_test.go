@@ -282,3 +282,65 @@ func TestDecodeStep_PromptTokenParity_StreamingKeepsClientRequestedUsage(t *test
 		})
 	}
 }
+
+// A Messages response reports the cached part of the prompt beside
+// input_tokens. With prefill's KV reused, most of the prompt is
+// cache_read_input_tokens; the sum must compare as a match.
+func TestDecodeStep_PromptTokenParity_MessagesCacheSplitMatches(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"usage":   map[string]any{"input_tokens": 1, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []int{1, 2, 3, 4, 5}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx.OriginalPath = "/v1/messages"
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
+		t.Fatalf("mismatch counter = %v, want 0: 1 + 3 + 1 cached equals the 5 rendered tokens", got)
+	}
+}
+
+// A client that set continuous_usage_stats without include_usage gets no usage
+// today; adding include_usage would put a usage block in every content chunk,
+// so the step leaves the request alone and skips the check.
+func TestDecodeStep_PromptTokenParity_SkipsInjectionForContinuousUsageStats(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	var received map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &received)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx.Body["stream_options"] = json.RawMessage(`{"continuous_usage_stats": true}`)
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	options, _ := received["stream_options"].(map[string]any)
+	if _, injected := options["include_usage"]; injected {
+		t.Fatalf("include_usage must not be injected beside continuous_usage_stats, got %v", options)
+	}
+	if !strings.Contains(recorder.Body.String(), `"content":"Hello"`) {
+		t.Fatalf("stream changed: %s", recorder.Body.String())
+	}
+	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
+		t.Fatalf("mismatch counter = %v, want 0 (no usage to compare)", got)
+	}
+}

@@ -183,7 +183,9 @@ func (s *DecodeStep) newParityCheck(logger logr.Logger, reqCtx *pipeline.Request
 // onUsage is called for each usage block in the decode response. Only the
 // first block that carries a prompt count is judged: a streamed Messages
 // response reports input_tokens on message_start and again on the final
-// usage, and both describe the same prompt.
+// usage, and both describe the same prompt. usage.PromptTokens folds the
+// Messages cache split back in, so a P/D request whose prompt was served
+// from prefill's KV compares as a match, not a short count.
 func (p *parityCheck) onUsage(block map[string]any) {
 	if p.reported {
 		return
@@ -230,6 +232,14 @@ func injectIncludeUsage(reqCtx *pipeline.RequestContext) bool {
 	if include, ok := options[fieldIncludeUsage].(bool); ok && include {
 		return false
 	}
+	// vLLM reports usage on every chunk when include_usage and
+	// continuous_usage_stats are both set. A client that sent only the latter
+	// gets no usage today; adding include_usage would put a usage block in
+	// each of its content chunks, which the writer cannot drop, so the check
+	// is skipped rather than reshaping the stream.
+	if continuous, ok := options[fieldContinuousUsageStats].(bool); ok && continuous {
+		return false
+	}
 	merged := make(map[string]any, len(options)+1)
 	for k, v := range options {
 		merged[k] = v
@@ -257,7 +267,10 @@ func streamOptions(body map[string]any) map[string]any {
 	}
 }
 
-const fieldIncludeUsage = "include_usage"
+const (
+	fieldIncludeUsage         = "include_usage"
+	fieldContinuousUsageStats = "continuous_usage_stats"
+)
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
 // prefill and conditional-decode). decode is the terminal pipeline step: its body
