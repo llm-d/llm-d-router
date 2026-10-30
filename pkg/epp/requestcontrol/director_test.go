@@ -142,7 +142,7 @@ func TestDirector_ModelRewriteIfNeeded(t *testing.T) {
 				TargetModelName:   tt.targetModel,
 			}
 			ds := &mockDatastore{}
-			director := NewDirectorWithConfig(ds, &mockScheduler{}, &mockAdmissionController{}, NewDatastoreEndpointCandidates(ds), NewConfig())
+			director := NewDirectorWithConfig(ds, &mockScheduler{}, &mockAdmissionController{}, NewDatastoreEndpointCandidates(ds), NewConfig(), "")
 			err = director.modelRewriteIfNeeded(ctx, reqCtx, parsed.Body)
 			if tt.wantBadModel {
 				var modelErr errcommon.Error
@@ -1500,7 +1500,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				}
 
 				endpointCandidates := NewDatastoreEndpointCandidates(ds)
-				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config, "")
 				if test.emptyEndpoints {
 					director.endpointCandidates = &fccontractmocks.MockEndpointCandidates{}
 				}
@@ -1874,7 +1874,7 @@ func TestDirector_ApplyWeightedModelRewrite(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			mockDs := &mockDatastore{rewrites: test.rewrites}
 			endpointCandidates := NewDatastoreEndpointCandidates(mockDs)
-			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig())
+			director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig(), "")
 
 			reqCtx := &handlers.RequestContext{
 				IncomingModelName: test.incomingModel,
@@ -1995,6 +1995,7 @@ func TestDirector_HandleResponseReceived(t *testing.T) {
 		&mockAdmissionController{},
 		endpointCandidates,
 		NewConfig().WithResponseReceivedPlugins(pr1),
+		"",
 	)
 
 	reqCtx := &handlers.RequestContext{
@@ -2069,6 +2070,7 @@ func TestDirector_HandleResponseHeader_SessionAffinity(t *testing.T) {
 				&mockAdmissionController{},
 				endpointCandidates,
 				NewConfig().WithResponseReceivedPlugins(test.plugin),
+				"",
 			)
 
 			reqCtx := &handlers.RequestContext{
@@ -2094,7 +2096,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	ds := datastore.NewDatastore(t.Context(), nil)
 	mockSched := &mockScheduler{}
 	endpointCandidates := NewDatastoreEndpointCandidates(ds)
-	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1))
+	director := NewDirectorWithConfig(ds, mockSched, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1), "")
 
 	reqCtx := &handlers.RequestContext{
 		Request: &handlers.Request{
@@ -2159,7 +2161,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	ds := datastore.NewDatastore(t.Context(), nil)
-	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin), "")
 
 	const numChunks = 50
 	reqCtx := newResponseBodyTestRequestContext("ordering-test-request")
@@ -2190,7 +2192,7 @@ func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 func TestDirector_HandleResponseBody_DuplicateRequestIDQueuesAreIndependent(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	plugin := newBlockingResponseStreamingPlugin()
-	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin))
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil, NewConfig().WithResponseStreamingPlugins(plugin), "")
 
 	const requestID = "duplicate-request-id"
 	firstReqCtx := newResponseBodyTestRequestContext(requestID)
@@ -2468,7 +2470,7 @@ func newSinglePodDirector(t *testing.T, scheduleResult *fwksched.SchedulingResul
 
 	cfg := NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil))
 	candidates := NewDatastoreEndpointCandidates(ds)
-	dir := NewDirectorWithConfig(ds, &mockScheduler{scheduleResults: scheduleResult}, &mockAdmissionController{}, candidates, cfg)
+	dir := NewDirectorWithConfig(ds, &mockScheduler{scheduleResults: scheduleResult}, &mockAdmissionController{}, candidates, cfg, "test-pool")
 	return dir, ctx
 }
 
@@ -2591,6 +2593,9 @@ func TestDirector_RecordsFairnessIDResolution(t *testing.T) {
 			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
 		},
 	})
+	// The pool label is fixed when the Director is built, so a datastore whose pool is not
+	// synced, as after the pool is deleted, must not change it.
+	dir.datastore = &mockDatastore{}
 	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
 	require.NoError(t, err)
 	send := func(fairnessHeader string) *handlers.RequestContext {
@@ -2723,7 +2728,7 @@ func TestDirector_HandleResponseBody_TerminationCause(t *testing.T) {
 			ps := newTestResponseStreaming("ps")
 			ctx := logutil.NewTestLoggerIntoContext(context.Background())
 			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
-				NewConfig().WithResponseStreamingPlugins(ps))
+				NewConfig().WithResponseStreamingPlugins(ps), "")
 
 			reqCtx := newResponseBodyTestRequestContext("test-req-id")
 			reqCtx.TerminationCause = tc.recorded
@@ -2742,7 +2747,7 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 	ps := newTestResponseStreaming("ps")
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
-		NewConfig().WithResponseStreamingPlugins(ps))
+		NewConfig().WithResponseStreamingPlugins(ps), "")
 
 	reqCtx := newResponseBodyTestRequestContext("test-req-id")
 	reqCtx.TerminationCause = fwkrc.TerminationCauseClientDisconnect

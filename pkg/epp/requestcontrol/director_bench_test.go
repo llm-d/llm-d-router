@@ -46,7 +46,7 @@ const (
 func newStreamingDirectorFixture(name string) (*Director, *testResponseStreaming, context.Context) {
 	plugin := newTestResponseStreaming(name)
 	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
-		NewConfig().WithResponseStreamingPlugins(plugin))
+		NewConfig().WithResponseStreamingPlugins(plugin), "")
 	// Info level leaves V(DEBUG) and V(TRACE) disabled, as in production. A
 	// discarding logger would hide the cost of deriving one, which is exactly
 	// what this benchmark exists to track.

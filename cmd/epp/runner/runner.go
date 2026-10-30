@@ -546,7 +546,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	endpointCandidates, admissionController, priorityBandControlPlane, requestEvictor := r.initAdmissionControl(servingCtx, opts, eppConfig, endpointCandidates)
 
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, gknn.Name)
 	if requestEvictor != nil {
 		director.SetRequestEvictor(requestEvictor)
 	}
@@ -1305,7 +1305,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// bands are provisioned here, before the server starts serving.
 	endpointCandidates, admissionController, bandControlPlane, requestEvictor := r.initAdmissionControl(r.servingCtx, opts, eppConfig, endpointCandidates)
 	provisionObjectiveBands(bandControlPlane, objectivePriorities)
-	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig)
+	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, poolName)
 	if requestEvictor != nil {
 		director.SetRequestEvictor(requestEvictor)
 	}

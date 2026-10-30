@@ -87,6 +87,7 @@ func NewDirectorWithConfig(
 	admissionController AdmissionController,
 	endpointCandidates contracts.EndpointCandidates,
 	config *Config,
+	poolName string,
 ) *Director {
 	return &Director{
 		datastore:             datastore,
@@ -95,6 +96,7 @@ func NewDirectorWithConfig(
 		endpointCandidates:    endpointCandidates,
 		requestControlPlugins: *config,
 		defaultPriority:       0, // define default priority explicitly
+		poolName:              poolName,
 	}
 }
 
@@ -172,6 +174,10 @@ type Director struct {
 	// requestEvictor, when set, tracks dispatched requests for demand-driven in-flight eviction.
 	// See docs/flow-control-eviction.md.
 	requestEvictor *eviction.RequestEvictor
+
+	// poolName is the inference_pool label on per-request metrics. It must match the name the
+	// runner passes to metrics.InitFairnessIDResolutionMetrics.
+	poolName string
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -259,11 +265,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
-	poolName := ""
-	if pool, err := d.datastore.PoolGet(); err == nil {
-		poolName = pool.Name
-	}
-	metrics.RecordFairnessIDResolution(poolName, reqCtx.SchedulingRequest.FairnessID, source)
+	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
