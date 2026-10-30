@@ -65,6 +65,37 @@ var (
 		},
 		[]string{"plugin_type", "plugin_name", "mode", "revision"},
 	)
+
+	revisionSelectionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      metricsPrefix + "_revision_selection_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Requests screened onto a revision, by the source of the revision choice.",
+				compbasemetrics.ALPHA,
+			),
+		},
+		[]string{"plugin_type", "plugin_name", "revision", "source"},
+	)
+)
+
+// selectionSource labels how the Screener chose a request's revision.
+type selectionSource string
+
+const (
+	// sourceHeader is a strict revision header.
+	sourceHeader selectionSource = "header"
+	// sourceCoordinated is a revision already stored under the decision ID.
+	sourceCoordinated selectionSource = "coordinated"
+	// sourceSession is affinity keyed on a session identifier.
+	sourceSession selectionSource = "session"
+	// sourcePrefix is affinity keyed on the text conversation prefix.
+	sourcePrefix selectionSource = "prefix"
+	// sourceRandom is a weighted random draw: affinity is off or the request
+	// has nothing to key on.
+	sourceRandom selectionSource = "random"
+	// sourceSingle is the only covered revision, so no draw was made.
+	sourceSingle selectionSource = "single"
 )
 
 var registerMetricsOnce sync.Once
@@ -75,12 +106,17 @@ func registerMetrics() {
 			strictRevisionNoMatchTotal,
 			revisionOverflowTotal,
 			revisionGatingShare,
+			revisionSelectionTotal,
 		)
 	})
 }
 
 func recordStrictRevisionNoMatch(pluginName string) {
 	strictRevisionNoMatchTotal.WithLabelValues(PluginType, pluginName).Inc()
+}
+
+func recordRevisionSelection(pluginName, revision string, source selectionSource) {
+	revisionSelectionTotal.WithLabelValues(PluginType, pluginName, revision, string(source)).Inc()
 }
 
 func recordRevisionOverflow(pluginName, from, to string) {
@@ -98,6 +134,7 @@ func recordRevisionGatingShares(
 			revisionGatingShare.DeleteLabelValues(PluginType, pluginName, string(mode), revision)
 			revisionOverflowTotal.DeletePartialMatch(prometheus.Labels{"plugin_name": pluginName, "from_revision": revision})
 			revisionOverflowTotal.DeletePartialMatch(prometheus.Labels{"plugin_name": pluginName, "to_revision": revision})
+			revisionSelectionTotal.DeletePartialMatch(prometheus.Labels{"plugin_name": pluginName, "revision": revision})
 		}
 	}
 	for revision := range current.roleCounts {

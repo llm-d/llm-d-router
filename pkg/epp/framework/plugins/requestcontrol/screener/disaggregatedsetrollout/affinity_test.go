@@ -76,8 +76,8 @@ func sessionTurns(session int) []*fwksched.InferenceRequest {
 
 func mustKey(t *testing.T, screener *Screener, request *fwksched.InferenceRequest) uint64 {
 	t.Helper()
-	key, ok := screener.affinityKey(t.Context(), request)
-	if !ok {
+	key, source := screener.affinityKey(t.Context(), request)
+	if source == sourceRandom {
 		t.Fatal("expected a keyed request")
 	}
 	return key
@@ -282,8 +282,8 @@ func TestAffinityKeyFallsBackWhenUnkeyed(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if key, ok := newTestScreener(test.config).affinityKey(t.Context(), test.request); ok {
-				t.Fatalf("want random fallback, got key %v", key)
+			if key, source := newTestScreener(test.config).affinityKey(t.Context(), test.request); source != sourceRandom {
+				t.Fatalf("want random fallback, got key %v from %s", key, source)
 			}
 		})
 	}
