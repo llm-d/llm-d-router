@@ -96,33 +96,57 @@ func TestBuildDoesNotInjectUseOpenAIFormatIntoDecodeOrConditionalDecode(t *testi
 	}
 }
 
-// TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML reproduces a
-// coordinator.yaml carrying the deprecated per-step override this PR removed:
-// decode or conditional-decode setting use_openai_format under their own
-// params. Build must fail config loading rather than build a pipeline that
-// silently ignores the setting.
+// TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML covers a
+// coordinator.yaml setting use_openai_format under the params of a step that
+// does not read it. conditional-decode probes the client's own route with the
+// body the client sent, so the setting cannot apply to it: Build must fail
+// rather than build a pipeline that silently ignores it.
 func TestBuildRejectsUseOpenAIFormatOverrideInCoordinatorYAML(t *testing.T) {
-	for _, stepType := range []string{steps.DecodeStepName, steps.ConditionalDecodeStepName} {
-		t.Run(stepType, func(t *testing.T) {
-			body := "pipeline:\n" +
-				"  use_openai_format: true\n" +
-				"  steps:\n" +
-				"    - type: " + stepType + "\n" +
-				"      params:\n" +
-				"        use_openai_format: false\n"
-			path := filepath.Join(t.TempDir(), "coordinator.yaml")
-			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-				t.Fatalf("writing fixture: %v", err)
-			}
+	stepType := steps.ConditionalDecodeStepName
+	body := "pipeline:\n" +
+		"  use_openai_format: true\n" +
+		"  steps:\n" +
+		"    - type: " + stepType + "\n" +
+		"      params:\n" +
+		"        use_openai_format: false\n"
+	path := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
 
-			cfg, err := config.Load(path)
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-			if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
-				t.Fatalf("Build() expected an error for %q overriding use_openai_format", stepType)
-			}
-		})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
+		t.Fatalf("Build() expected an error for %q overriding use_openai_format", stepType)
+	}
+}
+
+// TestBuildAcceptsDecodeUseOpenAIFormatOverride covers the decode step reading
+// use_openai_format: a pipeline may set the tokens-in format for the decode leg
+// alone, so Build must accept the key under decode's own params.
+func TestBuildAcceptsDecodeUseOpenAIFormatOverride(t *testing.T) {
+	body := "pipeline:\n" +
+		"  use_openai_format: true\n" +
+		"  steps:\n" +
+		"    - type: " + steps.RenderStepName + "\n" +
+		"      params:\n" +
+		"        address: http://render.invalid:8080\n" +
+		"    - type: " + steps.DecodeStepName + "\n" +
+		"      params:\n" +
+		"        use_openai_format: false\n"
+	path := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err != nil {
+		t.Fatalf("Build() unexpected error: %v", err)
 	}
 }
 

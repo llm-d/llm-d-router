@@ -247,7 +247,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		}
 	}
 
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return false
 	}
@@ -257,7 +257,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		if !ok {
 			continue
 		}
-		finishReason, ok := choice[responseFieldFinishReason].(string)
+		finishReason, ok := choice[reqcommon.FieldFinishReason].(string)
 		if ok && finishReason == finishReasonCacheThreshold {
 			return true
 		}

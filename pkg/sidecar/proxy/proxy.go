@@ -49,9 +49,6 @@ const (
 
 	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
 	tracerScope = "llm-d-router/pkg/sidecar/proxy"
-
-	responseFieldChoices      = "choices"
-	responseFieldFinishReason = "finish_reason"
 )
 
 // Config represents the complete runtime configuration for the proxy server.

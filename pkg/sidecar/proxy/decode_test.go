@@ -191,7 +191,7 @@ var _ = Describe("Chunked Decode", func() {
 				}
 				var last map[string]any
 				Expect(json.Unmarshal(gotMessages[len(gotMessages)-1], &last)).To(Succeed())
-				Expect(last).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+				Expect(last).To(HaveKeyWithValue(reqcommon.FieldRole, reqcommon.RoleAssistant))
 				Expect(last).To(HaveKeyWithValue(reqcommon.FieldContent, wantText))
 				if continueFinal {
 					Expect(last).To(HaveKeyWithValue("name", "writer"))
@@ -208,7 +208,7 @@ var _ = Describe("Chunked Decode", func() {
 					var event map[string]any
 					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
 					if choice := firstChoice(event); choice != nil {
-						emitted = append(emitted, choice[responseFieldDelta].(map[string]any)[reqcommon.FieldContent].(string))
+						emitted = append(emitted, choice[reqcommon.FieldDelta].(map[string]any)[reqcommon.FieldContent].(string))
 					}
 				}
 				Expect(scanner.Err()).ToNot(HaveOccurred())
@@ -556,7 +556,7 @@ var _ = Describe("Chunked Decode", func() {
 
 			var first map[string]any
 			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
-			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
+			delta := first["choices"].([]any)[0].(map[string]any)[reqcommon.FieldDelta].(map[string]any)
 			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
 
 			// Verify cumulative usage in the final usage event.

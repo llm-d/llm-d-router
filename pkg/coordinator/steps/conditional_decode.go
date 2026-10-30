@@ -64,7 +64,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, reqCtx.OriginalPath, body, map[string]string{"Prefer": "if-available"})
 	if err != nil {
 		return err
 	}
