@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -109,7 +109,7 @@ func (env *parallelCommitEnv) send(clientTimeout time.Duration) (int, http.Heade
 		return 0, nil, "", err
 	}
 	defer rp.Body.Close()
-	body, _ := io.ReadAll(rp.Body) //nolint:errcheck
+	body, _ := io.ReadAll(rp.Body)
 	return rp.StatusCode, rp.Header, string(body), nil
 }
 

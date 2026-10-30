@@ -29,8 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 	"golang.org/x/sync/errgroup"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"

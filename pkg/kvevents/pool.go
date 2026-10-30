@@ -425,8 +425,6 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 
 // decode spans the adapter's payload decode. It wraps the call rather than the
 // EngineAdapter itself so out-of-tree adapters need no signature change.
-//
-//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
 func (p *Pool) decode(ctx context.Context, msg *RawMessage) (string, string, EventBatch, error) {
 	_, span := p.startSpan(ctx, "events_decode", internalSpanOptions)
 	defer span.End()

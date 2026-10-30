@@ -71,12 +71,13 @@ func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.Anthropic
 }
 
 func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
-	if b.Content.Raw != "" {
-		return b.Content.Raw, nil
+	content := b.ToolResultContent()
+	if content.Raw != "" {
+		return content.Raw, nil
 	}
 	var parts []string
 	var imageBlocks []tokenizerTypes.ContentBlock
-	for _, item := range b.Content.Structured {
+	for _, item := range content.Structured {
 		switch item.Type {
 		case blockTypeText:
 			parts = append(parts, item.Text)
@@ -266,12 +267,26 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
+	case body.Images != nil:
+		return []byte(imageGenerationText(body.Images)), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
+}
+
+// imageGenerationText joins an images-generations/edits request's prompt with
+// its negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func imageGenerationText(r *fwkrh.ImagesGenerationsRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Prompt
+	}
+	return r.Prompt + "\n" + r.NegativePrompt
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
@@ -454,16 +469,16 @@ func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiM
 			out = append(out, []byte(role)...)
 		}
 		return b.appendResponsesContent(out, features, m["content"])
-	case "function_call":
+	case responsesItemTypeFunctionCall:
 		if name, ok := m["name"].(string); ok {
 			out = append(out, []byte(name)...)
 		}
 		if args, ok := m["arguments"].(string); ok {
 			out = append(out, []byte(args)...)
 		}
-	case "function_call_output":
+	case responsesItemTypeFunctionCallOutput:
 		out = appendResponsesOutputText(out, m["output"])
-	case "reasoning":
+	case responsesItemTypeReasoning:
 		out = appendResponsesSummaryText(out, m["summary"])
 	}
 	return out, features

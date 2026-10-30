@@ -85,7 +85,7 @@ Creates a new `kind` cluster (or reuses an existing one) in the `default` namesp
 > You can pre-pull external images to avoid slow downloads:
 > ```
 > docker pull ghcr.io/llm-d/llm-d-inference-sim:v1.0.0
-> docker pull vllm/vllm-openai-cpu:v0.21.0
+> docker pull vllm/vllm-openai-cpu:v0.31.0
 > ```
 
 ### Accessing the Gateway
@@ -617,7 +617,7 @@ kubectl --context kind-e2e-tests get pods
 | `VLLM_IMAGE` | `ghcr.io/llm-d/llm-d-inference-sim:v1.0.0` | vLLM container image to deploy. Can be a simulator or a real vLLM image (e.g., `vllm/vllm-openai:v0.16.0`) |
 | `VLLM_SIM_MODE` | `echo` | Simulator response mode. Supported values: `echo` (returns the input prompt as the response), `random` (returns a random sentence from a pre-defined bank) |
 | `SIDECAR_IMAGE` | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` | Routing sidecar image loaded into the Kind cluster |
-| `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.21.0` | vLLM renderer image loaded into the Kind cluster |
+| `VLLM_RENDER_IMAGE` | `vllm/vllm-openai-cpu:v0.31.0` | vLLM renderer image loaded into the Kind cluster. The e2e targets set it to `VLLM_IMAGE`, since the simulator serves every `/render` route the token-producer plugin calls. Pass it on the make command line (`make test-e2e-run VLLM_RENDER_IMAGE=...`) to render against real vLLM; an environment variable does not override a target-specific assignment |
 
 ### Coverage
 

@@ -982,7 +982,7 @@ func TestParseRequest_ToolBlocks(t *testing.T) {
 	require.Len(t, toolResult, 1)
 	assert.Equal(t, "tool_result", toolResult[0].Type)
 	assert.Equal(t, "toolu_01", toolResult[0].ToolUseID)
-	assert.Equal(t, "Sunny", toolResult[0].Content.Structured[0].Text)
+	assert.Equal(t, "Sunny", toolResult[0].ToolResultContent().Structured[0].Text)
 
 	tools := got.Body.Messages.Tools
 	require.Len(t, tools, 1)
@@ -1021,4 +1021,36 @@ func TestParseRequest_SearchResultBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.Body.Messages)
 	assert.Equal(t, `"https://example.com/notes"`, string(got.Body.Messages.Messages[0].Content.Structured[0].Source))
+}
+
+// Regression test for server tool result blocks rejected with a 400: their
+// "content" is an object, not the string or array a tool_result carries.
+// Block-level decoding is covered in requesthandling's TestAnthropicContent_UnmarshalJSON.
+func TestParseRequest_ServerToolResultObjectContent(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "Search and run it."},
+			{"role": "assistant", "content": [
+				{"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "weather"}},
+				{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01",
+				 "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}},
+				{"type": "server_tool_use", "id": "srvtoolu_02", "name": "bash_code_execution", "input": {"command": "ls"}},
+				{"type": "bash_code_execution_tool_result", "tool_use_id": "srvtoolu_02",
+				 "content": {"type": "bash_code_execution_result", "stdout": "data.csv", "stderr": "", "return_code": 0, "content": []}},
+				{"type": "text", "text": "Done."}
+			]},
+			{"role": "user", "content": "Thanks."}
+		]
+	}`
+
+	got, err := parser.ParseRequest(context.Background(), []byte(body), map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Body.Messages)
+	blocks := got.Body.Messages.Messages[1].Content.Structured
+	require.Len(t, blocks, 5)
+	assert.JSONEq(t, `{"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}`, string(blocks[1].Content))
+	assert.JSONEq(t, `{"type": "bash_code_execution_result", "stdout": "data.csv", "stderr": "", "return_code": 0, "content": []}`, string(blocks[3].Content))
 }

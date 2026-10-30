@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -258,6 +259,34 @@ func TestClient_RequestBuffersBodyOnlyAtTrace(t *testing.T) {
 			t.Errorf("body = %q, want %q", got, want)
 		}
 	})
+}
+
+// A declared Content-Length longer than the body ends the TRACE pre-read in
+// io.ErrUnexpectedEOF; the caller must still see the status and that error.
+func TestClient_RequestTraceReplaysInterruptedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "partial")
+	}))
+	defer srv.Close()
+
+	logger := funcr.NewJSON(func(string) {}, funcr.Options{Verbosity: logutil.TRACE})
+	resp, err := New(config.GatewayConfig{Address: srv.URL}).Post(log.IntoContext(context.Background(), logger), "/v1/chat/completions", []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	got, readErr := io.ReadAll(resp.Body)
+	if string(got) != "partial" {
+		t.Errorf("body = %q, want the bytes that arrived", got)
+	}
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Errorf("read error = %v, want io.ErrUnexpectedEOF", readErr)
+	}
 }
 
 func TestClient_BaseURLAndTransport(t *testing.T) {

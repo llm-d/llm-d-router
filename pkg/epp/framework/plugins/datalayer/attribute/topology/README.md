@@ -27,7 +27,7 @@ The following plugins produce this attribute:
 
 In coordinator deployments, where prefill and decode are picked by separate EPPs, the
 prefill EPP's **`topology-stamp-handler`** (Request Control) reads this attribute off its
-selected endpoint and encodes it onto the `x-peer-topology` response header, so the
+selected endpoint and encodes it onto the `x-llm-d-peer-topology` response header, so the
 decode EPP's `topology-affinity-filter`/`-scorer` can read the same locality data without
 the `Topology` attribute itself crossing the wire.
 

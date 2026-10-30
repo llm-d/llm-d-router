@@ -344,8 +344,30 @@ that depends on a Kubernetes API server is inactive:
   canary). The reconciler is not started; `ds.ModelRewriteGet` returns nil
   for every request. There is no file-mode equivalent today.
 - **`InferenceObjective`** (per-request SLO objectives). The reconciler is
-  not started; objective lookups return nil. Plugins that depend on
-  per-request SLO data will see no objectives configured.
+  not started. Without `--objectives-file`, objective lookups return nil
+  and every request gets priority 0. With it, objectives are loaded from
+  the file once at startup:
+
+  ```yaml
+  objectives:
+    - name: interactive
+      priority: 10
+    - name: batch      # priority < 0 is sheddable
+      priority: -1
+    - name: default    # priority defaults to 0
+  ```
+
+  - The `x-llm-d-inference-objective` header value must equal an
+    objective's `name`. Any other value runs at priority 0 without an error.
+  - Every objective applies to this EPP; pool targeting is not evaluated.
+    In Kubernetes mode an objective that does not target the served pool
+    is dropped.
+  - With the `flowControl` feature gate, a band is provisioned for each
+    priority before the EPP serves. With the gate off there are no bands,
+    but priority < 0 is still sheddable under the legacy admission
+    controller.
+  - The file is not re-read; the file-discovery `watchFile` option does
+    not apply to it.
 - **`k8s-notification-source` data layer plugin** (and any other notification
   source that needs the controller manager). The plugin loads from config
   but is never bound to a manager, so it produces no events. Remove it from
@@ -424,8 +446,12 @@ endpoints:
 
 Save as `/etc/epp/config.yaml`.  This example uses the default KV-cache
 utilization scorer and random picker -- adapt scheduling plugins as needed.
+With a single scheduling profile, the EPP adds the `single-profile-handler`
+itself, so the configuration does not list a profile handler.
 
 ```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
 plugins:
   - name: file-disc
     type: file-discovery
@@ -439,16 +465,11 @@ plugins:
   - name: random-picker
     type: random-picker
 
-  - name: single-profile
-    type: single-profile-handler
-    parameters:
-      scorer: kv-cache-scorer
-      picker: random-picker
-
 schedulingProfiles:
   - name: default
     plugins:
-      - pluginRef: single-profile
+      - pluginRef: kv-cache-scorer
+      - pluginRef: random-picker
 
 dataLayer:
   discovery:
@@ -464,16 +485,22 @@ epp \
   --config-file /etc/epp/config.yaml \
   --grpc-port 9002 \
   --grpc-health-port 9003 \
-  --metrics-port 9090
+  --metrics-port 9090 \
+  --secure-serving=false
 ```
+
+The EPP serves the `ext_proc` gRPC listener over TLS with a self-signed
+certificate by default. `--secure-serving=false` serves it in plaintext,
+which matches the `epp` cluster in the Envoy config below. To keep TLS
+enabled, see [TLS](tls.md).
 
 `--pool-name` is optional in file discovery mode and defaults to `epp` if
 unset. It is used as the internal pool identifier in the scheduler and
 metrics. The value is arbitrary -- it does not need to match any
 Kubernetes object.
 
-The EPP logs `EPP starting (file discovery mode)` on startup and emits a
-log line for each endpoint loaded from the file.
+The EPP logs `EPP starting (file discovery mode)` on startup, and
+`watching endpoints file for changes` when `watchFile` is `true`.
 
 ### 4. Envoy config
 
@@ -637,10 +664,11 @@ func (d *MyDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotifie
 }
 ```
 
-Register the factory in the runner before calling `Run`:
+Register the factory in the runner before calling `Run` (see
+[Registering out-of-tree plugins](plugins-vs-builtins.md#registering-out-of-tree-plugins)):
 
 ```go
-fwkplugin.Register(myplugin.PluginType, myplugin.Factory)
+fwkplugin.Register(myplugin.PluginType, fwkplugin.StabilityAlpha, myplugin.Factory)
 ```
 
 Then reference it in the EPP config:

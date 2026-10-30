@@ -1788,7 +1788,6 @@ func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
 // without exercising any engine-specific parsing.
 type stubAdapter struct{}
 
-//nolint:gocritic // unnamed results match the EngineAdapter implementations
 func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, error) {
 	return "pod-1", "model-1", EventBatch{}, nil
 }

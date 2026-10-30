@@ -63,6 +63,12 @@ type EndpointPickerConfig struct {
 	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
+
+	// +optional
+	// Metrics configures the EPP's own metric collectors. These are process-wide
+	// and are built once at startup, so they are configured here rather than on a
+	// plugin.
+	Metrics *MetricsConfig `json:"metrics,omitempty"`
 }
 
 func (cfg EndpointPickerConfig) String() string {
@@ -84,6 +90,9 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
+	}
+	if cfg.Metrics != nil {
+		parts = append(parts, fmt.Sprintf("Metrics: %v", cfg.Metrics))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -246,8 +255,9 @@ type CrossReplicaConfig struct {
 	// the datalayer polling interval. If omitted, a default is used.
 	SyncInterval *metav1.Duration `json:"syncInterval,omitempty"`
 	// +optional
-	// PublishTimeout bounds one endpoint publish, including all concurrent
-	// contributor writes. If omitted, a default is used.
+	// PublishTimeout bounds one endpoint publish (shared by its concurrent
+	// contributor writes), or one batch chunk per contributor when the syncer
+	// supports batching. If omitted, a default is used.
 	PublishTimeout *metav1.Duration `json:"publishTimeout,omitempty"`
 }
 
@@ -400,6 +410,36 @@ func (pc *ParserConfig) String() string {
 		return nilString
 	}
 	return fmt.Sprintf("{PluginRef: %s}", pc.PluginRef)
+}
+
+// MetricsConfig configures the EPP's own metrics. The histograms it covers are
+// process-wide singletons created once during metric registration, so the
+// settings here are read before that registration and cannot be changed later.
+type MetricsConfig struct {
+	// +optional
+	// RequestTPOTBuckets overrides the bucket edges, in seconds, of the
+	// request_streaming_tpot_seconds histogram. Omitted or empty keeps the
+	// built-in edges. Edges must be finite, positive and strictly increasing;
+	// the +Inf bucket is implicit. Every added edge is one more time series per
+	// label combination.
+	RequestTPOTBuckets []float64 `json:"requestTPOTBuckets,omitempty"`
+
+	// +optional
+	// RequestITLBuckets overrides the bucket edges, in seconds, of the
+	// request_streaming_itl_seconds histogram, under the same rules and the same
+	// cardinality cost as RequestTPOTBuckets.
+	RequestITLBuckets []float64 `json:"requestITLBuckets,omitempty"`
+}
+
+func (mc *MetricsConfig) String() string {
+	var parts []string
+	if len(mc.RequestTPOTBuckets) > 0 {
+		parts = append(parts, fmt.Sprintf("RequestTPOTBuckets: %v", mc.RequestTPOTBuckets))
+	}
+	if len(mc.RequestITLBuckets) > 0 {
+		parts = append(parts, fmt.Sprintf("RequestITLBuckets: %v", mc.RequestITLBuckets))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 // ParserConfig contains the configuration for a parser.
@@ -590,6 +630,16 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// MaxBytesPerFlow bounds the total queued request bytes for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Mi"). Omitted or "0" disables this limit.
+	MaxBytesPerFlow *resource.Quantity `json:"maxBytesPerFlow,omitempty"`
+
+	// +optional
+	// MaxRequestsPerFlow bounds the queued request count for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "100"). Omitted or "0" disables this limit.
+	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -617,6 +667,14 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.MaxBytesPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytesPerFlow: %d", pbc.MaxBytesPerFlow.Value()))
+	}
+
+	if pbc.MaxRequestsPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
 	}
 
 	if pbc.DefaultRequestTTL != nil {

@@ -66,6 +66,7 @@ test_cases_llm_d_router_gateway["active-active-redis"]="--set router.modelServer
 test_cases_llm_d_router_gateway["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_gateway["basic-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -106,6 +107,18 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ "${key}" == "triton" ]; then
     if ! grep -q "passthrough-parser" "${output_dir}/llm-d-router-gateway/templates/inferenceextension.yaml"; then
       echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "pdb" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    if ! grep -q "kind: PodDisruptionBudget" "${epp_yaml}"; then
+      echo "Validation failed: PodDisruptionBudget not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q "minAvailable: 1" "${epp_yaml}"; then
+      echo "Validation failed: PodDisruptionBudget minAvailable not rendered for test: ${key}"
       exit 1
     fi
   fi
@@ -219,6 +232,8 @@ declare -A test_cases_llm_d_router_standalone
 
 # llm_d_router_standalone Helm Chart test cases
 test_cases_llm_d_router_standalone["basic"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
+test_cases_llm_d_router_standalone["pdb-proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podDisruptionBudget.enabled=true --set router.proxy.podDisruptionBudget.maxUnavailable=1"
 test_cases_llm_d_router_standalone["active-active-redis"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.replicas=3"
 test_cases_llm_d_router_standalone["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_standalone["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
@@ -228,6 +243,8 @@ test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferen
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
+test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
+test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
@@ -272,6 +289,48 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
       exit 1
     fi
   fi
+  if [ "${key}" == "pdb" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "kind: PodDisruptionBudget" "${epp_yaml}"; then
+      echo "Validation failed: PodDisruptionBudget not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q "minAvailable: 1" "${epp_yaml}"; then
+      echo "Validation failed: PodDisruptionBudget minAvailable not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pdb-proxy-service" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "kind: PodDisruptionBudget" "${epp_yaml}"; then
+      echo "Validation failed: proxy PodDisruptionBudget not found in service-mode render for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q "maxUnavailable: 1" "${epp_yaml}"; then
+      echo "Validation failed: proxy PodDisruptionBudget maxUnavailable not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "lifecycle-override" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    for hook in /epp-drain /proxy-drain; do
+      if ! grep -q -- "${hook}" "${epp_yaml}"; then
+        echo "Validation failed: lifecycle hook ${hook} not found in rendered output for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -q "seconds: 5" "${epp_yaml}"; then
+      echo "Validation failed: default preStop sleep rendered alongside a lifecycle override for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "lifecycle-override-service" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q -- "/proxy-drain" "${epp_yaml}"; then
+      echo "Validation failed: proxy lifecycle override not found in service-mode render for test: ${key}"
+      exit 1
+    fi
+  fi
   if [ "${key}" == "proxy-autoscaling" ]; then
     if ! grep -q "name: release-name-proxy" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "kind: HorizontalPodAutoscaler" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: proxy HorizontalPodAutoscaler not found in rendered output for test: ${key}"
@@ -280,6 +339,31 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   fi
   echo "Test case ${key} passed validation."
 done
+
+echo "Verifying PodDisruptionBudget validations..."
+verify_pdb_validation_failure() {
+  local description="$1"
+  shift
+  local output
+  if output=$("${HELM}" template pdb-validation "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+      --namespace pdb-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.inferencePool.create=false "$@" 2>&1); then
+    echo "PDB validation failed to reject: ${description}"
+    exit 1
+  fi
+  if ! grep -q "podDisruptionBudget" <<<"${output}"; then
+    echo "PDB validation rejected ${description} without naming the values path: ${output}"
+    exit 1
+  fi
+}
+verify_pdb_validation_failure "minAvailable and maxUnavailable together" \
+  --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true \
+  --set router.epp.podDisruptionBudget.minAvailable=1 --set router.epp.podDisruptionBudget.maxUnavailable=1
+verify_pdb_validation_failure "enabled without a disruption field" \
+  --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true
+verify_pdb_validation_failure "minAvailable with a single replica" \
+  --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1
+echo "PodDisruptionBudget validation checks passed."
 
 echo "Verifying leader-election RBAC..."
 verify_leader_election_rbac() {
@@ -912,3 +996,22 @@ for v in 0 101; do
 done
 
 echo "Proxy autoscaling checks passed for llm-d-router-standalone."
+
+echo "Verifying llm-d-router-standalone proxy preset args..."
+arg_rendered() { if [ -z "$3" ]; then grep -q -- "- \"$2\"\$" "$1"; else grep -A1 -- "- \"$2\"\$" "$1" | grep -q -- "- \"$3\"\$"; fi; }
+envoy_default_output="${TEMP_DIR}/llm-d-router-standalone-envoy-default-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false > "${envoy_default_output}" || exit 1
+envoy_explicit_args_output="${TEMP_DIR}/llm-d-router-standalone-envoy-explicit-args-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.proxy.args={--concurrency,4,-c,/etc/envoy/envoy.yaml}' > "${envoy_explicit_args_output}" || exit 1
+# name:file:flag:value:want (1 = rendered, 0 = absent; empty value = flag alone)
+for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${envoy_default_output}:--cpuset-threads::0" \
+         "service:${proxy_service_render_output}:--concurrency:8:1" \
+         "agentgateway:${agentgateway_render_output}:--concurrency:8:0" "agentgateway-preset:${agentgateway_render_output}:-f:/config/config.yaml:1" \
+         "explicit:${envoy_explicit_args_output}:--concurrency:4:1" "explicit-preset:${envoy_explicit_args_output}:--concurrency:8:0"; do
+  IFS=: read -r name file flag value want <<< "${c}"
+  if arg_rendered "${file}" "${flag}" "${value}"; then got=1; else got=0; fi
+  if [ "${got}" != "${want}" ]; then
+    echo "Proxy args for ${name}: ${flag} ${value} rendered=${got}, want ${want}"
+    exit 1
+  fi
+done

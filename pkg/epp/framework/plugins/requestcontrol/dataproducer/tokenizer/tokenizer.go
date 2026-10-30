@@ -368,9 +368,16 @@ func (p *Plugin) Backend() string {
 	return p.backendName
 }
 
-// Produces returns the data keys this plugin produces.
+// Produces returns the data keys this plugin produces, along with the
+// configured tokenization backend attribute ("backend": BackendVLLM or BackendEstimate)
+// for Level-2 consumer dependency validation.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+	return map[plugin.DataKey]any{
+		p.dk: plugin.ProducedData{
+			Type:       fwkrh.TokenizedRequest{},
+			Attributes: map[string]string{"backend": p.backendName},
+		},
+	}
 }
 
 // RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.

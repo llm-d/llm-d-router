@@ -40,6 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -47,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -199,10 +201,19 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
+	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
+	// is the admission rejection. Later failures leave the decision as admitted.
+	admitting := false
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
+			if admitting && span.IsRecording() {
+				span.SetAttributes(
+					semconv.LLMDEPPAdmissionDecision("rejected"),
+					semconv.LLMDEPPAdmissionReason(admissionReason(err)),
+				)
+			}
 		}
 		span.End()
 	}()
@@ -260,9 +271,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
 
+	admitting = true
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
+	}
+	// IsRecording guards keep the tracing-disabled path allocation-free.
+	if reqCtx.FlowControlAdmitted && span.IsRecording() {
+		// Fractional milliseconds: queue waits are often below 1ms.
+		span.SetAttributes(semconv.LLMDEPPAdmissionQueueDurationMs(float64(reqCtx.FlowControlQueueDuration) / float64(time.Millisecond)))
 	}
 	reservationPending := false
 	reservationReleaser, hasReservationReleaser := d.admissionController.(dispatchReservationReleaser)
@@ -312,6 +329,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
+	admitting = false
+	if span.IsRecording() {
+		span.SetAttributes(semconv.LLMDEPPAdmissionDecision("admitted"))
+	}
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
@@ -353,6 +374,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 // differs from the model the parser read out of the body, marking the body Mutated so
 // repackage can skip re-marshaling when nothing changed.
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	if reqCtx.TargetModelName == "" {
+		reqCtx.TargetModelName = reqCtx.IncomingModelName
+	}
 	logger := log.FromContext(ctx)
 	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
 	if !ok {
@@ -364,11 +388,9 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
 		return nil
 	}
-	if reqCtx.TargetModelName == "" {
-		reqCtx.TargetModelName = reqCtx.IncomingModelName
-	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
-	if reqCtx.TargetModelName == "" {
+	// Native generate APIs allow requests without a model.
+	if reqCtx.TargetModelName == "" && inferenceRequestBody.Generate == nil {
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
 	if reqCtx.TargetModelName == inferenceRequestBody.Model {
@@ -400,7 +422,10 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
 		return nil
 	}
-	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod}, payload, reqCtx.Priority)
+	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{
+		TargetEndpoint: reqCtx.TargetPod,
+		RequestPath:    fwkrequest.GetRequestPath(reqCtx.Request.Headers),
+	}, payload, reqCtx.Priority)
 	if err != nil {
 		return err
 	}
@@ -568,7 +593,7 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		result[i] = fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		result[i] = fwksched.NewEndpointFromSnapshot(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
 	}
 
 	return result
@@ -817,6 +842,19 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 		}
 	}
 	return nil
+}
+
+// admissionReason returns the reason for an admission rejection: the dropped-reason header
+// when the rejecting component set one, otherwise the EPP error code.
+func admissionReason(err error) string {
+	var e errcommon.Error
+	if !errors.As(err, &e) {
+		return errcommon.Internal
+	}
+	if reason := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; reason != "" {
+		return reason
+	}
+	return e.Code
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {

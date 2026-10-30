@@ -20,6 +20,7 @@ package latency
 import (
 	"context"
 	"testing"
+	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -35,6 +36,7 @@ func makeLatencyScorerEndpoint(name string, kvCache float64, queueSize, runningR
 			KVCacheUsagePercent: kvCache,
 			WaitingQueueSize:    queueSize,
 			RunningRequestsSize: runningReqs,
+			UpdateTime:          time.Now(),
 		},
 		nil,
 	)
@@ -208,6 +210,59 @@ func TestScoreCompositeFallback(t *testing.T) {
 	t.Logf("pod1 score=%f, pod2 score=%f", s1, s2)
 }
 
+func TestScoreCompositeFallbackOmitsUnwrittenMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		metrics *fwkdl.Metrics
+	}{
+		{name: "never-scraped", metrics: &fwkdl.Metrics{}},
+		{name: "unwritten-queue", metrics: &fwkdl.Metrics{WaitingQueueSize: 100}},
+		{name: "nil-metrics"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scorer := NewPlugin(noExploreConfig())
+			busy := makeLatencyScorerEndpoint("busy", 0.5, 10, 5)
+			idle := makeLatencyScorerEndpoint("idle", 0, 0, 0)
+			unwritten := fwksched.NewEndpoint(
+				&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "unwritten"}},
+				tc.metrics,
+				nil,
+			)
+
+			scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{busy, idle, unwritten})
+			if _, ok := scores[unwritten]; ok {
+				t.Errorf("endpoint with unwritten metrics should be unscored, got %f", scores[unwritten])
+			}
+			if len(scores) != 2 {
+				t.Errorf("expected two scored endpoints, got %d", len(scores))
+			}
+			if scores[busy] != 0.17 || scores[idle] != 0.67 {
+				t.Errorf("written metrics should keep their scores: busy=%f, idle=%f", scores[busy], scores[idle])
+			}
+
+			scores = scorer.Score(context.Background(), nil, []fwksched.Endpoint{unwritten})
+			if len(scores) != 0 {
+				t.Errorf("expected no scores when all metrics are unwritten, got %v", scores)
+			}
+		})
+	}
+}
+
+func TestScorePredictionWithoutMetrics(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig())
+	ep := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod"}},
+		nil,
+		nil,
+	)
+	setLatencyPrediction(ep, true, true, 100, 20, 50, 10)
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{ep})
+	if scores[ep] <= 0 {
+		t.Errorf("endpoint with a prediction should be scored without metrics, got %f", scores[ep])
+	}
+}
+
 func TestScoreConstantHeadroomPreservesDisabledWeights(t *testing.T) {
 	for _, strategy := range []HeadroomSelectionStrategy{StrategyLeast, StrategyMost} {
 		t.Run(string(strategy), func(t *testing.T) {
@@ -277,3 +332,35 @@ func TestScoreConstantHeadroomPreservesDisabledWeights(t *testing.T) {
 
 // Note: EpsilonExploreNeg (tier selection) is now handled by the
 // slo-headroom-tier-filter, not the scorer. See filter tests.
+
+func TestScoreHeadroomWithinUnitInterval(t *testing.T) {
+	for _, strategy := range []HeadroomSelectionStrategy{StrategyLeast, StrategyMost} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := DefaultConfig
+			cfg.TTFTWeight, cfg.TPOTWeight = 1, 0
+			cfg.HeadroomSelectionStrategy = strategy
+			scorer := NewPlugin(cfg)
+
+			// The best endpoint and one 0.005 behind it on the normalized headroom.
+			ttft := []float64{10, 10.5, 110}
+			if strategy == StrategyMost {
+				ttft = []float64{110, 109.5, 10}
+			}
+			endpoints := make([]fwksched.Endpoint, len(ttft))
+			for i, headroom := range ttft {
+				endpoints[i] = makeLatencyScorerEndpoint(string(rune('a'+i)), 0.5, 0, 1)
+				setLatencyPrediction(endpoints[i], true, true, headroom, 5, 0, 0)
+			}
+			scores := scorer.Score(context.Background(), nil, endpoints)
+
+			for _, ep := range endpoints {
+				if s := scores[ep]; s < 0 || s > 1 {
+					t.Errorf("score of %s = %f, want it in [0, 1]", ep.GetMetadata().ID.Name, s)
+				}
+			}
+			if best, next := scores[endpoints[0]], scores[endpoints[1]]; best <= next {
+				t.Errorf("best endpoint should outscore the runner-up: best=%f, runner-up=%f", best, next)
+			}
+		})
+	}
+}

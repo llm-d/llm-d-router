@@ -723,6 +723,7 @@ the sidecar's outbound connections to the encode, prefill and decode stages.
 | `--enable-prefiller-sampling` | `ENABLE_PREFILLER_SAMPLING` | `true` / `false` | `false` | If true, the prefill instance is selected randomly from the provided prefill host values. |
 | `--enable-ssrf-protection` | — | `true` / `false` | `false` | Enable SSRF protection using InferencePool allowlisting. See [SSRF Protection](#ssrf-protection). |
 | `--tracing` | — | `true` / `false` | `false` | Enable OpenTelemetry tracing. See [Sidecar Tracing](#sidecar-tracing). |
+| `--enable-tool-calling-telemetry` | — | `true` / `false` | `false` | Observe tool-calling request fields. Traces and the metrics listener are configured separately. |
 | `--metrics-port` | — | port | `0` (disabled) | Serve Prometheus `/metrics` on this port. See [P/D sidecar metrics](metrics.md#pd-sidecar). |
 
 ### Sidecar Tracing
@@ -731,6 +732,16 @@ With `--tracing`, the sidecar exports spans under the service name `llm-d-disagg
 continues the W3C trace context of the incoming request and propagates it on its outbound requests
 to the model servers, so EPP, sidecar, and model server spans share one trace when the model server
 also exports traces.
+
+The sidecar's spans carry the same `llm_d.epp.fairness.id` and `llm_d.epp.fairness.source` as the
+EPP request spans. On sampled traces the EPP sends the pair in `x-llm-d-epp-fairness-id` and
+`x-llm-d-epp-fairness-source`, replacing any client copy; otherwise it removes client copies. The
+sidecar reads both before opening its server span and removes them before forwarding, so the model
+server never sees them. A missing, partial, or unrecognised pair is recorded as `default-flow` with
+source `default`. The headers record where the EPP resolved the identity, not who sent the request:
+keep the sidecar reachable only through the EPP, since a caller that bypasses it can set them. When
+the EPP routes straight to a model server without a sidecar, the model server receives the pair on
+sampled traces.
 
 The exporter is configured with the standard OpenTelemetry environment variables:
 
@@ -792,6 +803,8 @@ Enabling the flag requires:
 | Connector | Flag | Env var | Default | Description |
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
+| `ec-mooncake` | `--ec-mooncake-port` | `EC_MOONCAKE_PORT` | `14579` | Port the EC consumer (the prefiller, or the local decoder when the request has no prefiller) listens on for Mooncake EC control messages. Corresponds to `ec_port` in vLLM's `ECTransferConfig`. `--data-parallel-size > 1` is rejected. |
+| `ec-mooncake` | `--ec-mooncake-pod-ip` | `POD_IP` | — | Address of the local decoder as encoder pods reach it, named to the encoders as the EC consumer when a request has no prefiller. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |

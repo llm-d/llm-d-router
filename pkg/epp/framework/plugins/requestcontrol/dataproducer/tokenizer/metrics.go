@@ -24,11 +24,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 	compbasemetrics "k8s.io/component-base/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -134,14 +136,19 @@ func (r *vllmHTTPRenderer) observeRender(ctx context.Context, path string, timeo
 		return
 	}
 	result, reason := classifyRenderError(err)
+	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(renderToolAttributesCtxKey{}) != nil {
+		span.SetAttributes(semconv.LLMDEPPTokenProducerResult(result))
+	}
 	renderDurationSeconds.WithLabelValues(PluginType, r.pluginName, BackendVLLM, result).Observe(elapsed.Seconds())
 	if reason == "" {
 		return
 	}
 	renderFailuresTotal.WithLabelValues(PluginType, r.pluginName, BackendVLLM, reason).Inc()
+	r.failuresSinceLog.Add(1)
 	r.failureLog.Do(func() {
 		log.FromContext(ctx).Error(err, "token-producer render call failed",
 			"backend", BackendVLLM, "path", path, "reason", reason,
-			"elapsed", elapsed.String(), "timeout", timeout.String())
+			"elapsed", elapsed.String(), "timeout", timeout.String(),
+			"suppressed", r.failuresSinceLog.Swap(0)-1)
 	})
 }

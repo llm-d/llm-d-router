@@ -94,8 +94,6 @@ func newZMQSubscriber(
 // parseEventFrame validates and extracts a live or replayed event frame.
 // The returned sequence number is vLLM's per-pod event counter, which never
 // approaches int64 overflow.
-//
-//nolint:gocritic // unnamedResult conflicts with nonamedreturns
 func parseEventFrame(frames [][]byte) (string, uint64, []byte, bool) {
 	if len(frames) != 3 || len(frames[1]) < 8 {
 		return "", 0, nil, false
@@ -437,8 +435,6 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 // fetchSnapshot requests the snapshot. The reply frames are an 8-byte signed
 // sequence cut, the 16-byte publisher identity and the event batches; a cut
 // below -1 means the publisher cannot serve one.
-//
-//nolint:gocritic // unnamedResult conflicts with nonamedreturns
 func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, []byte, [][]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
 	defer cancel()

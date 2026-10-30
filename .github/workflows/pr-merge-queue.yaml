@@ -69,6 +69,9 @@ jobs:
         (contains(github.event.comment.body, '/lgtm') || contains(github.event.comment.body, '/approve'))
       )
     runs-on: ubuntu-latest
+    # The secrets context is not available in a step if; evaluate it here.
+    env:
+      HAS_APP: ${{ secrets.RELEASE_NOTES_APP_ID != '' && secrets.RELEASE_NOTES_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Checkout workflow scripts
         uses: actions/checkout@v7
@@ -86,7 +89,7 @@ jobs:
       # do not trigger workflows.
       - name: Generate GitHub App token
         id: app-token
-        if: ${{ secrets.RELEASE_NOTES_APP_ID != '' && secrets.RELEASE_NOTES_APP_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_APP == 'true' }}
         continue-on-error: true
         uses: actions/create-github-app-token@v3
         with:

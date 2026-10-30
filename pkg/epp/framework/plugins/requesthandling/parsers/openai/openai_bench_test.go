@@ -170,6 +170,132 @@ func benchChatBody(b *testing.B, messages []any, extra map[string]any) []byte {
 	return data
 }
 
+// benchResponsesInput converts chat messages into Responses API input items.
+func benchResponsesInput(messages []any) []any {
+	items := make([]any, 0, len(messages))
+	for _, m := range messages {
+		msg := m.(map[string]any)
+		switch {
+		case msg["tool_calls"] != nil:
+			call := msg["tool_calls"].([]any)[0].(map[string]any)
+			fn := call["function"].(map[string]any)
+			items = append(items, map[string]any{
+				"type": "function_call", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"],
+			})
+		case msg["role"] == "tool":
+			items = append(items, map[string]any{
+				"type": "function_call_output", "call_id": msg["tool_call_id"], "output": msg["content"],
+			})
+		default:
+			kind := "input_text"
+			if msg["role"] == "assistant" {
+				kind = "output_text"
+			}
+			items = append(items, map[string]any{
+				"type": "message", "role": msg["role"],
+				"content": []any{map[string]any{"type": kind, "text": msg["content"]}},
+			})
+		}
+	}
+	return items
+}
+
+// benchResponsesTools converts benchTools into the Responses API's flat function tool shape.
+func benchResponsesTools(n int) []any {
+	tools := make([]any, n)
+	for i, tool := range benchTools(n) {
+		fn := tool.(map[string]any)["function"].(map[string]any)
+		tools[i] = map[string]any{"type": "function", "name": fn["name"], "description": fn["description"], "parameters": fn["parameters"]}
+	}
+	return tools
+}
+
+func benchResponsesBody(b *testing.B, input []any, extra map[string]any) []byte {
+	b.Helper()
+	body := map[string]any{
+		"model":             "meta-llama/Llama-3.1-8B-Instruct",
+		"input":             input,
+		"stream":            true,
+		"max_output_tokens": 1024,
+		"temperature":       0.7,
+	}
+	maps.Copy(body, extra)
+	data, err := json.Marshal(body)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return data
+}
+
+// benchWireBytes returns the bytes the tokenizer renders and the director forwards.
+func benchWireBytes(result *fwkrh.ParseResult) ([]byte, error) {
+	switch payload := result.Body.WirePayload().(type) {
+	case fwkrh.RawPayload:
+		return payload, nil
+	case fwkrh.Marshaler:
+		return payload.Marshal()
+	default:
+		return nil, fmt.Errorf("unexpected wire payload %T", payload)
+	}
+}
+
+var benchmarkWireBytes []byte
+
+// BenchmarkOpenAIParser_Responses measures /v1/responses parsing on the text and
+// agentic workloads of BenchmarkOpenAIParser_ChatCompletions, converted to input
+// items. Wire adds producing the bytes the tokenizer renders and the director forwards.
+func BenchmarkOpenAIParser_Responses(b *testing.B) {
+	workloads := []struct {
+		name string
+		body []byte
+	}{
+		{name: "Text/ISL8K", body: benchResponsesBody(b, benchResponsesInput(benchConversation(8*1024, 1)), nil)},
+		{name: "Text/ISL32K", body: benchResponsesBody(b, benchResponsesInput(benchConversation(32*1024, 1)), nil)},
+		{name: "Text/ISL32K-32turns", body: benchResponsesBody(b, benchResponsesInput(benchConversation(32*1024, 32)), nil)},
+		{name: "Agentic/ISL32K-20tools-8calls", body: benchResponsesBody(b, benchResponsesInput(benchAgenticConversation(32*1024, 8)),
+			map[string]any{"tools": benchResponsesTools(20)})},
+	}
+
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/responses"}
+	ctx := context.Background()
+	stages := []struct {
+		name string
+		run  func(body []byte) error
+	}{
+		{name: "ParseRequest", run: func(body []byte) error {
+			result, err := parser.ParseRequest(ctx, body, headers)
+			benchmarkChatParseResult = result
+			return err
+		}},
+		{name: "Wire", run: func(body []byte) error {
+			result, err := parser.ParseRequest(ctx, body, headers)
+			if err != nil {
+				return err
+			}
+			benchmarkWireBytes, err = benchWireBytes(result)
+			return err
+		}},
+	}
+
+	for _, wl := range workloads {
+		b.Run(wl.name, func(b *testing.B) {
+			for _, stage := range stages {
+				b.Run(stage.name, func(b *testing.B) {
+					b.ReportAllocs()
+					b.SetBytes(int64(len(wl.body)))
+					for b.Loop() {
+						if err := stage.run(wl.body); err != nil {
+							b.Fatal(err)
+						}
+					}
+					b.ReportMetric(float64(len(wl.body))/1024, "body-KiB")
+				})
+			}
+		})
+	}
+}
+
 // BenchmarkOpenAIParser_ChatCompletions measures /v1/chat/completions parsing across
 // text-only, multi-turn, agentic, and multimodal workloads. Each workload reports the
 // full ParseRequest and its two decode stages: the typed body and the routing envelope.

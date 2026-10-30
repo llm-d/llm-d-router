@@ -392,8 +392,9 @@ func commonTestCases(prio func(int) int) []testCase {
 			name:     "no backend pods available",
 			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 			pods:     nil,
-			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-				"no pods available in datastore"),
+			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+				"no pods available in datastore",
+				errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
 			name: "request missing model field",
@@ -437,7 +438,7 @@ func metricReqTotal(model, target string, priority int) string {
     # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
     # TYPE llm_d_epp_request_total counter
     llm_d_epp_request_total{%s} 1
-    `, labelsToString([]label{{"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    `, labelsToString([]label{{"api_surface", reqcommon.APISurfaceUnknown.String()}, {"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {

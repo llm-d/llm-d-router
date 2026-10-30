@@ -49,13 +49,16 @@ Publisher settings are configured under `dataLayer.crossReplica`:
 | Setting | Default | Purpose |
 |---|---|---|
 | `syncInterval` | `200ms` | Interval between endpoint publication ticks. |
-| `publishTimeout` | `1s` | Context timeout shared by all contributors for one endpoint's publication or deletion. Must be positive. |
+| `publishTimeout` | `1s` | Context timeout for one endpoint publish (shared by its concurrent contributor writes), or one batch chunk per contributor when the syncer supports batching. Also bounds one endpoint deletion. Must be positive. |
 
-Each publication cycle visits endpoints sequentially. Contributors for one
-endpoint publish concurrently, sharing a deadline that starts before acquiring
-the publisher's read locks. A slow cycle can exceed `syncInterval`. Choose
-`stateTTL` longer than the observed interval between successful refreshes of an
-endpoint, with margin for Redis latency and variation in cycle duration.
+The Redis syncer publishes endpoints in batches: the publisher calls the
+syncer once per contributor per cycle with the live endpoint set, without
+holding its endpoint lock, and each chunk runs under one `publishTimeout`. Syncers without batch
+support visit endpoints sequentially, with concurrent contributor writes for
+each endpoint. Endpoints removed while a batch runs are deleted again after
+it finishes. A slow cycle can exceed `syncInterval`. Choose `stateTTL` longer
+than the observed interval between successful refreshes of an endpoint, with
+margin for Redis latency and variation in cycle duration.
 
 Deletion waits for the publisher's write lock, then starts one timeout shared by
 all contributor deletions. An earlier caller deadline takes precedence for both

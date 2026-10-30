@@ -164,6 +164,22 @@ func TestContent_UnmarshalJSON(t *testing.T) {
 			}},
 		},
 		{
+			name:  "untyped media parts take their type from the media field",
+			input: `[{"image_url":"https://example.com/a.jpg"},{"image_url":{"url":"https://example.com/b.jpg"}},{"audio_url":"https://example.com/c.wav"},{"video_url":{"url":"https://example.com/d.mp4"}},{"input_audio":{"data":"AAAA","format":"wav"}}]`,
+			want: Content{Structured: []ContentBlock{
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/a.jpg"}},
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/b.jpg"}},
+				{Type: "audio_url", AudioURL: AudioURLBlock{URL: "https://example.com/c.wav"}},
+				{Type: "video_url", VideoURL: VideoBlock{URL: "https://example.com/d.mp4"}},
+				{Type: "input_audio", InputAudio: AudioBlock{Data: "AAAA", Format: "wav"}},
+			}},
+		},
+		{
+			name:    "content block with mistyped media URL is rejected",
+			input:   `[{"image_url":1}]`,
+			wantErr: true,
+		},
+		{
 			name:  "empty content blocks",
 			input: `[]`,
 			want:  Content{Structured: []ContentBlock{}},
@@ -251,7 +267,7 @@ func TestAnthropicContent_UnmarshalJSON(t *testing.T) {
 				{
 					Type:    "search_result",
 					Source:  json.RawMessage(`"https://example.com/notes"`),
-					Content: AnthropicContent{Structured: []AnthropicContentBlock{{Type: "text", Text: "code word"}}},
+					Content: json.RawMessage(`[{"type":"text","text":"code word"}]`),
 				},
 				{Type: "text", Text: "reply"},
 			}},
@@ -264,11 +280,28 @@ func TestAnthropicContent_UnmarshalJSON(t *testing.T) {
 			want: AnthropicContent{Structured: []AnthropicContentBlock{{
 				Type:      "tool_result",
 				ToolUseID: "toolu_01",
-				Content: AnthropicContent{Structured: []AnthropicContentBlock{{
-					Type:    "search_result",
-					Source:  json.RawMessage(`"https://example.com/report"`),
-					Content: AnthropicContent{Structured: []AnthropicContentBlock{{Type: "text", Text: "sunny"}}},
-				}}},
+				Content: json.RawMessage(`[{"type":"search_result","source":"https://example.com/report","title":"Report",` +
+					`"content":[{"type":"text","text":"sunny"}]}]`),
+			}}},
+		},
+		{
+			name: "web_search_tool_result with error object content",
+			input: `[{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01",` +
+				`"content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:      "web_search_tool_result",
+				ToolUseID: "srvtoolu_01",
+				Content:   json.RawMessage(`{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}`),
+			}}},
+		},
+		{
+			name: "bash_code_execution_tool_result with object content",
+			input: `[{"type":"bash_code_execution_tool_result","tool_use_id":"srvtoolu_02",` +
+				`"content":{"type":"bash_code_execution_result","stdout":"1\n","stderr":"","return_code":0,"content":[]}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:      "bash_code_execution_tool_result",
+				ToolUseID: "srvtoolu_02",
+				Content:   json.RawMessage(`{"type":"bash_code_execution_result","stdout":"1\n","stderr":"","return_code":0,"content":[]}`),
 			}}},
 		},
 		{
@@ -292,15 +325,15 @@ func TestAnthropicContent_UnmarshalJSON(t *testing.T) {
 	}
 }
 
-// A malformed block inside an array must surface its own decode error, once,
-// however deeply the content is nested.
+// A malformed block inside an array must surface its own decode error, once.
+// A tool_result keeps its content raw, so a malformed block below it decodes
+// and is reported as empty content by ToolResultContent instead.
 func TestAnthropicContent_UnmarshalJSONMalformedBlock(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 	}{
 		{name: "top level", input: `[{"type":"text","text":5}]`},
-		{name: "inside tool_result", input: `[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":5}]}]`},
 	}
 
 	for _, tt := range tests {
@@ -314,6 +347,14 @@ func TestAnthropicContent_UnmarshalJSONMalformedBlock(t *testing.T) {
 			assert.NotContains(t, err.Error(), "must be a string or an array")
 		})
 	}
+
+	t.Run("inside tool_result", func(t *testing.T) {
+		var c AnthropicContent
+		require.NoError(t, json.Unmarshal([]byte(`[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":5}]}]`), &c))
+		require.Len(t, c.Structured, 1)
+		assert.Equal(t, `[{"type":"text","text":5}]`, string(c.Structured[0].Content))
+		assert.Equal(t, AnthropicContent{}, c.Structured[0].ToolResultContent())
+	})
 }
 
 func TestAnthropicContent_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
@@ -394,6 +435,47 @@ func TestAnthropicContentBlock_ImageSource(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, tt.block.ImageSource())
+		})
+	}
+}
+
+func TestAnthropicContentBlock_ToolResultContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		block AnthropicContentBlock
+		want  AnthropicContent
+	}{
+		{
+			name:  "tool_result with string content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`"Sunny, 22C"`)},
+			want:  AnthropicContent{Raw: "Sunny, 22C"},
+		},
+		{
+			name:  "tool_result with block array content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`[{"type":"text","text":"sunny"}]`)},
+			want:  AnthropicContent{Structured: []AnthropicContentBlock{{Type: "text", Text: "sunny"}}},
+		},
+		{
+			name:  "tool_result without content",
+			block: AnthropicContentBlock{Type: "tool_result"},
+		},
+		{
+			name:  "tool_result with null content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`null`)},
+		},
+		{
+			name:  "tool_result with object content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`{"type":"text","text":"sunny"}`)},
+		},
+		{
+			name:  "web_search_tool_result is not a tool_result",
+			block: AnthropicContentBlock{Type: "web_search_tool_result", Content: json.RawMessage(`[{"type":"web_search_result","url":"https://example.com"}]`)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.block.ToolResultContent())
 		})
 	}
 }

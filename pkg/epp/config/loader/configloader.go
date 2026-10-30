@@ -333,7 +333,7 @@ func buildSchedulerConfig(
 	profiles := make(map[string]fwksched.SchedulerProfile)
 
 	for _, cfgProfile := range configProfiles {
-		fwProfile := scheduling.NewSchedulerProfile()
+		fwProfile := scheduling.NewSchedulerProfile().WithName(cfgProfile.Name)
 
 		for _, pluginRef := range cfgProfile.Plugins {
 			plugin := handle.Plugin(pluginRef.PluginRef)

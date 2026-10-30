@@ -45,7 +45,7 @@ const defaultHeaderName = reqcommon.PeerTopologyHeaderKey
 
 type parameters struct {
 	// HeaderName is the response header the encoded topology is written to.
-	// Defaults to "x-peer-topology".
+	// Defaults to "x-llm-d-peer-topology".
 	HeaderName string `json:"headerName,omitempty"`
 	// ProfileName selects the scheduling profile whose selected endpoint's
 	// topology is stamped. Empty selects the primary profile's endpoint.

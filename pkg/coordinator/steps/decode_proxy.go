@@ -99,10 +99,13 @@ func newDecodeProxyRequest(ctx context.Context, logger logr.Logger, step string,
 // round trip failed before headers). TransportErr carries a round-trip failure
 // (connection refused, timeout, TCP reset) after the ErrorHandler has already
 // answered 502. Both fields let the caller emit error metrics without another
-// write to the client, which is already committed by the proxy.
+// write to the client, which is already committed by the proxy. Cancelled
+// carries the request context's error when the round trip failed because the
+// client's request ended.
 type decodeOutcome struct {
 	Status       int
 	TransportErr error
+	Cancelled    error
 }
 
 // newDecodeProxy builds the streaming reverse proxy for a decode-phase request
@@ -110,7 +113,8 @@ type decodeOutcome struct {
 // when non-nil, inspects each upstream response (the conditional cache probe
 // uses it to detect a 412) and runs after the outcome captures the status.
 // Transport errors are logged and answered 502, except errCacheMiss, which is
-// swallowed so the miss falls through.
+// swallowed so the miss falls through. A round trip ended by the client's
+// request context is recorded on the outcome and answered with nothing.
 //
 // A failure after the upstream response has started streaming cannot become a
 // 502: the 200 status and partial body are already on the wire, so the proxy
@@ -123,8 +127,13 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 		Director:      func(_ *http.Request) {}, //nolint:staticcheck // SA1019: Rewrite does not append X-Forwarded-For, which Director does.
 		FlushInterval: -1,
 		Transport:     transport,
+		// A decode profile's response headers are otherwise copied verbatim to
+		// the client; strip coordinator-internal headers (e.g. the peer-topology
+		// header, meaningful only between the prefill and decode legs) so a
+		// plugin configured on the decode profile cannot leak them to the caller.
 		ModifyResponse: func(resp *http.Response) error {
 			out.Status = resp.StatusCode
+			pipeline.StripInternalHeaders(resp.Header)
 			if modifyResponse != nil {
 				return modifyResponse(resp)
 			}
@@ -143,12 +152,21 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 			// errors.Is(err, context.DeadlineExceeded) by stdlib design and
 			// would otherwise misclassify a hung backend as a client cancellation.
 			if ctxErr := req.Context().Err(); ctxErr != nil {
-				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", ctxErr)
-			} else {
-				out.TransportErr = proxyErr
-				logger.Error(proxyErr, "proxy error")
+				out.Cancelled = ctxErr
+				logger.V(logutil.VERBOSE).Info("decode proxy: client cancelled", "error", proxyErr)
+				return
 			}
-			w.WriteHeader(http.StatusBadGateway)
+			out.TransportErr = proxyErr
+			logger.Error(proxyErr, "proxy error")
+			switch apiType := reqcommon.DetectAPIType(req.URL.Path); apiType {
+			case reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses:
+				msg := fmt.Sprintf("internal error (request_id: %s)", req.Header.Get(reqcommon.RequestIDHeaderKey))
+				if err := reqcommon.WriteAPIError(w, apiType, http.StatusBadGateway, msg); err != nil {
+					logger.Error(err, "failed to write error response")
+				}
+			default:
+				w.WriteHeader(http.StatusBadGateway)
+			}
 		},
 	}
 	return proxy, out
@@ -158,15 +176,36 @@ func newDecodeProxy(logger logr.Logger, transport http.RoundTripper, modifyRespo
 // pass the raw transport. Passing an already instrumented one counts the call
 // twice in upstream_request_total.
 func serveDecode(logger logr.Logger, transport http.RoundTripper, w http.ResponseWriter, proxyReq *http.Request,
-	upstream string, modifyResponse func(*http.Response) error) *decodeOutcome {
-	proxy, out := newDecodeProxy(logger, instrumentedTransport(transport, upstream), modifyResponse)
+	upstream string, modifyResponse func(*http.Response) error) (out *decodeOutcome) {
+	var proxy *httputil.ReverseProxy
+	proxy, out = newDecodeProxy(logger, instrumentedTransport(transport, upstream), modifyResponse)
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		// The proxy aborts with http.ErrAbortHandler when the body copy fails.
+		// After the client's request context ended that is the client departing:
+		// out already holds the worker's answer, so return it instead of
+		// propagating the abort. With the client present the abort propagates and
+		// the connection closes on the truncated body.
+		if r != http.ErrAbortHandler || proxyReq.Context().Err() == nil {
+			panic(r)
+		}
+		logger.V(logutil.VERBOSE).Info("decode proxy: client left mid-stream", "status", out.Status)
+	}()
 	proxy.ServeHTTP(w, proxyReq)
 	return out
 }
 
 // streamedError converts a decode outcome to the error its step returns. A
-// TransportErr takes precedence over a recorded Status.
+// Cancelled round trip returns the context error, so the caller ends the
+// request as a cancellation; otherwise a TransportErr takes precedence over a
+// recorded Status.
 func (o *decodeOutcome) streamedError(step string) error {
+	if o.Cancelled != nil {
+		return fmt.Errorf("%s: %w", step, o.Cancelled)
+	}
 	if o.TransportErr != nil {
 		return &pipeline.UpstreamStreamedError{Step: step, Cause: o.TransportErr}
 	}

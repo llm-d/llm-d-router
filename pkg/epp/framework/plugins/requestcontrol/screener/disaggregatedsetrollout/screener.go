@@ -78,14 +78,23 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 	// request in P/D must use the revision stamped by prefill; it must not depend
 	// on the two EPPs sharing a CrossReplicaSyncer.
 	if chosenRevision == "" {
-		chosenRevision = pickWeightedRevision(shares, rand.Float64()) //#nosec G404 -- traffic split across revisions, not security-sensitive
+		draw := rand.Float64() //#nosec G404 -- traffic split across revisions, not security-sensitive
+		drawn := pickWeightedRevision(shares, draw)
+		overflowed := c.overflowRevision(ctx, request, endpoints, shares, drawn, draw)
+		chosenRevision = overflowed
+		decided := false
 		if decisionID := revisionDecisionID(request); distribution.needsCoordination && decisionID != "" && chosenRevision != "" {
 			var err error
-			chosenRevision, err = c.getOrSetRevision(ctx, decisionID, chosenRevision)
+			chosenRevision, decided, err = c.getOrSetRevision(ctx, decisionID, chosenRevision)
 			if err != nil {
 				log.FromContext(ctx).Error(err, "failed to coordinate rollout revision")
 				return nil
 			}
+		}
+		// Count an overflow once per decision: a later call under the same
+		// decision ID gets the stored revision and is not a new overflow.
+		if overflowed != drawn && !decided {
+			recordRevisionOverflow(c.typedName.Name, drawn, overflowed)
 		}
 	}
 	result := c.filterRevisions(endpoints, allowedRevisions, chosenRevision)
@@ -113,29 +122,31 @@ func revisionDecisionID(request *fwksched.InferenceRequest) string {
 	return request.Headers[reqcommon.RequestIDHeaderKey]
 }
 
-func (c *Screener) getOrSetRevision(ctx context.Context, id, candidate string) (string, error) {
+// getOrSetRevision returns the revision stored for id, storing candidate when
+// none is, and whether a revision was already stored.
+func (c *Screener) getOrSetRevision(ctx context.Context, id, candidate string) (string, bool, error) {
 	syncer := c.crossReplicaSyncer()
 	if syncer == nil {
 		// Parallel encode requests can share a decision ID and reach this EPP
 		// without an earlier x-llm-d-disagg-revision response to forward. Local state
 		// makes them reuse the first revision selected for that decision ID.
-		actual, _ := c.localRevisionDecisions.ReadOrWrite(id, localRevisionDecisionStateKey, revisionDecision(candidate))
+		actual, existed := c.localRevisionDecisions.ReadOrWrite(id, localRevisionDecisionStateKey, revisionDecision(candidate))
 		revision, ok := actual.(revisionDecision)
 		if !ok || revision == "" {
-			return "", errInvalidRevisionDecision
+			return "", false, errInvalidRevisionDecision
 		}
-		return string(revision), nil
+		return string(revision), existed, nil
 	}
 
-	actual, _, err := syncer.GetOrSet(ctx, c.revisionDecisionStateKey, id, candidate)
+	actual, existed, err := syncer.GetOrSet(ctx, c.revisionDecisionStateKey, id, candidate)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	revision, ok := actual.(string)
 	if !ok || revision == "" {
-		return "", errInvalidRevisionDecision
+		return "", false, errInvalidRevisionDecision
 	}
-	return revision, nil
+	return revision, existed, nil
 }
 
 func (c *Screener) crossReplicaSyncer() fwkdl.CrossReplicaSyncer {

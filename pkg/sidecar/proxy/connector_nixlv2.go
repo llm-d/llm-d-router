@@ -33,11 +33,13 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
@@ -62,18 +64,21 @@ func newNIXLV2RequestID() (string, error) {
 }
 
 func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running NIXL protocol V2", "url", prefillPodHostPort, "api", apiType.String())
 
 	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
 	}
+	// Telemetry failure must not change routing or reject an inference request.
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
 	// Generate unique request UUID
 	uuidStr, err := s.nixlRequestIDFn()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -83,15 +88,21 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if s.config.MoRIIOParallelDispatch && s.config.MoRIIOWriteMode {
 		// MoRI-IO requires transfer_id to carry the "tx" prefix for message routing.
 		transferID := "tx" + uuidStr
+		// Reuse the client snapshot when the parallel helper creates its request state.
+		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
 		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, kvCacheSource, apiType)
 		return
 	}
+
+	defer toolFields.report(r.Context())
 
 	// Prefill Stage
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
-	ctx, prefillSpan := tracer.Start(ctx, "prefill",
+	// prefill and decode are sequential stages of forward_request, so both
+	// spans start from the request context and come out as siblings.
+	pCtx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
@@ -102,7 +113,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillStart := time.Now()
 
 	// 1. Prepare prefill request
-	preq := r.Clone(ctx)
+	preq := r.Clone(pCtx)
 
 	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -165,14 +176,14 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(logger, prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
 	pbody, err := json.Marshal(prefillRequest)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -182,30 +193,35 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 
 	// 2. Forward request to prefiller
-	s.logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
+	logger.V(logging.DEBUG).Info("sending prefill request", "to", prefillPodHostPort)
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("Prefill request", logging.HTTPBodyKey, string(pbody))
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("Prefill request", logBodyBytesKey, len(pbody))
 	}
 
 	// Retry on transient 5xx (502/503/504): these failures (e.g. connection
 	// reset → 502) are common when the prefill pod's accept queue overflows
 	// under load. Retrying the same host avoids expensive local prefill on
 	// decode. Non-transient errors (500/501) fail immediately.
+	// Every attempt uses the same serialized body, so compare it once.
+	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
+	var prefillErr error
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
-		prefillHandler.ServeHTTP(pw, preq)
+		// A response cut off mid-body keeps its status, and the status decides
+		// whether it is retried. A cut-off 2xx is not, because prefill already ran.
+		prefillErr = servePrefill(prefillHandler, pw, preq)
 
 		if !isHTTPError(pw.statusCode) {
 			break
@@ -217,7 +233,7 @@ retryLoop:
 			break
 		}
 
-		s.logger.Info("retrying prefill request",
+		logger.Info("retrying prefill request",
 			"attempt", attempt+1,
 			"target", prefillPodHostPort,
 			"request_id", uuidStr,
@@ -237,11 +253,19 @@ retryLoop:
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
-	if isHTTPError(pw.statusCode) {
+	// The reverse proxy also aborts the prefill body copy when the client
+	// disconnects, which is not a prefill failure.
+	if prefillErr != nil && preq.Context().Err() != nil {
+		logger.Info("client disconnected during prefill", "request_id", uuidStr)
+		prefillSpan.End()
+		return
+	}
+
+	if prefillErr == nil && isHTTPError(pw.statusCode) {
 		metrics.RecordError(metrics.StagePrefill)
-		s.logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
+		logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
-			logging.HTTPBodyKey, pw.buffer.String())
+			logBodyBytesKey, pw.buffer.Len())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
 
@@ -252,42 +276,67 @@ retryLoop:
 		}
 		w.WriteHeader(pw.statusCode)
 		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client")
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return
+	}
+
+	// Process response - extract p/d fields
+	var prefillerResponse map[string]any
+	if prefillErr == nil {
+		if err := json.Unmarshal(pw.bodyBytes(), &prefillerResponse); err != nil {
+			prefillErr = fmt.Errorf("invalid prefill response: %w", err)
+		}
+	}
+	if prefillErr != nil {
+		metrics.RecordError(metrics.StagePrefill)
+		logger.Error(jsonErrorForLog(prefillErr), "prefill request failed",
+			"request_id", uuidStr,
+			"status", pw.statusCode,
+			logBodyBytesKey, pw.buffer.Len())
+		prefillSpan.SetStatus(codes.Error, "prefill request failed")
+		prefillSpan.End()
+		if err := errorBadGateway(prefillErr, w); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 	prefillSpan.End()
 
-	// Process response - extract p/d fields
-	var prefillerResponse map[string]any
-	if err := json.Unmarshal(pw.bodyBytes(), &prefillerResponse); err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
-		}
-		return
-	}
-
 	// 3. Verify response
 
 	pKVTransferParams, ok := prefillerResponse[reqcommon.FieldKVTransferParams]
 	if !ok {
-		s.logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
+		logger.Info("warning: missing 'kv_transfer_params' field in prefiller response")
 	}
-	pCachedTokens, hasPCachedTokens := extractCachedTokens(prefillerResponse)
-	if !hasPCachedTokens {
-		// vLLM returns prompt_tokens_details as null when cached_tokens is 0,
-		// so treat a missing prefiller cached_tokens value as zero.
-		pCachedTokens = 0
-	}
+	// The prefill count corrects the one decode reports only when prefill
+	// measured the prompt cache and decode reuses the blocks it transferred.
+	// Without transfer params nothing moved, so decode recomputes the prompt and
+	// the count it reports is its own measurement. A usage block whose details
+	// are absent or null still measured the cache: vLLM reports zero hits that
+	// way.
+	pUsage := prefillerResponse[reqcommon.FieldUsage]
+	pKVParams, _ := pKVTransferParams.(map[string]any)
+	rewriteCachedTokens := pUsage != nil && len(pKVParams) > 0
+	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
 
-	s.logger.V(logging.TRACE).Info("received prefiller response",
-		reqcommon.FieldKVTransferParams, pKVTransferParams,
-		"cachedTokens", pCachedTokens,
-		"hasCachedTokens", hasPCachedTokens)
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		// The count is logged only when it was measured, so a logged zero is a
+		// measured zero rather than an absent measurement.
+		fields := []any{
+			"kvTransferParamsPresent", pKVTransferParams != nil,
+			"rewriteCachedTokens", rewriteCachedTokens,
+			"hasCachedTokens", hasPCachedTokens,
+		}
+		if hasPCachedTokens {
+			fields = append(fields, "cachedTokens", pCachedTokens)
+		}
+		trace.Info("received prefiller response", fields...)
+	}
 
 	// Decode Stage
 
-	ctx, decodeSpan := tracer.Start(ctx, "decode",
+	dCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
@@ -299,7 +348,7 @@ retryLoop:
 	decodeStart := time.Now()
 
 	// 1. Prepare decode request
-	dreq := r.Clone(ctx)
+	dreq := r.Clone(dCtx)
 
 	dreq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -313,16 +362,16 @@ retryLoop:
 				podIndex := slices.Index(s.currentRemoteHosts(ctx), prefillHost)
 				if podIndex < 0 {
 					err := fmt.Errorf("cannot determine prefill pod index for %q", prefillHost)
-					s.logger.Error(err, "failed to route MoRI-IO decode notify", "request_id", uuidStr)
+					logger.Error(err, "failed to route MoRI-IO decode notify", "request_id", uuidStr)
 					if err := errorBadGateway(err, w); err != nil {
-						s.logger.Error(err, "failed to send error response to client")
+						logger.Error(err, "failed to send error response to client")
 					}
 					return
 				}
 				decodeDPRank = podIndex*s.config.MoRIIODPSizeLocal + localDPRank
 			}
 			if rv, present := pkv[requestFieldRemoteDPRank]; present && !usedReturned && s.config.MoRIIODPSize > 1 {
-				s.logger.Info("prefill returned invalid/out-of-range remote_dp_rank; using fallback DP rank",
+				logger.Info("prefill returned invalid/out-of-range remote_dp_rank; using fallback DP rank",
 					"request_id", uuidStr, "returned", rv,
 					"dp_size", s.config.MoRIIODPSize, "rank", decodeDPRank)
 			}
@@ -388,12 +437,14 @@ retryLoop:
 			}
 		}
 	}
+	// Decode behind a prefiller has no ECConnector; the prefill stage consumed the encoder cache.
+	delete(body, reqcommon.FieldECTransferParams)
 	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 
 	dbody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -402,26 +453,28 @@ retryLoop:
 
 	// 2. Forward to local decoder.
 
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("sending request to decoder", logging.HTTPBodyKey, string(dbody))
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("sending request to decoder", logBodyBytesKey, len(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
-	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
+	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
+	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
+		toolFields.compareValidatedDispatchedForSpan(dbody, decodeSpan)
+	})
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
 	if !dataParallelUsed {
-		s.logger.V(logging.DEBUG).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
+		logger.V(logging.DEBUG).Info("sending request to decoder", "to", s.config.DecoderURL.Host)
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
-		s.dispatchDecode(decodeWriter, dreq, body)
+		s.dispatchDecode(decodeWriter, dreq, body, dbody, toolFields)
 	}
 	decodeReturned = true
 	if err := finalizeDecodeWriter(); err != nil {
 		metrics.RecordDecodeDuration(time.Since(decodeStart))
 		metrics.RecordError(metrics.StageDecode)
-		s.logger.Error(err, "failed to flush cached token response writer")
+		logger.Error(err, "failed to flush cached token response writer")
 		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
 		return
 	}
@@ -437,8 +490,9 @@ retryLoop:
 	// Calculate end-to-end P/D timing metrics.
 	// True TTFT captures time from gateway request start to decode start, including
 	// gateway routing, scheduling, prefill, and coordination overhead that
-	// per-instance vLLM metrics miss.
-	if currentSpan := trace.SpanFromContext(ctx); currentSpan.SpanContext().IsValid() {
+	// per-instance vLLM metrics miss. Set on the decode span explicitly, since ctx
+	// is the forward_request context.
+	if decodeSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration
 		var trueTTFT time.Duration
 		if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
@@ -450,7 +504,7 @@ retryLoop:
 
 		coordinatorOverhead := decodeStart.Sub(prefillStart.Add(prefillDuration))
 
-		currentSpan.SetAttributes(
+		decodeSpan.SetAttributes(
 			semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
 			semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
 			semconv.LLMDPDProxyPrefillDurationMsSummary(float64(prefillDuration.Milliseconds())),
@@ -458,6 +512,33 @@ retryLoop:
 			semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
 		)
 	}
+}
+
+// servePrefill buffers the prefill response into pw. It returns
+// errPrefillAborted in place of the http.ErrAbortHandler panic the reverse
+// proxy raises when the body copy fails, which net/http would answer by
+// resetting the client connection.
+func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec != http.ErrAbortHandler {
+				panic(rec)
+			}
+			err = errPrefillAborted
+		}
+	}()
+	h.ServeHTTP(pw, r)
+	return nil
+}
+
+// decodeResponseWriter returns the writer the decode response is streamed
+// through, and the function that flushes whatever it buffered. Without a prefill
+// count to apply the client gets the decode worker's bytes untouched.
+func decodeResponseWriter(w http.ResponseWriter, cachedTokens int, rewrite, streaming bool) (http.ResponseWriter, func() error) {
+	if !rewrite {
+		return w, func() error { return nil }
+	}
+	return usage.NewCachedTokensResponseWriter(w, cachedTokens, streaming)
 }
 
 // runNIXLProtocolV2WriteParallel is the MoRI-IO WRITE-mode concurrent-dispatch
@@ -469,7 +550,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	body map[string]any, uuidStr, transferID, prefillPodHostPort, kvCacheSource string,
 	apiType reqcommon.APIType,
 ) {
-	s.logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
+	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
+	defer toolFields.report(r.Context())
+
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running NIXL protocol V2 (concurrent dispatch)",
 		"url", prefillPodHostPort, "request_id", uuidStr)
 
 	tracer := tracing.Tracer()
@@ -531,14 +616,14 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}
 	}
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	s.addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(logger, prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), kvCacheSource, prefillPodHostPort)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
 	pbody, err := json.Marshal(prefillRequest)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal P)")
+			logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal P)")
 		}
 		return
 	}
@@ -554,6 +639,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	remoteHosts := s.currentRemoteHosts(parentCtx)
 
 	// Decode: one prefill host; leader bit for follower global ranks.
+	// Decode behind a prefiller has no ECConnector; the prefill stage consumed the encoder cache.
+	delete(body, reqcommon.FieldECTransferParams)
 	body[reqcommon.FieldKVTransferParams] = map[string]any{
 		reqcommon.FieldDoRemotePrefill: true,
 		reqcommon.FieldDoRemoteDecode:  false,
@@ -570,6 +657,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		"tp_size":                        s.config.MoRIIOTPSize,
 		"remote_dp_size":                 dpLocal,
 		"is_request_leader":              true,
+		// Unlike serial dispatch, this path cannot read the ID from prefill's
+		// response. Supply the shared request ID required by vLLM's NIXL connector.
+		"remote_request_id": uuidStr,
 	}
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
@@ -585,7 +675,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dbody, err := json.Marshal(body)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal D)")
+			logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal D)")
 		}
 		return
 	}
@@ -594,7 +684,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client (concurrent-dispatch P handler init)")
+			logger.Error(err, "failed to send error response to client (concurrent-dispatch P handler init)")
 		}
 		return
 	}
@@ -642,9 +732,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dreq.Body = io.NopCloser(bytes.NewReader(dbody))
 	dreq.ContentLength = int64(len(dbody))
 
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
-		trace.Info("concurrent-dispatch prefill request body", logging.HTTPBodyKey, string(pbody))
-		trace.Info("concurrent-dispatch decode request body", logging.HTTPBodyKey, string(dbody))
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
+		trace.Info("concurrent-dispatch prefill request body", logBodyBytesKey, len(pbody))
+		trace.Info("concurrent-dispatch decode request body", logBodyBytesKey, len(dbody))
 	}
 
 	// Decode writes into a deferred writer that buffers everything until we
@@ -658,6 +748,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// KV wait aborts immediately.
 	var prefillResp *bufferedResponseWriter
 	prefillDone := make(chan struct{})
+	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	prefillStartedAt := time.Now()
 	go func() {
 		defer close(prefillDone)
@@ -670,7 +761,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				}
 				prefillSpan.SetStatus(codes.Error, "prefill handler aborted")
 				cancel()
-				s.logger.Error(nil, "concurrent-dispatch prefill handler aborted",
+				log.FromContext(pCtx).Error(nil, "concurrent-dispatch prefill handler aborted",
 					"request_id", uuidStr)
 			}
 		}()
@@ -686,8 +777,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		if isHTTPError(pw.statusCode) {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancel() // KV will never arrive -> abort decode instead of hanging
-			s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
-				"status", pw.statusCode, "request_id", uuidStr, logging.HTTPBodyKey, pw.buffer.String())
+			log.FromContext(pCtx).Error(nil, "concurrent-dispatch prefill returned error status",
+				"status", pw.statusCode, "request_id", uuidStr, logBodyBytesKey, pw.buffer.Len())
 		}
 	}()
 
@@ -713,14 +804,18 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				decodeSpan.SetStatus(codes.Error, "decode handler aborted")
 				decodeAborted.Store(true)
 				dcw.abort()
-				s.logger.Error(nil, "concurrent-dispatch decode handler aborted",
+				log.FromContext(dCtx).Error(nil, "concurrent-dispatch decode handler aborted",
 					"request_id", uuidStr)
 			}
 		}()
-		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq)
+		// The request goroutine reads the aggregate only after decodeDone closes.
+		dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(dcw, dreq, func() {
+			toolFields.compareValidatedDispatchedForSpan(dbody, decodeSpan)
+		})
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 		if !dataParallelUsed {
 			decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
+			toolFields.compareValidatedDispatchedForSpan(dbody, decodeSpan)
 			s.decoderProxy.ServeHTTP(dcw, dreq)
 		}
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(time.Since(decodeStartedAt).Milliseconds())))
@@ -746,7 +841,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
 			// Prefill succeeded: commit decode's buffered response and stream on.
 			if !dcw.commit() {
-				s.logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
+				logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
 					"request_id", uuidStr)
 			}
 			break
@@ -764,17 +859,17 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				}
 			}
 		}
-		bodySnippet := ""
+		bodyBytes := 0
 		if prefillResp != nil {
-			bodySnippet = truncate(prefillResp.buffer.String(), 256)
+			bodyBytes = prefillResp.buffer.Len()
 		}
-		s.logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
-			"request_id", uuidStr, "p_status", status, "p_body_snippet", bodySnippet)
+		logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
+			"request_id", uuidStr, "p_status", status, logBodyBytesKey, bodyBytes)
 		clientResponded = true
 		w.WriteHeader(status)
 		if prefillResp != nil {
 			if _, writeErr := w.Write(prefillResp.bodyBytes()); writeErr != nil {
-				s.logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
+				logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
 			}
 		}
 	case <-timer.C:
@@ -786,13 +881,13 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		// prefill may still come back 2xx if it completed as the timer fired.
 		metrics.RecordError(metrics.StagePrefill)
 		decodeTimedOut = true
-		s.logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
+		logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 			"request_id", uuidStr, "timeout", waitTimeout.String())
 		clientResponded = true
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusGatewayTimeout)
 		if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
+			logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
 		}
 		<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
 	}
@@ -828,8 +923,6 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			semconv.LLMDPDProxyParallelDispatch(true),
 		)
 	}
-	_ = original // kept for signature symmetry with the strictly-serial path
-
 	// Replay the decode abort here, on the request goroutine, so it reaches the
 	// client the way it does on the strictly-serial path. Skipped when the
 	// commit point already wrote the prefill error or the KV-wait timeout,
@@ -844,15 +937,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		// Nothing was relayed, so the response is still ours to write. Returning
 		// without one would let net/http synthesise an empty 200.
 		if err := errorBadGateway(errDecodeAborted, w); err != nil {
-			s.logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
+			logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
 		}
 	}
-}
-
-// truncate shortens s to at most n characters, appending "..." if truncated.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

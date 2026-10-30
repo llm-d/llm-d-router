@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-router
 
-go 1.27.2
+go 1.27.3
 
 require (
 	cloud.google.com/go/aiplatform v1.124.0
@@ -12,7 +12,7 @@ require (
 	github.com/felixge/httpsnoop v1.1.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/fxamacker/cbor/v2 v2.9.6
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/go-logr/logr v1.4.4
 	github.com/go-logr/stdr v1.2.2
 	github.com/go-logr/zapr v1.3.0
@@ -22,8 +22,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jellydator/ttlcache/v3 v3.4.1
-	github.com/llm-d/llm-d-async/api v0.11.0
-	github.com/llm-d/llm-d-async/producer v0.11.0
+	github.com/llm-d/llm-d-async/api v1.0.0
+	github.com/llm-d/llm-d-async/producer v1.0.0
 	github.com/onsi/ginkgo/v2 v2.31.0
 	github.com/onsi/gomega v1.42.1
 	github.com/openai/openai-go v1.12.0

@@ -60,7 +60,10 @@
           startupProbe:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+        {{- if kindIs "map" $proxy.lifecycle }}
+          lifecycle:
+          {{- toYaml $proxy.lifecycle | nindent 12 }}
+        {{- else if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
           # Give endpoint removal time to propagate before SIGTERM.
           lifecycle:
             preStop:
@@ -171,7 +174,10 @@
               port: {{ $grpcHealthPort }}
               service: readiness
             periodSeconds: 2
-          {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+          {{- if kindIs "map" .Values.router.epp.lifecycle }}
+          lifecycle:
+            {{- toYaml .Values.router.epp.lifecycle | nindent 12 }}
+          {{- else if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
           # Give endpoint removal time to propagate before SIGTERM.
           # Kubelet performs the delay without a shell in the distroless EPP image.
           lifecycle:

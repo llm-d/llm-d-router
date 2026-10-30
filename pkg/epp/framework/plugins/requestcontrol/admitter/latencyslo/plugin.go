@@ -170,7 +170,7 @@ func parseFloatHeaderValue(s string) float64 {
 		return 0
 	}
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil || !metadata.IsFiniteFloat(v) {
 		return 0
 	}
 	return v

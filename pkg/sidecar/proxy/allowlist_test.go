@@ -36,8 +36,8 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

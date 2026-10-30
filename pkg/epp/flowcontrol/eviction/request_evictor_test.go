@@ -51,7 +51,7 @@ func makeSchedulingResult() *scheduling.SchedulingResult {
 	}
 }
 
-func makeInferenceRequest(requestID string, priority int) *scheduling.InferenceRequest { //nolint:unparam
+func makeInferenceRequest(requestID string, priority int) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Headers: map[string]string{

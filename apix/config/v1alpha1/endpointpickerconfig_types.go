@@ -231,8 +231,9 @@ type DataLayerConfig struct {
 	// independent of the datalayer polling interval. If omitted, a default is used.
 	CrossReplicaSyncInterval *metav1.Duration `json:"crossReplicaSyncInterval,omitempty"`
 	// +optional
-	// CrossReplicaPublishTimeout bounds one endpoint publish, including all
-	// concurrent contributor writes. If omitted, a default is used.
+	// CrossReplicaPublishTimeout bounds one endpoint publish (shared by its
+	// concurrent contributor writes), or one batch chunk per contributor when
+	// the syncer supports batching. If omitted, a default is used.
 	CrossReplicaPublishTimeout *metav1.Duration `json:"crossReplicaPublishTimeout,omitempty"`
 }
 
@@ -571,6 +572,16 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// MaxBytesPerFlow bounds the total queued request bytes for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Mi"). Omitted or "0" disables this limit.
+	MaxBytesPerFlow *resource.Quantity `json:"maxBytesPerFlow,omitempty"`
+
+	// +optional
+	// MaxRequestsPerFlow bounds the queued request count for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "100"). Omitted or "0" disables this limit.
+	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -598,6 +609,14 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.MaxBytesPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytesPerFlow: %d", pbc.MaxBytesPerFlow.Value()))
+	}
+
+	if pbc.MaxRequestsPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
 	}
 
 	if pbc.DefaultRequestTTL != nil {

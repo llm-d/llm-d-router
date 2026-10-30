@@ -31,6 +31,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -1923,4 +1925,38 @@ func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *te
 	if _, ok := receivedBody["input"]; ok {
 		t.Error("generate sub-request must not carry the client's input array")
 	}
+}
+
+// The client leaves while the encoder is silent: the context error and no
+// error-level log.
+func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The encoder never answers; release lets server.Close finish.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     testModelName,
+		TokenIDs:  []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	err = step.Execute(log.IntoContext(ctx, logr.New(sink)), reqCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, sink.errors, "a cancelled fan-out must not log at error level")
 }

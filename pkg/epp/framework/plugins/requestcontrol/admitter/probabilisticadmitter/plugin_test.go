@@ -22,6 +22,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -36,6 +37,7 @@ func newEndpoint(name string, queueSize int, kvFraction float64) fwksched.Endpoi
 		&fwkdl.Metrics{
 			WaitingQueueSize:    queueSize,
 			KVCacheUsagePercent: kvFraction,
+			UpdateTime:          time.Now(),
 		},
 		nil,
 	)
@@ -168,7 +170,7 @@ func TestDroppableAdmittedAtZeroSaturation(t *testing.T) {
 	}
 }
 
-func TestNilMetricsTreatedAsSaturated(t *testing.T) {
+func TestNilMetricsAdmitted(t *testing.T) {
 	pod := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "stale"}},
 		nil,
@@ -178,8 +180,57 @@ func TestNilMetricsTreatedAsSaturated(t *testing.T) {
 	req := &fwksched.InferenceRequest{
 		Objectives: fwksched.RequestObjectives{Priority: -1},
 	}
-	if err := admitter.Admit(context.Background(), req, []fwksched.Endpoint{pod}); err == nil {
-		t.Error("expected rejection when pod has nil metrics")
+	if err := admitter.Admit(context.Background(), req, []fwksched.Endpoint{pod}); err != nil {
+		t.Errorf("expected admission when pod has nil metrics, got: %v", err)
+	}
+}
+
+func TestUncollectedMetricsExcludedFromSaturation(t *testing.T) {
+	uncollected := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "new-pod"}},
+		fwkdl.NewMetrics(),
+		nil,
+	)
+	for _, tt := range []struct {
+		name           string
+		pods           []fwksched.Endpoint
+		wantSaturation float64
+		wantRejected   bool
+	}{
+		{
+			name:           "all uncollected",
+			pods:           []fwksched.Endpoint{uncollected},
+			wantSaturation: 0,
+		},
+		{
+			name:           "collected and uncollected",
+			pods:           []fwksched.Endpoint{newEndpoint("pod-0", 0, 0.4), uncollected},
+			wantSaturation: 0.5,
+			wantRejected:   true,
+		},
+		{
+			name:           "idle and uncollected",
+			pods:           []fwksched.Endpoint{newEndpoint("pod-0", 0, 0), uncollected},
+			wantSaturation: 0,
+		},
+		{
+			name:           "multiple collected and uncollected",
+			pods:           []fwksched.Endpoint{newEndpoint("pod-0", 0, 0.4), newEndpoint("pod-1", 0, 0), uncollected},
+			wantSaturation: 0.25,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			admitter := newAdmitter(defaultParams()).WithRandFn(func() float64 { return 0.9 })
+			if got := admitter.computeSaturation(tt.pods); got != tt.wantSaturation {
+				t.Errorf("expected saturation %v, got %v", tt.wantSaturation, got)
+			}
+			req := &fwksched.InferenceRequest{
+				Objectives: fwksched.RequestObjectives{Priority: -1},
+			}
+			if err := admitter.Admit(context.Background(), req, tt.pods); (err != nil) != tt.wantRejected {
+				t.Errorf("expected rejection %v, got error: %v", tt.wantRejected, err)
+			}
+		})
 	}
 }
 

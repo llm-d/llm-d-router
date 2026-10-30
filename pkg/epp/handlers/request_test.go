@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -333,6 +334,74 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, "traceparent")
 }
 
+// EPP hands the sidecar the fairness identity it resolved, replacing any client
+// copy. Without a sampled trace it sends nothing and removes client copies, so the
+// identity stays off the wire and a client cannot supply its own attribution.
+func TestGenerateRequestHeaderResponse_AttributionHandoff(t *testing.T) {
+	t.Parallel()
+
+	spanContext := func(flags trace.TraceFlags) trace.SpanContext {
+		return trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{1},
+			SpanID:     trace.SpanID{1},
+			TraceFlags: flags,
+		})
+	}
+	handoff := []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader}
+
+	tests := []struct {
+		name        string
+		sampled     bool
+		attributed  bool
+		wantHandoff bool
+	}{
+		{name: "sampled trace hands off the resolved identity", sampled: true, attributed: true, wantHandoff: true},
+		{name: "unsampled trace removes client copies", sampled: false, attributed: true},
+		{name: "no resolved identity removes client copies", sampled: true, attributed: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			flags := trace.TraceFlags(0)
+			if tc.sampled {
+				flags = trace.FlagsSampled
+			}
+			ctx := trace.ContextWithSpanContext(context.Background(), spanContext(flags))
+			if tc.attributed {
+				ctx = tracing.BeginRequestAttribution(ctx, "")
+				tracing.SetRequestAttribution(ctx, "agent-7", tracing.AttributionSourceAgentIdentity)
+			}
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request: &Request{Headers: map[string]string{
+					tracing.FairnessIDHandoffHeader:     "forged",
+					tracing.FairnessSourceHandoffHeader: tracing.AttributionSourceHeader,
+				}},
+				Response: &Response{},
+			}
+
+			mutation := (&StreamingServer{}).generateRequestHeaderResponse(ctx, reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string][]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = append(gotSet[h.Header.Key], string(h.Header.RawValue))
+			}
+			if tc.wantHandoff {
+				assert.Equal(t, []string{"agent-7"}, gotSet[tracing.FairnessIDHandoffHeader])
+				assert.Equal(t, []string{tracing.AttributionSourceAgentIdentity}, gotSet[tracing.FairnessSourceHandoffHeader])
+				assert.NotContains(t, mutation.GetRemoveHeaders(), tracing.FairnessIDHandoffHeader)
+				assert.NotContains(t, mutation.GetRemoveHeaders(), tracing.FairnessSourceHandoffHeader)
+				return
+			}
+			for _, h := range handoff {
+				assert.NotContains(t, gotSet, h)
+				assert.Contains(t, mutation.GetRemoveHeaders(), h)
+			}
+		})
+	}
+}
+
 func TestGenerateRequestHeaderResponse_MergeMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -535,7 +604,9 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
-			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
+			// The context is unsampled, so client copies of the attribution handoff are removed too.
+			wantRemoved := slices.Concat(tc.wantRemoved, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
 }
@@ -609,6 +680,31 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
+	assert.Equal(t, errcommon.Error{
+		Code:    errcommon.ServiceUnavailable,
+		Msg:     "no pods available in datastore",
+		Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	}, err)
+}
+
+type emptyPoolDirector struct {
+	Director
+}
+
+func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
 }
 
 type mockDirectorRequest struct {
@@ -753,6 +849,12 @@ func TestToolCallingAPIForPath(t *testing.T) {
 		{path: "/provider/messages/", want: reqcommon.APITypeMessages, wantOK: true},
 		{path: "/provider/responses?stream=true", want: reqcommon.APITypeResponses, wantOK: true},
 		{path: "/v1/chat/completions/?stream=true", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: reqcommon.PathCompletions, wantOK: false},
+		{path: reqcommon.PathVLLMGenerate, wantOK: false},
+		{path: reqcommon.PathSGLangGenerate, wantOK: false},
+		{path: "/provider" + reqcommon.PathCompletions + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathVLLMGenerate + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathSGLangGenerate + "/?stream=true", wantOK: false},
 		{path: "/v1/chat/completions/render", wantOK: false},
 		{path: "/v1/messages/render", wantOK: false},
 		{path: "/v1/messages/count_tokens", wantOK: false},
@@ -794,10 +896,14 @@ type requestIntegrityDirector struct {
 	err                error
 	called             bool
 	checkInboundBuffer func()
+	checkSnapshot      func(context.Context, []byte)
 }
 
-func (d *requestIntegrityDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
 	d.called = true
+	if d.checkSnapshot != nil {
+		d.checkSnapshot(ctx, reqCtx.Request.RawBody)
+	}
 	if d.outbound != "" {
 		if d.inPlace {
 			copy(reqCtx.Request.RawBody, d.outbound)
@@ -860,7 +966,12 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 		wantToolBucket        string
 		wantFields            map[string]string
 		wantToolCallingAbsent bool
+		disabled              bool
 	}{
+		{
+			name: "tool telemetry disabled", path: reqcommon.PathChatCompletions,
+			body: chatBody, wantDirector: true, disabled: true,
+		},
 		{
 			name: "chat fields preserved", path: reqcommon.PathChatCompletions,
 			body: chatBody, wantDirector: true, wantSurface: "chat_completions",
@@ -1132,6 +1243,17 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 					require.Equal(t, tt.body, requestBuffer.String(), "inbound buffer must remain intact through Director processing")
 				},
 			}
+			if tt.wantSurface != "" && tt.wantDirector {
+				apiType, ok := toolCallingAPIForPath(tt.path)
+				require.True(t, ok)
+				director.checkSnapshot = func(ctx context.Context, body []byte) {
+					got, ok := toolcalling.RequestSnapshotForBody(ctx, apiType, body)
+					require.True(t, ok)
+					want, err := toolcalling.CaptureRequestJSON(apiType, []byte(tt.body))
+					require.NoError(t, err)
+					require.Equal(t, want.Summary(), got.Summary())
+				}
+			}
 			bodySplit := len(tt.body) / 2
 			srv := &scriptedProcessServer{
 				ctx: context.Background(),
@@ -1151,6 +1273,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			}
 			registry := NewParserRegistry(parsers, logr.Discard())
 			server := NewStreamingServer(nil, director, registry, 0)
+			server.SetToolCallingTelemetryEnabled(!tt.disabled)
 			server.bufferPool.New = func() any { return requestBuffer }
 			require.NoError(t, server.Process(srv))
 			require.Zero(t, requestBuffer.Len(), "request buffer must be reset on success and failure")
