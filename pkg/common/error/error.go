@@ -47,6 +47,8 @@ const (
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
 	RequestDroppedReasonShuttingDown     RequestDroppedReason = "rejected-shutting-down"
 	RequestDroppedReasonInternal         RequestDroppedReason = "rejected-internal"
+	RequestDroppedReasonOverQuota        RequestDroppedReason = "rejected-over-quota"
+	RequestDroppedReasonSizeLimit        RequestDroppedReason = "rejected-size-limit"
 
 	// Evicted — request was dispatched to an inference server and then killed.
 	// The generic "evicted" reason is the current default used by ImmediateResponseEvictor.Evict().

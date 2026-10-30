@@ -1,0 +1,34 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: qos-admission
+    parameters:
+      classes:
+        - {name: critical, priority: 100}
+        - {name: batch, priority: -10}
+      defaultTeam:
+        class: batch
+      teams:
+        - id: team-a
+          class: critical
+          commitTokensPerMinute: 60
+          burstSeconds: 60
+          maxConcurrency: 5
+        - id: team-b
+          class: batch
+          commitTokensPerMinute: 60
+          burstSeconds: 60
+  - type: latency-reporter
+    parameters:
+      priorities: [100]
+schedulingProfiles:
+  - name: default
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source

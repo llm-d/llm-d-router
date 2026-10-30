@@ -2781,3 +2781,94 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 		})
 	}
 }
+
+type priorityCapturingAdmissionController struct {
+	priority int
+	called   bool
+}
+
+func (m *priorityCapturingAdmissionController) Admit(_ context.Context, _ *handlers.RequestContext, priority int) error {
+	m.priority = priority
+	m.called = true
+	return nil
+}
+
+type priorityOverrideRequestHeaderPlugin struct {
+	priority int
+}
+
+func (m *priorityOverrideRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "override", Type: "mock-priority-override"}
+}
+
+func (m *priorityOverrideRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
+	request.Objectives.Priority = m.priority
+	return nil
+}
+
+// TestDirector_RequestHeaderPluginOverridesPriority verifies that a priority set by a
+// RequestHeaderProcessor is the one admission control and the request context see.
+func TestDirector_RequestHeaderPluginOverridesPriority(t *testing.T) {
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "192.168.1.100",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	}, nil, fwkdl.NewAttributes())
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+	dir, ctx := newSinglePodDirector(t, result)
+	admission := &priorityCapturingAdmissionController{}
+	dir.admissionController = admission
+	dir.requestControlPlugins = *NewConfig().WithRequestHeaderPlugins(&priorityOverrideRequestHeaderPlugin{priority: -7})
+
+	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
+	require.NoError(t, err)
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{
+			ID: "test-priority-override",
+			Headers: map[string]string{
+				reqcommon.RequestIDHeaderKey: "test-priority-override",
+				":path":                      "/v1/completions",
+			},
+			RawBody: body,
+		},
+		Parser: openai.NewOpenAIParser(),
+	}
+	parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
+	require.NoError(t, err)
+
+	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+	require.NoError(t, err)
+	require.True(t, admission.called)
+	assert.Equal(t, -7, admission.priority)
+	assert.Equal(t, -7, reqCtx.Priority)
+	assert.Equal(t, -7, reqCtx.SchedulingRequest.Objectives.Priority)
+}
+
+// TestDirector_HandleResponseBody_LifecycleTimestamps verifies that the end-of-stream response
+// record carries the request lifecycle timestamps and streaming mode.
+func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps))
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	received := time.Unix(100, 0)
+	reqCtx.RequestReceivedTimestamp = received
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	require.Len(t, ps.respsOnStreaming, 1)
+	resp := ps.respsOnStreaming[0]
+	assert.Equal(t, received, resp.ReceivedTimestamp)
+	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
+	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
+	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}

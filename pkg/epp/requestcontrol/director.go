@@ -246,6 +246,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
+	// A RequestHeaderProcessor may reassign the priority (e.g. a QoS class downgrade); admission,
+	// metrics and the body priority rewrite all follow the reassigned value.
+	if p := reqCtx.SchedulingRequest.Objectives.Priority; p != priority {
+		priority = p
+		reqCtx.Priority = p
+		span.SetAttributes(attribute.Int("request_prio", p))
+	}
 	// Derive FairnessID from agent identity when no explicit header supplied it.
 	source := tracing.AttributionSourceHeader
 	if reqCtx.SchedulingRequest.FairnessID == "" {
@@ -636,6 +643,10 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
+		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()
+		response.CompleteTimestamp = reqCtx.ResponseCompleteTimestamp()
+		response.Streaming = reqCtx.ModelServerStreaming()
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
