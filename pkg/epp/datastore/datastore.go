@@ -60,10 +60,10 @@ const (
 	// Example: "8000,8001,8002"
 	activePortsAnnotation = "llm-d.ai/active-ports"
 
-	// dataParallelRanksAnnotation sets the number of data-parallel ranks a pod serves
-	// behind its target port, overriding --data-parallel-ranks-per-port for that pod.
+	// dataParallelSizeLocalAnnotation sets the number of data-parallel ranks a pod serves
+	// behind its target port, overriding --data-parallel-size-local for that pod.
 	// Example: "4"
-	dataParallelRanksAnnotation = "llm-d.ai/data-parallel-ranks"
+	dataParallelSizeLocalAnnotation = "llm-d.ai/data-parallel-size-local"
 )
 
 // The datastore is a local cache of relevant data for the given InferencePool (currently all pulled from k8s-api)
@@ -77,10 +77,10 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
-	// WithDataParallelRanksPerPort expands the single target port of a pod into n rank endpoints
+	// WithDataParallelSizeLocal expands the single target port of a pod into n rank endpoints
 	// sharing that port. Values below 2 keep one endpoint per port. Above 1, PoolSet rejects a
 	// pool with more than one target port.
-	WithDataParallelRanksPerPort(n int) Datastore
+	WithDataParallelSizeLocal(n int) Datastore
 	// WithDataParallelStartRankLabel names the pod label holding the pod's index in a
 	// data-parallel group that spans pods. A rank endpoint's DataParallelRank is
 	// index*ranksPerPort + RankIndex. Empty means every pod starts at rank 0.
@@ -178,7 +178,7 @@ func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 	return ds
 }
 
-func (ds *datastore) WithDataParallelRanksPerPort(n int) Datastore {
+func (ds *datastore) WithDataParallelSizeLocal(n int) Datastore {
 	ds.ranksPerPort = max(n, 1)
 	return ds
 }
@@ -189,15 +189,15 @@ func (ds *datastore) WithDataParallelStartRankLabel(label string) Datastore {
 }
 
 // podRanksPerPort returns the number of data-parallel ranks the pod serves behind its
-// target port: the pod's dataParallelRanksAnnotation, or the configured default.
+// target port: the pod's dataParallelSizeLocalAnnotation, or the configured default.
 func (ds *datastore) podRanksPerPort(pod *corev1.Pod) (int, error) {
-	value, ok := pod.GetAnnotations()[dataParallelRanksAnnotation]
+	value, ok := pod.GetAnnotations()[dataParallelSizeLocalAnnotation]
 	if !ok {
 		return ds.ranksPerPort, nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || n < 1 {
-		return 0, fmt.Errorf("pod annotation %q is %q, not a positive integer", dataParallelRanksAnnotation, value)
+		return 0, fmt.Errorf("pod annotation %q is %q, not a positive integer", dataParallelSizeLocalAnnotation, value)
 	}
 	return n, nil
 }
@@ -241,7 +241,7 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 		return nil
 	}
 	if ds.ranksPerPort > 1 && len(endpointPool.TargetPorts) != 1 {
-		return fmt.Errorf("data-parallel ranks per port is %d, which requires exactly one target port, got %d",
+		return fmt.Errorf("data-parallel-size-local is %d, which requires exactly one target port, got %d",
 			ds.ranksPerPort, len(endpointPool.TargetPorts))
 	}
 	logger := log.FromContext(ctx)

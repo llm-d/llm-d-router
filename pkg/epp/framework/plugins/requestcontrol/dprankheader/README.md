@@ -2,7 +2,7 @@
 
 A PreRequest plugin that writes the data-parallel rank of the scheduling-selected endpoint to a request header. vLLM's Rust frontend (`vllm-rs serve --data-parallel-size N`) serves N engine ranks on one port and sends a request to the rank named in the `x-data-parallel-rank` header.
 
-The plugin acts only on rank endpoints, which share their pod's port with the pod's other ranks. The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-ranks` annotation, or from the `--data-parallel-ranks-per-port` flag for pods without it, so pods in one pool can run different DP sizes (for example prefill with 2 ranks and decode with 4). For those endpoints it sets the header to the endpoint's data-parallel rank and replaces any value the client sent. For other endpoints it leaves the request headers unchanged.
+The plugin acts only on rank endpoints, which share their pod's port with the pod's other ranks. The EPP splits a pod into N rank endpoints when N, the pod's rank count, is above 1. N comes from the pod's `llm-d.ai/data-parallel-size-local` annotation, or from the `--data-parallel-size-local` flag for pods without it, so pods in one pool can run different DP sizes (for example prefill with 2 ranks and decode with 4). For those endpoints it sets the header to the endpoint's data-parallel rank and replaces any value the client sent. For other endpoints it leaves the request headers unchanged.
 
 The rank is the one vLLM numbers its engines by. Within one pod it runs from 0 to N-1. When a data-parallel group spans pods, each with its own frontend (for example an LWS group where pod `k` serves ranks `k*N` to `k*N+N-1`), set `--data-parallel-start-rank-label` to the pod label holding `k`, such as `leaderworkerset.sigs.k8s.io/worker-index`; the header then carries the global rank.
 
@@ -33,7 +33,7 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 
 ## Example
 
-Each model server pod runs `vllm-rs serve --data-parallel-size 2` on port 8000, selected by an InferencePool with one target port. The pods are annotated `llm-d.ai/data-parallel-ranks: "2"` (or the EPP runs with `--data-parallel-ranks-per-port=2`), so each pod becomes two endpoints, `<pod>-rank-0` and `<pod>-rank-1`, both on port 8000.
+Each model server pod runs `vllm-rs serve --data-parallel-size 2` on port 8000, selected by an InferencePool with one target port. The pods are annotated `llm-d.ai/data-parallel-size-local: "2"` (or the EPP runs with `--data-parallel-size-local=2`), so each pod becomes two endpoints, `<pod>-rank-0` and `<pod>-rank-1`, both on port 8000.
 
 ```yaml
 # EndpointPickerConfig (excerpt)

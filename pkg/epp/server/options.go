@@ -96,7 +96,7 @@ type Options struct {
 	//
 	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
 	EndpointTargetPorts         []int           // Target ports of model server pods.
-	DataParallelRanksPerPort    int             // Data-parallel ranks served behind each target port of a pod.
+	DataParallelSizeLocal       int             // Data-parallel ranks served behind each target port of a pod.
 	DataParallelStartRankLabel  string          // Pod label holding the pod's index in a data-parallel group that spans pods.
 	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	EmitEndpointScores          bool            // Enables emitting per-endpoint scheduler scores in the request-path dynamic metadata.
@@ -165,7 +165,7 @@ func NewOptions() *Options {
 		RetryPeriod:                      DefaultRetryPeriod,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
-		DataParallelRanksPerPort:         1,
+		DataParallelSizeLocal:            1,
 		DisableEndpointSubsetFilter:      false,
 		EmitEndpointScores:               false,
 		RefreshMetricsInterval:           MinRefreshMetricsInterval,
@@ -225,11 +225,11 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
-	fs.IntVar(&opts.DataParallelRanksPerPort, "data-parallel-ranks-per-port", opts.DataParallelRanksPerPort,
-		"Number of data-parallel ranks a model server pod serves behind its target port, such as vLLM's Rust "+
-			"frontend with --data-parallel-size. Above 1, the pool must have exactly one target port, and each pod "+
+	fs.IntVar(&opts.DataParallelSizeLocal, "data-parallel-size-local", opts.DataParallelSizeLocal,
+		"Number of data-parallel ranks a model server pod serves behind its target port: the value of vLLM's "+
+			"--data-parallel-size-local for a vLLM Rust frontend serving them on one port. Above 1, the pool must have exactly one target port, and each pod "+
 			"becomes that many endpoints on that port, one per rank, with RankIndex 0 to N-1. A pod's "+
-			"llm-d.ai/data-parallel-ranks annotation overrides this value for that pod.")
+			"llm-d.ai/data-parallel-size-local annotation overrides this value for that pod.")
 	fs.StringVar(&opts.DataParallelStartRankLabel, "data-parallel-start-rank-label", opts.DataParallelStartRankLabel,
 		"Pod label holding the pod's index in a data-parallel group that spans pods, such as "+
 			"leaderworkerset.sigs.k8s.io/worker-index. Pod k then serves global ranks k*N to k*N+N-1, where N is "+
@@ -442,11 +442,11 @@ func (opts *Options) Validate() error {
 		}
 	}
 
-	if opts.DataParallelRanksPerPort < 1 {
-		return fmt.Errorf("data-parallel-ranks-per-port must be at least 1, got %d", opts.DataParallelRanksPerPort)
+	if opts.DataParallelSizeLocal < 1 {
+		return fmt.Errorf("data-parallel-size-local must be at least 1, got %d", opts.DataParallelSizeLocal)
 	}
-	if opts.DataParallelRanksPerPort > 1 && opts.EndpointSelector != nil && len(opts.EndpointTargetPorts) != 1 {
-		return fmt.Errorf("data-parallel-ranks-per-port above 1 requires exactly one %q, got %d",
+	if opts.DataParallelSizeLocal > 1 && opts.EndpointSelector != nil && len(opts.EndpointTargetPorts) != 1 {
+		return fmt.Errorf("data-parallel-size-local above 1 requires exactly one %q, got %d",
 			"endpoint-target-ports", len(opts.EndpointTargetPorts))
 	}
 

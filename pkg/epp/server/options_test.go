@@ -451,41 +451,41 @@ func TestDrainTimeoutFlag(t *testing.T) {
 	}
 }
 
-func TestDataParallelRanksPerPortFlag(t *testing.T) {
+func TestDataParallelSizeLocalFlag(t *testing.T) {
 	def := NewOptions()
 	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
-	if def.DataParallelRanksPerPort != 1 {
-		t.Errorf("DataParallelRanksPerPort default = %d, want 1", def.DataParallelRanksPerPort)
+	if def.DataParallelSizeLocal != 1 {
+		t.Errorf("DataParallelSizeLocal default = %d, want 1", def.DataParallelSizeLocal)
 	}
 
 	opts := NewOptions()
 	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
 	opts.AddFlags(fs)
-	if err := fs.Parse([]string{"--data-parallel-ranks-per-port=4"}); err != nil {
+	if err := fs.Parse([]string{"--data-parallel-size-local=4"}); err != nil {
 		t.Fatalf("Parse() failed: %v", err)
 	}
-	if opts.DataParallelRanksPerPort != 4 {
-		t.Errorf("DataParallelRanksPerPort = %d, want 4", opts.DataParallelRanksPerPort)
+	if opts.DataParallelSizeLocal != 4 {
+		t.Errorf("DataParallelSizeLocal = %d, want 4", opts.DataParallelSizeLocal)
 	}
 
 	opts.PoolName = testPoolName
-	opts.DataParallelRanksPerPort = 0
-	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-ranks-per-port") {
-		t.Errorf("Expected Validate() to reject zero data-parallel-ranks-per-port, got: %v", err)
+	opts.DataParallelSizeLocal = 0
+	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-size-local") {
+		t.Errorf("Expected Validate() to reject zero data-parallel-size-local, got: %v", err)
 	}
 }
 
-func TestDataParallelRanksPerPortRequiresOneTargetPort(t *testing.T) {
+func TestDataParallelSizeLocalRequiresOneTargetPort(t *testing.T) {
 	selector, err := labels.Parse("app=vllm")
 	require.NoError(t, err)
 
 	opts := NewOptions()
 	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
 	opts.EndpointSelector = selector
-	opts.DataParallelRanksPerPort = 2
+	opts.DataParallelSizeLocal = 2
 	opts.EndpointTargetPorts = []int{8000, 8001}
 	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Errorf("Expected Validate() to reject several target ports with data-parallel-ranks-per-port=2, got: %v", err)
+		t.Errorf("Expected Validate() to reject several target ports with data-parallel-size-local=2, got: %v", err)
 	}
 
 	opts.EndpointTargetPorts = []int{8000}
@@ -876,7 +876,7 @@ func TestLeaderElectionOverride(t *testing.T) {
 
 // The rank count can come from the per-pod annotation, so the start-rank
 // label does not require the flag.
-func TestDataParallelStartRankLabelWithoutRanksPerPortFlag(t *testing.T) {
+func TestDataParallelStartRankLabelWithoutSizeLocalFlag(t *testing.T) {
 	opts := NewOptions()
 	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
 	opts.PoolName = testPoolName
