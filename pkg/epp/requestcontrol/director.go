@@ -756,6 +756,7 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	// budget of the others. A failed producer does not stop the ones after it;
 	// only producers that require a key it would have produced are skipped, and
 	// their own keys count as missing in turn. The errors are returned joined.
+	// Once the request's context is done, no further producer is started.
 	var errs []error
 	missing := map[string]struct{}{}
 	markMissing := func(p fwkrc.DataProducer) {
@@ -764,6 +765,10 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 		}
 	}
 	for _, p := range plugins {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if key, ok := missingRequiredInput(p, missing); ok {
 			errs = append(errs, fmt.Errorf("DataProducer %q skipped: required input %s was not produced", p.TypedName().String(), key))
 			markMissing(p)
@@ -771,6 +776,9 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 		}
 		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
 			markMissing(p)
 		}
 	}
