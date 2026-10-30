@@ -112,7 +112,7 @@ func int64Values(v any) ([]int64, bool) {
 func encodeBatchedInt64Field(enc *msgpack.Encoder, key string, values []int64) error {
 	raw := make([]byte, 8*len(values))
 	for i, v := range values {
-		binary.LittleEndian.PutUint64(raw[8*i:], uint64(v))
+		binary.LittleEndian.PutUint64(raw[8*i:], uint64(v)) //#nosec G115 -- the wrap is the int64 two's-complement bytes vLLM reads back
 	}
 	steps := []func() error{
 		func() error { return enc.EncodeString(key) },
