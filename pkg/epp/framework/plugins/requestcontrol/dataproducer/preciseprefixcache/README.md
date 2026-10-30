@@ -53,8 +53,9 @@ requires a vLLM build with
 [vllm-project/vllm#57789](https://github.com/vllm-project/vllm/pull/57789),
 whose wire format can still change.
 
-When the EPP runs with `--data-parallel-ranks-per-port` above 1, each rank of a
-pod is its own endpoint on the pod's address and port. With pod discovery, each
+When a pod serves several data-parallel ranks behind its port (see
+[data-parallel-rank-header](../../dprankheader/README.md)), each rank of the pod
+is its own endpoint on the pod's address and port. With pod discovery, each
 rank's events reach the index under `<address>:<port>/rank-<RankIndex>`, so the
 ranks of one pod are scored separately. Without pod discovery, the index learns
 a pod's identity from the event topic, and all ranks of a pod share one score.

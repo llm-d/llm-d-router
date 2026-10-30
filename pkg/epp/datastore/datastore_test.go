@@ -921,6 +921,90 @@ func TestDataParallelRanksPerPort(t *testing.T) {
 	}
 }
 
+// The llm-d.ai/data-parallel-ranks pod annotation sets a pod's rank count,
+// so prefill and decode pods in one pool can run different DP sizes.
+func TestDataParallelRanksAnnotation(t *testing.T) {
+	type rank struct{ rankIndex, ranksPerPort, dpRank int }
+	pod := func(name string, annotations map[string]string, labels map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations, Labels: labels},
+			Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+		}
+	}
+	endpoints := func(ds Datastore) map[string]rank {
+		got := map[string]rank{}
+		for _, ep := range ds.PodList(AllPodsPredicate) {
+			md := ep.GetMetadata()
+			got[md.ID.Name] = rank{md.RankIndex, md.RanksPerPort, md.DataParallelRank}
+		}
+		return got
+	}
+	newDatastore := func(t *testing.T, flagRanks int, startLabel string, ports ...int32) Datastore {
+		ctx := context.Background()
+		ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
+			WithDataParallelRanksPerPort(flagRanks).
+			WithDataParallelStartRankLabel(startLabel)
+		pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+		pool.Spec.TargetPorts = nil
+		for _, p := range ports {
+			pool.Spec.TargetPorts = append(pool.Spec.TargetPorts, v1.Port{Number: v1.PortNumber(p)})
+		}
+		require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+		return ds
+	}
+	ctx := context.Background()
+
+	t.Run("pods with different rank counts in one pool", func(t *testing.T) {
+		ds := newDatastore(t, 1, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("prefill", map[string]string{dataParallelRanksAnnotation: "2"}, nil)))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("decode", map[string]string{dataParallelRanksAnnotation: "4"}, nil)))
+		assert.Equal(t, map[string]rank{
+			"prefill-rank-0": {0, 2, 0}, "prefill-rank-1": {1, 2, 1},
+			"decode-rank-0": {0, 4, 0}, "decode-rank-1": {1, 4, 1}, "decode-rank-2": {2, 4, 2}, "decode-rank-3": {3, 4, 3},
+		}, endpoints(ds))
+	})
+
+	t.Run("the annotation overrides the flag", func(t *testing.T) {
+		ds := newDatastore(t, 2, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("one", map[string]string{dataParallelRanksAnnotation: "1"}, nil)))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("flag", nil, nil)))
+		assert.Equal(t, map[string]rank{
+			"one-rank-0":  {0, 0, 0},
+			"flag-rank-0": {0, 2, 0}, "flag-rank-1": {1, 2, 1},
+		}, endpoints(ds))
+	})
+
+	t.Run("start rank uses the pod's own rank count", func(t *testing.T) {
+		const indexLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+		ds := newDatastore(t, 1, indexLabel, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx,
+			pod("w1", map[string]string{dataParallelRanksAnnotation: "2"}, map[string]string{indexLabel: "1"})))
+		assert.Equal(t, map[string]rank{"w1-rank-0": {0, 2, 2}, "w1-rank-1": {1, 2, 3}}, endpoints(ds))
+	})
+
+	for _, value := range []string{"0", "-1", "two"} {
+		t.Run("malformed annotation "+value+" gets no endpoints", func(t *testing.T) {
+			ds := newDatastore(t, 1, "", 8000)
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("bad", map[string]string{dataParallelRanksAnnotation: value}, nil)))
+			assert.Empty(t, endpoints(ds))
+		})
+	}
+
+	t.Run("several ranks need exactly one target port", func(t *testing.T) {
+		ds := newDatastore(t, 1, "", 8000, 8001)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("multi", map[string]string{dataParallelRanksAnnotation: "2"}, nil)))
+		assert.Empty(t, endpoints(ds))
+	})
+
+	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
+		ds := newDatastore(t, 1, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelRanksAnnotation: "4"}, nil)))
+		require.Len(t, endpoints(ds), 4)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelRanksAnnotation: "2"}, nil)))
+		assert.Equal(t, map[string]rank{"p-rank-0": {0, 2, 0}, "p-rank-1": {1, 2, 1}}, endpoints(ds))
+	})
+}
+
 // A data-parallel group spanning pods (for example an LWS group with one
 // frontend per pod) numbers ranks globally: pod k serves k*N..k*N+N-1.
 func TestDataParallelStartRankLabel(t *testing.T) {

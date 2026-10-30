@@ -54,7 +54,7 @@ pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
 `x-kv-cache-source-host-port`), so a sidecar that predates the rename still
 routes. The old names are deprecated and will be removed.
 
-When the EPP runs with `--data-parallel-ranks-per-port` above 1, it also sends
+When the Prefill Worker serves several data-parallel ranks behind its port (see [data-parallel-rank-header](../pkg/epp/framework/plugins/requestcontrol/dprankheader/README.md)), EPP also sends
 `x-llm-d-prefiller-data-parallel-rank` with the data-parallel rank it picked on
 the Prefill Worker. The sidecar sends that rank to the Prefill Worker as
 `x-data-parallel-rank`. Without the header, the sidecar removes

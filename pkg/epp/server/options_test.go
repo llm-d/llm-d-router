@@ -874,15 +874,12 @@ func TestLeaderElectionOverride(t *testing.T) {
 	}
 }
 
-func TestDataParallelStartRankLabelRequiresRanksPerPort(t *testing.T) {
+// The rank count can come from the per-pod annotation, so the start-rank
+// label does not require the flag.
+func TestDataParallelStartRankLabelWithoutRanksPerPortFlag(t *testing.T) {
 	opts := NewOptions()
 	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
 	opts.PoolName = testPoolName
 	opts.DataParallelStartRankLabel = "leaderworkerset.sigs.k8s.io/worker-index"
-	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-start-rank-label") {
-		t.Errorf("Expected Validate() to reject data-parallel-start-rank-label without data-parallel-ranks-per-port, got: %v", err)
-	}
-
-	opts.DataParallelRanksPerPort = 2
 	require.NoError(t, opts.Validate())
 }
