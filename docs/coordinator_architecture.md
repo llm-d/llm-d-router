@@ -222,7 +222,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, and `/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
@@ -339,6 +339,85 @@ This is an alternative to the sidecar-based orchestration in llm-d-router; see
 [Coordinator vs. the llm-d-router sidecar model](#coordinator-vs-the-llm-d-router-sidecar-model)
 for the comparison.
 
+### Streaming SGLang prefill and decode
+
+By default, `/generate` passes through to the gateway's decode profile, including
+non-streaming requests to non-disaggregated workers. Set `server.enable_sglang_pd`
+to route `/generate` through the SGLang P/D pipeline. This flow requires
+`stream: true` and `sampling_params.n` absent or 1. A non-null client-supplied
+`disagg_prefill_dp_rank` is rejected. Use the existing prefill and decode steps:
+
+```yaml
+server:
+  enable_sglang_pd: true
+pipeline:
+  kv_connector: kv-sglang
+  steps:
+    - type: prefill
+    - type: decode
+```
+
+For bootstrap port configuration, see [KV and EC transfer protocols](#kv-and-ec-transfer-protocols).
+
+On the gateway's prefill route, expose the worker address with Envoy's native
+[response header formatting](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_conn_man/headers.html#custom-request-response-headers):
+
+```yaml
+response_headers_to_add:
+  - header:
+      key: x-llm-d-prefiller-host-port
+      value: "%UPSTREAM_HOST%"
+    append_action: OVERWRITE_IF_EXISTS_OR_ADD
+```
+
+`x-llm-d-prefiller-host-port` is internal and must not be listed in
+`pipeline.forward_response_headers`.
+
+Both coordinator gateway configurations, [single EPP](../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml)
+and [three EPPs](../deploy/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml),
+include this header on the prefill route. Activate `sglanghttp-parser` in EPP.
+For a shared EPP, use `header-profile-handler` and the prefill/decode role filters.
+For Rust frontends without `/metrics`, use `endpoint-notification-source`,
+`inflight-load-producer`, and `concurrency-detector` instead of metric polling.
+
+Prefill receives `bootstrap_host: 127.0.0.1` to register its room locally.
+Each prefill pod's registry must be reachable locally at that address and from
+decode at the pod's address, on `SGLANG_BOOTSTRAP_PORT`, including when EPP
+selects a different HTTP listener port.
+
+For multiple attention DP ranks, set
+`SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK=1` on both prefill and decode
+workers. Prefill registers its actual rank in the room registry, and decode
+queries that rank regardless of the configured load-balancing method. This
+configuration supports multiple prefill and decode pods with each engine
+contained in one pod.
+Multi-node prefill engines require separate validation of registry reachability.
+
+For the SGLang 0.5.22 Rust frontend with attention DP, set
+`--enable-dp-attention-local-control-broadcast` on both roles so cancellation
+reaches the scheduler associated with the selected HTTP listener.
+
+Keep SGLang startup warmup enabled and use `/health` for readiness so the initial
+kernel compilation runs before the worker receives traffic.
+
+The KV connector generates a numeric `bootstrap_room`. Both requests share this room
+and the configured `bootstrap_port`. SGLang starts the streaming response before
+generated frames are available. On receiving the response headers, the coordinator derives
+`bootstrap_host` from the endpoint header and starts decode with the bootstrap
+fields in the body. EPP selects the decode worker independently. Gateway idle
+timeouts must allow for prefill to complete without emitting SSE frames.
+
+Prefill drains concurrently with decode. Prefill transport errors and SGLang
+error events cancel decode.
+Client cancellation and decode HTTP or transport errors cancel prefill. Successful
+decode allows prefill up to `prefill_grace` to finish without delaying the client;
+later prefill failures and grace expiry are logged. A stream that closes without
+a terminal event is treated as a prefill failure.
+Response buffering filters and upstream retries that can change the worker are
+unsupported.
+
+OpenAI APIs, rendering, and encode orchestration are unsupported for this flow.
+
 ### Cross-phase scheduling headers
 
 An EPP plugin can stamp scheduling metadata from a selected endpoint onto its
@@ -430,6 +509,13 @@ The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
+
+Set this port to the prefill worker's bootstrap service port. Python workers listen
+on `--disaggregation-bootstrap-port`, which has the same default. With
+`SGLANG_RUST_SERVER`, backends using the embedded bootstrap registry, including
+Mooncake, serve it on the prefill HTTP port (for example, 8000). For these backends,
+leave `--disaggregation-bootstrap-port` unset or set it to `--port`.
+Backends running their own bootstrap server retain their configured port.
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -817,7 +903,7 @@ only the request carrier differs.
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
-| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
+| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector`, `prefill_grace` |
 | `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
 
 Parameter semantics and defaults are documented inline in

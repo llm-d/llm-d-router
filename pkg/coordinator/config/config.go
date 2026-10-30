@@ -43,6 +43,7 @@ const BytesPerMB = 1024 * 1024
 const DefaultMaxRequestBodySize = 64 // 64 MB
 
 type ServerConfig struct {
+	EnableSGLangPD     bool          `mapstructure:"enable_sglang_pd"`
 	ListenAddr         string        `mapstructure:"listen_addr"`
 	MetricsPort        int           `mapstructure:"metrics_port"` // default 9090; non-positive disables the endpoint
 	MetricsCertDir     string        `mapstructure:"metrics_cert_dir"`
@@ -86,6 +87,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("log_level", 2)
 	v.SetDefault("tracing", false)
 	v.SetDefault("server.listen_addr", ":8080")
+	v.SetDefault("server.enable_sglang_pd", false)
 	v.SetDefault("server.metrics_port", 9090)
 	v.SetDefault("server.metrics_cert_dir", "")
 	v.SetDefault("server.secure_serving", true)
