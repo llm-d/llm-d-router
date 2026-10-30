@@ -26,8 +26,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -605,26 +607,6 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 	}
 }
 
-// TestDecodeStep_UnreachableFormat_ReturnsError verifies that a request path
-// for a format prepareDecodeBody's switch does not handle explicitly
-// (APITypeSGLangGenerate) fails through its default case, reporting an error
-// instead of sending an unprepared body upstream.
-func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	reqCtx := &pipeline.RequestContext{
-		OriginalPath:     reqcommon.PathSGLangGenerate,
-		Body:             map[string]any{"model": testModelName},
-		KVTransferParams: map[string]any{"block_id": "block-1"},
-	}
-	if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err == nil {
-		t.Fatal("expected an error for an unreachable request format")
-	}
-}
-
 func TestDecodeStep_Streaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -1171,4 +1153,54 @@ func TestInjectMediaPartUUIDs_CountMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeStep_PrefillFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		headersSent bool
+	}{
+		{name: "before decode headers"},
+		{name: "after decode headers", headersSent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			done := make(chan error, 1)
+			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				if tc.headersSent {
+					w.Header().Set(reqcommon.HeaderContentType, reqcommon.ContentTypeJSON)
+					w.(http.Flusher).Flush()
+				} else {
+					done <- io.ErrUnexpectedEOF
+				}
+				<-r.Context().Done()
+			}))
+			t.Cleanup(gw.Close)
+			t.Cleanup(cancel)
+			step, err := NewDecodeStep(gateway.NewWithTransport(nil, gw.URL), map[string]any{ParamKVConnector: kv.SGLang})
+			require.NoError(t, err)
+			writer := &prefillFailureWriter{ResponseRecorder: httptest.NewRecorder(), done: done}
+			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathSGLangGenerate, Body: map[string]any{},
+				Prefill: &pipeline.PendingPrefill{Done: done}, ResponseWriter: writer}
+			if tc.headersSent {
+				require.PanicsWithValue(t, http.ErrAbortHandler, func() { _ = step.Execute(ctx, reqCtx) })
+				require.Equal(t, http.StatusOK, writer.Code)
+			} else {
+				require.ErrorIs(t, step.Execute(ctx, reqCtx), io.ErrUnexpectedEOF)
+			}
+			require.NoError(t, ctx.Err(), "prefill failure must propagate before the client deadline")
+		})
+	}
+}
+
+type prefillFailureWriter struct {
+	*httptest.ResponseRecorder
+	done chan<- error
+}
+
+func (w *prefillFailureWriter) WriteHeader(status int) {
+	w.ResponseRecorder.WriteHeader(status)
+	// Trigger prefill failure after decode commits its response headers.
+	w.done <- io.ErrUnexpectedEOF
 }
