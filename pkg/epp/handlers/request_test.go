@@ -18,12 +18,18 @@ limitations under the License.
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -35,13 +41,21 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 func TestExtractTraceContext(t *testing.T) {
@@ -320,6 +334,74 @@ func TestGenerateHeaders_Sanitization(t *testing.T) {
 	assert.NotContains(t, gotHeaders, "traceparent")
 }
 
+// EPP hands the sidecar the fairness identity it resolved, replacing any client
+// copy. Without a sampled trace it sends nothing and removes client copies, so the
+// identity stays off the wire and a client cannot supply its own attribution.
+func TestGenerateRequestHeaderResponse_AttributionHandoff(t *testing.T) {
+	t.Parallel()
+
+	spanContext := func(flags trace.TraceFlags) trace.SpanContext {
+		return trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{1},
+			SpanID:     trace.SpanID{1},
+			TraceFlags: flags,
+		})
+	}
+	handoff := []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader}
+
+	tests := []struct {
+		name        string
+		sampled     bool
+		attributed  bool
+		wantHandoff bool
+	}{
+		{name: "sampled trace hands off the resolved identity", sampled: true, attributed: true, wantHandoff: true},
+		{name: "unsampled trace removes client copies", sampled: false, attributed: true},
+		{name: "no resolved identity removes client copies", sampled: true, attributed: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			flags := trace.TraceFlags(0)
+			if tc.sampled {
+				flags = trace.FlagsSampled
+			}
+			ctx := trace.ContextWithSpanContext(context.Background(), spanContext(flags))
+			if tc.attributed {
+				ctx = tracing.BeginRequestAttribution(ctx, "")
+				tracing.SetRequestAttribution(ctx, "agent-7", tracing.AttributionSourceAgentIdentity)
+			}
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request: &Request{Headers: map[string]string{
+					tracing.FairnessIDHandoffHeader:     "forged",
+					tracing.FairnessSourceHandoffHeader: tracing.AttributionSourceHeader,
+				}},
+				Response: &Response{},
+			}
+
+			mutation := (&StreamingServer{}).generateRequestHeaderResponse(ctx, reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string][]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = append(gotSet[h.Header.Key], string(h.Header.RawValue))
+			}
+			if tc.wantHandoff {
+				assert.Equal(t, []string{"agent-7"}, gotSet[tracing.FairnessIDHandoffHeader])
+				assert.Equal(t, []string{tracing.AttributionSourceAgentIdentity}, gotSet[tracing.FairnessSourceHandoffHeader])
+				assert.NotContains(t, mutation.GetRemoveHeaders(), tracing.FairnessIDHandoffHeader)
+				assert.NotContains(t, mutation.GetRemoveHeaders(), tracing.FairnessSourceHandoffHeader)
+				return
+			}
+			for _, h := range handoff {
+				assert.NotContains(t, gotSet, h)
+				assert.Contains(t, mutation.GetRemoveHeaders(), h)
+			}
+		})
+	}
+}
+
 func TestGenerateRequestHeaderResponse_MergeMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -522,7 +604,9 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
-			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
+			// The context is unsampled, so client copies of the attribution handoff are removed too.
+			wantRemoved := slices.Concat(tc.wantRemoved, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
 }
@@ -598,6 +682,31 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 	}
 }
 
+func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
+	assert.Equal(t, errcommon.Error{
+		Code:    errcommon.ServiceUnavailable,
+		Msg:     "no pods available in datastore",
+		Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	}, err)
+}
+
+type emptyPoolDirector struct {
+	Director
+}
+
+func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
 type mockDirectorRequest struct {
 	Director
 	endpoint *datalayer.EndpointMetadata
@@ -654,6 +763,605 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 			require.True(t, hasID && hasSource, "identity and source are recorded together")
 			assert.Equal(t, tc.wantID, id.AsString())
 			assert.Equal(t, tc.wantSource, source.AsString())
+		})
+	}
+}
+
+func TestCompareEPPToolCallingSnapshotToBody(t *testing.T) {
+	inboundBody := []byte(`{"tools":[{"function":{"name":"private","parameters":{"type":"object"}}}],"tool_choice":"required","parallel_tool_calls":true}`)
+	outbound := []byte(`{"parallel_tool_calls":true,"tool_choice":"auto","tools":[{"function":{"parameters":{"type":"object"},"name":"private"}}]}`)
+
+	parserBody := bytes.Clone(inboundBody)
+	inbound, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, parserBody)
+	require.NoError(t, err)
+	parserBody[0] = 'x' // The captured snapshot remains stable if the parser's copy is changed.
+	statuses, err := compareEPPToolCallingSnapshotToBody(reqcommon.APITypeChatCompletions, inbound, inboundBody, outbound)
+	require.NoError(t, err)
+	require.Equal(t, toolcalling.FieldStatusPreserved, statusForField(t, statuses, toolcalling.FieldTools).Status)
+	require.Equal(t, toolcalling.FieldStatusChanged, statusForField(t, statuses, toolcalling.FieldToolChoice).Status)
+	require.True(t, statusForField(t, statuses, toolcalling.FieldToolChoice).Observed)
+
+	statuses, err = compareEPPToolCallingSnapshotToBody(reqcommon.APITypeChatCompletions, inbound, inboundBody, []byte(`{"tools":[`))
+	require.Error(t, err)
+	require.Empty(t, statuses, "a failed capture does not establish field rejection")
+}
+
+func TestCompareEPPToolCallingUnchangedBodyAllocations(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","function":{"name":"private","parameters":{"type":"object"}}}],"tool_choice":"required"}`)
+	snapshot, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, body)
+	require.NoError(t, err)
+	outbound := bytes.Clone(body)
+	baseline := testing.AllocsPerRun(20, func() {
+		_, compareErr := toolcalling.CompareRequests(snapshot, snapshot)
+		require.NoError(t, compareErr)
+	})
+	unchanged := testing.AllocsPerRun(20, func() {
+		_, compareErr := compareEPPToolCallingSnapshotToBody(reqcommon.APITypeChatCompletions, snapshot, body, outbound)
+		require.NoError(t, compareErr)
+	})
+	require.LessOrEqual(t, unchanged, baseline, "unchanged bodies should reuse the captured fields")
+}
+
+func BenchmarkCompareEPPToolCallingSnapshotToBody(b *testing.B) {
+	for _, size := range []int{1024, 64 * 1024, 1024 * 1024} {
+		plain := []byte(`{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", size) + `"}]}`)
+		toolBody := append(bytes.Clone(plain[:len(plain)-1]), []byte(`,"tools":[{"type":"function","function":{"name":"private","parameters":{"type":"object"}}}],"tool_choice":"auto"}`)...)
+		rewrittenPlain := bytes.Replace(plain, []byte(`"model":"m"`), []byte(`"model":"other"`), 1)
+		for _, tt := range []struct {
+			name     string
+			inbound  []byte
+			outbound []byte
+		}{
+			{name: "unchanged_tool", inbound: toolBody, outbound: bytes.Clone(toolBody)},
+			{name: "changed_tool", inbound: toolBody, outbound: bytes.Replace(toolBody, []byte(`"auto"`), []byte(`"none"`), 1)},
+			{name: "unchanged_non_tool", inbound: plain, outbound: bytes.Clone(plain)},
+			{name: "rewritten_non_tool", inbound: plain, outbound: rewrittenPlain},
+			{name: "rewritten_prompt_field_words", inbound: plain, outbound: bytes.Replace(rewrittenPlain, []byte(`"content":"`), []byte(`"content":"tools tool_choice `), 1)},
+			{name: "rewritten_escaped_prompt", inbound: plain, outbound: bytes.Replace(rewrittenPlain, []byte(`"content":"`), []byte(`"content":"\u0061`), 1)},
+		} {
+			b.Run(tt.name+"/"+strconv.Itoa(size), func(b *testing.B) {
+				snapshot, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, tt.inbound)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					if _, err := compareEPPToolCallingSnapshotToBody(reqcommon.APITypeChatCompletions, snapshot, tt.inbound, tt.outbound); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestToolCallingAPIForPath(t *testing.T) {
+	tests := []struct {
+		path   string
+		want   reqcommon.APIType
+		wantOK bool
+	}{
+		{path: "/v1/chat/completions", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: "/prefix/v1/messages", want: reqcommon.APITypeMessages, wantOK: true},
+		{path: "/v1/responses", want: reqcommon.APITypeResponses, wantOK: true},
+		{path: "/v1/projects/demo/locations/us/endpoints/model/chat/completions", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: "/provider/messages/", want: reqcommon.APITypeMessages, wantOK: true},
+		{path: "/provider/responses?stream=true", want: reqcommon.APITypeResponses, wantOK: true},
+		{path: "/v1/chat/completions/?stream=true", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: reqcommon.PathCompletions, wantOK: false},
+		{path: reqcommon.PathVLLMGenerate, wantOK: false},
+		{path: reqcommon.PathSGLangGenerate, wantOK: false},
+		{path: "/provider" + reqcommon.PathCompletions + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathVLLMGenerate + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathSGLangGenerate + "/?stream=true", wantOK: false},
+		{path: "/v1/chat/completions/render", wantOK: false},
+		{path: "/v1/messages/render", wantOK: false},
+		{path: "/v1/messages/count_tokens", wantOK: false},
+		{path: "/v1/responses/response-id", wantOK: false},
+		{path: "/v1/notchat/completions", wantOK: false},
+		{path: "/v1/notmessages", wantOK: false},
+		{path: "/v1/chat/completions-extra", wantOK: false},
+		{path: "/v1/embeddings?route=/v1/chat/completions", wantOK: false},
+		{path: "/unknown", wantOK: false},
+		{path: "", wantOK: false},
+		{path: "/v1/embeddings", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got, ok := toolCallingAPIForPath(tt.path)
+			require.Equal(t, tt.wantOK, ok)
+			if ok {
+				require.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func statusForField(t *testing.T, statuses []toolcalling.FieldStatus, field toolcalling.Field) toolcalling.FieldStatus {
+	t.Helper()
+	for _, status := range statuses {
+		if status.Field == field {
+			return status
+		}
+	}
+	t.Fatalf("field %q missing from status list", field)
+	return toolcalling.FieldStatus{}
+}
+
+type requestIntegrityDirector struct {
+	mockDirector
+	outbound           string
+	inPlace            bool
+	err                error
+	called             bool
+	checkInboundBuffer func()
+	checkSnapshot      func(context.Context, []byte)
+}
+
+func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+	d.called = true
+	if d.checkSnapshot != nil {
+		d.checkSnapshot(ctx, reqCtx.Request.RawBody)
+	}
+	if d.outbound != "" {
+		if d.inPlace {
+			copy(reqCtx.Request.RawBody, d.outbound)
+		} else {
+			reqCtx.Request.RawBody = []byte(d.outbound)
+		}
+		reqCtx.RequestSize = len(d.outbound)
+	}
+	if d.checkInboundBuffer != nil {
+		d.checkInboundBuffer()
+	}
+	return reqCtx, d.err
+}
+
+func TestRequestParserJSONValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		parser fwkrh.Parser
+		path   string
+		body   string
+		want   bool
+	}{
+		{name: "chat", parser: openai.NewOpenAIParser(), path: reqcommon.PathChatCompletions, body: `{"messages":[{"role":"user","content":"hello"}]}`, want: true},
+		{name: "Responses", parser: openai.NewOpenAIParser(), path: reqcommon.PathResponses, body: `{"input":"hello"}`, want: true},
+		{name: "Messages", parser: anthropic.NewAnthropicParser(), path: reqcommon.PathMessages, body: `{"messages":[{"role":"user","content":"hello"}]}`, want: true},
+		{name: "passthrough", parser: passthrough.NewPassthroughParser(), path: reqcommon.PathChatCompletions, body: `{"tools":[`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			result, err := tt.parser.ParseRequest(context.Background(), body, map[string]string{":path": tt.path})
+			require.NoError(t, err)
+			require.Equal(t, tt.want, result.JSONValidated)
+			require.Equal(t, tt.body, string(body), "parser must preserve the original bytes")
+			if result.JSONValidated {
+				require.True(t, json.Valid(body))
+			}
+		})
+	}
+}
+
+func TestProcessRequestToolCallingIntegrity(t *testing.T) {
+	const (
+		chatBody      = `{"model":"m","messages":[{"role":"user","content":"private_prompt_content"}],"tools":[{"type":"function","function":{"name":"private_tool_name","parameters":{"type":"object","description":"private_schema_content"}}}],"tool_choice":"required","parallel_tool_calls":true,"response_format":{"type":"json_object"}}`
+		plainBody     = `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
+		responsesBody = `{"model":"m","input":"private_prompt_content","tools":[{"type":"function","name":"private_tool_name","parameters":{"type":"object","description":"private_schema_content"}}],"tool_choice":{"type":"function","name":"private_tool_name"},"parallel_tool_calls":true,"response_format":null}`
+	)
+	for _, tt := range []struct {
+		name                  string
+		path                  string
+		body                  string
+		outbound              string
+		inPlace               bool
+		parser                fwkrh.Parser
+		directorErr           error
+		wantErrorStatus       envoyTypePb.StatusCode
+		wantErrorMessage      string
+		wantDirector          bool
+		wantSurface           string
+		wantChoice            string
+		wantToolBucket        string
+		wantFields            map[string]string
+		wantToolCallingAbsent bool
+		disabled              bool
+	}{
+		{
+			name: "tool telemetry disabled", path: reqcommon.PathChatCompletions,
+			body: chatBody, wantDirector: true, disabled: true,
+		},
+		{
+			name: "chat fields preserved", path: reqcommon.PathChatCompletions,
+			body: chatBody, wantDirector: true, wantSurface: "chat_completions",
+			wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved", "response_format": "preserved"},
+		},
+		{
+			name: "in-place tool choice change", path: reqcommon.PathChatCompletions,
+			body:     `{"model":"m","messages":[{"role":"user","content":"hello"}],"tool_choice":"auto"}`,
+			outbound: `{"model":"m","messages":[{"role":"user","content":"hello"}],"tool_choice":"none"}`, inPlace: true,
+			wantDirector: true, wantSurface: "chat_completions", wantChoice: "auto",
+			wantFields: map[string]string{"tool_choice": "changed"},
+		},
+		{
+			name: "introduced tool fields", path: reqcommon.PathChatCompletions,
+			body: plainBody, outbound: chatBody,
+			wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"tools": "changed", "tool_choice": "changed", "parallel_tool_calls": "changed", "response_format": "changed"},
+		},
+		{
+			name: "introduced escaped tool fields", path: reqcommon.PathChatCompletions,
+			body: plainBody, outbound: strings.ReplaceAll(strings.ReplaceAll(chatBody, `"tools"`, `"to\u006fls"`), `"tool_choice"`, `"tool\u005fchoice"`),
+			wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"tools": "changed", "tool_choice": "changed", "parallel_tool_calls": "changed", "response_format": "changed"},
+		},
+		{
+			name: "model rewrite preserves tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, outbound: strings.Replace(chatBody, `"model":"m"`, `"model":"other"`, 1),
+			wantDirector: true, wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved", "response_format": "preserved"},
+		},
+		{
+			name: "equivalent reserialization preserves tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, outbound: strings.ReplaceAll(chatBody, `,`, ",\n "),
+			wantDirector: true, wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved", "response_format": "preserved"},
+		},
+		{
+			name: "provider chat route records request telemetry", path: "/v1/projects/demo/locations/us/endpoints/model/chat/completions?stream=true",
+			body: chatBody, wantDirector: true, wantSurface: "chat_completions",
+			wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved", "response_format": "preserved"},
+		},
+		{
+			name: "Responses preserves supported fields and sanitizes named choice", path: reqcommon.PathResponses,
+			body: responsesBody, wantDirector: true, wantSurface: "responses",
+			wantChoice: "named", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved"},
+		},
+		{
+			name: "Responses compares serialized changes and drops", path: "/provider/responses/?stream=true",
+			body: responsesBody, outbound: `{"model":"m","input":"hello","tools":[],"tool_choice":"auto","response_format":null}`,
+			wantDirector: true, wantSurface: "responses", wantChoice: "named", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "changed", "tool_choice": "changed", "parallel_tool_calls": "dropped"},
+		},
+		{
+			name: "Responses structured output emits no tool telemetry", path: reqcommon.PathResponses,
+			body:         `{"model":"m","input":"hello","text":{"format":{"type":"json_object"}},"response_format":null}`,
+			wantDirector: true,
+		},
+		{
+			name: "chat render does not emit inference tool telemetry", path: reqcommon.PathChatCompletions + "/render",
+			body: chatBody, wantDirector: true,
+		},
+		{
+			name: "Messages render does not emit inference tool telemetry", path: reqcommon.PathMessages + "/render",
+			body: `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[],"tool_choice":{"type":"any"}}`, wantDirector: true,
+		},
+		{
+			name: "Messages count_tokens does not emit inference tool telemetry", path: reqcommon.PathMessages + "/count_tokens",
+			body: `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[],"tool_choice":{"type":"any"}}`, wantDirector: true,
+		},
+		{
+			name: "serialized body changes and drops fields", path: reqcommon.PathChatCompletions,
+			body:         chatBody,
+			outbound:     `{"model":"m","messages":[{"role":"user","content":"private_prompt_content"}],"tools":[{"function":{"parameters":{"description":"private_schema_content","type":"object"},"name":"private_tool_name"},"type":"function"}],"tool_choice":"auto","response_format":{"type":"json_object"}}`,
+			wantDirector: true, wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "changed", "parallel_tool_calls": "dropped", "response_format": "preserved"},
+		},
+		{
+			name: "all tool fields dropped", path: reqcommon.PathChatCompletions,
+			body: chatBody, outbound: plainBody, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "dropped", "tool_choice": "dropped", "parallel_tool_calls": "dropped", "response_format": "dropped"},
+		},
+		{
+			name: "structured output preserved without tool presence", path: reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_object"}}`,
+			wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"response_format": "preserved"},
+		},
+		{
+			name: "structured output changed without tool presence", path: reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_object"}}`,
+			outbound:     `{"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"text"}}`,
+			wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"response_format": "changed"},
+		},
+		{
+			name: "structured output dropped without tool presence", path: reqcommon.PathChatCompletions,
+			body:     `{"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_object"}}`,
+			outbound: plainBody, wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"response_format": "dropped"},
+		},
+		{
+			name: "null structured output without tool presence", path: reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":null}`,
+			wantDirector: true, wantSurface: "chat_completions", wantToolCallingAbsent: true,
+			wantFields: map[string]string{"response_format": "preserved"},
+		},
+		{
+			name: "missing messages does not reject tool fields", path: reqcommon.PathChatCompletions,
+			body: `{"model":"m","tools":[],"tool_choice":"required"}`, wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface: "chat_completions", wantChoice: "required",
+		},
+		{
+			name: "chat invalid tools type rejects only tools", path: reqcommon.PathChatCompletions,
+			body:             `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":"private_tool_value","tool_choice":"required","parallel_tool_calls":true}`,
+			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
+			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantSurface:      "chat_completions", wantChoice: "required",
+			wantFields: map[string]string{"tools": "rejected"},
+		},
+		{
+			name: "chat invalid message role does not reject tools", path: reqcommon.PathChatCompletions,
+			body:             `{"model":"m","messages":[{"role":123,"content":"hello"}],"tools":[],"tool_choice":"required"}`,
+			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
+			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantSurface:      "chat_completions", wantChoice: "required",
+		},
+		{
+			name: "Messages invalid tools type rejects only tools", path: reqcommon.PathMessages,
+			body:            `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":false,"tool_choice":{"type":"any"}}`,
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface:     "messages", wantChoice: "required",
+			wantFields: map[string]string{"tools": "rejected"},
+		},
+		{
+			name: "Messages invalid tool name type rejects only tools", path: reqcommon.PathMessages,
+			body:            `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[{"name":123}],"tool_choice":{"type":"any"}}`,
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface:     "messages", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "rejected"},
+		},
+		{
+			name: "Messages invalid tool strict type rejects only tools", path: reqcommon.PathMessages,
+			body:            `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"private_tool_name","strict":"private_invalid_value"}],"tool_choice":{"type":"any"}}`,
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface:     "messages", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "rejected"},
+		},
+		{
+			name: "Messages invalid message role does not reject tools", path: reqcommon.PathMessages,
+			body:            `{"model":"m","messages":[{"role":123,"content":"hello"}],"tools":[],"tool_choice":{"type":"any"}}`,
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface:     "messages", wantChoice: "required",
+		},
+		{
+			name: "unvalidated tool choice remains accepted", path: reqcommon.PathChatCompletions,
+			body:         `{"model":"m","messages":[{"role":"user","content":"hello"}],"tool_choice":123}`,
+			wantDirector: true, wantSurface: "chat_completions", wantChoice: "unknown",
+			wantFields: map[string]string{"tool_choice": "preserved"},
+		},
+		{
+			name: "generic director BadRequest does not reject tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, directorErr: errcommon.Error{Code: errcommon.BadRequest, Msg: "request rejected"},
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+		},
+		{
+			name: "no endpoints does not reject tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, directorErr: errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available"},
+			wantErrorStatus: envoyTypePb.StatusCode_ServiceUnavailable, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+		},
+		{
+			name: "capacity shedding does not reject tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, directorErr: errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "no request capacity"},
+			wantErrorStatus: envoyTypePb.StatusCode_TooManyRequests, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+		},
+		{
+			name: "internal director error does not reject tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, directorErr: errcommon.Error{Code: errcommon.Internal, Msg: "request processing failed"},
+			wantErrorStatus: envoyTypePb.StatusCode_InternalServerError, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+		},
+		{
+			name: "non-tool scheduling failure emits no tool telemetry", path: reqcommon.PathChatCompletions,
+			body: plainBody, directorErr: errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available"},
+			wantErrorStatus: envoyTypePb.StatusCode_ServiceUnavailable, wantDirector: true,
+		},
+		{
+			name: "failed outbound capture emits no guessed field outcomes", path: reqcommon.PathChatCompletions,
+			body: chatBody, outbound: `{"tools":[`, wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+		},
+		{
+			name: "Messages missing messages does not reject tool fields", path: reqcommon.PathMessages,
+			body:            `{"model":"m","tools":[],"tool_choice":{"type":"any"}}`,
+			wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+			wantSurface:     "messages", wantChoice: "required",
+		},
+		{
+			name: "malformed body has no guessed statuses", path: reqcommon.PathChatCompletions,
+			body: `{"model":"m","tools":[`, wantErrorStatus: envoyTypePb.StatusCode_BadRequest,
+		},
+		{
+			name: "non-tool request", path: reqcommon.PathChatCompletions,
+			body: plainBody, wantDirector: true,
+		},
+		{
+			name: "plain model rewrite emits no tool telemetry", path: reqcommon.PathChatCompletions,
+			body: plainBody, outbound: strings.Replace(plainBody, `"model":"m"`, `"model":"other"`, 1), wantDirector: true,
+		},
+		{
+			name: "plain priority rewrite emits no tool telemetry", path: reqcommon.PathChatCompletions,
+			body: plainBody, outbound: strings.Replace(plainBody, `"model":"m"`, `"model":"m","priority":1`, 1), wantDirector: true,
+		},
+		{
+			name: "passthrough malformed JSON has no guessed statuses", path: reqcommon.PathChatCompletions,
+			body: `{"tools":[`, parser: passthrough.NewPassthroughParser(), wantDirector: true,
+		},
+		{
+			name: "passthrough trailing JSON has no guessed statuses", path: reqcommon.PathChatCompletions,
+			body: `{"tools":[]} {}`, parser: passthrough.NewPassthroughParser(), wantDirector: true,
+		},
+		{
+			name: "passthrough null has no tool fields", path: reqcommon.PathChatCompletions,
+			body: `null`, parser: passthrough.NewPassthroughParser(), wantDirector: true,
+		},
+		{
+			name: "passthrough valid JSON preserves tool fields", path: reqcommon.PathChatCompletions,
+			body: chatBody, parser: passthrough.NewPassthroughParser(), wantDirector: true,
+			wantSurface: "chat_completions", wantChoice: "required", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved", "parallel_tool_calls": "preserved", "response_format": "preserved"},
+		},
+		{
+			name: "nested tool fields are not request fields", path: reqcommon.PathChatCompletions,
+			body: `{"model":"m","messages":[{"role":"user","content":"hello","tools":[],"tool_choice":"required"}]}`, wantDirector: true,
+		},
+		{
+			name: "Messages counts only supported fields", path: reqcommon.PathMessages,
+			body:         `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"private_tool_name","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"private_tool_name"},"parallel_tool_calls":true,"response_format":null}`,
+			outbound:     `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"private_tool_name","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"private_tool_name"}}`,
+			wantDirector: true, wantSurface: "messages", wantChoice: "named", wantToolBucket: "1",
+			wantFields: map[string]string{"tools": "preserved", "tool_choice": "preserved"},
+		},
+		{
+			name: "Messages unsupported fields emit no telemetry", path: reqcommon.PathMessages,
+			body: `{"model":"m","messages":[{"role":"user","content":"hello"}],"parallel_tool_calls":true,"response_format":null}`, wantDirector: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics.Register()
+			metrics.Reset()
+			t.Cleanup(metrics.Reset)
+			exporter := tracetest.NewInMemoryExporter()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter), sdktrace.WithSampler(sdktrace.AlwaysSample()))
+			useTracerProvider(t, provider)
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+			if tt.inPlace {
+				require.Len(t, tt.outbound, len(tt.body))
+			}
+			requestBuffer := new(bytes.Buffer)
+			director := &requestIntegrityDirector{
+				outbound: tt.outbound, inPlace: tt.inPlace, err: tt.directorErr,
+				checkInboundBuffer: func() {
+					require.Equal(t, tt.body, requestBuffer.String(), "inbound buffer must remain intact through Director processing")
+				},
+			}
+			if tt.wantSurface != "" && tt.wantDirector {
+				apiType, ok := toolCallingAPIForPath(tt.path)
+				require.True(t, ok)
+				director.checkSnapshot = func(ctx context.Context, body []byte) {
+					got, ok := toolcalling.RequestSnapshotForBody(ctx, apiType, body)
+					require.True(t, ok)
+					want, err := toolcalling.CaptureRequestJSON(apiType, []byte(tt.body))
+					require.NoError(t, err)
+					require.Equal(t, want.Summary(), got.Summary())
+				}
+			}
+			bodySplit := len(tt.body) / 2
+			srv := &scriptedProcessServer{
+				ctx: context.Background(),
+				reqs: []*extProcPb.ProcessingRequest{
+					newRequestHeaders(map[string]string{":path": tt.path, "traceparent": upstreamTraceparent}),
+					{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+						Body: []byte(tt.body[:bodySplit]),
+					}}},
+					{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{
+						Body: []byte(tt.body[bodySplit:]), EndOfStream: true,
+					}}},
+				},
+			}
+			parsers := []fwkrh.Parser{openai.NewOpenAIParser(), anthropic.NewAnthropicParser()}
+			if tt.parser != nil {
+				parsers = []fwkrh.Parser{tt.parser}
+			}
+			registry := NewParserRegistry(parsers, logr.Discard())
+			server := NewStreamingServer(nil, director, registry, 0)
+			server.SetToolCallingTelemetryEnabled(!tt.disabled)
+			server.bufferPool.New = func() any { return requestBuffer }
+			require.NoError(t, server.Process(srv))
+			require.Zero(t, requestBuffer.Len(), "request buffer must be reset on success and failure")
+			require.Equal(t, tt.wantDirector, director.called)
+			if tt.wantErrorStatus != 0 {
+				require.Len(t, srv.sentResponses, 1)
+				require.Equal(t, tt.wantErrorStatus, srv.sentResponses[0].GetImmediateResponse().GetStatus().GetCode())
+				wantErrorMessage := tt.wantErrorMessage
+				if tt.path == reqcommon.PathMessages {
+					var messages fwkrh.MessagesRequest
+					if decodeErr := json.Unmarshal([]byte(tt.body), &messages); decodeErr != nil {
+						wantErrorMessage = "error parsing messages request: " + decodeErr.Error()
+					}
+				}
+				if wantErrorMessage != "" {
+					var errorBody struct {
+						Error struct {
+							Message string `json:"message"`
+						} `json:"error"`
+					}
+					require.NoError(t, json.Unmarshal(srv.sentResponses[0].GetImmediateResponse().GetBody(), &errorBody))
+					require.Equal(t, wantErrorMessage, errorBody.Error.Message)
+				}
+			} else {
+				require.Len(t, srv.sentResponses, 2)
+				wantBody := tt.body
+				if tt.outbound != "" {
+					wantBody = tt.outbound
+				}
+				require.Equal(t, wantBody, string(srv.sentResponses[1].GetRequestBody().GetResponse().GetBodyMutation().GetStreamedResponse().GetBody()))
+			}
+
+			gotFields := make(map[string]string)
+			families, err := ctrlmetrics.Registry.Gather()
+			require.NoError(t, err)
+			for _, family := range families {
+				if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+					continue
+				}
+				for _, metric := range family.GetMetric() {
+					labels := make(map[string]string)
+					for _, label := range metric.GetLabel() {
+						labels[label.GetName()] = label.GetValue()
+					}
+					require.Len(t, labels, 4)
+					require.Equal(t, toolcalling.ComponentEPP, labels[toolcalling.MetricLabelComponent])
+					require.Equal(t, toolcalling.DirectionRequest, labels[toolcalling.MetricLabelDirection])
+					require.Equal(t, float64(1), metric.GetCounter().GetValue())
+					field := labels[toolcalling.MetricLabelField]
+					require.NotContains(t, gotFields, field, "a field must be counted only once")
+					gotFields[field] = labels[toolcalling.MetricLabelStatus]
+				}
+			}
+			require.Len(t, gotFields, len(tt.wantFields))
+			for field, status := range tt.wantFields {
+				require.Equal(t, status, gotFields[field])
+			}
+
+			var requestSpans tracetest.SpanStubs
+			for _, span := range exporter.GetSpans() {
+				if span.Name == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+			require.Equal(t, upstreamTraceID, requestSpans[0].SpanContext.TraceID().String())
+			require.Equal(t, "00f067aa0c9902b7", requestSpans[0].Parent.SpanID().String())
+			gotAttrs := make(map[string]any)
+			for _, attr := range requestSpans[0].Attributes {
+				if strings.HasPrefix(string(attr.Key), "llm_d.tool_calling.") {
+					gotAttrs[string(attr.Key)] = attr.Value.AsInterface()
+				}
+			}
+			wantAttrs := make(map[string]any)
+			if tt.wantSurface != "" {
+				wantAttrs["llm_d.tool_calling.api_surface"] = tt.wantSurface
+				wantAttrs["llm_d.tool_calling.present"] = !tt.wantToolCallingAbsent
+				if !tt.wantToolCallingAbsent {
+					wantAttrs["llm_d.tool_calling.tool_choice"] = tt.wantChoice
+				}
+				if tt.wantToolBucket != "" {
+					wantAttrs["llm_d.tool_calling.tool_count"] = tt.wantToolBucket
+				}
+				for field, status := range tt.wantFields {
+					wantAttrs["llm_d.tool_calling.field."+field+".status"] = status
+				}
+			}
+			require.Equal(t, wantAttrs, gotAttrs)
 		})
 	}
 }

@@ -10,6 +10,9 @@ llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.01"} 5
 llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.02"} 6
 llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.05"} 7
 llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.1"} 8
+llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.2"} 9
+llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="0.5"} 9
+llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="1"} 9
 llm_d_epp_scheduler_e2e_duration_seconds_bucket{le="+Inf"} 9
 llm_d_epp_scheduler_e2e_duration_seconds_sum 0.2835
 llm_d_epp_scheduler_e2e_duration_seconds_count 9

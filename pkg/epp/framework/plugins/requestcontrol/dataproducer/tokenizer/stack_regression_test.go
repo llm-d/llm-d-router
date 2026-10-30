@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -49,7 +50,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	framed := make([]byte, 5+len(msg))
 	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
-	features := []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
+	features := []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
 	for _, tc := range []struct {
 		name, path, salt string
 		parser           fwkrh.Parser

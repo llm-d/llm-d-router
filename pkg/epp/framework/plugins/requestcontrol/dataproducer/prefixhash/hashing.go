@@ -112,10 +112,14 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 	blockHashes := make([]BlockHash, 0, count)
 
 	// Different models should have different hashes even with the same body.
+	// Length-prefixing each field keeps distinct model and salt pairs from
+	// encoding to the same bytes, so model "ab" with salt "c" and model "a"
+	// with salt "bc" no longer share a seed.
 	var seed xxhash.Digest
 	seed.Reset()
-	_, _ = seed.WriteString(request.TargetModel)
-	_, _ = seed.WriteString(request.Body.TokenizedRequest.CacheSalt)
+	var seedLen [8]byte
+	writeLengthPrefixedString(&seed, seedLen[:], request.TargetModel)
+	writeLengthPrefixedString(&seed, seedLen[:], request.Body.TokenizedRequest.CacheSalt)
 	prevBlockHash := BlockHash(seed.Sum64())
 
 	var buf [16]byte
@@ -135,4 +139,14 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 // a reused buffer without allocating per hash.
 func PutBlockHash(buf []byte, h BlockHash) {
 	binary.LittleEndian.PutUint64(buf, uint64(h))
+}
+
+// writeLengthPrefixedString writes s to d preceded by its length as an 8-byte
+// little-endian integer. Length-prefixing makes a sequence of strings
+// unambiguous: no two sequences of distinct strings share an encoding. lenBuf
+// must have length at least 8 and is overwritten.
+func writeLengthPrefixedString(d *xxhash.Digest, lenBuf []byte, s string) {
+	binary.LittleEndian.PutUint64(lenBuf, uint64(len(s)))
+	_, _ = d.Write(lenBuf)
+	_, _ = d.WriteString(s)
 }

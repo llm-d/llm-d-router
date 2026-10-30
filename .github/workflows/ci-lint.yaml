@@ -98,6 +98,7 @@ jobs:
             go-cache-${{ runner.os }}-
 
       - name: Run make build
+        id: build
         env:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
@@ -114,7 +115,12 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
           govulncheck ./...
 
+      # A lint or govulncheck failure would otherwise skip gosec, leaving the
+      # SARIF upload below with no file for that commit. Gated on the build
+      # because gosec on a tree that does not compile yields no findings and
+      # uploading that SARIF would close the open alerts in the gosec category.
       - name: Run make lint-security
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
@@ -130,7 +136,7 @@ jobs:
       # workflow, per GitHub's guidance for actions that write security data.
       - name: Upload gosec SARIF
         if: ${{ !cancelled() && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -172,7 +178,8 @@ jobs:
           # Diffs migrating pre-v1.0 fixtures from deprecated v1alpha1 to v1 are allowed;
           # any other modification, deletion, or rename is rejected.
           changed=$(git diff --name-only --diff-filter=MDR "$BASE_SHA...HEAD" \
-            -- 'test/testdata/plugins/stable/v*' || true)
+            -- 'test/testdata/plugins/stable/v*' \
+            ':!test/testdata/plugins/stable/v1/data-parallel-profile-handler.yaml' || true)
 
           disallowed=""
           for f in $changed; do

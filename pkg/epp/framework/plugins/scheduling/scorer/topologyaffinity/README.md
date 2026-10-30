@@ -84,7 +84,7 @@ attribute is absent.
 | Parameter               | Required | Default | Description                                                                  |
 |--------------------------|----------|---------|--------------------------------------------------------------------------------|
 | `topologyProducerName`   | no       | default producer | `topology-extractor` instance to read the `Topology` attribute from. |
-| `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. No other value is accepted: the coordinator's forwarding is not configurable, so a different name is rejected at startup. |
+| `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-llm-d-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. No other value is accepted: the coordinator's forwarding is not configurable, so a different name is rejected at startup. |
 
 The plugin trusts `peerTopologyHeader` without re-verifying its source. Only set it on a
 profile reachable exclusively through the coordinator's forwarded header; a decode EPP
@@ -110,7 +110,7 @@ plugins:
   - type: topology-affinity-scorer
     name: decode-topology-affinity
     parameters:
-      peerTopologyHeader: x-peer-topology
+      peerTopologyHeader: x-llm-d-peer-topology
 schedulingProfiles:
   - name: decode
     plugins:

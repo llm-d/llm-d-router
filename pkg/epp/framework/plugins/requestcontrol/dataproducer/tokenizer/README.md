@@ -78,14 +78,19 @@ to estimation when rendering fails.
 
 Legacy conversion uses the configured `modelName` and logs a deprecation
 warning once per plugin instance. It reshapes string Input, Input items that
-are simple `{role, content}` messages, and Instructions as a leading system
-message; `input_text`/`output_text` and `input_image` content parts convert,
-the latter carrying its URL as a bare string rather than chat completions'
+are `{role, content}` messages, `function_call`, `function_call_output` and
+`reasoning` items, and Instructions as a leading system message. Items fold
+into chat messages the way vLLM's Responses serving folds them: a
+`function_call` joins the `tool_calls` of the assistant message before it, a
+`reasoning` item or an assistant message fills the reasoning or content that
+message still lacks, and a `function_call_output` becomes a `tool` message.
+`input_text`/`output_text` and `input_image` content parts convert, the
+latter carrying its URL as a bare string rather than chat completions'
 nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
-cannot represent this way — for example `function_call`,
-`function_call_output`, `reasoning`, or `input_audio` — fails the conversion
-rather than tokenizing a prompt shorter than the one vLLM serves. The
-forwarded request is unchanged.
+cannot represent this way fails the conversion rather than tokenizing a
+prompt shorter than the one vLLM serves: `input_audio` parts, `reasoning`
+items with `encrypted_content`, namespaced `function_call` items, and item
+types such as `web_search_call`. The forwarded request is unchanged.
 
 The compatibility implementation and tests are contained in `responses.go`
 and `responses_test.go`. Its integration points are the
@@ -105,7 +110,7 @@ tools, or reconstruct content from routing projections. Model rewrites happen
 before token production and apply to both rendering and forwarding.
 `vllm.prefillOnly` rewrites only the output budget fields of the render copy;
 see [Render-only output budget](#render-only-output-budget). `vllm.omitMMKwargs`
-adds one field to the render copy; see
+adds two fields to the render copy; see
 [Render responses without multimodal tensors](#render-responses-without-multimodal-tensors).
 
 The parsed payload keeps nested objects, arrays, Completions `prompt`, and
@@ -475,18 +480,24 @@ the existing token-producer error behavior.
 
 Set `vllm.prefillOnly: true` when the renderer should validate the full prompt
 without reserving the client's generation budget. The render copy uses
-`max_tokens: 1`, caps `max_completion_tokens` at one when present, and sets
-`min_tokens` to zero when present. The inference payload, prompt, and requested
-generation budget are unchanged. The render copy re-serializes the JSON
-envelope; nested content such as messages and tool schemas keeps its key order.
-This option is false by default and also works with `vllm.url`.
+`max_tokens: 1`, caps `max_completion_tokens` and `max_output_tokens` at one
+when present, and sets `min_tokens` to zero when present. A Messages render
+copy also drops a `thinking` of type `enabled`: vLLM requires its
+`budget_tokens` to be less than `max_tokens` and applies it only during
+sampling, so the rendered prompt is unchanged. Other `thinking` types stay.
+The inference payload, prompt, and requested generation budget are unchanged.
+The render copy re-serializes the JSON envelope; nested content such as
+messages and tool schemas keeps its key order. This option is false by default
+and also works with `vllm.url`.
 
 This avoids rejecting a prompt solely because its requested output would
 exceed the renderer's context capacity. The prompt itself must still fit;
 this option does not enable partial matching or extend inference context limits.
 
 Requests with a non-null `truncate_prompt_tokens` retain their original output
-budget because automatic truncation depends on it.
+budget because automatic truncation depends on it. Responses requests with a
+`truncation` value other than `"disabled"`, including `null`, retain their
+`max_output_tokens` for the same reason.
 
 #### Render responses without multimodal tensors
 
@@ -494,11 +505,13 @@ The producer reads token IDs, `mm_hashes`, and `mm_placeholders` from a render
 response. By default vLLM also returns the processed multimodal tensors in
 `features.kwargs_data`, which the producer discards and which can reach tens of
 megabytes per request. Set `vllm.omitMMKwargs: true` to add
-`"return_mm_kwargs": false` to the render copy, so vLLM leaves the tensors out
-and skips serializing them. The inference payload is unchanged. The option
-requires a vLLM version with the `return_mm_kwargs` render field; other
-versions ignore the field and return the tensors. It is false by default and
-works with `vllm.url` and `vllm.endpointDiscovery`.
+`"return_mm_kwargs": false` and `"mm_payload": "none"` to the render copy, so
+vLLM leaves the tensors out and skips serializing them. The inference payload
+is unchanged. vLLM v0.32 reads `return_mm_kwargs`; versions with
+vllm-project/vllm#61427 read `mm_payload`, which takes precedence. Values the
+client sent for either field are overridden. vLLM versions without these fields
+ignore them and return the tensors. The option is false by default and works
+with `vllm.url` and `vllm.endpointDiscovery`.
 
 A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
 

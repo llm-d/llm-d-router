@@ -27,7 +27,6 @@ import (
 	"sort"
 	"time"
 
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
@@ -37,6 +36,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -368,9 +368,16 @@ func (p *Plugin) Backend() string {
 	return p.backendName
 }
 
-// Produces returns the data keys this plugin produces.
+// Produces returns the data keys this plugin produces, along with the
+// configured tokenization backend attribute ("backend": BackendVLLM or BackendEstimate)
+// for Level-2 consumer dependency validation.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+	return map[plugin.DataKey]any{
+		p.dk: plugin.ProducedData{
+			Type:       fwkrh.TokenizedRequest{},
+			Attributes: map[string]string{"backend": p.backendName},
+		},
+	}
 }
 
 // RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
@@ -485,7 +492,7 @@ func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.M
 		}
 		for i := 0; i < n; i++ {
 			items = append(items, fwkrh.MultiModalFeature{
-				Modality: fwkrh.Modality(modality),
+				Modality: reqcommon.Modality(modality),
 				Hash:     hashes[i],
 				Offset:   ranges[i].Offset,
 				Length:   ranges[i].Length,

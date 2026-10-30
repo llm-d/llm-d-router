@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -57,6 +58,9 @@ type FlowItem struct {
 	effectiveTTL    time.Duration
 	originalRequest flowcontrol.FlowControlRequest
 	logger          logr.Logger
+	// span is the request's trace span, kept for the queue duration exemplar because finalization can run on a
+	// goroutine that has no request context.
+	span trace.Span
 
 	// --- Synchronized State ---
 
@@ -83,8 +87,9 @@ type FlowItem struct {
 
 var _ flowcontrol.QueueItemAccessor = &FlowItem{}
 
-// NewItem allocates and initializes a new FlowItem for a request lifecycle.
+// NewItem allocates and initializes a new FlowItem for a request lifecycle. Only the trace span is kept from ctx.
 func NewItem(
+	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
 	effectiveTTL time.Duration,
 	enqueueTime time.Time,
@@ -95,6 +100,7 @@ func NewItem(
 		effectiveTTL:    effectiveTTL,
 		originalRequest: req,
 		logger:          logger,
+		span:            trace.SpanFromContext(ctx),
 		done:            make(chan *FinalState, 1),
 	}
 }
@@ -175,6 +181,7 @@ func (fi *FlowItem) finalizeInternal(err error) {
 	duration := time.Since(fi.enqueueTime)
 	flowKey := fi.originalRequest.FlowKey()
 	metrics.RecordFlowControlRequestQueueDuration(
+		trace.ContextWithSpan(context.Background(), fi.span),
 		flowKey.ID, strconv.Itoa(flowKey.Priority), outcome.String(),
 		fi.originalRequest.InferencePoolName(),
 		fi.OriginalRequest().ModelName(), fi.OriginalRequest().TargetModelName(),

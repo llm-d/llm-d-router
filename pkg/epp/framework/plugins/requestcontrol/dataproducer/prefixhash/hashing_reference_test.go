@@ -31,15 +31,29 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// referenceSeed is the (model, salt) seed: xxhash over each string
+// length-prefixed as an 8-byte little-endian integer. The length prefix removes
+// boundaries that would otherwise let distinct pairs share a seed.
+func referenceSeed(model, salt string) uint64 {
+	var seed []byte
+	for _, s := range []string{model, salt} {
+		var lenBuf [8]byte
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(s)))
+		seed = append(seed, lenBuf[:]...)
+		seed = append(seed, s...)
+	}
+	return xxhash.Sum64(seed)
+}
+
 // referenceBlockHashes is an independent statement of the block hash chain:
-// the seed is xxhash(model || salt); block i hashes its token bytes, and its
-// chain hash is xxhash(LE(block hash) || LE(chain hash of block i-1)). Every
-// prompt starts from the seed, the final block may be partial, and empty
-// prompts produce no entry.
+// the seed is xxhash over the length-prefixed model and salt; block i hashes
+// its token bytes, and its chain hash is xxhash(LE(block hash) || LE(chain hash
+// of block i-1)). Every prompt starts from the seed, the final block may be
+// partial, and empty prompts produce no entry.
 func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, maxBlocks int) ([][]BlockHash, []int) {
 	var hashes [][]BlockHash
 	var tokens []int
-	seed := xxhash.Sum64String(model + salt)
+	seed := referenceSeed(model, salt)
 	for _, prompt := range prompts {
 		if len(prompt) == 0 || blockSize <= 0 {
 			continue

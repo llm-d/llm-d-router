@@ -28,8 +28,8 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -54,7 +54,7 @@ func newChunkedTestSetup(chunkSize int, decodeResponses []string) *chunkedTestIn
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, decodeResponses[reqIdx]) //nolint:errcheck
+		fmt.Fprint(w, decodeResponses[reqIdx])
 		reqIdx++
 	}))
 }
@@ -280,7 +280,7 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(err).ToNot(HaveOccurred())
 			response := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(string(original)))
-			server.runChunkedDecodeFromMap(response, request, body)
+			server.runChunkedDecodeFromMap(response, request, body, original, nil)
 			Expect(calls).To(Equal(wantCalls))
 			Expect(response.Code).To(Equal(http.StatusOK))
 			after, err := json.Marshal(body)
@@ -290,6 +290,122 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("continues an empty assistant message when tokens were consumed", 5, 2),
 		Entry("stops when neither tokens nor text were produced", 0, 1),
 	)
+
+	DescribeTable("forwards echo requests unchanged",
+		func(streaming bool) {
+			raw := fmt.Sprintf(`{"messages":[{"role":"assistant","content":"Prefix: "}],"continue_final_message":true,"add_generation_prompt":false,"max_tokens":20,"echo":true,"stream":%t}`, streaming)
+			backendBody := chatResponse("Prefix: done", "stop", 8, 12)
+			contentType := "application/json"
+			if streaming {
+				contentType = "text/event-stream"
+				backendBody = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Prefix: done\"},\"finish_reason\":\"stop\"}]}\n\n" + reqcommon.SSEDone + "\n\n"
+			}
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+				w.Header().Set("Content-Type", contentType)
+				_, err = io.WriteString(w, backendBody)
+				Expect(err).ToNot(HaveOccurred())
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			Expect(response.Header().Get("Content-Type")).To(Equal(contentType))
+			Expect(response.Body.String()).To(Equal(backendBody))
+		},
+		Entry("non-streaming", false),
+		Entry("streaming", true),
+	)
+
+	DescribeTable("forwards requests for several choices unchanged",
+		func(streaming bool) {
+			raw := fmt.Sprintf(`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"n":2,"stream":%t}`, streaming)
+			backendBody := `{"choices":[` +
+				`{"index":0,"message":{"role":"assistant","content":"first"},"finish_reason":"stop"},` +
+				`{"index":1,"message":{"role":"assistant","content":"second"},"finish_reason":"stop"}],` +
+				`"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}`
+			contentType := "application/json"
+			if streaming {
+				contentType = "text/event-stream"
+				backendBody = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":\"stop\"}]}\n\n" +
+					"data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n\n" +
+					reqcommon.SSEDone + "\n\n"
+			}
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				w.Header().Set("Content-Type", contentType)
+				_, err = io.WriteString(w, backendBody)
+				Expect(err).ToNot(HaveOccurred())
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			Expect(response.Body.String()).To(Equal(backendBody))
+		},
+		Entry("non-streaming", false),
+		Entry("streaming", true),
+	)
+
+	DescribeTable("forwards tool requests unchanged",
+		func(toolChoice string) {
+			tools := `[{"type":"function","function":{"name":"get_weather"}}]`
+			raw := fmt.Sprintf(
+				`{"messages":[{"role":"user","content":"Weather?"}],"max_tokens":20,"tools":%s%s,"stream":true}`,
+				tools,
+				toolChoice,
+			)
+
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+			})
+
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+		},
+		Entry("tool_choice omitted", ""),
+		Entry("tool_choice auto", `,"tool_choice":"auto"`),
+		Entry("tool_choice required", `,"tool_choice":"required"`),
+	)
+
+	It("still chunks when tools are declared but tool_choice is none", func() {
+		ti := newChunkedTestSetup(5, []string{
+			chatResponse("hello ", "length", 8, 5),
+			chatResponse("world", "stop", 9, 5),
+		})
+		defer ti.stop()
+
+		resp := doPost(ti.addr,
+			`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10, "tools": [{"type":"function","function":{"name":"f"}}], "tool_choice": "none"}`)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		var body map[string]any
+		Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+
+		content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
+		Expect(content).To(Equal("hello world"))
+	})
 
 	Describe("non-streaming", func() {
 
@@ -357,7 +473,7 @@ var _ = Describe("Chunked Decode", func() {
 		It("propagates decode backend error to client", func() {
 			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadGateway)
-				fmt.Fprint(w, `{"error":"backend down"}`) //nolint:errcheck
+				fmt.Fprint(w, `{"error":"backend down"}`)
 			}))
 			defer ti.stop()
 
@@ -365,9 +481,54 @@ var _ = Describe("Chunked Decode", func() {
 				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusBadGateway))
 		})
+
+		It("returns the response unmodified when the first choice is not an object", func() {
+			// completion_tokens equals max_tokens so the budget is exhausted
+			// after one chunk.
+			ti := newChunkedTestSetup(5, []string{
+				`{"choices":[null],"usage":{"prompt_tokens":3,"completion_tokens":10,"total_tokens":13}}`,
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]any
+			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+			Expect(body["choices"]).To(Equal([]any{nil}))
+		})
 	})
 
 	Describe("streaming", func() {
+
+		It("ends the stream with an error event when a later chunk fails", func() {
+			errorBody := `{"error":{"message":"maximum context length exceeded","type":"BadRequestError","param":null,"code":400}}`
+			calls := 0
+			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 1 {
+					fmt.Fprint(w, chatResponse("hello ", finishReasonLength, 5, 5))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, errorBody)
+			}))
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			body, err := io.ReadAll(resp.Body)
+			Expect(err).ToNot(HaveOccurred())
+
+			events := strings.Split(strings.TrimSuffix(string(body), "\n\n"), "\n\n")
+			Expect(events).To(HaveLen(3))
+			Expect(events[0]).To(HavePrefix(reqcommon.SSEDataPrefix))
+			Expect(events[1]).To(Equal(reqcommon.SSEDataPrefix + errorBody))
+			Expect(events[2]).To(Equal(reqcommon.SSEDone))
+		})
 
 		It("emits one SSE event per chunk and terminates with [DONE]", func() {
 			ti := newChunkedTestSetup(5, []string{
@@ -409,6 +570,46 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(completionTokens).To(Equal(10))
 			Expect(totalTokens).To(Equal(15))
 		})
+
+		DescribeTable("reports a finish reason only on the last chunk",
+			func(maxTokens int, decodeResponses []string, wantFinishReasons []any) {
+				ti := newChunkedTestSetup(5, decodeResponses)
+				defer ti.stop()
+
+				resp := doPost(ti.addr, fmt.Sprintf(
+					`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":%d,"stream":true}`, maxTokens))
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+				var finishReasons []any
+				scanner := bufio.NewScanner(resp.Body)
+				for scanner.Scan() {
+					data, ok := strings.CutPrefix(scanner.Text(), reqcommon.SSEDataPrefix)
+					if !ok || scanner.Text() == reqcommon.SSEDone {
+						continue
+					}
+					var event map[string]any
+					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
+					if choice := firstChoice(event); choice != nil {
+						Expect(choice).To(HaveKey(responseFieldFinishReason))
+						finishReasons = append(finishReasons, choice[responseFieldFinishReason])
+					}
+				}
+				Expect(scanner.Err()).ToNot(HaveOccurred())
+				Expect(finishReasons).To(Equal(wantFinishReasons))
+			},
+			Entry("decoder stops in a later chunk", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", "stop", 10, 3),
+			}, []any{nil, "stop"}),
+			Entry("token budget runs out", 10, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", finishReasonLength, 10, 5),
+			}, []any{nil, finishReasonLength}),
+			Entry("chunk produces nothing to continue from", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("", finishReasonLength, 10, 0),
+			}, []any{nil, finishReasonLength}),
+		)
 	})
 
 	Describe("helper functions", func() {

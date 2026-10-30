@@ -139,6 +139,11 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		return
 	}
 
+	// The handler synthesizes completion records for truncated streams.
+	// These callbacks carry no new data event and must not add a token.
+	completionOnly := response.EndOfStream &&
+		response.TerminationCause != "" &&
+		response.TerminationCause != requestcontrol.TerminationCauseNatural
 	now := time.Now()
 	predictedLatencyCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
@@ -151,12 +156,12 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		if pl.config.StreamingMode && !response.EndOfStream {
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
-	} else {
+	} else if !completionOnly {
 		processTokenForLatencyPrediction(ctx, predictedLatencyCtx, now)
 	}
 
 	if response.EndOfStream {
-		if !pl.config.StreamingMode {
+		if !pl.config.StreamingMode && !completionOnly {
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 
@@ -171,7 +176,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		}
 
 		if predictedLatencyCtx.ttft > 0 && predictedLatencyCtx.generatedTokenCount > 1 {
-			e2eMs := float64(now.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
+			e2eMs := float64(predictedLatencyCtx.lastTokenTimestamp.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
 			predictedLatencyCtx.avgTPOT = (e2eMs - predictedLatencyCtx.ttft) / float64(predictedLatencyCtx.generatedTokenCount-1)
 		}
 

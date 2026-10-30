@@ -164,6 +164,22 @@ func TestContent_UnmarshalJSON(t *testing.T) {
 			}},
 		},
 		{
+			name:  "untyped media parts take their type from the media field",
+			input: `[{"image_url":"https://example.com/a.jpg"},{"image_url":{"url":"https://example.com/b.jpg"}},{"audio_url":"https://example.com/c.wav"},{"video_url":{"url":"https://example.com/d.mp4"}},{"input_audio":{"data":"AAAA","format":"wav"}}]`,
+			want: Content{Structured: []ContentBlock{
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/a.jpg"}},
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/b.jpg"}},
+				{Type: "audio_url", AudioURL: AudioURLBlock{URL: "https://example.com/c.wav"}},
+				{Type: "video_url", VideoURL: VideoBlock{URL: "https://example.com/d.mp4"}},
+				{Type: "input_audio", InputAudio: AudioBlock{Data: "AAAA", Format: "wav"}},
+			}},
+		},
+		{
+			name:    "content block with mistyped media URL is rejected",
+			input:   `[{"image_url":1}]`,
+			wantErr: true,
+		},
+		{
 			name:  "empty content blocks",
 			input: `[]`,
 			want:  Content{Structured: []ContentBlock{}},
@@ -206,6 +222,260 @@ func TestContent_UnmarshalJSON(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.want, c)
 			}
+		})
+	}
+}
+
+func TestAnthropicContent_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    AnthropicContent
+		wantErr string
+	}{
+		{
+			name:  "string content",
+			input: `"hello world"`,
+			want:  AnthropicContent{Raw: "hello world"},
+		},
+		{
+			name:  "text block",
+			input: `[{"type":"text","text":"hi"}]`,
+			want:  AnthropicContent{Structured: []AnthropicContentBlock{{Type: "text", Text: "hi"}}},
+		},
+		{
+			name:  "image block with object source",
+			input: `[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:   "image",
+				Source: json.RawMessage(`{"type":"url","url":"https://example.com/a.png"}`),
+			}}},
+		},
+		{
+			name:  "document block with object source",
+			input: `[{"type":"document","title":"t","source":{"type":"text","media_type":"text/plain","data":"x"}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:   "document",
+				Source: json.RawMessage(`{"type":"text","media_type":"text/plain","data":"x"}`),
+			}}},
+		},
+		{
+			name: "search_result block with string source",
+			input: `[{"type":"search_result","source":"https://example.com/notes","title":"Notes",` +
+				`"content":[{"type":"text","text":"code word"}]},{"type":"text","text":"reply"}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{
+				{
+					Type:    "search_result",
+					Source:  json.RawMessage(`"https://example.com/notes"`),
+					Content: json.RawMessage(`[{"type":"text","text":"code word"}]`),
+				},
+				{Type: "text", Text: "reply"},
+			}},
+		},
+		{
+			name: "search_result block inside tool_result",
+			input: `[{"type":"tool_result","tool_use_id":"toolu_01","content":[` +
+				`{"type":"search_result","source":"https://example.com/report","title":"Report",` +
+				`"content":[{"type":"text","text":"sunny"}]}]}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:      "tool_result",
+				ToolUseID: "toolu_01",
+				Content: json.RawMessage(`[{"type":"search_result","source":"https://example.com/report","title":"Report",` +
+					`"content":[{"type":"text","text":"sunny"}]}]`),
+			}}},
+		},
+		{
+			name: "web_search_tool_result with error object content",
+			input: `[{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01",` +
+				`"content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:      "web_search_tool_result",
+				ToolUseID: "srvtoolu_01",
+				Content:   json.RawMessage(`{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}`),
+			}}},
+		},
+		{
+			name: "bash_code_execution_tool_result with object content",
+			input: `[{"type":"bash_code_execution_tool_result","tool_use_id":"srvtoolu_02",` +
+				`"content":{"type":"bash_code_execution_result","stdout":"1\n","stderr":"","return_code":0,"content":[]}}]`,
+			want: AnthropicContent{Structured: []AnthropicContentBlock{{
+				Type:      "bash_code_execution_tool_result",
+				ToolUseID: "srvtoolu_02",
+				Content:   json.RawMessage(`{"type":"bash_code_execution_result","stdout":"1\n","stderr":"","return_code":0,"content":[]}`),
+			}}},
+		},
+		{
+			name:    "number content",
+			input:   `42`,
+			wantErr: "anthropic content: must be a string or an array of content blocks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c AnthropicContent
+			err := json.Unmarshal([]byte(tt.input), &c)
+			if tt.wantErr != "" {
+				assert.EqualError(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, c)
+		})
+	}
+}
+
+// A malformed block inside an array must surface its own decode error, once.
+// A tool_result keeps its content raw, so a malformed block below it decodes
+// and is reported as empty content by ToolResultContent instead.
+func TestAnthropicContent_UnmarshalJSONMalformedBlock(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "top level", input: `[{"type":"text","text":5}]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var c AnthropicContent
+			err := json.Unmarshal([]byte(tt.input), &c)
+
+			var typeErr *json.UnmarshalTypeError
+			require.ErrorAs(t, err, &typeErr)
+			assert.Equal(t, "number", typeErr.Value)
+			assert.NotContains(t, err.Error(), "must be a string or an array")
+		})
+	}
+
+	t.Run("inside tool_result", func(t *testing.T) {
+		var c AnthropicContent
+		require.NoError(t, json.Unmarshal([]byte(`[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":5}]}]`), &c))
+		require.Len(t, c.Structured, 1)
+		assert.Equal(t, `[{"type":"text","text":5}]`, string(c.Structured[0].Content))
+		assert.Equal(t, AnthropicContent{}, c.Structured[0].ToolResultContent())
+	})
+}
+
+func TestAnthropicContent_UnmarshalJSONPreservesReceiverBehavior(t *testing.T) {
+	stale := AnthropicContent{
+		Raw: "stale",
+		Structured: []AnthropicContentBlock{{
+			Type:   "image",
+			Name:   "stale",
+			Source: json.RawMessage(`{"type":"url","url":"https://example.com/a.png"}`),
+		}},
+	}
+	clone := func() AnthropicContent {
+		c := stale
+		c.Structured = append([]AnthropicContentBlock(nil), stale.Structured...)
+		return c
+	}
+
+	c := clone()
+	require.NoError(t, json.Unmarshal([]byte(`[{"type":"text","text":"a"}]`), &c))
+	assert.Equal(t, AnthropicContent{Raw: "stale", Structured: []AnthropicContentBlock{{Type: "text", Text: "a"}}}, c,
+		"decoded blocks must not inherit fields from the receiver's old blocks")
+
+	c = clone()
+	require.NoError(t, json.Unmarshal([]byte(`"hello"`), &c))
+	assert.Equal(t, AnthropicContent{Raw: "hello", Structured: stale.Structured}, c)
+
+	c = clone()
+	require.Error(t, json.Unmarshal([]byte(`[{"type":"image"},{"type":"text","text":5}]`), &c))
+	assert.Equal(t, stale, c, "a failed decode must leave the receiver unchanged")
+
+	c = clone()
+	require.Error(t, json.Unmarshal([]byte(`42`), &c))
+	assert.Equal(t, stale, c, "a failed decode must leave the receiver unchanged")
+}
+
+func TestAnthropicContentBlock_ImageSource(t *testing.T) {
+	tests := []struct {
+		name  string
+		block AnthropicContentBlock
+		want  *AnthropicImageSource
+	}{
+		{
+			name:  "image with base64 source",
+			block: AnthropicContentBlock{Type: "image", Source: json.RawMessage(`{"type":"base64","media_type":"image/png","data":"AAAA"}`)},
+			want:  &AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "AAAA"},
+		},
+		{
+			name:  "image with url source",
+			block: AnthropicContentBlock{Type: "image", Source: json.RawMessage(`{"type":"url","url":"https://example.com/a.png"}`)},
+			want:  &AnthropicImageSource{Type: "url", URL: "https://example.com/a.png"},
+		},
+		{
+			name:  "image without source",
+			block: AnthropicContentBlock{Type: "image"},
+		},
+		{
+			name:  "image with null source",
+			block: AnthropicContentBlock{Type: "image", Source: json.RawMessage(`null`)},
+		},
+		{
+			name:  "image with string source",
+			block: AnthropicContentBlock{Type: "image", Source: json.RawMessage(`"https://example.com/a.png"`)},
+		},
+		{
+			name:  "image with malformed source object",
+			block: AnthropicContentBlock{Type: "image", Source: json.RawMessage(`{"type":5}`)},
+		},
+		{
+			name:  "search_result is not an image",
+			block: AnthropicContentBlock{Type: "search_result", Source: json.RawMessage(`"https://example.com/notes"`)},
+		},
+		{
+			name:  "document is not an image",
+			block: AnthropicContentBlock{Type: "document", Source: json.RawMessage(`{"type":"url","url":"https://example.com/a.pdf"}`)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.block.ImageSource())
+		})
+	}
+}
+
+func TestAnthropicContentBlock_ToolResultContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		block AnthropicContentBlock
+		want  AnthropicContent
+	}{
+		{
+			name:  "tool_result with string content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`"Sunny, 22C"`)},
+			want:  AnthropicContent{Raw: "Sunny, 22C"},
+		},
+		{
+			name:  "tool_result with block array content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`[{"type":"text","text":"sunny"}]`)},
+			want:  AnthropicContent{Structured: []AnthropicContentBlock{{Type: "text", Text: "sunny"}}},
+		},
+		{
+			name:  "tool_result without content",
+			block: AnthropicContentBlock{Type: "tool_result"},
+		},
+		{
+			name:  "tool_result with null content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`null`)},
+		},
+		{
+			name:  "tool_result with object content",
+			block: AnthropicContentBlock{Type: "tool_result", Content: json.RawMessage(`{"type":"text","text":"sunny"}`)},
+		},
+		{
+			name:  "web_search_tool_result is not a tool_result",
+			block: AnthropicContentBlock{Type: "web_search_tool_result", Content: json.RawMessage(`[{"type":"web_search_result","url":"https://example.com"}]`)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.block.ToolResultContent())
 		})
 	}
 }

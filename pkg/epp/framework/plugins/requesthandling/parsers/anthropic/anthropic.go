@@ -108,11 +108,15 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	// through, so only the envelope is read: Messages stays nil, while the model
 	// still resolves and rewrites.
 	if countTokens {
-		return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: true}, nil
+		return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: true}, nil
 	}
 
 	var messagesReq fwkrh.MessagesRequest
 	if err := json.Unmarshal(body, &messagesReq); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && typeErr.Field != "" {
+			err = &fwkrh.RequestFieldError{Field: typeErr.Field, Err: err}
+		}
 		return nil, fmt.Errorf("error parsing messages request: %w", err)
 	}
 	if len(messagesReq.Messages) == 0 {
@@ -123,7 +127,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		result.Stream = true
 	}
 
-	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
+	return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: false}, nil
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
@@ -215,7 +219,20 @@ func jsonInt(m map[string]any, key string) int {
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
+	}, nil
+}
+
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		if _, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix)); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {

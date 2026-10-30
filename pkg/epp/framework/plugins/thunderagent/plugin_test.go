@@ -51,7 +51,7 @@ func TestAgentIdentityIsARequiredDependency(t *testing.T) {
 func TestFactoryStartsSweep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01}`))
+	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01, "headWaitStarvationMs": 0}`))
 	p, err := Factory("thunder", params, utils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	a := p.(*ThunderAgent)
@@ -73,6 +73,8 @@ func TestDumpState(t *testing.T) {
 	a := newTestAgent(testConfig())
 	runTurn(t, a, "secret-session", schedEndpoint("pod-a", 0, 0), 400, 300)
 	_ = startTurn(t, a, "other", schedEndpoint("pod-a", 0, 0), 800)
+	runTurn(t, a, "paused", schedEndpoint("pod-a", 0, 0), 400, 200)
+	pause(a, "paused")
 
 	raw, err := a.DumpState()
 	require.NoError(t, err)
@@ -83,6 +85,7 @@ func TestDumpState(t *testing.T) {
 	require.Equal(t, stateDump{
 		RunningSessions: 1,
 		IdleSessions:    1,
+		PausedSessions:  1,
 		Endpoints: map[string]endpointDump{
 			"default/pod-a": {WorkingSetTokens: 500, CapacityTokens: 1000},
 		},
@@ -122,4 +125,14 @@ func TestRuntimeReleaseEndpointRemovesEndpoint(t *testing.T) {
 
 	runtime.ReleaseEndpoint(endpoint)
 	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
+}
+
+// PreRequest stores each turn's estimate under inflightEstimateKey for its
+// later hooks. The data layer drops undeclared request-attribute writes and
+// fails the request, so the key must be declared.
+func TestProducesInflightEstimate(t *testing.T) {
+	a := newTestAgent(testConfig())
+	produced, ok := a.Produces()[inflightEstimateKey]
+	require.True(t, ok)
+	require.IsType(t, int64(0), produced)
 }

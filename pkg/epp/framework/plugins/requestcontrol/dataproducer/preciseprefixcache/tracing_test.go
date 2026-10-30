@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -82,8 +83,8 @@ func mmSpanRequest(id string) *scheduling.InferenceRequest {
 				Prompts: []fwkrh.PromptTokens{{
 					TokenIDs: tokens,
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
-						{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
-						{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
+						{Modality: reqcommon.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
+						{Modality: reqcommon.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
 					},
 				}},
 			},
@@ -168,7 +169,7 @@ func TestProduce_MultiPromptMMTotalBlocksSums(t *testing.T) {
 	prompt := func() fwkrh.PromptTokens {
 		return fwkrh.PromptTokens{
 			TokenIDs:           make([]uint32, 2*testBlockSize),
-			MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 0, Length: testBlockSize}},
+			MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "img", Offset: 0, Length: testBlockSize}},
 		}
 	}
 	req := &scheduling.InferenceRequest{
@@ -243,11 +244,11 @@ func TestProduce_SubBlockPromptCountsInMMTotal(t *testing.T) {
 				Prompts: []fwkrh.PromptTokens{
 					{
 						TokenIDs:           make([]uint32, 2*testBlockSize),
-						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: testBlockSize}},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "img-a", Offset: 0, Length: testBlockSize}},
 					},
 					{
 						TokenIDs:           make([]uint32, 5),
-						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 0, Length: 5}},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "img-b", Offset: 0, Length: 5}},
 					},
 				},
 			},
@@ -281,7 +282,7 @@ func TestPreRequest_MultiPromptMMTotalBlocksSums(t *testing.T) {
 	prompt := func() fwkrh.PromptTokens {
 		return fwkrh.PromptTokens{
 			TokenIDs:           make([]uint32, 2*testBlockSize),
-			MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 0, Length: testBlockSize}},
+			MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "img", Offset: 0, Length: testBlockSize}},
 		}
 	}
 	req := &scheduling.InferenceRequest{

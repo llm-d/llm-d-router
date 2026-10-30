@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -112,7 +116,7 @@ func TestMessagesRenderMode(t *testing.T) {
 					CacheSalt: "tenant-a",
 					Prompts: []fwkrh.PromptTokens{{
 						TokenIDs:           []uint32{1, 2, 3},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
 					}},
 				}, req.Body.TokenizedRequest)
 				require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
@@ -858,7 +862,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				{Role: "user", Content: fwkrh.AnthropicContent{
 					Structured: []fwkrh.AnthropicContentBlock{
 						{Type: "text", Text: "Describe this"},
-						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc123"}},
+						{Type: "image", Source: imageSource(fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc123"})},
 					},
 				}},
 			},
@@ -877,7 +881,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				{Role: "user", Content: fwkrh.AnthropicContent{
 					Structured: []fwkrh.AnthropicContentBlock{
 						{Type: "text", Text: "Describe this"},
-						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "url", URL: "https://example.com/img.jpg"}},
+						{Type: "image", Source: imageSource(fwkrh.AnthropicImageSource{Type: "url", URL: "https://example.com/img.jpg"})},
 					},
 				}},
 			},
@@ -895,7 +899,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 			messages: []fwkrh.AnthropicMessage{
 				{Role: "user", Content: fwkrh.AnthropicContent{
 					Structured: []fwkrh.AnthropicContentBlock{
-						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", Data: "abc123"}},
+						{Type: "image", Source: imageSource(fwkrh.AnthropicImageSource{Type: "base64", Data: "abc123"})},
 					},
 				}},
 			},
@@ -913,7 +917,7 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				{Role: "user", Content: fwkrh.AnthropicContent{
 					Structured: []fwkrh.AnthropicContentBlock{
 						{Type: "text", Text: "Describe this"},
-						{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64"}},
+						{Type: "image", Source: imageSource(fwkrh.AnthropicImageSource{Type: "base64"})},
 					},
 				}},
 			},
@@ -935,6 +939,223 @@ func TestLegacyMessagesToRenderChatRequest_StructuredMessage(t *testing.T) {
 				assert.Equal(t, want.Content.Structured, got.Content.Structured,
 					"message %d: Structured content mismatch", i)
 			}
+		})
+	}
+}
+
+func TestLegacyProduceMessagesToolChoice(t *testing.T) {
+	for _, tc := range []struct {
+		name, choice, want, mode, tools string
+	}{
+		{"auto", `"tool_choice":{"type":"auto"}`, `"auto"`, "auto", ""},
+		{"any", `"tool_choice":{"type":"any"}`, `"required"`, "required", ""},
+		{"none", `"tool_choice":{"type":"none"}`, `"none"`, "none", ""},
+		{"named", `"tool_choice":{"type":"tool","name":"private_tool"}`, `{"type":"function","function":{"name":"private_tool"}}`, "named", ""},
+		{"parallel disabled", `"tool_choice":{"type":"any","disable_parallel_tool_use":true}`, `"required"`, "required", ""},
+		{"parallel enabled", `"tool_choice":{"type":"auto","disable_parallel_tool_use":false}`, `"auto"`, "auto", ""},
+		{"null", `"tool_choice":null`, `null`, "unknown", ""},
+		{"absent", "", "", "unknown", ""},
+		{"empty tools", "", "", "unknown", `[]`},
+		{"null tools", "", "", "unknown", `null`},
+		{"uppercase choice after canonical", `"tool_choice":{"type":"auto"},"TOOL_CHOICE":{"type":"any"}`, `"auto"`, "auto", ""},
+		{"uppercase choice before canonical", `"TOOL_CHOICE":{"type":"any"},"tool_choice":{"type":"auto"}`, `"auto"`, "auto", ""},
+		{"uppercase choice only", `"TOOL_CHOICE":{"type":"any"}`, "", "unknown", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := setupSpanRecorder(t)
+			before := renderToolFieldCounts(t)
+			var received map[string]json.RawMessage
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, chatRenderPath, r.URL.Path)
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			}))
+			defer srv.Close()
+			tools := tc.tools
+			if tools == "" {
+				tools = `[{"name":"private_tool","input_schema":{"maximum":9007199254740993}}]`
+			}
+			raw := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":` + tools
+			if tc.choice != "" {
+				raw += "," + tc.choice
+			}
+			raw += "}"
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
+			require.NoError(t, err)
+			p := newTestPlugin(newHTTPRenderer(t, srv))
+			p.backend = renderBackend{tk: p.backend.(renderBackend).tk, modelName: "m", legacyMessages: &legacyMessagesMode{mode: messagesRenderModeLegacy}}
+			require.NoError(t, p.Produce(toolcalling.WithTelemetryEnabled(t.Context()), &scheduling.InferenceRequest{Body: parsed.Body}, nil))
+			require.Equal(t, fwkrh.RawPayload(raw), parsed.Body.WirePayload())
+			if tc.want == "" {
+				require.NotContains(t, received, "tool_choice")
+			} else {
+				require.JSONEq(t, tc.want, string(received["tool_choice"]))
+			}
+			if tc.tools == "" {
+				require.Contains(t, string(received["tools"]), "9007199254740993")
+			} else {
+				require.JSONEq(t, tc.tools, string(received["tools"]))
+			}
+			if strings.HasPrefix(tc.name, "parallel") {
+				require.Equal(t, strconv.FormatBool(tc.name == "parallel enabled"), string(received["parallel_tool_calls"]))
+			}
+			after := renderToolFieldCounts(t)
+			require.Equal(t, float64(1), after["tools/preserved"]-before["tools/preserved"])
+			if tc.want != "" {
+				status := "preserved"
+				if tc.want == "null" {
+					status = "changed"
+				}
+				require.Equal(t, float64(1), after["tool_choice/"+status]-before["tool_choice/"+status])
+			} else {
+				for key, count := range after {
+					if strings.HasPrefix(key, "tool_choice/") {
+						require.Equal(t, before[key], count)
+					}
+				}
+			}
+			require.Len(t, recorder.Ended(), 2)
+			for _, span := range recorder.Ended() {
+				attrs := spanAttrs(span)
+				require.Equal(t, "messages", attrs[semconv.LLMDToolCallingAPISurfaceKey].AsString())
+				if tc.want == "" {
+					require.NotContains(t, attrs, semconv.LLMDToolCallingToolChoiceKey)
+					require.NotContains(t, attrs, semconv.LLMDToolCallingFieldToolChoiceStatusKey)
+				} else {
+					require.Equal(t, tc.mode, attrs[semconv.LLMDToolCallingToolChoiceKey].AsString())
+				}
+				for _, value := range attrs {
+					require.NotContains(t, value.String(), "private_tool")
+					require.NotContains(t, value.String(), "9007199254740993")
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyMessagesRenderFieldChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name, field, status string
+		value               any
+		tools               string
+	}{
+		{"dropped tools", "tools", "dropped", nil, ""},
+		{"changed projected tools", "tools", "changed", "private_replaced_tool", ""},
+		{"dropped choice", "tool_choice", "dropped", nil, ""},
+		{"changed choice", "tool_choice", "changed", "none", ""},
+		{"uppercase tools after canonical", "tools", "changed", "private_replaced_tool", `"tools":[{"name":"private_tool","input_schema":{"type":"object"}}],"TOOLS":[{"name":"private_replaced_tool","input_schema":{"type":"object"}}]`},
+		{"uppercase tools before canonical", "tools", "preserved", "private_tool", `"TOOLS":[{"name":"private_replaced_tool","input_schema":{"type":"object"}}],"tools":[{"name":"private_tool","input_schema":{"type":"object"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"private_tool","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}`
+			if tc.tools != "" {
+				raw = `{"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"any"},` + tc.tools + "}"
+			}
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), []byte(raw), map[string]string{":path": reqcommon.PathMessages})
+			require.NoError(t, err)
+			if tc.field == "tools" && tc.value != nil && tc.tools == "" {
+				parsed.Body.Messages.Tools[0].Name = tc.value.(string)
+			}
+			payload := legacyMessagesPayload(parsed.Body.Messages)
+			baseline := prepareLegacyMessagesToolFields(parsed.Body, payload, true)
+			require.NotNil(t, baseline)
+			if tc.value == nil {
+				delete(payload, tc.field)
+			} else if tc.field != "tools" {
+				payload[tc.field] = tc.value
+			}
+			renderer := newRenderServer(t, vllmConfig{PrefillOnly: true, OmitMMKwargs: true}, func(w http.ResponseWriter, r *http.Request) {
+				var received map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+				switch {
+				case tc.value == nil:
+					assert.NotContains(t, received, tc.field)
+				case tc.field == "tools":
+					assert.Contains(t, string(received[tc.field]), tc.value)
+				default:
+					assert.JSONEq(t, `"none"`, string(received[tc.field]))
+				}
+				_, _ = io.WriteString(w, `{"token_ids":[1]}`)
+			})
+			before := renderToolFieldCounts(t)
+			ctx := context.WithValue(t.Context(), renderToolBaselineCtxKey{}, baseline)
+			inbound, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeMessages, []byte(raw))
+			require.NoError(t, err)
+			ctx = toolcalling.WithRequestSnapshot(ctx, []byte(raw), inbound)
+			ctx = toolcalling.WithTelemetryEnabled(ctx)
+			var out renderResponse
+			require.NoError(t, renderer.postJSON(ctx, chatRenderPath, payload, time.Second, &out))
+			after := renderToolFieldCounts(t)
+			for key, value := range before {
+				after[key] -= value
+			}
+			for key, value := range after {
+				if value == 0 {
+					delete(after, key)
+				}
+			}
+			want := map[string]float64{"tools/preserved": 1, "tool_choice/preserved": 1}
+			delete(want, tc.field+"/"+string(toolcalling.FieldStatusPreserved))
+			want[tc.field+"/"+tc.status] = 1
+			require.Equal(t, want, after)
+		})
+	}
+}
+
+func TestLegacyMessagesInvalidToolChoiceIsChanged(t *testing.T) {
+	for _, choice := range []string{
+		`{"type":"unexpected"}`,
+		`{"type":"tool","name":""}`,
+		`"auto"`,
+	} {
+		t.Run(choice, func(t *testing.T) {
+			raw := []byte(`{"messages":[],"tool_choice":` + choice + `}`)
+			body := &fwkrh.InferenceRequestBody{
+				Messages: &fwkrh.MessagesRequest{},
+				Payload:  fwkrh.RawPayload(raw),
+			}
+			payload := fwkrh.PayloadMap{}
+			baseline := prepareLegacyMessagesToolFields(body, payload, true)
+			require.NotNil(t, baseline)
+			forwardedJSON, err := payload.Marshal()
+			require.NoError(t, err)
+			forwarded, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, forwardedJSON)
+			require.NoError(t, err)
+			statuses, err := toolcalling.CompareRequests(baseline.comparison, forwarded)
+			require.NoError(t, err)
+			for _, status := range statuses {
+				if status.Field == toolcalling.FieldToolChoice {
+					require.Equal(t, toolcalling.FieldStatusChanged, status.Status)
+					return
+				}
+			}
+			t.Fatal("missing tool_choice status")
+		})
+	}
+}
+
+func TestLegacyMessagesPayloadWithTelemetryDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools string
+	}{
+		{"null tools", `null`},
+		{"empty tools", `[]`},
+		{"nonempty tools", `[{"name":"private_tool","input_schema":{"type":"object"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":` + tc.tools + `,"tool_choice":{"type":"any","disable_parallel_tool_use":true}}`)
+			parsed, err := anthropic.NewAnthropicParser().ParseRequest(t.Context(), raw, map[string]string{":path": reqcommon.PathMessages})
+			require.NoError(t, err)
+			enabled := legacyMessagesPayload(parsed.Body.Messages)
+			require.NotNil(t, prepareLegacyMessagesToolFields(parsed.Body, enabled, true))
+			disabled := legacyMessagesPayload(parsed.Body.Messages)
+			require.Nil(t, prepareLegacyMessagesToolFields(parsed.Body, disabled, false))
+			enabledJSON, err := enabled.Marshal()
+			require.NoError(t, err)
+			disabledJSON, err := disabled.Marshal()
+			require.NoError(t, err)
+			require.JSONEq(t, string(enabledJSON), string(disabledJSON))
 		})
 	}
 }
@@ -1074,19 +1295,15 @@ func TestLegacyMessagesToRenderChatRequest_ToolResult(t *testing.T) {
 		Messages: []fwkrh.AnthropicMessage{
 			{Role: "user", Content: fwkrh.AnthropicContent{
 				Structured: []fwkrh.AnthropicContentBlock{
-					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{
-						Structured: []fwkrh.AnthropicContentBlock{
-							{Type: "text", Text: "stdout line 1"},
-							{Type: "text", Text: "stdout line 2"},
-							{Type: "image", Source: &fwkrh.AnthropicImageSource{Type: "base64", MediaType: "image/png", Data: "abc"}},
-						},
-					}},
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: json.RawMessage(
+						`[{"type":"text","text":"stdout line 1"},{"type":"text","text":"stdout line 2"},` +
+							`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]`)},
 					{Type: "text", Text: "What do you see?"},
 				},
 			}},
 			{Role: "user", Content: fwkrh.AnthropicContent{
 				Structured: []fwkrh.AnthropicContentBlock{
-					{Type: "tool_result", ToolUseID: "toolu_02", Content: fwkrh.AnthropicContent{Raw: "plain string result"}},
+					{Type: "tool_result", ToolUseID: "toolu_02", Content: json.RawMessage(`"plain string result"`)},
 				},
 			}},
 		},
@@ -1124,7 +1341,7 @@ func TestLegacyMessagesToRenderChatRequest_ToolResultOnlyUserDropped(t *testing.
 		Messages: []fwkrh.AnthropicMessage{
 			{Role: "user", Content: fwkrh.AnthropicContent{
 				Structured: []fwkrh.AnthropicContentBlock{
-					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "result"}},
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: json.RawMessage(`"result"`)},
 				},
 			}},
 		},
@@ -1153,7 +1370,7 @@ func TestLegacyMessagesToRenderChatRequest_FullAgenticTurn(t *testing.T) {
 			}},
 			{Role: "user", Content: fwkrh.AnthropicContent{
 				Structured: []fwkrh.AnthropicContentBlock{
-					{Type: "tool_result", ToolUseID: "toolu_01", Content: fwkrh.AnthropicContent{Raw: "Sunny, 22C"}},
+					{Type: "tool_result", ToolUseID: "toolu_01", Content: json.RawMessage(`"Sunny, 22C"`)},
 				},
 			}},
 		},

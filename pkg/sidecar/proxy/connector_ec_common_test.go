@@ -179,7 +179,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 		},
 	}
 
-	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL} {
+	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake} {
 		t.Run(connector, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -344,6 +344,7 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
 		"ec-nixl":           (*Server).handleECNIXL,
 		"ec-shared-storage": (*Server).handleECSharedStorage,
+		"ec-mooncake":       (*Server).handleECMooncake,
 	}
 	tests := []struct {
 		name        string
@@ -399,4 +400,59 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestExtractMMItemsConvertsAnthropicImages(t *testing.T) {
+	messages, err := json.Marshal([]any{
+		map[string]any{"role": "system", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/system.png"}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/a.png"}},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/chat.png"}},
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aaaa"}},
+				map[string]any{"type": "image", "source": map[string]any{"media_type": "image/gif", "data": "bbbb"}},
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "cccc"}},
+				map[string]any{"type": "image", "source": map[string]any{"url": "https://example.com/bare.png"}},
+				map[string]any{"type": "tool_result", "content": []any{
+					map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/deep.png"}},
+				}},
+			}},
+		}},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/assistant.png"}},
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_2", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/assistant-tool.png"}},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	items := extractMMItems(log.Log, map[string]any{"messages": json.RawMessage(messages)}, reqcommon.APITypeMessages)
+	urls := make([]any, 0, len(items))
+	for _, item := range items {
+		assert.Equal(t, reqcommon.PartTypeImageURL, item["type"])
+		urls = append(urls, item["image_url"])
+	}
+	// A user turn's tool_result images come before its own, the order vLLM
+	// renders them in.
+	assert.Equal(t, []any{
+		map[string]any{"url": "data:image/png;base64,aaaa"},
+		map[string]any{"url": "data:image/gif;base64,bbbb"},
+		map[string]any{"url": "data:image/jpeg;base64,cccc"},
+		map[string]any{"url": "https://example.com/bare.png"},
+		map[string]any{"url": "https://example.com/a.png"},
+		map[string]any{"url": "https://example.com/assistant.png"},
+	}, urls)
+
+	// A chat completion does not speak Anthropic image blocks.
+	chat, err := json.Marshal([]any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/a.png"}},
+		}},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, extractMMItems(log.Log, map[string]any{"messages": json.RawMessage(chat)}, reqcommon.APITypeChatCompletions))
 }

@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -347,6 +348,77 @@ func TestHandleECEPDThreadsParamsToPrefill(t *testing.T) {
 	assert.Equal(t, float64(0), threshold, "cache_hit_threshold should be 0")
 }
 
+// TestHandleECNIXLPrimesAnthropicImages covers a /v1/messages body whose
+// images are Anthropic image blocks, including one nested in tool_result.
+// The encoder speaks chat completions, so those blocks have to arrive as
+// image_url parts, and the prefill body still has to carry ec_transfer_params.
+func TestHandleECNIXLPrimesAnthropicImages(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		mu.Lock()
+		bodies = append(bodies, string(buf))
+		i := len(bodies) - 1
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{
+			"choices": [{"message": {"content": ""}}],
+			"ec_transfer_params": {"hash-%d": {"peer_host": "10.0.0.%d"}}
+		}`, i, i)
+	}))
+	defer encoderBackend.Close()
+
+	encoderURL, err := url.Parse(encoderBackend.URL)
+	assert.NoError(t, err)
+	srv := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+	srv.logger = log.Log
+
+	var capturedBody []byte
+	srv.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
+		buf, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		capturedBody = buf
+	}
+
+	messages, err := json.Marshal([]any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/a.png"}},
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aaaa"}},
+			}},
+		}},
+	})
+	assert.NoError(t, err)
+	reqBody, err := json.Marshal(map[string]any{"messages": json.RawMessage(messages)})
+	assert.NoError(t, err)
+
+	httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathMessages, io.NopCloser(bytes.NewReader(reqBody)))
+	srv.handleECNIXL(httptest.NewRecorder(), httpReq, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeMessages)
+
+	mu.Lock()
+	got := append([]string(nil), bodies...)
+	mu.Unlock()
+	assert.Len(t, got, 2)
+	assert.Contains(t, strings.Join(got, "\n"), "https://example.com/a.png")
+	assert.Contains(t, strings.Join(got, "\n"), "data:image/png;base64,aaaa")
+	for _, body := range got {
+		assert.Contains(t, body, `"type":"image_url"`)
+		assert.NotContains(t, body, `"source"`)
+	}
+
+	if !assert.NotNil(t, capturedBody, "handlePDConnector should have been invoked") {
+		return
+	}
+	var parsed map[string]any
+	assert.NoError(t, json.Unmarshal(capturedBody, &parsed))
+	ec, ok := parsed[reqcommon.FieldECTransferParams].(map[string]any)
+	assert.True(t, ok, "prefill body should carry ec_transfer_params")
+	assert.Len(t, ec, 2)
+}
+
 // TestHandleECEPDAllMissingDoesNotAddField verifies the all-missing
 // degradation branch: when every encoder response lacks ec_transfer_params,
 // the connector forwards the prefill request WITHOUT the field set (so
@@ -621,7 +693,9 @@ func TestFanoutEncoderPerErrorVisibility(t *testing.T) {
 		imageURLItem("https://example.com/img2.jpg"),
 		imageURLItem("https://example.com/img3.jpg"),
 	)
-	_, _, _, err = srv.fanoutEncoderCollect(context.Background(), req, []string{encoderURL.Host}, "test-visibility", reqcommon.APITypeChatCompletions)
+	// The connector reads its logger from the context, so the capture sink has
+	// to be seeded the way disaggregatedPrefillHandler seeds it.
+	_, _, _, err = srv.fanoutEncoderCollect(log.IntoContext(context.Background(), srv.logger), req, []string{encoderURL.Host}, "test-visibility", reqcommon.APITypeChatCompletions)
 	assert.Error(t, err, "all encoders return 5xx; an error must surface")
 
 	captured := sink.snapshot()
@@ -800,4 +874,122 @@ func TestHandleECNIXLDecoderDirect(t *testing.T) {
 	threshold, ok := parsed[reqcommon.FieldCacheHitThreshold]
 	assert.True(t, ok, "cache_hit_threshold must be set")
 	assert.Equal(t, float64(0), threshold)
+}
+
+// TestECEPDDecodeBody verifies where ec_transfer_params lands once the real
+// NIXLv2 connector runs behind handleECNIXL: the prefill stage consumes the
+// encoder cache, so it keeps the field; decode behind a prefiller has no
+// ECConnector and must not receive it; the direct encoder-to-decoder branch
+// has no prefiller, so decode is the consumer and keeps it.
+func TestECEPDDecodeBody(t *testing.T) {
+	tests := []struct {
+		name            string
+		prefillEndpoint bool
+		mutate          func(cfg *Config, decodeURL *url.URL)
+		wantPrefillEC   bool
+		wantDecodeEC    bool
+	}{
+		{
+			name:            "nixlv2 serial",
+			prefillEndpoint: true,
+			wantPrefillEC:   true,
+			wantDecodeEC:    false,
+		},
+		{
+			name:            "nixlv2 parallel write",
+			prefillEndpoint: true,
+			mutate: func(cfg *Config, decodeURL *url.URL) {
+				cfg.MoRIIOWriteMode = true
+				cfg.MoRIIOParallelDispatch = true
+				cfg.MoRIIODecodePodIP = decodeURL.Hostname()
+				cfg.MoRIIODecodeNotifyPort = 61005
+				cfg.MoRIIODecodeHandshakePort = 6301
+				cfg.MoRIIOPrefillNotifyPort = 61006
+				cfg.MoRIIOPrefillHandshakePort = 6302
+				cfg.MoRIIOTPSize = 1
+				cfg.MoRIIODPSize = 1
+			},
+			wantPrefillEC: true,
+			wantDecodeEC:  false,
+		},
+		{
+			name:            "direct encoder to decoder",
+			prefillEndpoint: false,
+			wantDecodeEC:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prefillBodies := make(chan []byte, 4)
+			decodeBodies := make(chan []byte, 4)
+
+			recorder := func(out chan<- []byte, resp string) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					buf, _ := io.ReadAll(r.Body)
+					out <- buf
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(resp))
+				}
+			}
+
+			encoderBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}],"ec_transfer_params":{"hash-0":{"peer_host":"10.0.0.1"}}}`))
+			}))
+			defer encoderBackend.Close()
+			prefillBackend := httptest.NewServer(recorder(prefillBodies,
+				`{"choices":[],"kv_transfer_params":{"do_remote_prefill":true}}`))
+			defer prefillBackend.Close()
+			decodeBackend := httptest.NewServer(recorder(decodeBodies, `{"choices":[]}`))
+			defer decodeBackend.Close()
+
+			encoderURL, err := url.Parse(encoderBackend.URL)
+			assert.NoError(t, err)
+			decodeURL, err := url.Parse(decodeBackend.URL)
+			assert.NoError(t, err)
+
+			cfg := Config{Port: "0", DecoderURL: decodeURL}
+			if tc.mutate != nil {
+				tc.mutate(&cfg, decodeURL)
+			}
+			srv := NewProxy(cfg)
+			srv.logger = log.Log
+			srv.decoderProxy = httputil.NewSingleHostReverseProxy(decodeURL)
+
+			prefillHost := ""
+			if tc.prefillEndpoint {
+				prefillHost = prefillBackend.Listener.Addr().String()
+			}
+
+			reqBody, _ := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+			httpReq := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, io.NopCloser(bytes.NewReader(reqBody)))
+			rw := httptest.NewRecorder()
+
+			srv.handleECNIXL(rw, httpReq, prefillHost, []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+
+			assertEC := func(stage string, bodies <-chan []byte, want bool) {
+				t.Helper()
+				var raw []byte
+				select {
+				case raw = <-bodies:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("%s backend received no request", stage)
+				}
+				var parsed map[string]any
+				assert.NoError(t, json.Unmarshal(raw, &parsed))
+				ec, has := parsed[reqcommon.FieldECTransferParams]
+				assert.Equalf(t, want, has, "%s body ec_transfer_params presence", stage)
+				if want {
+					assert.Contains(t, ec, "hash-0")
+				}
+			}
+			if tc.prefillEndpoint {
+				assertEC("prefill", prefillBodies, tc.wantPrefillEC)
+			}
+			assertEC("decode", decodeBodies, tc.wantDecodeEC)
+		})
+	}
 }

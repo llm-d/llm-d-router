@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -50,6 +51,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	receivedAt := time.Now()
 	cw := newCountingResponseWriter(w)
 	route := inferenceRoute(r.URL.Path)
+	apiType := reqcommon.DetectAPIType(r.URL.Path)
 	// model is the raw name from the request body, or "" when the client
 	// omitted it. Metric emitters normalize "" to ModelUnknown via
 	// boundModel; the pipeline sees the raw value so upstream requests
@@ -112,19 +114,19 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(cw, "failed to read request body", http.StatusBadRequest)
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "failed to read request body")
 		return
 	}
 	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(cw, "request body too large", http.StatusRequestEntityTooLarge)
+		rejectInference(serverLog, cw, apiType, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
 	parsed, err := decodeRequestBody(body)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		http.Error(cw, "invalid JSON body", http.StatusBadRequest)
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	parseDuration = time.Since(parseStart)
@@ -145,13 +147,13 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// the passthrough catch-all, which never parses a body. Which paths and
 	// methods each API serves is settled in
 	// https://github.com/llm-d/llm-d-router/issues/3091.
-	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
+	if apiType == reqcommon.APITypeResponses {
 		// The router serves only stateless Responses requests, disaggregated
 		// or not; the rest is resolved upstream of it. err names a field from
 		// a fixed list, so echoing it reflects no client-controlled content.
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
@@ -203,6 +205,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
+		if pipeline.IsClientCancellation(ctx, err) {
+			logger.V(logutil.VERBOSE).Info("pipeline aborted: client cancelled", "error", err)
+			return
+		}
 		logger.Error(err, "pipeline execution failed")
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		var streamed *pipeline.UpstreamStreamedError
@@ -214,7 +220,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status, msg := classifyPipelineError(err, reqCtx.RequestID)
-		http.Error(cw, msg, status)
+		rejectInference(logger, cw, apiType, status, msg)
 	}
 }
 
@@ -226,6 +232,10 @@ func inferenceRoute(path string) string {
 		return coordmetrics.RouteChatCompletions
 	case reqcommon.PathCompletions:
 		return coordmetrics.RouteCompletions
+	case reqcommon.PathResponses:
+		return coordmetrics.RouteResponses
+	case reqcommon.PathMessages:
+		return coordmetrics.RouteMessages
 	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
 		return coordmetrics.RouteGenerate
 	default:
@@ -292,4 +302,12 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// rejectInference answers a rejected inference request with the error envelope
+// of its API and logs a failure to write it.
+func rejectInference(logger logr.Logger, w http.ResponseWriter, apiType reqcommon.APIType, status int, msg string) {
+	if err := reqcommon.WriteAPIError(w, apiType, status, msg); err != nil {
+		logger.Error(err, "failed to write error response")
+	}
 }

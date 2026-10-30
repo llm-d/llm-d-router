@@ -33,13 +33,21 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v0.10.2
+VLLM_SIMULATOR_TAG ?= v1.0.0
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
 # CPU-only vLLM image that exposes `vllm launch render` for the token-producer
-# plugin's HTTP backend.
-export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
+# plugin's HTTP backend. The dev renderer manifest overrides the image's command
+# with that CLI, so this image cannot be swapped for the simulator there. The
+# e2e suites render through the simulator instead and override this per target.
+# The tag must serve every render route the plugin calls, including
+# /v1/messages/render and /v1/responses/render; tags below v0.30.0 answer 404
+# there and the plugin falls back to the deprecated chat-completions
+# conversion. v0.32.0 serves the routes but cannot run model inference on a
+# Triton-less CPU build (vllm-project/vllm#61131), so it is not usable for the
+# serving manifests that share this tag.
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.31.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
@@ -225,7 +233,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint vulncheck check-latest-tags-strict verify-boilerplate
+presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -317,6 +325,10 @@ test-integration-hermetic: image-build-builder ## Run hermetic integration tests
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/integration-hermetic.out | tail -1'
 
 
+# The simulator serves every /render route the token-producer plugin calls, so
+# the e2e suites render through it and no real-vLLM image is pulled or loaded.
+# Set on the target so image-pull inherits it.
+test-e2e-run: export VLLM_RENDER_IMAGE = $(VLLM_IMAGE)
 .PHONY: test-e2e-run
 test-e2e-run: image-pull ## Ensure images are present, then run e2e tests
 	@printf "\033[33;1m==== Running End to End Tests ====\033[0m\n"
@@ -356,8 +368,8 @@ verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
 ##@ Helm
 
 .PHONY: verify-helm-charts
-verify-helm-charts: helm-install kubectl-validate ## Render and validate Helm charts.
-	HELM="$(HELM)" KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-helm.sh $(MODE)
+verify-helm-charts: helm-install kubectl-validate yq ## Render and validate Helm charts.
+	HELM="$(HELM)" YQ="$(YQ)" KUBECTL_VALIDATE="$(KUBECTL_VALIDATE)" hack/verify-helm.sh $(MODE)
 
 .PHONY: helm-push
 helm-push: yq helm-install ## Package and push a specified Helm chart. Usage: make helm-push CHART=<chart_name>

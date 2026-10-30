@@ -31,6 +31,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -109,15 +110,15 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 	var features []fwkrh.MultiModalFeature
 	if hasImage {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasVideo {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasAudio {
 		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	body := &fwkrh.InferenceRequestBody{
 		ChatCompletions: &fwkrh.ChatCompletionsRequest{
@@ -226,7 +227,7 @@ func TestHasMultimodalContent(t *testing.T) {
 		{"feature present", &scheduling.InferenceRequest{
 			Body: &fwkrh.InferenceRequestBody{
 				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage}}}},
+					Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage}}}},
 				},
 			},
 		}, true},

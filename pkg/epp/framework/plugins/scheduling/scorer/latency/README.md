@@ -67,9 +67,10 @@ prefer the most overloaded endpoint.
 
 ### Range-based weight re-normalization
 
-If all endpoints have identical TTFT headroom (range = 0), the TTFT weight is set to 0
-and TPOT weight to 1 (and vice versa). This prevents the zero-range dimension from
-compressing all scores to the same value.
+If all endpoints in a bucket have identical TTFT headroom (range = 0), the TTFT
+weight is set to 0 and TPOT weight to 1 only when TPOT headroom varies and its
+configured weight is positive (and vice versa). This keeps the varying dimension
+fully weighted without enabling a dimension whose configured weight is 0.
 
 ### Composite fallback
 

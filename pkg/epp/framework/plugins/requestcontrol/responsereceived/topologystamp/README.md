@@ -28,7 +28,7 @@ Reads the `Topology` attribute (`topology-extractor`) from the endpoint selected
 
 | Parameter               | Required | Default            | Description                                                                  |
 |--------------------------|----------|---------------------|--------------------------------------------------------------------------------|
-| `headerName`             | no       | `x-peer-topology`   | Response header the encoded topology is written to. Must be `x-peer-topology`: the coordinator's request forwarding is not configurable, so any other value is rejected at startup. |
+| `headerName`             | no       | `x-llm-d-peer-topology`   | Response header the encoded topology is written to. Must be `x-llm-d-peer-topology`: the coordinator's request forwarding is not configurable, so any other value is rejected at startup. |
 | `profileName`            | no       | primary profile      | Scheduling profile whose selected endpoint's topology is stamped.            |
 | `topologyProducerName`   | no       | default producer     | `topology-extractor` instance to read the `Topology` attribute from.         |
 

@@ -37,7 +37,7 @@ func TestFlowItem_New(t *testing.T) {
 	req := mocks.NewMockFlowControlRequest(100, "req-1", flowcontrol.FlowKey{})
 
 	enqueueTime := time.Now()
-	item := NewItem(req, time.Minute, enqueueTime, logr.Discard())
+	item := NewItem(context.Background(), req, time.Minute, enqueueTime, logr.Discard())
 
 	require.NotNil(t, item, "NewItem should not return a nil item")
 	assert.Equal(t, enqueueTime, item.EnqueueTime(), "EnqueueTime should be populated")
@@ -121,7 +121,7 @@ func TestFlowItem_Finalize_Idempotency(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			item := NewItem(req, time.Minute, now, logr.Discard())
+			item := NewItem(context.Background(), req, time.Minute, now, logr.Discard())
 
 			// First call
 			tc.firstCall(item)
@@ -229,7 +229,7 @@ func TestFlowItem_Finalize_OutcomeClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			req := mocks.NewMockFlowControlRequest(100, "req-1", flowcontrol.FlowKey{})
-			item := NewItem(req, time.Minute, now, logr.Discard())
+			item := NewItem(context.Background(), req, time.Minute, now, logr.Discard())
 			if tc.isQueued {
 				item.SetHandle(&mocks.MockQueueItemHandle{})
 			}

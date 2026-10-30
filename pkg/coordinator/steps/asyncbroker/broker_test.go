@@ -29,16 +29,20 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/llm-d/llm-d-async/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 // newAsyncTestStep builds the step through its factory against a miniredis,
@@ -285,7 +289,10 @@ func TestAsyncBrokerEnqueue(t *testing.T) {
 	assert.Equal(t, "/v1/chat/completions", envelope.Data.Endpoint)
 	assert.Equal(t, "team-a", envelope.Data.Metadata["userid"])
 	assert.Equal(t, "00-abc-def-01", envelope.Data.Metadata["traceparent"])
-	assert.Equal(t, "test-model", envelope.Data.Payload["model"])
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(envelope.Data.Payload, &payload))
+	assert.Equal(t, "test-model", payload["model"])
+	assert.Equal(t, "test-model", envelope.Data.Model)
 	assert.Equal(t, "800", envelope.Data.Headers["x-llm-d-slo-ttft-ms"])
 	for k := range envelope.Data.Headers {
 		assert.NotEqual(t, "x-llm-d-async-mode", strings.ToLower(k))
@@ -314,17 +321,96 @@ func TestAsyncBrokerEnqueueFailure(t *testing.T) {
 	assert.InDelta(t, 1.0, upstreamRequestCount(t, reg, coordmetrics.UpstreamAsyncBroker), 1e-9)
 }
 
-// A client gone before the enqueue returns is not counted as an error.
-func TestAsyncBrokerEnqueueClientGone(t *testing.T) {
-	step, _ := newAsyncTestStep(t, nil)
-	require.NoError(t, step.rdb.Close())
-	reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
-		map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+// A departed client ends the step with the context error on both the enqueue
+// and the hold path.
+func TestAsyncBrokerClientGone(t *testing.T) {
+	t.Run("enqueue", func(t *testing.T) {
+		step, _ := newAsyncTestStep(t, nil)
+		require.NoError(t, step.rdb.Close())
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var logged []string
+		logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
 
-	err := step.Execute(ctx, reqCtx)
-	assert.True(t, errors.Is(err, pipeline.ErrPipelineDone), "want ErrPipelineDone, got %v", err)
+		err := step.Execute(log.IntoContext(ctx, logger), reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+		for _, line := range logged {
+			assert.NotContains(t, line, "failed to enqueue request")
+		}
+	})
+	t.Run("wait", func(t *testing.T) {
+		step, _ := newAsyncTestStep(t, nil)
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+	})
+	t.Run("enqueue with a generated id cancels the queued request", func(t *testing.T) {
+		// The client never sees the generated id, so a request it cannot
+		// fetch or delete must not be left for a worker to dispatch.
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "enqueue", defaultTenantHeader: "team-a"})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+
+		eid := envelopeID("team-a", reqCtx.RequestID)
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), exists, "the abandoned request should be marked cancelled before dispatch")
+	})
+	t.Run("enqueue with a client-chosen id stays queued", func(t *testing.T) {
+		// The client already knows this id, so it can still fetch, delete, or
+		// retry the request after this connection is gone.
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{
+				defaultModeHeader:            "enqueue",
+				defaultTenantHeader:          "team-a",
+				reqcommon.RequestIDHeaderKey: "client-job",
+			})
+		reqCtx.RequestID = "client-job"
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
+
+		err := step.Execute(ctx, reqCtx)
+		require.ErrorIs(t, err, pipeline.ErrPipelineDone)
+
+		eid := envelopeID("team-a", "client-job")
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
+		require.NoError(t, err)
+		assert.Zero(t, exists, "a request the client can still address should not be cancelled")
+		members, err := rdb.ZRange(t.Context(), "team-default-queue", 0, -1).Result()
+		require.NoError(t, err)
+		assert.Len(t, members, 1, "a request the client can still address should stay queued")
+	})
+}
+
+// cancelAfterSubmit ends the request context once the enqueue has succeeded,
+// so the client is gone when the hold begins.
+type cancelAfterSubmit struct {
+	asyncSubmitter
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) error {
+	err := s.asyncSubmitter.SubmitRequest(ctx, req)
+	s.cancel()
+	return err
 }
 
 func upstreamRequestCount(t *testing.T, reg *prometheus.Registry, upstream string) float64 {
@@ -728,6 +814,104 @@ func TestAsyncBrokerFetchGraceConfig(t *testing.T) {
 		exists, err := rdb.Exists(t.Context(), key).Result()
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists)
+	})
+}
+
+var errClientGone = errors.New("client gone")
+
+// failingWriter records the status it is given and fails every body write, as
+// a connection dropped mid-response does.
+type failingWriter struct {
+	header http.Header
+	status int
+}
+
+func newFailingWriter() *failingWriter { return &failingWriter{header: http.Header{}} }
+
+func (f *failingWriter) Header() http.Header        { return f.header }
+func (f *failingWriter) WriteHeader(statusCode int) { f.status = statusCode }
+func (f *failingWriter) Write([]byte) (int, error)  { return 0, errClientGone }
+
+func TestWriteResultReportsWriteFailure(t *testing.T) {
+	cases := map[string]api.ResultMessage{
+		"upstream payload":       {StatusCode: 200, Payload: `{"done":true}`},
+		"invalid stored status":  {StatusCode: 42, Payload: `{}`},
+		"gate dropped":           {ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "dropped"},
+		"deadline exceeded":      {ErrorCode: api.ErrCodeDeadlineExceeded, ErrorMessage: "late"},
+		"invalid request":        {ErrorCode: api.ErrCodeInvalidRequest, ErrorMessage: "bad"},
+		"cancelled":              {ErrorCode: api.ErrCodeCancelled, ErrorMessage: "cancelled"},
+		"unmapped producer code": {ErrorCode: "SOMETHING_ELSE", ErrorMessage: "failed"},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, writeErr := writeResult(newFailingWriter(), &res)
+			assert.ErrorIs(t, writeErr, errClientGone)
+		})
+	}
+}
+
+// TestAsyncBrokerUndeliveredErrorResultIsRetained covers the cleanup paths
+// that reclaim the mailbox only after confirmed delivery: a stored error
+// result whose body write fails must stay fetchable by id.
+func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
+	seed := func(t *testing.T, rdb *redis.Client, id string) string {
+		t.Helper()
+		res, err := json.Marshal(api.ResultMessage{ErrorCode: api.ErrCodeGateDropped, ErrorMessage: "dropped"})
+		require.NoError(t, err)
+		key := resultKey("team-a", id)
+		require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+		require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
+		return key
+	}
+	assertRetained := func(t *testing.T, rdb *redis.Client, key string) {
+		t.Helper()
+		exists, err := rdb.Exists(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), exists)
+	}
+
+	t.Run("held wait", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
+			map[string]string{defaultModeHeader: "wait", defaultTenantHeader: "team-a"})
+		w := newFailingWriter()
+		reqCtx.ResponseWriter = w
+		key := seed(t, rdb, "req-test-1")
+
+		err := step.Execute(t.Context(), reqCtx)
+		assert.Equal(t, coordmetrics.ErrorCodeUpstream4xx, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
+		assert.Equal(t, http.StatusTooManyRequests, w.status)
+		assertRetained(t, rdb, key)
+	})
+
+	t.Run("fetch with zero grace", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 0})
+		key := seed(t, rdb, "eager-id")
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/eager-id", nil)
+		req.Header.Set(defaultTenantHeader, "team-a")
+
+		w := newFailingWriter()
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusTooManyRequests, w.status)
+		assertRetained(t, rdb, key)
+	})
+
+	t.Run("fetch with grace", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 5})
+		key := seed(t, rdb, "grace-id")
+		r := chi.NewRouter()
+		step.RegisterRoutes(r)
+		req := httptest.NewRequest(http.MethodGet, "/v1/requests/grace-id", nil)
+		req.Header.Set(defaultTenantHeader, "team-a")
+
+		w := newFailingWriter()
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusTooManyRequests, w.status)
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Greater(t, ttl, 5*time.Second)
 	})
 }
 

@@ -28,6 +28,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -118,9 +119,9 @@ func TestPreRequestRecordsPredictionModality(t *testing.T) {
 	tokens := []uint32{1, 2, 3, 4}
 	body := tokenizedBody(tokens)
 	body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img"},
+		{Modality: reqcommon.ModalityImage, Hash: "img"},
 	}
-	image := string(fwkrh.ModalityImage)
+	image := string(reqcommon.ModalityImage)
 
 	// sum reads the producer's decode series for one modality label value.
 	sum := func(metricName, modality string) float64 {
@@ -384,11 +385,11 @@ func TestPreRequestMaximaCarryModality(t *testing.T) {
 
 	body := tokenizedBody([]uint32{1, 2, 3, 4})
 	body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img"},
+		{Modality: reqcommon.ModalityImage, Hash: "img"},
 	}
 	runPredictionWithBody(t, p, "mm", body, endpoints, result)
 
-	image := string(fwkrh.ModalityImage)
+	image := string(reqcommon.ModalityImage)
 	assert.Equal(t, image, metricModality(t, bestPredictedMetric, name))
 	assert.Equal(t, image, metricModality(t, bestAvailableMetric, name))
 }

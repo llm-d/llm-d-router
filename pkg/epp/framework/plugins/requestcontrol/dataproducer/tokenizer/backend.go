@@ -145,7 +145,7 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			return nil, err
 		}
 		if legacy {
-			return b.renderLegacyMessages(ctx, body.Messages)
+			return b.renderLegacyMessages(ctx, body)
 		}
 		tokenIDs, mmFeatures, err := b.tk.RenderMessages(ctx, body.WirePayload())
 		if err != nil {
@@ -160,13 +160,19 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrh.InferenceRequest
 			TokenIDs:           body.Generate.TokenIDs,
 			MultiModalFeatures: convertMMFeaturesToUpstream(body.Generate.Features),
 		}}}, nil
+	case body.Generate != nil && body.Generate.Text != "":
+		tokenIDs, _, err := b.tk.Render(ctx, fwkrh.PayloadMap{"model": b.modelName, "prompt": body.Generate.Text})
+		if err != nil {
+			return nil, fmt.Errorf("tokenization failed: %w", err)
+		}
+		return fwkrh.NewTokenizedRequest(tokenIDs), nil
 	case body.Responses != nil:
 		legacy, err := b.legacyResponses.useLegacy(ctx, b.tk, b.modelName)
 		if err != nil {
 			return nil, err
 		}
 		if legacy {
-			return b.renderLegacyResponses(ctx, body.Responses)
+			return b.renderLegacyResponses(ctx, body)
 		}
 		tokenIDs, mmFeatures, err := b.tk.RenderResponses(ctx, body.WirePayload())
 		if err != nil {

@@ -144,6 +144,9 @@ type CapacitySnapshot struct {
 	Band CapacityDimension
 	// Global holds the registry-wide occupancy and limits.
 	Global CapacityDimension
+	// MaxBytesPerFlow and MaxRequestsPerFlow are the band's per-flow queue limits. Zero disables a limit.
+	MaxBytesPerFlow    uint64
+	MaxRequestsPerFlow uint64
 }
 
 // ActiveFlowConnection represents a handle to a scoped, leased session on a flow.

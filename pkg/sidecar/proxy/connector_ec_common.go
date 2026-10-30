@@ -17,9 +17,9 @@ limitations under the License.
 // This file holds the encoder fan-out scaffolding shared by every EC
 // connector: multimodal-item extraction and the parallel
 // per-item encoder dispatch loop. Each EC connector
-// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect)
-// supplies its own per-response perItem callback and otherwise reuses
-// these helpers verbatim.
+// (ec-example via fanoutEncoderPrimer, ec-nixl via fanoutEncoderCollect,
+// ec-mooncake via fanoutEncoderMooncake) supplies its own per-response perItem
+// callback and otherwise reuses these helpers verbatim.
 
 package proxy
 
@@ -36,16 +36,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 	"golang.org/x/sync/errgroup"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-// Multimodal content types that need encoder processing.
-var mmTypes = map[string]bool{
-	reqcommon.PartTypeImageURL:   true,
-	reqcommon.PartTypeAudioURL:   true,
-	reqcommon.PartTypeVideoURL:   true,
-	reqcommon.PartTypeInputAudio: true,
-	reqcommon.PartTypeInputImage: true,
-}
 
 // requestInput returns the request's Responses input items. A bare JSON string
 // (a single text turn), an explicit null and an absent field all yield a nil
@@ -71,36 +63,11 @@ func requestInput(req map[string]any) ([]json.RawMessage, error) {
 	}
 }
 
-// truncateLongStrings recursively shortens long string values for logging.
-func truncateLongStrings(v any, maxLen int) any {
-	switch x := v.(type) {
-	case string:
-		if len(x) > maxLen {
-			return fmt.Sprintf("%s...(%d bytes)", x[:maxLen], len(x))
-		}
-		return x
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, vv := range x {
-			out[k] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, vv := range x {
-			out[i] = truncateLongStrings(vv, maxLen)
-		}
-		return out
-	default:
-		return v
-	}
-}
-
-// extractMMItems extracts all multimodal content parts from the request:
-// chat-completions' messages array, or a Responses input array. Which field to
-// walk is gated on apiType rather than presence, since a client could send a
-// stray field the other format does not use. The part arrays within a turn come
-// from reqcommon.ItemPartArrays.
+// extractMMItems extracts all multimodal content parts from the request: the
+// messages array of chat completions or Messages, or a Responses input array.
+// Which field to walk is gated on apiType rather than presence, since a client
+// could send a stray field the other format does not use. The part arrays
+// within a turn come from reqcommon.ItemPartArrays.
 //
 // One item is returned per content part, repeats included. A part's modality and
 // its client-supplied uuid both move the serving engine's multimodal hash, so
@@ -118,7 +85,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		wrapped, err = requestMessages(requestData)
 	}
 	if err != nil {
-		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", err)
+		logger.V(logging.DEBUG).Info("cannot read request content for multimodal extraction", "error", jsonErrorForLog(err))
 		return items
 	}
 
@@ -143,29 +110,53 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 				continue
 			}
 
-			// vLLM's chat-completions parser primes input_image and image_url
-			// through the same map, so an input_image on a chat request is
-			// extracted. A chat part type on a Responses request fails the model
-			// server's input validation, so the request never reaches a worker
-			// and priming it would only fail the fanout first.
-			switch partType {
-			case reqcommon.PartTypeInputImage:
-				if url := reqcommon.MediaPartURL(partMap); url == "" {
-					logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL")
+			if apiType == reqcommon.APITypeMessages {
+				// Anthropic image blocks are not a chat part. The encoder is
+				// posted at /v1/chat/completions, which only primes image_url,
+				// so reshape before the part is forwarded as-is. ItemPartArrays
+				// returns only the arrays vLLM loads images from: a turn's
+				// content and, on a user turn, each tool_result's content one
+				// level deep. Which blocks name media is
+				// reqcommon.MessagesBlockModality's rule, shared with the
+				// coordinator steps. A chat part type fails /v1/messages input
+				// validation, so that request never reaches a worker.
+				_, isBlockMedia := reqcommon.MessagesBlockModality(partType)
+				_, isChatMedia := reqcommon.PartModality(partType)
+				switch {
+				case isBlockMedia:
+					converted, ok := anthropicImagePart(partMap)
+					if !ok {
+						logger.V(logging.DEBUG).Info("skipping anthropic image the encoder cannot be primed with")
+						droppedParts++
+						continue
+					}
+					items = append(items, converted)
+				case isChatMedia:
+					logger.V(logging.DEBUG).Info("skipping content part the Messages API does not define", "type", partType, "apiType", apiType)
 					droppedParts++
-					continue
 				}
-			case reqcommon.PartTypeImageURL, reqcommon.PartTypeAudioURL, reqcommon.PartTypeVideoURL, reqcommon.PartTypeInputAudio:
-				if apiType == reqcommon.APITypeResponses {
-					logger.V(logging.DEBUG).Info("skipping content part the Responses input union does not define", "type", partType, "apiType", apiType)
-					droppedParts++
-					continue
-				}
+				continue
 			}
 
-			if mmTypes[partType] {
-				items = append(items, partMap)
+			// reqcommon.PartModality's rule, shared with the coordinator steps
+			// so the two cannot disagree about which parts exist. A part naming
+			// no media is not counted as a drop: every text and tool part lands
+			// here, so counting them would fire droppedParts on ordinary traffic.
+			if _, isMedia := reqcommon.PartModality(partType); !isMedia {
+				continue
 			}
+
+			// An input_image carries its media behind a URL only, so one without
+			// a readable URL has nothing to prime an encoder with. Specific to
+			// it: an input_audio holds its bytes inline and reports no URL, so a
+			// general check would drop audio the encoder can be primed with.
+			if partType == reqcommon.PartTypeInputImage && reqcommon.MediaPartURL(partMap) == "" {
+				logger.V(logging.DEBUG).Info("skipping input_image with no fetchable URL")
+				droppedParts++
+				continue
+			}
+
+			items = append(items, partMap)
 		}
 	}
 
@@ -178,7 +169,7 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		if err := dec.Decode(&turn); err != nil {
-			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", err)
+			logger.V(logging.DEBUG).Info("skipping turn that does not decode as an object", "error", jsonErrorForLog(err))
 			droppedTurns++
 			continue
 		}
@@ -201,8 +192,21 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 
 // mmItemsForFanout extracts the fanout items for one request, tagging the
 // extraction logs with requestID.
-func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
-	return extractMMItems(s.logger.WithValues("requestID", requestID), originalRequest, apiType)
+func (s *Server) mmItemsForFanout(ctx context.Context, originalRequest map[string]any, requestID string, apiType reqcommon.APIType) []map[string]any {
+	return extractMMItems(log.FromContext(ctx).WithValues("requestID", requestID), originalRequest, apiType)
+}
+
+// anthropicImagePart turns a Messages API image block into the image_url
+// part the chat-completions encoder primes.
+func anthropicImagePart(part map[string]any) (map[string]any, bool) {
+	imageURL := reqcommon.MediaPartURL(part)
+	if imageURL == "" {
+		return nil, false
+	}
+	return map[string]any{
+		"type":      reqcommon.PartTypeImageURL,
+		"image_url": map[string]any{"url": imageURL},
+	}, true
 }
 
 // fanoutEncoder fans out one encoder request per item, in parallel, with
@@ -211,6 +215,8 @@ func (s *Server) mmItemsForFanout(originalRequest map[string]any, requestID stri
 // positional index and the buffered encoder response. The
 // callback may return an error to fail the whole fan-out, or nil to
 // accept. perItem may be nil for fire-and-forget primer-style usage.
+// prepare, when non-nil, may add fields to an item's encoder request body
+// before it is sent.
 //
 // The first goroutine to fail cancels the group context so sibling encoder
 // requests are aborted at the transport layer. Every failure is logged before
@@ -222,59 +228,67 @@ func (s *Server) fanoutEncoder(
 	encoderHostPorts []string,
 	requestID string,
 	apiType reqcommon.APIType,
+	prepare func(idx int, body map[string]any),
 	perItem func(idx int, pw *bufferedResponseWriter) error,
 ) error {
 	if len(encoderHostPorts) == 0 {
 		return fmt.Errorf("fanoutEncoder: no encoder hostPorts provided (requestID=%s)", requestID)
 	}
 
+	logger := log.FromContext(ctx)
 	encoderPath := reqcommon.PathChatCompletions
 	if apiType == reqcommon.APITypeResponses {
 		encoderPath = reqcommon.PathResponses
 	}
 
-	s.logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
+	logger.Info("processing multimodal items", "count", len(items), "requestID", requestID, "encoderHostPorts", encoderHostPorts)
 
 	grp, gctx := errgroup.WithContext(ctx)
 	for idx, mmItem := range items {
 		hostPort := encoderHostPorts[idx%len(encoderHostPorts)]
 		grp.Go(func() (err error) {
+			logger := log.FromContext(gctx)
 			defer func() {
 				if rec := recover(); rec != nil {
 					if rec != http.ErrAbortHandler {
 						panic(rec)
 					}
 					err = fmt.Errorf("encoder response interrupted for item %d: %w", idx, http.ErrAbortHandler)
-					s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+					logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				}
 			}()
 
+			// A Messages request gets NewEncoderPrimingBody's Messages body at
+			// the chat path; see its doc for why that holds.
 			encoderRequest := reqcommon.NewEncoderPrimingBody(originalRequest, mmItem, apiType)
+			if prepare != nil {
+				prepare(idx, encoderRequest)
+			}
 
 			body, err := json.Marshal(encoderRequest)
 			if err != nil {
 				err = fmt.Errorf("failed to marshal encoder request for item %d: %w", idx, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			encoderHandler, err := s.encoderProxyHandler(hostPort)
 			if err != nil {
 				err = fmt.Errorf("failed to get encoder proxy handler for %s: %w", hostPort, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			req, err := http.NewRequestWithContext(gctx, "POST", encoderPath, bytes.NewReader(body))
 			if err != nil {
 				err = fmt.Errorf("failed to create encoder request for item %d: %w", idx, err)
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(reqcommon.RequestIDHeaderKey, fmt.Sprintf("%s-enc-%d", requestID, idx))
 
-			s.logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
+			logger.V(logging.DEBUG).Info("sending encoder request", "item", idx, "to", hostPort, "requestID", requestID)
 
 			pw := &bufferedResponseWriter{}
 			encoderHandler.ServeHTTP(pw, req)
@@ -282,19 +296,19 @@ func (s *Server) fanoutEncoder(
 			// bufferedResponseWriter.Write back-fills 200, so statusCode 0 means
 			// the handler wrote nothing at all. isHTTPError treats it as an error.
 			if isHTTPError(pw.statusCode) {
-				err := fmt.Errorf("encoder request failed for item %d with status %d: %s", idx, pw.statusCode, pw.buffer.String())
-				s.logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
+				err := fmt.Errorf("encoder request failed for item %d with status %d", idx, pw.statusCode)
+				logger.Error(err, "encoder fanout", "item", idx, "requestID", requestID)
 				return err
 			}
 
 			if perItem != nil {
 				if err := perItem(idx, pw); err != nil {
-					s.logger.Error(err, "encoder fanout perItem", "item", idx, "requestID", requestID)
+					logger.Error(jsonErrorForLog(err), "encoder fanout perItem", "item", idx, "requestID", requestID)
 					return err
 				}
 			}
 
-			s.logger.V(logging.DEBUG).Info("encoder request completed", "item", idx, "requestID", requestID)
+			logger.V(logging.DEBUG).Info("encoder request completed", "item", idx, "requestID", requestID)
 			return nil
 		})
 	}
@@ -314,14 +328,15 @@ func (s *Server) runPDPipeline(
 	requestID string,
 	apiType reqcommon.APIType,
 ) {
+	logger := log.FromContext(r.Context())
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[reqcommon.FieldCacheHitThreshold] = 0
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
-		s.logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
+		logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
+			logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return
 	}
@@ -335,21 +350,18 @@ func (s *Server) runPDPipeline(
 	}
 
 	// Don't log the full body. Inline base64 images can be MB each.
-	if v := s.logger.V(logging.DEBUG); v.Enabled() {
+	if v := logger.V(logging.DEBUG); v.Enabled() {
 		kv := []any{
 			"requestID", requestID,
 			"destination", destination,
 			"prefiller", prefillEndPoint,
-			"bodyBytes", len(modifiedBody),
-		}
-		if ec, ok := body[reqcommon.FieldECTransferParams]; ok {
-			kv = append(kv, reqcommon.FieldECTransferParams, truncateLongStrings(ec, 64))
+			logBodyBytesKey, len(modifiedBody),
 		}
 		v.Info("forwarding request after encoder", kv...)
 	}
 
 	if len(prefillEndPoint) > 0 {
-		s.logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
+		logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
 		// The encoder path does not carry a KV cache source: the P2P prefix pull
 		// is not wired through encoder disaggregation. The empty source skips the
 		// p2p injection regardless of --enable-p2p-pull.
@@ -357,12 +369,17 @@ func (s *Server) runPDPipeline(
 		return
 	}
 
-	s.logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
+	logger.V(logging.DEBUG).Info("no prefiller configured, going directly to decoder after encoder")
+	toolFields, _ := captureInferenceToolCallingRequest(pdRequest, apiType, modifiedBody)
+	defer toolFields.report(r.Context())
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
-	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest) {
+	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
+		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
+	}) {
+		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 		s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
 	}
 	decodeReturned = true

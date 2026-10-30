@@ -123,8 +123,8 @@ func generateTokenIDs(images []genImage) []int {
 	// placeholderTokenID fills each image's placeholder span in the prompt. The
 	// real value is model-dependent (each multimodal model reserves its own
 	// image placeholder/pad token ID); this stand-in is arbitrary because the
-	// sim backend echoes and only the placeholder positions, not their token
-	// value, drive the coordinator's parse and encode fan-out.
+	// sim backend does not interpret token values, and only the placeholder
+	// positions drive the coordinator's parse and encode fan-out.
 	const placeholderTokenID = 32000
 	maxEnd := 1
 	for _, img := range images {

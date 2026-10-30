@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -152,7 +153,7 @@ func TestPrefixPluginScoreEmitsMultimodalAttributes(t *testing.T) {
 		{
 			name: "multimodal miss reports false",
 			request: requestWithMMFeatures(
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "h1"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
 			),
 			endpoints: []fwksched.Endpoint{
 				mmEndpoint("pod1", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 0})),
@@ -164,8 +165,8 @@ func TestPrefixPluginScoreEmitsMultimodalAttributes(t *testing.T) {
 		{
 			name: "multimodal hit reports true",
 			request: requestWithMMFeatures(
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "h1"},
-				fwkrh.MultiModalFeature{Modality: fwkrh.ModalityAudio, Hash: "h2"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityAudio, Hash: "h2"},
 			),
 			endpoints: []fwksched.Endpoint{
 				mmEndpoint("pod1", attrprefix.NewPrefixCacheMatchInfo(5, 10, 16).WithMM(attrprefix.MMMatchInfo{MatchBlocks: 3})),

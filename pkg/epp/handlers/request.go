@@ -33,12 +33,19 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *RequestContext, req *extProcPb.ProcessingRequest_RequestHeaders) error {
 	reqCtx.RequestReceivedTimestamp = time.Now()
+
+	// Responders run before the EndOfStream fallback so they can intercept bodyless
+	// GETs (e.g. /v1/models) that would otherwise be routed to a random endpoint.
+	if handled, err := s.tryRespondLocally(ctx, reqCtx, req); handled {
+		return err
+	}
 
 	// an EoS in the request headers means this request has no body or trailers.
 	if req.RequestHeaders.EndOfStream {
@@ -66,7 +73,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
 	endpoint := s.director.GetRandomEndpoint()
 	if endpoint == nil {
-		return errcommon.Error{Code: errcommon.Internal, Msg: "no pods available in datastore"}
+		return errcommon.Error{
+			Code:    errcommon.ServiceUnavailable,
+			Msg:     "no pods available in datastore",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		}
 	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
@@ -101,7 +112,7 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
 						SetHeaders:    s.generateHeaders(ctx, reqCtx),
-						RemoveHeaders: unsetRoutingHeaders(reqCtx),
+						RemoveHeaders: unsetRoutingHeaders(ctx, reqCtx),
 					},
 				},
 			},
@@ -144,6 +155,14 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 
+	// Hand the resolved fairness identity to the P/D sidecar so its spans carry it.
+	if id, source, ok := tracing.AttributionHandoff(ctx); ok {
+		headers = append(headers,
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessIDHandoffHeader, RawValue: []byte(id)}},
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessSourceHandoffHeader, RawValue: []byte(source)}},
+		)
+	}
+
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
 		if request.IsSystemOwnedHeader(key) {
@@ -160,10 +179,11 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 }
 
 // unsetRoutingHeaders lists the headers Envoy removes before forwarding: the
-// screening headers, and the routing headers no plugin set, so no
-// client-supplied value reaches the model server.
-func unsetRoutingHeaders(reqCtx *RequestContext) []string {
-	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders))
+// screening headers, the routing headers no plugin set, and the attribution
+// handoff when EPP does not send it, so no client-supplied value reaches the
+// sidecar or the model server.
+func unsetRoutingHeaders(ctx context.Context, reqCtx *RequestContext) []string {
+	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders)+2)
 	for key := range request.ScreeningHeaders {
 		remove = append(remove, key)
 	}
@@ -171,6 +191,9 @@ func unsetRoutingHeaders(reqCtx *RequestContext) []string {
 		if _, ok := reqCtx.Request.Headers[key]; !ok {
 			remove = append(remove, key)
 		}
+	}
+	if _, _, ok := tracing.AttributionHandoff(ctx); !ok {
+		remove = append(remove, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
 	}
 	return remove
 }

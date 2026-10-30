@@ -194,6 +194,49 @@ func TestConditionalDecodeStep_ResponsesFormat_PassesBodyThrough(t *testing.T) {
 	}
 }
 
+func TestConditionalDecodeStep_MessagesFormat_PassesBodyThrough(t *testing.T) {
+	var receivedBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathMessages {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "message", "content": []map[string]any{}})
+	}))
+	defer srv.Close()
+
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{Address: srv.URL}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-messages",
+		OriginalPath: reqcommon.PathMessages,
+		Body: map[string]any{
+			"model":      testModelName,
+			"max_tokens": 10,
+			"messages":   []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+		TokenIDs:       []int{1, 2345, 6789},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err = step.Execute(context.Background(), reqCtx)
+	if !errors.Is(err, pipeline.ErrPipelineDone) {
+		t.Fatalf("expected ErrPipelineDone, got %v", err)
+	}
+	if _, ok := receivedBody["prompt"]; ok {
+		t.Fatalf("expected no prompt field, got %v", receivedBody["prompt"])
+	}
+	if receivedBody["max_tokens"] != float64(10) {
+		t.Fatalf("expected the client's Messages body to pass through, got %v", receivedBody)
+	}
+}
+
 // Completions rewrites prompt to the rendered token IDs when render supplied
 // them, mirroring decode's TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV
 // coverage for the analogous branch in conditional_decode.go's prepareBody.
@@ -229,27 +272,22 @@ func TestConditionalDecodeStep_CompletionsFormat_RewritesPrompt(t *testing.T) {
 	}
 }
 
-// TestConditionalDecodeStep_UnreachableFormat_ReturnsError verifies that
-// request paths for formats prepareBody's switch does not handle explicitly
-// (APITypeMessages, APITypeSGLangGenerate) fail through
-// its default case, reporting an error instead of forwarding an unprepared
-// body.
+// TestConditionalDecodeStep_UnreachableFormat_ReturnsError verifies that a
+// request path for a format prepareBody's switch does not handle explicitly
+// (APITypeSGLangGenerate) fails through its default case, reporting an error
+// instead of forwarding an unprepared body.
 func TestConditionalDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathSGLangGenerate} {
-		t.Run(path, func(t *testing.T) {
-			step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+	step, err := NewConditionalDecodeStep(gateway.New(config.GatewayConfig{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			reqCtx := &pipeline.RequestContext{
-				OriginalPath: path,
-				Body:         map[string]any{"model": testModelName},
-			}
-			if _, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx); err == nil {
-				t.Fatal("expected an error for an unreachable request format")
-			}
-		})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathSGLangGenerate,
+		Body:         map[string]any{"model": testModelName},
+	}
+	if _, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx); err == nil {
+		t.Fatal("expected an error for an unreachable request format")
 	}
 }
 
@@ -440,6 +478,47 @@ func TestConditionalDecodeStep_TransportError(t *testing.T) {
 			probeCount(t, reg, other), 1e-9,
 			"response-based bucket %q must not increment on transport failure", other,
 		)
+	}
+}
+
+// The client leaves while the worker is silent: the context error, not
+// ErrPipelineDone, and no probe result.
+func TestConditionalDecodeStep_ClientCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// The worker never answers; release lets srv.Close finish.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled, "a cancelled probe must not read as a cache hit")
+	for _, result := range []string{
+		coordmetrics.ProbeResultServed,
+		coordmetrics.ProbeResultDeferred,
+		coordmetrics.ProbeResultError,
+		coordmetrics.ProbeResultTransportError,
+	} {
+		require.InDelta(t, 0.0, probeCount(t, reg, result), 1e-9, "no probe result for %q on client cancel", result)
 	}
 }
 

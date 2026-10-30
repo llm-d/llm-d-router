@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -88,9 +89,9 @@ func TestExtractMMItemsFromTokenizedRequestUsesPlaceholderLengths(t *testing.T) 
 			TokenizedRequest: &fwkrh.TokenizedRequest{
 				Prompts: []fwkrh.PromptTokens{{
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
-						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 576},
-						{Modality: fwkrh.ModalityImage, Hash: "image-b", Length: 0},
-						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 144},
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 576},
+						{Modality: reqcommon.ModalityImage, Hash: "image-b", Length: 0},
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 144},
 					},
 				}},
 			},
@@ -98,8 +99,8 @@ func TestExtractMMItemsFromTokenizedRequestUsesPlaceholderLengths(t *testing.T) 
 	})
 
 	assert.Equal(t, []attrmm.MatchItem{
-		{Hash: "image-a", Size: 576, Modality: string(fwkrh.ModalityImage)},
-		{Hash: "image-b", Size: 1, Modality: string(fwkrh.ModalityImage)},
+		{Hash: "image-a", Size: 576, Modality: string(reqcommon.ModalityImage)},
+		{Hash: "image-b", Size: 1, Modality: string(reqcommon.ModalityImage)},
 	}, items)
 }
 
@@ -114,8 +115,8 @@ func TestProduceUsesPlaceholderLengthsWhenTokenizedRequestAvailable(t *testing.T
 	assertMatchInfo(t, producer, endpointA,
 		nil,
 		[]attrmm.MatchItem{
-			{Hash: "hash-a", Size: 80, Modality: string(fwkrh.ModalityImage)},
-			{Hash: "hash-c", Size: 20, Modality: string(fwkrh.ModalityImage)},
+			{Hash: "hash-a", Size: 80, Modality: string(reqcommon.ModalityImage)},
+			{Hash: "hash-c", Size: 20, Modality: string(reqcommon.ModalityImage)},
 		})
 }
 
@@ -125,8 +126,8 @@ func TestExtractMMItemsFromTokenizedRequestFallsBackToUnitWeight(t *testing.T) {
 			TokenizedRequest: &fwkrh.TokenizedRequest{
 				Prompts: []fwkrh.PromptTokens{{
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
-						{Modality: fwkrh.ModalityImage, Hash: "image-a", Length: 0},
-						{Modality: fwkrh.ModalityAudio, Hash: "image-b", Length: 0},
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 0},
+						{Modality: reqcommon.ModalityAudio, Hash: "image-b", Length: 0},
 					},
 				}},
 			},
@@ -134,8 +135,8 @@ func TestExtractMMItemsFromTokenizedRequestFallsBackToUnitWeight(t *testing.T) {
 	})
 
 	assert.Equal(t, []attrmm.MatchItem{
-		{Hash: "image-a", Size: 1, Modality: string(fwkrh.ModalityImage)},
-		{Hash: "image-b", Size: 1, Modality: string(fwkrh.ModalityAudio)},
+		{Hash: "image-a", Size: 1, Modality: string(reqcommon.ModalityImage)},
+		{Hash: "image-b", Size: 1, Modality: string(reqcommon.ModalityAudio)},
 	}, items)
 }
 
@@ -192,7 +193,7 @@ func TestExtractMMItemsFromStructuredChatMedia(t *testing.T) {
 	})
 
 	assert.Equal(t, []attrmm.MatchItem{
-		{Hash: contentHash("image_url", "https://example.com/cat.png"), Size: 1, Modality: string(fwkrh.ModalityImage)},
+		{Hash: contentHash("image_url", "https://example.com/cat.png"), Size: 1, Modality: string(reqcommon.ModalityImage)},
 	}, items)
 }
 
@@ -213,8 +214,8 @@ func TestExtractMMItemsFromStructuredChatAudioURL(t *testing.T) {
 	})
 
 	assert.Equal(t, []attrmm.MatchItem{
-		{Hash: contentHash("audio_url", audioURL), Size: 1, Modality: string(fwkrh.ModalityAudio)},
-		{Hash: contentHash("input_audio", "wav:AAAA"), Size: 1, Modality: string(fwkrh.ModalityAudio)},
+		{Hash: contentHash("audio_url", audioURL), Size: 1, Modality: string(reqcommon.ModalityAudio)},
+		{Hash: contentHash("input_audio", "wav:AAAA"), Size: 1, Modality: string(reqcommon.ModalityAudio)},
 	}, items)
 }
 
@@ -232,7 +233,7 @@ func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
 
 	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
 
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 	assertMatchInfo(t, producer, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}},
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}, {Hash: "hash-c", Size: 20, Modality: img}})
@@ -349,8 +350,8 @@ func TestWeightedEvictionPreservesRequestItemOrder(t *testing.T) {
 			TokenizedRequest: &fwkrh.TokenizedRequest{
 				Prompts: []fwkrh.PromptTokens{{
 					MultiModalFeatures: []fwkrh.MultiModalFeature{
-						{Modality: fwkrh.ModalityImage, Hash: "first", Length: 512},
-						{Modality: fwkrh.ModalityImage, Hash: "second", Length: 512},
+						{Modality: reqcommon.ModalityImage, Hash: "first", Length: 512},
+						{Modality: reqcommon.ModalityImage, Hash: "second", Length: 512},
 					},
 				}},
 			},
@@ -562,7 +563,7 @@ func TestStalePodCleanup(t *testing.T) {
 	endpointB := newEndpoint(podB)
 	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
 
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 	assertMatchInfo(t, producer, endpointA,
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}},
 		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}})
@@ -685,7 +686,7 @@ func newEndpoint(name k8stypes.NamespacedName) scheduling.Endpoint {
 func requestWithHashes(requestID string, hashToWeight map[string]int) *scheduling.InferenceRequest {
 	features := make([]fwkrh.MultiModalFeature, 0, len(hashToWeight))
 	for hash, weight := range hashToWeight {
-		features = append(features, fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: hash, Length: weight})
+		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: hash, Length: weight})
 	}
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,

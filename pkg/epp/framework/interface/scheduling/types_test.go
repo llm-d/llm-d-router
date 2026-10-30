@@ -195,11 +195,6 @@ func TestScoredEndpointComparer(t *testing.T) {
 	assert.False(t, ScoredEndpointComparer(ScoredEndpoint{Endpoint: a, Score: 1}, ScoredEndpoint{Endpoint: other, Score: 1}))
 }
 
-func TestModalityAliases(t *testing.T) {
-	// These aliases exist for ergonomic re-export. Confirm the values line up.
-	assert.Equal(t, fwkrh.ModalityImage, ModalityImage)
-}
-
 func TestProfileRunResult_FirstEndpoint(t *testing.T) {
 	first := NewEndpoint(newTestMetadata("first"), newTestMetrics(), nil)
 	second := NewEndpoint(newTestMetadata("second"), newTestMetrics(), nil)

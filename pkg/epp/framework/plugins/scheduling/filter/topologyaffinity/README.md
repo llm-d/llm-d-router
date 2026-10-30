@@ -62,7 +62,7 @@ attribute is absent.
 |--------------------------|----------|---------|----------------------------------------------------------------------------------------|
 | `minAffinity`            | no       | `host`  | Tightest-to-loosest floor an endpoint must meet: `host`, `rack`, `zone`, or `region`.  |
 | `topologyProducerName`   | no       | default producer | `topology-extractor` instance to read the `Topology` attribute from.        |
-| `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. No other value is accepted: the coordinator's forwarding is not configurable, so a different name is rejected at startup. |
+| `peerTopologyHeader`     | no       | unset   | Request header carrying the peer topology in coordinator deployments. Set to `x-llm-d-peer-topology` when running in a decode EPP behind the coordinator; unused in single-EPP deployments. No other value is accepted: the coordinator's forwarding is not configurable, so a different name is rejected at startup. |
 
 The plugin trusts `peerTopologyHeader` without re-verifying its source. Only set it on a
 profile reachable exclusively through the coordinator's forwarded header; a decode EPP
@@ -90,7 +90,7 @@ plugins:
     name: decode-topology-affinity
     parameters:
       minAffinity: host
-      peerTopologyHeader: x-peer-topology
+      peerTopologyHeader: x-llm-d-peer-topology
 schedulingProfiles:
   - name: decode
     plugins:

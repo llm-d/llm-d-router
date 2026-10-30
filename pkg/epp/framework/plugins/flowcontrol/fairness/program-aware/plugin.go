@@ -99,7 +99,6 @@ var (
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
 )
 
-//nolint:revive // factory name matches sibling fairness plugins.
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := DefaultConfig()
 	if parameters != nil {
@@ -133,7 +132,6 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	return p, nil
 }
 
-//nolint:revive
 type ProgramAwarePlugin struct {
 	name     string
 	strategy Strategy

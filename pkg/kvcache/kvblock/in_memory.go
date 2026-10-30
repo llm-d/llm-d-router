@@ -489,7 +489,8 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 }
 
 // Clear removes every entry for the pod from the index, across all device tiers.
-// O(N) over the index, but Clear is rare and off the Lookup/Add hot path. Reuses
+// O(N) over the index for a pod it has held, and O(1) for a pod it never held,
+// such as one whose first snapshot is about to load. Reuses
 // evictPodsFromRequestKey for race-safe removal, and holds no global lock — only
 // each PodCache's mu, briefly — so it does not stall Lookup.
 //
@@ -501,6 +502,14 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 // the prefix chain in Lookup.
 func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Clear")
+
+	// A pod is interned by its first Add and never released.
+	m.pods.mu.Lock()
+	_, interned := m.pods.ids[podIdentifier]
+	m.pods.mu.Unlock()
+	if !interned {
+		return nil
+	}
 
 	for _, requestKey := range m.data.Keys() {
 		// Peek so a clear does not promote LRU recency on keys it scans.

@@ -351,3 +351,82 @@ func TestSharedStorage_StreamingDecodeFirstErrorStatus(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, client.Code)
 	require.Equal(t, errEvent, client.Body.String())
 }
+
+func TestCacheThresholdStopReason(t *testing.T) {
+	s := &Server{logger: log.Log}
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"stop_reason": "cache_threshold",
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"delta": map[string]any{"stop_reason": "cache_threshold"},
+	}))
+	require.False(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"stop_reason": "end_turn",
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{map[string]any{"finish_reason": "cache_threshold"}},
+	}))
+
+	data := "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"cache_threshold\"}}\n\n"
+	require.True(t, s.checkBufferedResponseForCacheThreshold(log.Log, data))
+}
+
+func TestCacheThresholdFinishReasonScansEveryChoice(t *testing.T) {
+	s := &Server{}
+	require.False(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "stop"},
+		},
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "stop"},
+			map[string]any{"finish_reason": "cache_threshold"},
+		},
+	}))
+	require.True(t, s.hasCacheThresholdFinishReason(map[string]any{
+		"choices": []any{
+			map[string]any{"finish_reason": "cache_threshold"},
+		},
+	}))
+}
+
+// TestSharedStorage_UpstreamErrorForwardsHeaders covers a prefill or buffered
+// decode-first error: the upstream headers reach the client with the status.
+func TestSharedStorage_UpstreamErrorForwardsHeaders(t *testing.T) {
+	fail := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream-Stage", "failed")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"unavailable"}`)
+	})
+	prefill := httptest.NewServer(fail)
+	defer prefill.Close()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "prefill failure", body: `{"model":"m","messages":[]}`},
+		{name: "buffered decode-first failure", body: `{"model":"m","messages":[],"cache_hit_threshold":0.5}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decodeURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			srv.logger = log.Log
+			srv.decoderProxy = fail
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tt.body))
+			recorder := httptest.NewRecorder()
+			srv.handleSharedStorage(recorder, req, strings.TrimPrefix(prefill.URL, "http://"), reqcommon.APITypeChatCompletions)
+
+			require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+			header := recorder.Result().Header
+			require.Equal(t, "application/json", header.Get("Content-Type"))
+			require.Equal(t, "failed", header.Get("X-Upstream-Stage"))
+		})
+	}
+}

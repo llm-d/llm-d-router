@@ -29,6 +29,8 @@ import (
 	"encoding/json"
 	"strconv"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -44,10 +46,6 @@ var AttributeKey = plugin.NewDataKey("outlen-bucket", "")
 const (
 	// PluginType is the plugin type name used in the EPP config.
 	PluginType = "outlen-bucket"
-
-	// toolChoiceNamed is the normalized value returned when tool_choice forces a specific
-	// function call ({"type":"function","function":{"name":...}}); used as a SHORT signal.
-	toolChoiceNamed = "named"
 
 	// longBudgetThresholdTokens is the thinking_budget above which a request is
 	// classified LONG even when enable_thinking is not explicitly set.
@@ -89,7 +87,7 @@ func (b Bucket) String() string {
 }
 
 // EstimateOutlen predicts the output-length bin using request-time signals.
-// Precedence (first match wins): LONG pushers (enable_thinking,
+// Precedence (first match wins): LONG pushers (enable_thinking / reasoning.effort,
 // DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
 // are checked first; SHORT pushers (tool_choice, has_tools,
 // continue_final_message, max_output_tokens<500)
@@ -105,9 +103,10 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	var thinkingBudget *int64
 	hasTools := false
 	continueFinalMessage := false
-	// has_tools, continue_final_message, enable_thinking, thinking_budget, and the
-	// vendor-specific DeepSeek/Nemotron signals are only carried on the chat-completions
-	// shape (vLLM populates them from the client's chat_template_kwargs / extra_body).
+	// continue_final_message, thinking_budget, and vendor-specific DeepSeek/Nemotron
+	// signals are only carried on the chat-completions shape (vLLM populates them from
+	// the client's chat_template_kwargs / extra_body). Responses API carries tools
+	// on the typed body, and reasoning.effort on the raw payload.
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
@@ -131,13 +130,17 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 			// Nemotron uses reasoning_budget as the budget key.
 			thinkingBudget = int64PtrFromAny(kwArgs["reasoning_budget"])
 		}
+	} else if body.Responses != nil {
+		hasTools = hasResponsesTools(body.Responses.Tools)
 	}
 
-	// tool_choice is an OpenAI top-level body field, not typed on the request —
-	// read it from the raw payload map.
+	// tool_choice is read from the raw payload; reasoning.effort is scoped to /v1/responses.
 	var toolChoice string
 	if payload, ok := payloadMap(body); ok {
-		toolChoice = toolChoiceKind(payload["tool_choice"])
+		toolChoice = toolChoiceKind(body, payload["tool_choice"])
+		if body.Responses != nil {
+			enableThinking = responsesThinking(payload["reasoning"])
+		}
 	}
 
 	bucket := classifyOutlen(classifyInput{
@@ -184,14 +187,14 @@ func classifyOutlen(in classifyInput) Bucket {
 	// --- SHORT pushers (must be high-precision) ---
 
 	// Forced tool call -> short tool-call JSON.
-	if in.toolChoice == "required" || in.toolChoice == toolChoiceNamed {
+	if in.toolChoice == string(toolcalling.ToolChoiceRequired) || in.toolChoice == string(toolcalling.ToolChoiceNamed) {
 		return Short
 	}
 	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
 	// Guard: enable_thinking must be explicitly false or absent (Nemotron ARC-AGI proves
 	// has_tools alone is NOT a SHORT signal under thinking); and tool_choice="none" vetoes it
 	// (tools are advertised but the model is told not to call them, so the SHORT premise fails).
-	if in.hasTools && !thinking && in.toolChoice != "none" {
+	if in.hasTools && !thinking && in.toolChoice != string(toolcalling.ToolChoiceNone) {
 		return Short
 	}
 	// Continuing/completing a partially-written assistant turn -> short by construction.
@@ -278,28 +281,17 @@ func stringFromAny(v any) string {
 	return ""
 }
 
-// toolChoiceKind normalizes the OpenAI tool_choice field. It is either a string
-// ("none" | "auto" | "required") or an object forcing a specific function
-// ({"type":"function","function":{"name":...}}), which we report as "named".
-// Anything else yields "" ("not set").
-func toolChoiceKind(v any) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case map[string]any:
-		// A specific tool is forced -> a short tool-call JSON response.
-		return toolChoiceNamed
-	case json.RawMessage:
-		// UnmarshalEnvelope stores objects as json.RawMessage; object = named tool.
-		if len(t) > 0 && t[0] == '{' {
-			return toolChoiceNamed
-		}
-		var s string
-		if err := json.Unmarshal(t, &s); err == nil {
-			return s
-		}
+// toolChoiceKind classifies tool_choice; only /v1/responses puts a function name at the top level.
+func toolChoiceKind(body *fwkrh.InferenceRequestBody, v any) string {
+	surface := reqcommon.APITypeChatCompletions
+	if body.Responses != nil {
+		surface = reqcommon.APITypeResponses
 	}
-	return ""
+	if raw, ok := v.(json.RawMessage); ok { // UnmarshalEnvelope keeps objects as raw JSON
+		v = nil
+		_ = json.Unmarshal(raw, &v)
+	}
+	return string(toolcalling.NormalizeToolChoice(surface, v))
 }
 
 // toJSONNumber normalizes float64 (from json.Unmarshal without UseNumber) and
@@ -357,4 +349,30 @@ func int64PtrFromAny(v any) *int64 {
 		}
 	}
 	return nil
+}
+
+// hasResponsesTools reports whether the Responses API's tools slice contains
+// at least one tool.
+func hasResponsesTools(v any) bool {
+	t, ok := v.([]any)
+	return ok && len(t) > 0
+}
+
+// responsesThinking maps the Responses API's reasoning.effort to an enable_thinking
+// boolean pointer. vLLM treats reasoning.effort != "none" as enable_thinking=true,
+// and "none" as enable_thinking=false.
+func responsesThinking(v any) *bool {
+	m, ok := v.(map[string]any)
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		ok = json.Unmarshal(raw, &m) == nil && m != nil
+	}
+	if !ok {
+		return nil
+	}
+	effort := stringFromAny(m["effort"])
+	if effort == "" {
+		return nil
+	}
+	t := effort != "none"
+	return &t
 }

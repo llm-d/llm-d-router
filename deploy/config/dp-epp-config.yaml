@@ -6,9 +6,7 @@ plugins:
 - type: prefix-cache-scorer
 - type: decode-filter
 - type: max-score-picker
-- type: data-parallel-profile-handler
-  parameters:
-    primaryPort: 8000
+- type: single-profile-handler
 schedulingProfiles:
 - name: default
   plugins:

@@ -96,3 +96,40 @@ func TestProducerPlugin_EmptyProduces(t *testing.T) {
 	}
 	assert.Empty(t, p.Produces())
 }
+
+func TestUnwrapDataType(t *testing.T) {
+	assert.Equal(t, 42, UnwrapDataType(42))
+	assert.Equal(t, "hello", UnwrapDataType(ProducedData{Type: "hello", Attributes: map[string]string{"k": "v"}}))
+	assert.Equal(t, "hello", UnwrapDataType(&ProducedData{Type: "hello"}))
+	assert.Nil(t, UnwrapDataType((*ProducedData)(nil)))
+	assert.Equal(t, 3.14, UnwrapDataType(ConsumedData{Type: 3.14}))
+	assert.Equal(t, 3.14, UnwrapDataType(&ConsumedData{Type: 3.14}))
+	assert.Nil(t, UnwrapDataType((*ConsumedData)(nil)))
+	assert.Nil(t, UnwrapDataType(nil))
+}
+
+func TestMatchKeys(t *testing.T) {
+	matcher := MatchKeys("GPUUtilization", "GPUMemoryUsed")
+	assert.NoError(t, matcher(map[string]string{
+		"GPUUtilization": "true",
+		"GPUMemoryUsed":  "true",
+		"Extra":          "true",
+	}))
+
+	err := matcher(map[string]string{"GPUUtilization": "true"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), `producer does not declare required attribute key "GPUMemoryUsed"`)
+}
+
+func TestMatchKeyValues(t *testing.T) {
+	matcher := MatchKeyValues(map[string]string{"backend": "vllm"})
+	assert.NoError(t, matcher(map[string]string{"backend": "vllm", "model": "llama"}))
+
+	err := matcher(map[string]string{"backend": "estimate"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), `producer attribute "backend"="estimate" does not match required "vllm"`)
+
+	err = matcher(map[string]string{"other": "val"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), `producer does not declare required attribute "backend"="vllm"`)
+}

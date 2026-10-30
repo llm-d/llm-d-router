@@ -406,6 +406,19 @@ func ReadYaml(filePath string) []string {
 	return strings.Split(string(yamlBytes), "\n---")
 }
 
+// VLLMStrictArg turns on the simulator's request validation: every body the
+// router or coordinator emits is checked against the bundled vLLM request
+// schema and its semantic checks.
+const VLLMStrictArg = "--strict"
+
+// VLLMExtraArgs formats one or more flags to fill a single `- ${VLLM_EXTRA_ARGS_*}`
+// list item in the kustomize-rendered worker manifests. Substitution is raw text
+// replacement, so each extra flag is emitted as its own list item at the
+// placeholder's 8-space indent, yielding a distinct argv element.
+func VLLMExtraArgs(flags ...string) string {
+	return strings.Join(flags, "\n        - ")
+}
+
 // ValidateCRDsEstablished verifies that each of the given CRD names is established in the cluster.
 func ValidateCRDsEstablished(testConfig *TestConfig, crdNames []string) {
 	for _, name := range crdNames {

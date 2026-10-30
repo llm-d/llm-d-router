@@ -50,8 +50,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      # A missing cache is fine. Lychee then checks every link.
+      - id: cache-key
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lychee cache
+        id: lychee-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .lycheecache
+          key: lychee-${{ hashFiles('.lychee.toml') }}-${{ steps.cache-key.outputs.date }}
+          restore-keys: |
+            lychee-${{ hashFiles('.lychee.toml') }}-
+
       - name: Run lychee link checker
         uses: lycheeverse/lychee-action@v2.9.0
         with:
-          args: '--config .lychee.toml --verbose --no-progress "**/*.md"'
+          args: '--config .lychee.toml --cache --max-cache-age 1d --verbose --no-progress "**/*.md"'
           fail: true
+
+      # Save the cache so later runs send fewer requests and finish faster.
+      # This also runs when the check fails, so links that passed are still saved.
+      - name: Save lychee cache
+        if: ${{ !cancelled() && steps.lychee-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: .lycheecache
+          key: lychee-${{ hashFiles('.lychee.toml') }}-${{ steps.cache-key.outputs.date }}

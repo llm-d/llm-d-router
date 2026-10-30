@@ -62,14 +62,14 @@ type stubBands struct {
 // a new Options flag reach only one of the two hand-written composite literals.
 func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	// Fields the caller sets after construction, not the factory.
-	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true}
+	callerSet := map[string]bool{"GrpcListener": true, "EvictChannelLookup": true, "Responders": true}
 
 	opts := server.NewOptions()
 	// AddFlags registers the logging flag set that Complete() dereferences.
 	opts.AddFlags(pflag.NewFlagSet("t", pflag.ContinueOnError))
 	opts.GRPCPort, opts.CertPath = 19002, "/tmp/certs"
 	opts.SecureServing, opts.HealthChecking, opts.EnableCertReload = true, true, true
-	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores = true, true
+	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores, opts.EnableToolCallingTelemetry = true, true, true
 	opts.TLSMinVersion, opts.TLSCipherSuites = "VersionTLS13", []string{"TLS_AES_128_GCM_SHA256"}
 	opts.RefreshPrometheusMetricsInterval, opts.MetricsStalenessThreshold = 7*time.Second, 11*time.Second
 	require.NoError(t, opts.Complete()) // parses the TLS strings into the unexported fields
@@ -131,6 +131,9 @@ var boolOptions = []struct {
 	{"EmitEndpointScores",
 		func(o *server.Options, v bool) { o.EmitEndpointScores = v },
 		func(r *server.ExtProcServerRunner) bool { return r.EmitEndpointScores }},
+	{"EnableToolCallingTelemetry",
+		func(o *server.Options, v bool) { o.EnableToolCallingTelemetry = v },
+		func(r *server.ExtProcServerRunner) bool { return r.EnableToolCallingTelemetry }},
 }
 
 // TestNewExtProcServerRunnerMapsEachBoolOption sets one boolean option at a time and

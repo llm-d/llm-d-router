@@ -1,0 +1,84 @@
+{{- define "llm-d-epp.pod-disruption-budget" -}}
+{{- $pdb := .Values.router.epp.podDisruptionBudget | default dict -}}
+{{- if $pdb.enabled -}}
+{{- if and (hasKey $pdb "minAvailable") (hasKey $pdb "maxUnavailable") -}}
+{{- fail ".Values.router.epp.podDisruptionBudget: minAvailable and maxUnavailable are mutually exclusive, set exactly one" -}}
+{{- end -}}
+{{- if not (or (hasKey $pdb "minAvailable") (hasKey $pdb "maxUnavailable")) -}}
+{{- fail ".Values.router.epp.podDisruptionBudget: set minAvailable or maxUnavailable when the budget is enabled" -}}
+{{- end -}}
+{{- /* A minAvailable >= 1 with a single replica blocks every voluntary eviction forever: the
+       budget can never be satisfied while any pod is down, so node drains hang. Reject the
+       integer form of that combination; percentages are left to the user (they round up and
+       hit the same trap, but the arithmetic is theirs to reason about). */ -}}
+{{- $autoscaling := .Values.router.epp.autoscaling | default dict -}}
+{{- $replicas := $autoscaling.minReplicas | default 1 -}}
+{{- if not $autoscaling.enabled -}}
+{{- $replicas = .Values.router.epp.replicas | default 1 -}}
+{{- end -}}
+{{- if and (hasKey $pdb "minAvailable") (or (kindIs "int" $pdb.minAvailable) (kindIs "int64" $pdb.minAvailable) (kindIs "float64" $pdb.minAvailable)) (lt ($replicas | int) 2) -}}
+{{- fail (printf ".Values.router.epp.podDisruptionBudget: minAvailable %d requires at least 2 effective replicas (got %d); with a single replica the budget blocks all voluntary disruptions, including node drains" (int $pdb.minAvailable) ($replicas | int)) -}}
+{{- end -}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "llm-d-router.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.selectorLabels" . | nindent 6 }}
+  {{- if hasKey $pdb "minAvailable" }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- end }}
+---
+{{- end -}}
+{{- end -}}
+
+{{/*
+PodDisruptionBudget for the service-mode proxy Deployment. Not rendered in sidecar mode: the
+proxy shares the EPP pod there, so the EPP budget above already governs it.
+*/}}
+{{- define "llm-d-epp.proxy-pod-disruption-budget" -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- $pdb := $proxy.podDisruptionBudget | default dict -}}
+{{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") $pdb.enabled -}}
+{{- if and (hasKey $pdb "minAvailable") (hasKey $pdb "maxUnavailable") -}}
+{{- fail ".Values.router.proxy.podDisruptionBudget: minAvailable and maxUnavailable are mutually exclusive, set exactly one" -}}
+{{- end -}}
+{{- if not (or (hasKey $pdb "minAvailable") (hasKey $pdb "maxUnavailable")) -}}
+{{- fail ".Values.router.proxy.podDisruptionBudget: set minAvailable or maxUnavailable when the budget is enabled" -}}
+{{- end -}}
+{{- $autoscaling := $proxy.autoscaling | default dict -}}
+{{- $replicas := $autoscaling.minReplicas | default 2 -}}
+{{- if not $autoscaling.enabled -}}
+{{- $replicas = $proxy.replicas | default 2 -}}
+{{- end -}}
+{{- if and (hasKey $pdb "minAvailable") (or (kindIs "int" $pdb.minAvailable) (kindIs "int64" $pdb.minAvailable) (kindIs "float64" $pdb.minAvailable)) (lt ($replicas | int) 2) -}}
+{{- fail (printf ".Values.router.proxy.podDisruptionBudget: minAvailable %d requires at least 2 effective replicas (got %d); with a single replica the budget blocks all voluntary disruptions, including node drains" (int $pdb.minAvailable) ($replicas | int)) -}}
+{{- end -}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "llm-d-router.proxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}
+  {{- if hasKey $pdb "minAvailable" }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- end }}
+---
+{{- end -}}
+{{- end -}}

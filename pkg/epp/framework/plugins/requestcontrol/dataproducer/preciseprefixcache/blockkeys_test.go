@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -50,8 +51,8 @@ func TestComputeBlockKeys_PerPromptMMContent(t *testing.T) {
 		},
 	}
 
-	img := fwkrh.MultiModalFeature{Modality: fwkrh.ModalityImage, Hash: "a", Offset: 0, Length: 16}
-	audio := fwkrh.MultiModalFeature{Modality: fwkrh.ModalityAudio, Hash: "b", Offset: 16, Length: 16}
+	img := fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "a", Offset: 0, Length: 16}
+	audio := fwkrh.MultiModalFeature{Modality: reqcommon.ModalityAudio, Hash: "b", Offset: 16, Length: 16}
 
 	req := &scheduling.InferenceRequest{
 		TargetModel: "test-model",

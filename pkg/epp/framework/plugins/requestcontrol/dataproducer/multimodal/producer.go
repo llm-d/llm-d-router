@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -397,13 +398,13 @@ func itemsFromChat(request *fwkrh.ChatCompletionsRequest) []attrmm.MatchItem {
 func addBlockItem(collector *itemCollector, block fwkrh.ContentBlock) {
 	switch {
 	case block.ImageURL.URL != "":
-		collector.add(contentHash("image_url", block.ImageURL.URL), string(fwkrh.ModalityImage), 1)
+		collector.add(contentHash("image_url", block.ImageURL.URL), string(reqcommon.ModalityImage), 1)
 	case block.VideoURL.URL != "":
-		collector.add(contentHash("video_url", block.VideoURL.URL), string(fwkrh.ModalityVideo), 1)
+		collector.add(contentHash("video_url", block.VideoURL.URL), string(reqcommon.ModalityVideo), 1)
 	case block.AudioURL.URL != "":
-		collector.add(contentHash("audio_url", block.AudioURL.URL), string(fwkrh.ModalityAudio), 1)
+		collector.add(contentHash("audio_url", block.AudioURL.URL), string(reqcommon.ModalityAudio), 1)
 	case block.InputAudio.Data != "":
-		collector.add(contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), string(fwkrh.ModalityAudio), 1)
+		collector.add(contentHash("input_audio", block.InputAudio.Format+":"+block.InputAudio.Data), string(reqcommon.ModalityAudio), 1)
 	}
 }
 

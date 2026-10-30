@@ -121,6 +121,28 @@ func TestGetBlockHashesCacheSalt(t *testing.T) {
 	assert.NotEqual(t, noSalt, salted, "cache salt must change the block hashes")
 }
 
+// TestGetBlockHashes_ModelSaltBoundary covers (model, salt) pairs whose
+// concatenation is identical. The seed must still separate them.
+func TestGetBlockHashes_ModelSaltBoundary(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	hashesFor := func(model, salt string) [][]BlockHash {
+		return GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+			TargetModel: model,
+			Body: &fwkrh.InferenceRequestBody{
+				TokenizedRequest: &fwkrh.TokenizedRequest{
+					Prompts:   []fwkrh.PromptTokens{{TokenIDs: tokens}},
+					CacheSalt: salt,
+				},
+			},
+		}, 2, testMaxPrefixBlocks)
+	}
+
+	assert.NotEqual(t, hashesFor("ab", "c"), hashesFor("a", "bc"),
+		"model and salt must not collide when their concatenations match")
+	assert.NotEqual(t, hashesFor("llama-3-8b", ""), hashesFor("llama-3", "-8b"),
+		"empty salt must not collide with a same-length model split")
+}
+
 func TestGetBlockHashes_MultiPrompt(t *testing.T) {
 	tests := []struct {
 		name                    string

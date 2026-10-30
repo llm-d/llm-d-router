@@ -46,6 +46,13 @@ This document defines the process for releasing llm-d-router.
    ```shell
    export LATENCY_PREDICTOR_TAG=v0.8.0-rc.1
    ```
+
+1. Set the llm-d-async release the coordinator's async-broker step should embed (refer to the [llm-d-async releases]; normally the release the llm-d guides pin for this llm-d version):
+
+   ```shell
+   export LLM_D_ASYNC_TAG=v0.11.0
+   ```
+
 1. If needed, clone the llm-d-router [repo].
 
    ```shell
@@ -80,6 +87,15 @@ This document defines the process for releasing llm-d-router.
     ```shell
     # Update LATENCY_PREDICTOR_TAG ?= vX.Y.Z in Makefile
     git commit -a -s -m "release: set LATENCY_PREDICTOR_TAG to ${LATENCY_PREDICTOR_TAG}"
+    ```
+
+1. Check that `go.mod` pins the `github.com/llm-d/llm-d-async/api` and `/producer` modules at `${LLM_D_ASYNC_TAG}`. If not, bump them, read the release's `RELEASE-NOTES.md` section in llm-d-async for entries marked Breaking (the async-broker step builds `api.RequestMessage` and calls the producer directly), and run the coordinator tests before committing:
+
+    ```shell
+    go get github.com/llm-d/llm-d-async/api@${LLM_D_ASYNC_TAG} github.com/llm-d/llm-d-async/producer@${LLM_D_ASYNC_TAG}
+    go mod tidy
+    go test ./pkg/coordinator/...
+    git commit -a -s -m "release: bump llm-d-async api and producer to ${LLM_D_ASYNC_TAG}"
     ```
 
 1. Push your release branch to the llm-d-router remote.
@@ -171,3 +187,4 @@ Use the following steps to announce the release.
 [issue]: https://github.com/llm-d/llm-d-router/issues/new/choose
 [CI release workflow]: https://github.com/llm-d/llm-d-router/actions/workflows/ci-release.yaml
 [latency predictor releases]: https://github.com/orgs/llm-d/packages?repo_name=llm-d-latency-predictor
+[llm-d-async releases]: https://github.com/llm-d/llm-d-async/releases

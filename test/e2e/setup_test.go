@@ -17,16 +17,18 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/lifecycle"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/manifest"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -35,19 +37,21 @@ import (
 // router helpers.
 func standaloneConfig() standalone.Config {
 	return standalone.Config{
-		TestConfig:    testConfig,
-		Namespace:     getNamespace(),
-		EPPImage:      eppImage,
-		HTTPPort:      getPort(),
-		MetricsPort:   getMetricsPort(),
-		K8sContext:    k8sContext,
-		PodSelector:   podSelector,
-		ReleaseName:   poolName,
-		KeepOnFailure: keepClusterOnFailure,
+		TestConfig:      testConfig,
+		Namespace:       getNamespace(),
+		EPPImage:        eppImage,
+		HTTPPort:        getPort(),
+		MetricsPort:     getMetricsPort(),
+		HTTPNodePort:    getNodePort(),
+		MetricsNodePort: getMetricsNodePort(),
+		K8sContext:      k8sContext,
+		PodSelector:     podSelector,
+		ReleaseName:     poolName,
+		KeepOnFailure:   keepClusterOnFailure,
 	}
 }
 
-func createModelServersFromKustomize(kustomizeDir string, extra map[string]string) []string {
+func createModelServersFromKustomize(kustomizeDir string, extra map[string]string, edits ...func(*unstructured.Unstructured)) []string {
 	nsName := getNamespace()
 	subs := map[string]string{
 		"${MODEL_NAME}":              simModelName,
@@ -61,31 +65,37 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${EPP_NAME}":                eppName,
 		"${NAMESPACE}":               nsName,
 		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
-		"${VLLM_EXTRA_ARGS_E}":       "--force-dummy-tokenizer",
-		"${VLLM_EXTRA_ARGS_P}":       "--force-dummy-tokenizer",
-		"${VLLM_EXTRA_ARGS_D}":       "--force-dummy-tokenizer",
-		"${VLLM_RENDER_URL}":         fmt.Sprintf("http://vllm-render.%s.svc.cluster.local:%s", baseNsName, vllmRenderPort),
-		"${VLLM_RENDER_PORT}":        vllmRenderPort,
+		"${VLLM_EXTRA_ARGS_E}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
+		"${VLLM_EXTRA_ARGS_P}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
+		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
+		// keep empty to force dummy tokenizer
+		"${VLLM_RENDER_URL}":  "",
+		"${VLLM_RENDER_PORT}": vllmRenderPort,
 	}
 	for k, v := range extra {
 		subs[k] = v
 	}
 
-	manifests := utils.RunKustomize(kustomizeDir)
-	manifests = utils.SubstituteMany(manifests, subs)
+	manifests := manifest.RunKustomize(kustomizeDir)
+	manifests = manifest.SubstituteMany(manifests, subs)
 	// Remove labels with empty values (produced when ${DECODE_ROLE} is empty)
-	manifests = utils.RemoveEmptyLabels(manifests)
-	manifests = utils.RemoveEmptyArgs(manifests)
-	objects, err := utils.DecodeCaseObjects([]byte(strings.Join(manifests, "\n---\n")), nsName)
+	manifests = manifest.RemoveEmptyLabels(manifests)
+	manifests = manifest.RemoveEmptyArgs(manifests)
+	objects, err := manifest.DecodeCaseObjects([]byte(strings.Join(manifests, "\n---\n")), nsName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	resources := &utils.CaseResources{Client: testConfig.K8sClient}
-	utils.DeferCaseCleanup(testConfig, keepClusterOnFailure, resources, nsName, nil)
+	for _, obj := range objects {
+		for _, edit := range edits {
+			edit(obj)
+		}
+	}
+	resources := &lifecycle.CaseResources{Client: testConfig.K8sClient}
+	lifecycle.DeferCaseCleanup(testConfig, keepClusterOnFailure, resources, nsName, nil)
 	gomega.Expect(resources.Create(testConfig.Context, objects)).To(gomega.Succeed())
 	names := make([]string, len(objects))
 	for i, obj := range objects {
 		names[i] = obj.GetKind() + "/" + obj.GetName()
 	}
-	utils.PodsInDeploymentsReady(testConfig, nsName, names)
+	k8s.PodsInDeploymentsReady(testConfig, nsName, names)
 	return names
 }
 
@@ -93,6 +103,25 @@ func createModelServersDecode(replicas int) []string {
 	return createModelServersFromKustomize(epdDeploymentDir, map[string]string{
 		"${KV_CACHE_ENABLED}":     "false",
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(replicas),
+	})
+}
+
+const modelLabel = "llm-d.ai/model"
+
+// createModelServerVersion gives each version its own Deployment name and selector
+// so that versions in the same pool do not share Pods.
+func createModelServerVersion(modelName string) {
+	createModelServersFromKustomize(epdDeploymentDir, map[string]string{
+		"${MODEL_NAME}":           modelName,
+		"${VLLM_REPLICA_COUNT_D}": "1",
+	}, func(obj *unstructured.Unstructured) {
+		if obj.GetKind() != "Deployment" {
+			return
+		}
+		obj.SetName(obj.GetName() + "-" + modelName)
+		for _, labels := range [][]string{{"spec", "selector", "matchLabels"}, {"spec", "template", "metadata", "labels"}} {
+			gomega.Expect(unstructured.SetNestedField(obj.Object, modelName, append(labels, modelLabel)...)).To(gomega.Succeed())
+		}
 	})
 }
 
@@ -109,7 +138,7 @@ func createModelServersDecodeDP(replicas int) []string {
 		"${VLLM_REPLICA_COUNT_D}":    strconv.Itoa(replicas),
 		"${VLLM_DATA_PARALLEL_SIZE}": "2",
 		"${DECODE_ROLE}":             "decode",
-		"${VLLM_EXTRA_ARGS_D}":       "--mode=echo",
+		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs("--mode=echo", testutils.VLLMStrictArg),
 	})
 }
 
@@ -179,14 +208,14 @@ func createModelServersEPDUnified(replicas int) []string {
 }
 
 func createRender(nsName string) []string {
-	renderYamls := utils.SubstituteMany(testutils.ReadYaml(renderManifest),
+	renderYamls := manifest.SubstituteMany(testutils.ReadYaml(renderManifest),
 		map[string]string{
 			"${MODEL_NAME}":        kvModelName,
 			"${VLLM_RENDER_IMAGE}": vllmRenderImage,
 			"${VLLM_RENDER_PORT}":  vllmRenderPort,
 		})
 	objects := testutils.CreateObjsFromYaml(testConfig, renderYamls, nsName)
-	utils.PodsInDeploymentsReady(testConfig, nsName, objects)
+	k8s.PodsInDeploymentsReady(testConfig, nsName, objects)
 	return objects
 }
 

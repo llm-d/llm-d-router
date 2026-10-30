@@ -13,21 +13,22 @@ However, it is relatively new and may contain bugs. The `/v1/chat/completions` f
 - [Stage 1: replace-media-urls](#stage-1-replace-media-urls)
 - [Stage 2: render](#stage-2-render)
 - [Stage 3: conditional-decode](#stage-3-conditional-decode)
-- [Stage 4: encode (fan-out, one per image)](#stage-4-encode-fan-out-one-per-image)
+- [Stage 4: encode (fan-out, one per media entry)](#stage-4-encode-fan-out-one-per-media-entry)
 - [Stage 5: prefill](#stage-5-prefill)
 - [Stage 6: decode](#stage-6-decode)
 - [x-llm-d-epp-profile Header and Routing](#x-llm-d-epp-profile-header-and-routing)
 - [Request Format Configuration](#request-format-configuration)
 - [Completions Requests (/v1/completions)](#completions-requests-v1completions)
 - [Responses Requests (/v1/responses)](#responses-requests-v1responses)
-- [Text-Only Requests (no images)](#text-only-requests-no-images-v1chatcompletions)
+- [Messages Requests (/v1/messages)](#messages-requests-v1messages)
+- [Text-Only Requests (no media)](#text-only-requests-no-media-v1chatcompletions)
 - [Generate Requests (/inference/v1/generate)](#generate-requests-inferencev1generate)
 - [Questions](#questions)
 
 ## Pipeline Overview
 
 ```
-Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /inference/v1/generate)
+Client Request (/v1/chat/completions, /v1/responses, /v1/messages, /v1/completions, or /inference/v1/generate)
     |
     |--- /inference/v1/generate (tokens-in)?
     |        YES --> skip replace-media-urls; render parses token_ids and features
@@ -40,22 +41,22 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/completions, or /infere
     |        YES --> skip replace-media-urls, go to [render]
     |
     v
-[replace-media-urls] - Fan-out downloads images, converts to base64 data URIs
-    |                    (skipped for /v1/completions and for /v1/chat/completions or
-    |                    /v1/responses without media URLs)
+[replace-media-urls] - Fan-out downloads media (image, audio, video), converts to base64 data URIs
+    |                    (skipped for /v1/completions and for /v1/chat/completions,
+    |                    /v1/responses, or /v1/messages without media parts)
     v
-[render] - Tokenizes prompt, produces token_ids and per-image metadata
+[render] - Tokenizes prompt, produces token_ids and per-modality media metadata
     |         (skipped for /v1/completions with token array prompt)
     v
 [conditional-decode] - Attempts decode with token_ids;
     |                     if 412, continues pipeline; otherwise returns response
     |
-    |--- /v1/completions, or /v1/chat/completions or /v1/responses without multi media content --> skip encode, go to [prefill]
+    |--- /v1/completions, or /v1/chat/completions, /v1/responses, or /v1/messages without multi media content --> skip encode, go to [prefill]
     |
     |--- /inference/v1/generate --> skip encode (prefill encodes inline from kwargs_data), go to [prefill]
     |
     v
-[encode] - Fan-out: one request per image, runs ViT encoder
+[encode] - Fan-out: one request per media entry, runs the encoder
     |
     v
 [prefill] - Single request with encoder outputs; full token sequence too, in the generate format
@@ -70,9 +71,11 @@ All requests from the coordinator to workers include the `x-llm-d-epp-profile` H
 
 ## Stage 1: replace-media-urls
 
-Downloads external image URLs and replaces them with inline data URIs in the request body.
+Downloads external `image_url`, `audio_url`, and `video_url` references and replaces them with inline data URIs in the request body. Inline `input_audio` parts already carry their bytes and are validated and size-checked in place.
 
 **Skipped for `/v1/completions` requests** (completions cannot contain multimedia content).
+
+The worked examples below use images throughout; audio and video take the same path, with `audio_url` / `video_url` / `input_audio` parts and `audio` / `video` keys wherever an example shows `image`.
 
 ### Input
 
@@ -129,15 +132,31 @@ encode the wrong image.
 
 ### Output (mutates RequestContext)
 
-- `reqCtx.Body["messages"]` (or `reqCtx.Body["input"]` for `/v1/responses`) - image URLs replaced with `data:<mime>;base64,<data>` URIs
-- `reqCtx.MultimodalEntries` - populated with one entry per image:
+- `reqCtx.Body["messages"]` (or `reqCtx.Body["input"]` for `/v1/responses`) - media URLs replaced with `data:<mime>;base64,<data>` URIs
+- `reqCtx.MultimodalEntries` - one entry per media part, tagged with the modality it came from:
 
 ```go
 []MultimodalEntry{
-    {Index: 0, Base64Data: "<base64>", ContentType: "image/jpeg"},
-    {Index: 1, Base64Data: "<base64>", ContentType: "image/png"},
+    {Modality: "image"},
+    {Modality: "image"},
 }
 ```
+
+A request mixing modalities seeds one entry per part in request-walker order, so a body carrying an image, then audio, then another image yields:
+
+```go
+[]MultimodalEntry{
+    {Modality: "image"},
+    {Modality: "audio"},
+    {Modality: "image"},
+}
+```
+
+This step sets `Modality` only; [render](#stage-2-render) fills in `Hash`, `KwargsData`, and `Placeholder`.
+
+The entry does **not** carry the media bytes. They stay on the request body -- in the `data:` URI this step wrote, or in `input_audio.data` where the client put them -- so a large payload is not duplicated on `reqCtx`.
+
+An entry's absolute position in the slice carries no meaning on its own: every step pairs an entry with its content part by counting entries of the same `Modality`, so the `i`-th `audio` entry pairs with the `i`-th audio part.
 
 ---
 
@@ -264,25 +283,27 @@ Wire-size example (the test payload above, single 200×300 JPG against Qwen3-VL-
 | `features.kwargs_data["image"][0]`        | 1,147,128 bytes (base64)   |
 | **Total response size**                   | ~1.15 MB                   |
 
-For text-only chat completions (no `image_url` parts), `features.mm_hashes.image`, `features.mm_placeholders.image`, and `features.kwargs_data.image` are empty arrays.
+For text-only chat completions (no media parts), `features.mm_hashes.image`, `features.mm_placeholders.image`, and `features.kwargs_data.image` are empty arrays. A request carrying audio or video gets the same three maps keyed by `audio` / `video` instead of (or alongside) `image`.
 
 #### Output (mutates RequestContext)
 
 For the single-image example above:
 
 - `reqCtx.TokenIDs` = the full 84-element token sequence from the response
-- `reqCtx.MultimodalEntries` enriched per image:
+- `reqCtx.MultimodalEntries` enriched from `features` (the example's single entry has `Modality: "image"`, set by stage 1 and left untouched here):
   - `entries[0].Hash = "2b622017706939546ca39ffbc7b610fe1fcbd4f9154d33b4ef13aaf5860c473e"`
   - `entries[0].KwargsData = "<base64-encoded-msgpack blob, ~1.1 MB>"`
   - `entries[0].Placeholder = {Offset: 8, Length: 70}`
 
-For a multi-image request the slices line up positionally:
+For a multi-entry request the coordinator walks `reqCtx.MultimodalEntries` in order, reading each entry's slot from the response maps for its own modality at a per-modality position counter. Writing `m` for `entries[i].Modality` and `k` for the number of earlier entries with that same modality:
 
-- `entries[i].Hash = features.mm_hashes.image[i]`
-- `entries[i].KwargsData = features.kwargs_data.image[i]`
-- `entries[i].Placeholder = features.mm_placeholders.image[i]`
+- `entries[i].Hash = features.mm_hashes[m][k]`
+- `entries[i].KwargsData = features.kwargs_data[m][k]`
+- `entries[i].Placeholder = features.mm_placeholders[m][k]`
 
-The coordinator validates that `mm_hashes.image`, `mm_placeholders.image`, and `kwargs_data.image` all have length `len(reqCtx.MultimodalEntries)`; a mismatch fails the request.
+For an image-only request `k == i`, so this is the same positional pairing as `features.mm_hashes.image[i]`.
+
+The coordinator validates that the per-modality lengths of `mm_hashes`, `mm_placeholders`, and `kwargs_data` each **sum** to `len(reqCtx.MultimodalEntries)`, and that every entry finds an element at its per-modality position. Either failure fails the request, so a response with the right total split across the wrong modalities is rejected rather than silently mispaired.
 
 ---
 
@@ -379,7 +400,7 @@ The client request body (tokens-in format):
 #### Output (mutates RequestContext)
 
 - `reqCtx.TokenIDs` = the `token_ids` array from the body
-- `reqCtx.MultimodalEntries` = one entry per image, populated from `features` (`Hash`, `Placeholder`, `KwargsData`), same layout as the chat-completions path
+- `reqCtx.MultimodalEntries` = one entry per item named in `features.mm_hashes`, populated from `features` (`Modality`, `Hash`, `Placeholder`, `KwargsData`). `mm_hashes` decides which modalities the request describes: one that only `mm_placeholders` or `kwargs_data` names is a client error, not a skipped key. There is no request walker on this path, so entries are grouped by modality in sorted order (`audio`, `image`, `video`) and by index within each -- which still satisfies the per-modality pairing
 - `reqCtx.Body` is left as-is; downstream stages read it directly
 
 ---
@@ -419,6 +440,28 @@ Identical to [2.A](#2a-v1chatcompletionsrender): a single JSON object carrying
 `token_ids` and one `features` entry per image. The render service tokenizes
 whatever shape `input` holds (a plain string or an array of message items), so
 this stage does not distinguish those shapes.
+
+#### Output (mutates RequestContext)
+
+Identical to [2.A](#2a-v1chatcompletionsrender).
+
+---
+
+### 2.E `/v1/messages/render`
+
+#### Request
+
+```
+POST <rendering_service_address>/v1/messages/render
+Content-Type: application/json
+```
+
+The body is the client's Messages request, with image URLs already inlined by
+[Stage 1](#stage-1-replace-media-urls).
+
+#### Response (single object)
+
+Identical to [2.A](#2a-v1chatcompletionsrender).
 
 #### Output (mutates RequestContext)
 
@@ -537,9 +580,9 @@ Like chat completions, the body is sent unchanged:
 
 ---
 
-## Stage 4: encode (fan-out, one per image)
+## Stage 4: encode (fan-out, one per media entry)
 
-Sends one encode request per multimodal entry. Each request contains only the BOS token plus placeholder tokens for that specific image. The encoder runs ViT and stores the result in the EC (Embedding Cache).
+Sends one encode request per multimodal entry, whatever its modality. Each carries only the BOS token plus that entry's placeholder tokens, with `mm_hashes` and `kwargs_data` keyed under the entry's own modality. On the chat-completions path it also carries the one matching content part, located by counting parts of that modality. The encoder runs and stores the result in the EC (Embedding Cache).
 
 **Skipped for `/v1/completions` requests** (completions cannot contain multimedia content).
 
@@ -548,7 +591,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 **Common notes:**
 - `token_ids[0]` is always BOS (first token from render output)
 - The placeholder token ID is extracted from `reqCtx.TokenIDs[entry.Placeholder.Offset]` (model-specific, opaque)
-- `mm_placeholders` offset is always 1 in encode requests (right after BOS, since each request has only one image)
+- `mm_placeholders` offset is always 1 in encode requests (right after BOS, since each request has only one media entry)
 
 ---
 
@@ -691,6 +734,48 @@ For image 0:
 `max_output_tokens` is the Responses output cap, in place of chat completions'
 `max_tokens` and `max_completion_tokens`. `stream` is forced to `false` and
 `store` to `false`, since the sub-request exists only to prime the encoder cache.
+
+#### Response
+
+Identical to Option B.
+
+---
+
+### Option D: /v1/messages
+
+#### Request (per image)
+
+```
+POST <gateway>/v1/messages
+Content-Type: application/json
+X-Request-ID: <request_id>
+x-llm-d-epp-profile: encode
+```
+
+Same single-image fan-out as Option B, in the Messages shape. The client's
+`image` block is forwarded unchanged, so the encoder parses it through the same
+Anthropic conversion as the prefill worker:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "source": {"type": "url", "url": "data:image/jpeg;base64,/9j/4AAQ..."}}
+      ]
+    }
+  ],
+  "max_tokens": 1,
+  "stream": false
+}
+```
+
+`max_tokens` is the Messages output cap. The client's `mm_processor_kwargs` and
+`media_io_kwargs` are not forwarded: vLLM's `/v1/messages` accepts neither, so
+the prefill worker hashes the image at the deployment defaults and the encoder
+has to as well.
 
 #### Response
 
@@ -941,37 +1026,77 @@ Identical to Option B.
 
 ### Optimization: avoid sending pixel data to prefill
 
-Currently the full `kwargs_data` blobs (containing both `pixel_values` and `image_grid_thw`) are forwarded to the prefill worker. The prefill worker only needs `image_grid_thw` for mRoPE -- the `pixel_values` are redundant since the encoder already consumed them. For large images, the pixel tensors dominate the payload size, so stripping them would significantly reduce the data sent to prefill.
+With a renderer that emits `features.mm_metadata` (see vLLM
+[#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
+`kwargs_data` for an entry when `ec_transfer_params` covers that entry.
 
-**Required changes:**
+This applies to prefill legs that carry a `features` map: the completions and
+generate wire formats. A chat-completions client reaches those legs when
+`use_openai_format` is `false`, which routes prefill through
+`/inference/v1/generate`; with the default `true`, prefill forwards the client
+body, which carries no `features`. A client calling `/inference/v1/generate`
+directly runs no encode stage (see
+[Generate Requests](#generate-requests-inferencev1generate)), so
+`ec_transfer_params` stays empty and every entry falls back to `kwargs_data`.
 
-1. **vLLM render endpoint** (`vllm/entrypoints/openai/render/serving.py`): return `image_grid_thw` as a separate top-level field in the render response, alongside `kwargs_data`. The render step already computes it during image preprocessing (`get_image_grid_thw()` in the vision processor). Example response:
-   ```json
-   {
-     "token_ids": [1, 32000, 32000, 32000, ...],
-     "features": {
-       "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-       "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-       "kwargs_data": {"image": ["<full-msgpack-blob-1>", "<full-msgpack-blob-2>"]},
-       "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-     }
-   }
-   ```
+`kwargs_data` mixes encoder tensors (`pixel_values`) with lightweight fields
+(`image_grid_thw` and other `keep_on_cpu` / placeholder-metadata fields). Encode
+already consumes the tensors and publishes embeddings through the EC connector.
+Prefill only needs the metadata sibling plus `ec_transfer_params` to load those
+embeddings. For large images the pixel tensors dominate payload size, so dropping
+`kwargs_data` on prefill cuts coordinator-to-prefill traffic.
 
-2. **vLLM prefill worker**: accept `image_grid_thw` directly in the features dict (as plain JSON arrays) instead of extracting it from the msgpack `kwargs_data` blob.
+The choice is per entry: an entry whose hash has a matching descriptor in
+`ec_transfer_params` and carries non-empty metadata ships `mm_metadata[i]`;
+every other entry keeps `kwargs_data[i]`. Both fields are
+always present in the prefill body with complementary nulls so vLLM's
+per-item zip merge (`merge_mm_kwargs_items`) reconstructs each entry from
+whichever side is non-null.
 
-3. **Coordinator render step** (`pkg/steps/render.go`): parse `image_grid_thw` from the render response and store it per `MultimodalEntry`.
+A single encode sub-request can return no descriptor for one image while
+another image in the same batch is covered (`nixlEC.MergeEncodeResponse`
+logs a warning and continues rather than failing the request). The per-entry
+decision handles this: the covered entry takes the metadata path and the
+uncovered entry keeps its pixel tensor. vLLM's `_require_ec_for_metadata_only`
+is a request-level check and does not catch partial coverage, so the
+reconciliation has to be coordinator-side.
 
-4. **Coordinator prefill step** (`pkg/steps/prefill.go`): send `image_grid_thw` instead of `kwargs_data` in the prefill request features:
-   ```json
-   "features": {
-     "mm_hashes": {"image": ["abc123hash", "def456hash"]},
-     "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
-     "image_grid_thw": {"image": [[1, 24, 24], [1, 16, 16]]}
-   }
-   ```
+The multimodal data each stage sends:
 
-5. **Coordinator encode step** (`pkg/steps/encode.go`): no change -- encode continues to send the full `kwargs_data` (pixel values needed for ViT).
+```text
+Encode              = kwargs_data
+Prefill (optimized) = mm_metadata[i] (covered entries) + ec_transfer_params
+                   + kwargs_data[i] (uncovered entries), both arrays present
+Prefill (fallback)  = kwargs_data + mm_metadata (all null)
+```
+
+**Coordinator behavior:**
+
+1. **Render step** (`pkg/coordinator/steps/render.go`): parse optional
+   `features.mm_metadata` from the render response (same per-modality item order
+   as `mm_hashes` / `kwargs_data`) and store it on each `MultimodalEntry`.
+2. **Encode step** (`pkg/coordinator/steps/encode.go`): unchanged; encode still
+   sends full `kwargs_data`.
+3. **Prefill step** (`pkg/coordinator/steps/prefill.go`): per entry, ship
+   `mm_metadata[i]` with a null `kwargs_data[i]` when the entry has both an EC
+   descriptor and render metadata; ship `kwargs_data[i]` with a null
+   `mm_metadata[i]` otherwise. Both fields stay present so vLLM's per-item
+   merge can reassemble each entry.
+
+Example prefill features with mixed coverage (entry 0 covered, entry 1 not):
+
+```json
+"features": {
+  "mm_hashes": {"image": ["abc123hash", "def456hash"]},
+  "mm_placeholders": {"image": [{"offset": 1, "length": 3}, {"offset": 4, "length": 3}]},
+  "kwargs_data": {"image": [null, "<base64-pixel-tensor-2>"]},
+  "mm_metadata": {"image": ["<base64-metadata-only-msgpack-1>", null]}
+}
+```
+
+vLLM rejects metadata-only entries without `ec_transfer_params`, so the
+per-entry decision never sends `mm_metadata[i]` to a non-null slot without an
+EC descriptor for `mm_hashes.image[i]`.
 
 ### Output (mutates RequestContext)
 
@@ -1230,6 +1355,7 @@ treated as chat completions. The differences:
 | Text part | `{"type": "text", "text": ...}` | `{"type": "input_text", "text": ...}` |
 | Image part | `{"type": "image_url", "image_url": {"url": ...}}` | `{"type": "input_image", "image_url": "..."}` |
 | Image detail | nested in `image_url` | `detail`, a sibling of `image_url` |
+| Audio / video parts | `audio_url`, `video_url`, `input_audio` | none; see below |
 | Part arrays walked | `content` | `content`, and `output` on a `function_call_output` |
 | Output cap | `max_tokens`, `max_completion_tokens` | `max_output_tokens` |
 | Render endpoint | `/v1/chat/completions/render` | `/v1/responses/render` |
@@ -1240,9 +1366,17 @@ which holds them under `output`. Every stage walks both arrays, since vLLM
 forwards the `output` array as a tool message's content, so an image in it
 reaches the model like any other part.
 
+The Responses input content union is `input_text` / `input_image` / `input_file`,
+so a Responses request carrying `image_url`, `audio_url`, `video_url` or
+`input_audio` is refused by the model server. The pipeline does not pre-empt
+that: `reqcommon.PartModality` answers by part type alone, so those parts are
+collected, downloaded and primed on either API. That rule has one
+implementation, `pkg/common/request/modality.go`, which every coordinator and
+sidecar stage calls rather than carrying its own copy.
+
 Per stage:
 
-1. **replace-media-urls**: walks `input` for `input_image` parts and inlines each URL as a data URI (see [Stage 1](#stage-1-replace-media-urls))
+1. **replace-media-urls**: walks `input` for media parts and inlines each URL as a data URI; a request the model server accepts carries `input_image` (see [Stage 1](#stage-1-replace-media-urls))
 2. **render**: posts to `/v1/responses/render`; same response shape as chat completions (see [2.D](#2d-v1responsesrender))
 3. **conditional-decode**: forwards the body unchanged to `/v1/responses`
 4. **encode**: one `/v1/responses` sub-request per image, each carrying a single `input_image` part (see [Option C](#option-c-v1responses))
@@ -1269,9 +1403,59 @@ do (see [Request Format Configuration](#request-format-configuration)).
 
 ---
 
-## Text-Only Requests (no images, /v1/chat/completions)
+## Messages Requests (/v1/messages)
 
-When a `/v1/chat/completions` request contains no `image_url` parts:
+A `/v1/messages` (Anthropic Messages API) request runs the same pipeline and the
+same step sequence as `/v1/chat/completions`. vLLM's Anthropic endpoint
+converts each request to a chat completion and accepts `kv_transfer_params` and
+`ec_transfer_params`, so every stage sends a Messages body. The differences:
+
+| Concern | `/v1/chat/completions` | `/v1/messages` |
+| :---- | :---- | :---- |
+| Prompt field | `messages` | `messages`, with the system prompt in a top-level `system` field |
+| Image part | `{"type": "image_url", "image_url": {"url": ...}}` | `{"type": "image", "source": {...}}`, a `url` or `base64` source |
+| Part arrays walked | `content` | `content`, and the `content` of each `tool_result` in a user turn |
+| Output cap | `max_tokens`, `max_completion_tokens` | `max_tokens` |
+| Render endpoint | `/v1/chat/completions/render` | `/v1/messages/render` |
+| Image `uuid` on decode | stamped | none |
+| Coordinator error envelope | `{"error": {"message": ..., "type": ..., "code": ...}}` | `{"type": "error", "error": {"type": ..., "message": ...}}` |
+
+The images follow vLLM's Anthropic conversion, since render pairs its hashes
+with images by position: within a user turn, the images in its `tool_result`
+blocks come first, in order, then the turn's own image blocks. A system turn
+keeps only its text, and an assistant turn's `tool_result` becomes text, so
+neither carries an image.
+
+The coordinator rejects no block type itself. vLLM's Anthropic endpoint
+defines no `document` block, so a request that carries one fails validation at
+the first stage that sends the client's messages to vLLM (render, when the
+pipeline has it), and the coordinator answers 400. vLLM answers a validation
+failure with the OpenAI error envelope, because it builds the Anthropic
+envelope only for errors raised inside its `/v1/messages` handler. The
+coordinator answers in the Anthropic envelope, so a client that calls vLLM
+directly gets the same 400 with a different body.
+
+Per stage:
+
+1. **replace-media-urls**: walks `messages` for `image` blocks. A `url` source is downloaded and rewritten to a `url` source carrying a data URI; a `base64` source is read in place. A source with no data, such as a Files API reference, is rejected with 400.
+2. **render**: posts to `/v1/messages/render`; same response shape as chat completions (see [2.E](#2e-v1messagesrender))
+3. **conditional-decode**: forwards the body unchanged to `/v1/messages`
+4. **encode**: one `/v1/messages` sub-request per image, each carrying a single `image` block (see [Option D](#option-d-v1messages))
+5. **prefill**: the client body plus `ec_transfer_params` and `kv_transfer_params`, capped to one output token. The client's `thinking` setting stays: vLLM skips its `budget_tokens < max_tokens` check when `kv_transfer_params` sets `do_remote_decode`, which every KV connector does.
+6. **decode**: the client body plus `kv_transfer_params`, uncapped. An Anthropic image block has no `uuid` field, so the decode worker hashes each image itself.
+
+`/v1/messages/count_tokens` is not a pipeline route; it passes through to the
+gateway.
+
+When `use_openai_format` is `false`, the encode and prefill steps collapse to the
+internal `/inference/v1/generate` tokens-in format the same way chat completions
+do (see [Request Format Configuration](#request-format-configuration)).
+
+---
+
+## Text-Only Requests (no media, /v1/chat/completions)
+
+When a `/v1/chat/completions` request contains no media parts (`image_url`, `audio_url`, `video_url`, or `input_audio`):
 - `replace-media-urls`: no-op (no downloads, no multimodal entries)
 - `render`: always runs -- tokenizes the prompt and returns `token_ids` (features will be empty)
 - `encode`: skipped (`MultimodalEntries` is empty)

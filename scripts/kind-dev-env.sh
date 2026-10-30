@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${IMAGE_REGISTRY:=ghcr.io/llm-d}"
 
 # Set a default VLLM_SIMULATOR_TAG if not provided
-export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v0.10.2}"
+export VLLM_SIMULATOR_TAG="${VLLM_SIMULATOR_TAG:-v1.0.0}"
 
 # VLLM_IMAGE: the vLLM container image to deploy. Can be a simulator or real vLLM image
 # (e.g., vllm/vllm-openai:v0.16.0 for production). Defaults to the simulator image.
@@ -79,7 +79,7 @@ export SIDECAR_IMAGE
 
 # Set a default VLLM_RENDER_IMAGE if not provided (CPU-only vLLM image that
 # runs `vllm launch render` for the token-producer plugin's HTTP backend).
-export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.21.0}"
+export VLLM_RENDER_IMAGE="${VLLM_RENDER_IMAGE:-vllm/vllm-openai-cpu:v0.31.0}"
 export VLLM_RENDER_PORT="${VLLM_RENDER_PORT:-8082}"
 export VLLM_RENDER_URL="${VLLM_RENDER_URL:-http://vllm-render:${VLLM_RENDER_PORT}}"
 export VLLM_RENDER_MAX_MODEL_LEN="${VLLM_RENDER_MAX_MODEL_LEN:-131072}"

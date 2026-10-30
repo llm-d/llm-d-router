@@ -109,14 +109,81 @@ Core settings for the Endpoint Picker Proxy (EPP) container and pod, including s
 > **High Availability (HA) Modes**:
 > When EPP is scaled (`router.epp.replicas > 1`):
 > *   **Active-Passive Mode (Default)**: The chart automatically enables the `--ha-enable-leader-election` flag. Only one leader replica active-routes traffic, coordinates lease status, and maintains absolute routing state, while other replicas act as warm standbys.
-> *   **Active-Active Mode**: You can explicitly disable leader-election by passing `ha-enable-leader-election: false` under `router.epp.flags`. In this mode, all replicas process traffic concurrently.
->     *   *Warning*: In active-active mode, you **must only use active-active compatible plugins**—specifically plugins that pull real-time metrics/state dynamically from the backend model servers (such as the precise prefix cache, queue, and KV-cache utilization scorers). Avoid plugins that rely on local in-memory routing state, as this state is not synchronized across replicas.
+> *   **Active-Active Mode**: Set `router.epp.haMode: all-active` to disable leader election and let all replicas process traffic. Setting `router.epp.crossReplica.enabled: true` also selects this mode. The existing `router.epp.flags.ha-enable-leader-election: false` setting remains supported.
+>     *   **Plugin compatibility**: Stateless plugins and plugins that read backend metrics can run independently. The optional Redis syncer shares in-flight load between replicas. Approximate prefix-cache state remains local, so this option does not make approximate prefix routing consistent across replicas.
 >
 > Setting `router.epp.flags.ha-enable-leader-election: true` also enables leader
 > election for a single replica. The chart grants the EPP ServiceAccount the
 > namespace-scoped lease permissions required by this flag.
 
-##### Multi-replica EPP and Helm `--wait`
+#### Active-active with Redis synchronization (Alpha)
+
+Choose this option when EPP throughput needs to scale across replicas and routing
+uses in-flight load. Provision **Redis 7.4 or newer separately** and create any
+password Secret in the release namespace. The chart does not deploy Redis;
+whether to offer an optional Redis subchart is an open question. The syncer uses
+unencrypted TCP and optional password authentication for the default Redis user;
+Redis services requiring TLS or an ACL username are unsupported.
+
+```yaml
+router:
+  epp:
+    replicas: 3
+    pluginsConfigFile: payload-agnostic.yaml
+    crossReplica:
+      enabled: true
+      redis:
+        address: redis.example:6379
+        passwordSecretRef:
+          name: redis-auth
+          key: password
+```
+
+The chart appends `redis-syncer` to the selected EPP config and sets
+`dataLayer.crossReplica`. It passes `--ha-enable-leader-election=false` and
+`--allow-experimental-plugins=true`, and defaults to a rolling update with zero
+unavailable replicas. Fixed `replicas` and `autoscaling` are both supported.
+
+In standalone Envoy service mode, active-active configuration creates a separate
+`<release>-epp-discovery` headless Service. Envoy resolves Ready EPP pod addresses
+and balances requests across them, including replicas discovered after scale-up.
+The chart enables EPP's gRPC health service for Envoy's active health checks;
+`router.epp.flags.health-checking` cannot be set to `false` in this mode.
+An upgrade of an existing standalone Envoy service release with multiple replicas
+and leader election disabled, or with autoscaling enabled, fails if
+`health-checking: false` is set. Remove that flag or set it to `true` before upgrading.
+The EPP ClusterIP Service is retained so enabling discovery can upgrade an
+existing release without changing its immutable Service address. This discovery
+path applies to Envoy; Agentgateway uses the EPP ClusterIP Service.
+
+The example selects `active-request-scorer` through `payload-agnostic.yaml` so
+routing consumes shared in-flight load. The unmodified default and
+optimized-baseline profiles do not consume in-flight load, so enabling Redis
+with either profile does not publish or use shared load. Select a consumer such
+as `active-request-scorer` in the scheduling profile to activate the
+`inflight-load-producer`, and keep its `syncCrossReplicaState` enabled. The chart
+preserves the selected profile and prints this prerequisite in the Helm notes.
+
+Automatic configuration supports `llm-d.ai/v1` built-in, structured
+`pluginsConfig`, and selected raw `pluginsCustomConfig` files. Only the selected
+file receives synchronization settings. An existing `redis-syncer` plugin or
+`dataLayer.crossReplica` section conflicts with this option. To manage these
+manually, leave `crossReplica.enabled` false, select `haMode: all-active`, and
+configure the plugin and experimental flag yourself.
+
+`passwordSecretRef` exposes the Secret key as `EPP_REDIS_PASSWORD` and sets the
+plugin's `passwordEnv`. Omit the reference for Redis without authentication.
+Plaintext `redis.password` values are rejected. The Secret must already exist;
+its value is never placed in the ConfigMap. Restart EPP pods after changing an
+environment-based password. Manual plugin configurations can use `passwordFile`
+with `router.epp.volumes` and `router.epp.volumeMounts` instead.
+
+Load sharing is eventually consistent and does not provide an atomic
+cluster-wide admission quota. See [Scaling Modes](../../docs/operations.md#scaling-modes-active-active-vs-active-passive)
+for state coverage and [Redis Syncer](../../pkg/epp/framework/plugins/datalayer/cross_plugin/redis/README.md)
+for timing and failure behavior.
+
+#### Multi-replica EPP and Helm `--wait`
 
 In active-passive mode only the elected leader passes its readiness probe; standby
 replicas answer the `readiness` gRPC service with `NOT_SERVING` on purpose, so they
@@ -182,9 +249,18 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
-| `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. Defaults to `RollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1` when autoscaling is enabled; otherwise defaults to `{type: Recreate}`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | `{type: Recreate}` |
+| `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
+| `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
+| `router.epp.crossReplica.syncInterval` | Endpoint publication tick interval. A full publication cycle can take longer. | `200ms` |
+| `router.epp.crossReplica.publishTimeout` | Timeout shared by contributors for one endpoint publication or deletion. Must be positive. | `1s` |
+| `router.epp.crossReplica.redis.address` | External Redis `host:port`; required when synchronization is enabled. | `""` |
+| `router.epp.crossReplica.redis.db` | Redis database number. Use a separate database or server for unrelated routing pools. | `0` |
+| `router.epp.crossReplica.redis.stateTTL` | Endpoint state and cached peer aggregate expiration. Must exceed the observed successful per-endpoint refresh interval with margin for Redis latency; minimum `1ms`. | `2s` |
+| `router.epp.crossReplica.redis.coordinationTTL` | Request-level coordination value expiration; minimum `1ms`. | `180s` |
+| `router.epp.crossReplica.redis.passwordSecretRef` | Existing Secret reference with `name` and `key`, exposed through the plugin's `passwordEnv`. | `{}` |
+| `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. Defaults to `RollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1` for `haMode: all-active`, cross-replica sync, or autoscaling; otherwise `{type: Recreate}`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | Mode-dependent |
 | `router.epp.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the EPP Deployment. Requires active-active mode (`router.epp.flags.ha-enable-leader-election` must not be `true`). See [Horizontal Pod Autoscaling (HPA)](../../docs/operations.md#horizontal-pod-autoscaling-hpa). | `false` |
 | `router.epp.autoscaling.minReplicas` | Minimum number of EPP replicas for the HPA. | `1` |
 | `router.epp.autoscaling.maxReplicas` | Maximum number of EPP replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |
@@ -205,8 +281,10 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
-| `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and latency predictor containers. | `{}` |
+| `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |
 | `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
+| `router.epp.podDisruptionBudget` | PodDisruptionBudget for the EPP Deployment: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. `minAvailable` requires at least 2 effective replicas (`replicas`, or `autoscaling.minReplicas` when autoscaled) — a single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
+| `router.epp.lifecycle` | Container lifecycle for the EPP container, rendered verbatim. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. | `null` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
 | `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
@@ -424,7 +502,18 @@ the client's session identifier, or `default` for the `default-flow` sentinel. S
 before the identity resolves keep the value set at ingress: the fairness header value, or
 `default-flow` with source `default` when the header is absent, even if the agent-identity
 plugin would have supplied one. Span values are not subject to the `fairness_id`
-metric-label cardinality cap. The pair is not propagated as request headers.
+metric-label cardinality cap. On sampled traces the EPP also hands the pair to the P/D
+sidecar, so sidecar spans carry it too; see
+[Sidecar Tracing](../../docs/disaggregation.md#sidecar-tracing).
+
+The `request_orchestration` span also records the admission decision. Admission runs from the
+admission controller (Flow Control when enabled) through endpoint candidate lookup, screening
+and the Admitter plugins. `llm_d.epp.admission.decision` is `admitted` or `rejected`, absent when
+the request failed before admission, and not changed by a later scheduling failure or eviction.
+A rejection adds `llm_d.epp.admission.reason`: the `x-llm-d-request-dropped-reason` value, such
+as `rejected-ttl-expired`, or the EPP error code when none is set. When Flow Control dispatched
+the request, `llm_d.epp.admission.queue_duration_ms` holds the time behind the
+`x-llm-d-flow-queue-duration-ms` response header, in fractional milliseconds.
 
 #### Complete Monitoring & Tracing Example
 
@@ -465,7 +554,7 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.31.0` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -493,7 +582,7 @@ router:
     image:
       registry: docker.io
       repository: vllm/vllm-openai-cpu
-      tag: v0.19.1
+      tag: v0.31.0
     env:
       - name: HF_TOKEN
         valueFrom:
@@ -516,17 +605,27 @@ router:
 
 ---
 
-### 6. Sidecar Latency Predictor Configuration (`router.latencyPredictor.*`)
+### 6. Latency Predictor Configuration (`router.latencyPredictor.*`)
 
-Enables latency predictor containers inside the EPP deployment to feed metrics to a latency scorer plugin, allowing EPP to route traffic based on real-time predicted latencies.
+Runs a latency training server and one or more prediction servers that feed a latency scorer plugin, allowing EPP to route traffic based on real-time predicted latencies. EPP posts training samples to the training server and fetches predictions from the prediction servers; the prediction servers pull refreshed models from the training server over HTTP.
+
+`router.latencyPredictor.mode` selects where the servers run:
+
+*   `sidecar`: the training server and `predictionServers.count` prediction containers run inside the EPP pod and EPP reaches them over loopback.
+*   `service`: the training server runs as a single-replica Deployment and the prediction servers as a Deployment with `predictionServers.count` replicas. Each Deployment has one ClusterIP Service, so all prediction replicas share a single Service. EPP reaches them through the two Service FQDNs, so the prediction pods scale independently of the EPP pod and the Service spreads EPP connections across them.
 
 #### Latency Predictor Parameters
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
 | `router.latencyPredictor.enabled` | Enable latency-based routing (requires extra Borg/training setup). | `false` |
+| `router.latencyPredictor.mode` | `sidecar` runs the servers in the EPP pod; `service` runs them as their own Deployments and Services. | `sidecar` |
+| `router.latencyPredictor.podSecurityContext` | Pod-level `securityContext` for the training and prediction pods in `service` mode. | `{}` |
+| `router.latencyPredictor.affinity` | Affinity for the training and prediction pods in `service` mode. Empty uses `router.epp.affinity`. | `{}` |
+| `router.latencyPredictor.tolerations` | Tolerations for the training and prediction pods in `service` mode. Empty uses `router.epp.tolerations`. | `[]` |
 | `router.latencyPredictor.trainingServer.image` | Latency training server image configuration. | |
 | `router.latencyPredictor.predictionServers.image` | Latency prediction server image configuration. | |
+| `router.latencyPredictor.predictionServers.count` | Number of prediction servers: containers in the EPP pod in `sidecar` mode, pods in `service` mode. | `1` |
 | `router.latencyPredictor.trainingServer.securityContext` | Container-level `securityContext` for the training server container. | `{}` |
 | `router.latencyPredictor.predictionServers.securityContext` | Container-level `securityContext` for each prediction server container. | `{}` |
 | `router.latencyPredictor.trainingServer.command` | Training server container command. Empty uses the image default. | `[]` |
@@ -564,6 +663,16 @@ router:
   latencyPredictor:
     predictionServers:
       args: ["prediction_server:app", "--host", "0.0.0.0", "--port", "$(PREDICT_PORT)", "--workers", "$(UVICORN_WORKERS)"]
+```
+
+#### Latency Predictor as Separate Services
+
+```bash
+helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
+  --set router.modelServers.matchLabels.app=vllm-qwen3-32b \
+  --set router.latencyPredictor.enabled=true \
+  --set router.latencyPredictor.mode=service \
+  --set router.latencyPredictor.predictionServers.count=3
 ```
 
 ---
@@ -631,7 +740,9 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.proxyType` | Type of proxy. Options: `[envoy, agentgateway]`. | `envoy` |
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
-| `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on the proxy pod. Applies in service mode only: in sidecar mode the proxy shares the EPP pod, so `router.epp.terminationGracePeriodSeconds` controls the grace period for both containers. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
+| `router.proxy.lifecycle` | Container lifecycle for the proxy container, rendered verbatim in both sidecar and service mode. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. For preStop drains that outlast the default window, raise the grace period: `router.epp.terminationGracePeriodSeconds` in sidecar mode, `router.proxy.terminationGracePeriodSeconds` in service mode. | `null` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |
 | `router.proxy.autoscaling.minReplicas` | Minimum number of proxy replicas for the HPA. | `1` |
 | `router.proxy.autoscaling.maxReplicas` | Maximum number of proxy replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |
@@ -639,7 +750,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.targetMemoryUtilizationPercentage` | Target average memory utilization percentage across proxy pods (1-100). | `""` |
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
-| `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
 | `router.proxy.image` | Sidecar container image. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |

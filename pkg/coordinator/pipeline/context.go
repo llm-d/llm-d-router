@@ -38,23 +38,27 @@ var hopByHopHeaders = map[string]bool{
 
 // internalForwardingHeaders are set only by the coordinator; a client copy is
 // dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port.
+// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
+// Prefer: if-available, the conditional-decode probe's signal, with 412 on
+// any other leg.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
+	routing.PreferHeader:                  true,
 }
 
 func isForwardableHeader(name string) bool {
-	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+	// accept-encoding: http.Transport decompresses only the gzip it negotiated itself.
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type" && name != "accept-encoding"
 }
 
-// StripInternalHeaders removes headers the coordinator alone injects into
-// requests it forwards (e.g. x-peer-topology, copied from the prefill
-// response onto the decode request). Call this on a client request's headers
-// as soon as they are received, so a client-supplied value is never mistaken
-// for one the coordinator generated itself.
+// StripInternalHeaders removes the internalForwardingHeaders. Call it on a
+// client request as soon as it is received, so a client-supplied value is
+// never mistaken for one the coordinator generated, and on an upstream
+// response before it is copied to the client, so a value stamped by an EPP
+// plugin is not exposed.
 func StripInternalHeaders(headers http.Header) {
 	for key := range internalForwardingHeaders {
 		headers.Del(key)
@@ -62,8 +66,8 @@ func StripInternalHeaders(headers http.Header) {
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
-// to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
-// coordinator-owned routing headers.
+// to upstream services, excluding hop-by-hop headers, Content-Length, Host,
+// Content-Type, Accept-Encoding, and coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
@@ -177,10 +181,29 @@ type RequestContext struct {
 	// decode step. Populated by PrefillStep from the prefill response; consumed
 	// by the KV connector when building the decode request.
 	KVTransferParams map[string]any
+	// PrefillCachedTokens is the prompt-cache hit count the prefill worker
+	// reported, read from the details object its route documents:
+	// usage.prompt_tokens_details.cached_tokens, or
+	// usage.input_tokens_details.cached_tokens on the Responses routes. The
+	// decode step substitutes it into the usage block it streams to the client,
+	// because a decode worker counts the KV blocks transferred from prefill as
+	// prompt-cache hits of its own, so its count describes the handoff rather
+	// than the prompt cache.
+	//
+	// A zero value is a measurement, not an absent one: vLLM sends the details
+	// object as null when nothing hit the prompt cache. nil means no prefill
+	// measurement applies to this request, and the decode worker's own count
+	// must reach the client unchanged. PrefillStep leaves it nil when prefill
+	// did not run, when the prefill response carried no usage block at all, and
+	// when a kv-nixl handoff returned no transfer params, since decode then
+	// recomputes the prompt and nothing inflates the count it reports. A
+	// consumer that treats nil as zero reports no cache hits for a request that
+	// had them.
+	PrefillCachedTokens *int
 	// PeerTopology carries the prefill endpoint's encoded topology from the
 	// prefill response to the decode request, for topology-affinity-filter
 	// and topology-affinity-scorer running in the decode EPP's profile.
-	// Populated by PrefillStep from the x-peer-topology response header;
+	// Populated by PrefillStep from the x-llm-d-peer-topology response header;
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
@@ -192,17 +215,28 @@ type RequestContext struct {
 	ResponseWriter http.ResponseWriter
 }
 
-// MultimodalEntry describes one downloaded multimodal item (e.g. an image) and
-// where it sits in the tokenized prompt. Index is its position in the request's
-// multimodal list. Base64Data and ContentType come from the media download;
-// Hash and KwargsData are filled in by the render step; Placeholder marks the
-// span of placeholder tokens the encode step replaces.
+// MultimodalEntry describes one multimodal item in the request and where it
+// sits in the tokenized prompt. Modality comes from reqcommon.PartModality for
+// a request that carries content parts, and from the feature-map key for a
+// token-in one. Hash and KwargsData are filled in by the render step;
+// Placeholder marks the span of placeholder tokens the encode step replaces.
+// The bytes stay in the request body (data URI or input_audio.data) rather than
+// on the entry, so a large audio or video payload is not duplicated on reqCtx.
+//
+// KwargsData is the full MultiModalKwargsItem blob (encoder tensors plus
+// metadata). MMMetadata is the sibling metadata-only blob from render
+// (placeholder_metadata_fields and keep_on_cpu fields such as image_grid_thw),
+// without encoder inputs like pixel_values. Prefill may send MMMetadata with
+// ec_transfer_params instead of KwargsData.
+//
+// An entry's position in this slice means nothing on its own: steps pair an
+// entry with its content part by counting entries of the same Modality. See
+// steps.collectMediaParts for the invariant that keeps the two lined up.
 type MultimodalEntry struct {
-	Index       int
+	Modality    reqcommon.Modality
 	Hash        string
-	Base64Data  string
-	ContentType string
 	KwargsData  string
+	MMMetadata  string
 	Placeholder PlaceholderRange
 }
 

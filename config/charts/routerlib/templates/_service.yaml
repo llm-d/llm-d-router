@@ -65,6 +65,27 @@ spec:
     {{- . | toYaml | nindent 4 }}
     {{- end }}
   type: ClusterIP
+{{- $discoveryServiceName := include "llm-d-router.proxy.discoveryServiceName" . }}
+{{- if $discoveryServiceName }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $discoveryServiceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "llm-d-router.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc-ext-proc
+      protocol: TCP
+      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      appProtocol: kubernetes.io/h2c
+{{- end }}
 {{- if $isPriorityRouting }}
 ---
 # Headless Service is required for Priority Routing to provide deterministic, per-pod DNS records

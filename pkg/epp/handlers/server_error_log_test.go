@@ -27,9 +27,12 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
@@ -37,18 +40,32 @@ import (
 // rejectingDirector fails every request with err.
 type rejectingDirector struct {
 	mockDirector
-	err error
+	err    error
+	cancel context.CancelFunc
 }
 
 func (d *rejectingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+	if d.cancel != nil {
+		d.cancel()
+	}
 	return reqCtx, d.err
 }
 
 // replayProcessServer replays reqs in order, then reports EOF.
 type replayProcessServer struct {
 	mockProcessServer
-	ctx  context.Context
-	reqs []*extProcPb.ProcessingRequest
+	ctx          context.Context
+	reqs         []*extProcPb.ProcessingRequest
+	sendErr      error
+	cancelOnSend context.CancelFunc
+}
+
+func (m *replayProcessServer) Send(resp *extProcPb.ProcessingResponse) error {
+	if m.cancelOnSend != nil {
+		m.cancelOnSend()
+	}
+	m.sentResponses = append(m.sentResponses, resp)
+	return m.sendErr
 }
 
 func (m *replayProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
@@ -94,6 +111,16 @@ func TestProcessLogsRequestErrorOnce(t *testing.T) {
 			},
 			wantStatus: envoyTypePb.StatusCode_ServiceUnavailable,
 		},
+		{
+			name: "queue deadline exceeded",
+			path: "/v1/completions",
+			body: validBody,
+			directorErr: errcommon.Error{
+				Code: errcommon.ResourceExhausted,
+				Msg:  "request timed out in queue: context deadline exceeded",
+			},
+			wantStatus: envoyTypePb.StatusCode_TooManyRequests,
+		},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +151,139 @@ func TestProcessLogsRequestErrorOnce(t *testing.T) {
 			require.Len(t, srv.sentResponses, 1)
 			require.Equal(t, tt.wantStatus, srv.sentResponses[0].GetImmediateResponse().GetStatus().GetCode())
 			require.Len(t, errorLines, 1, "a failed request must be logged at error level once: %v", errorLines)
+		})
+	}
+}
+
+func TestProcessCancelledRequest(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		cancelOnRequest bool
+		cancelOnSend    bool
+		sendErr         error
+		wantCode        codes.Code
+		wantSends       int
+		wantErrorLogs   int
+	}{
+		{
+			name:            "cancelled while queued",
+			cancelOnRequest: true,
+			wantCode:        codes.Canceled,
+		},
+		{
+			name:          "request failure",
+			wantSends:     1,
+			wantErrorLogs: 1,
+		},
+		{
+			name:          "send failure",
+			sendErr:       status.Error(codes.Unavailable, "transport unavailable"),
+			wantCode:      codes.Unknown,
+			wantSends:     1,
+			wantErrorLogs: 2,
+		},
+		{
+			name:          "cancelled during send",
+			cancelOnSend:  true,
+			sendErr:       status.Error(codes.Canceled, "context canceled"),
+			wantCode:      codes.Canceled,
+			wantSends:     1,
+			wantErrorLogs: 1,
+		},
+		{
+			name:          "cancelled send with active stream",
+			sendErr:       status.Error(codes.Canceled, "context canceled"),
+			wantCode:      codes.Unknown,
+			wantSends:     1,
+			wantErrorLogs: 2,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var errorLines []string
+			capture := funcr.New(func(prefix, args string) {
+				if strings.Contains(args, `"error"=`) {
+					errorLines = append(errorLines, prefix+" "+args)
+				}
+			}, funcr.Options{Verbosity: logutil.DEBUG})
+			ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), capture))
+			defer cancel()
+			srv := &replayProcessServer{
+				ctx: ctx,
+				reqs: []*extProcPb.ProcessingRequest{
+					newRequestHeaders(map[string]string{":path": "/v1/completions"}),
+					{Request: &extProcPb.ProcessingRequest_RequestBody{
+						RequestBody: &extProcPb.HttpBody{Body: []byte(`{"model":"m","prompt":"hi"}`), EndOfStream: true},
+					}},
+				},
+				sendErr: tt.sendErr,
+			}
+			director := &rejectingDirector{err: errcommon.Error{
+				Code: errcommon.ServiceUnavailable,
+				Msg:  "client disconnected: request evicted from queue: request context cancelled: context canceled",
+				Headers: map[string]string{
+					errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled),
+				},
+			}}
+			if tt.cancelOnRequest {
+				director.cancel = cancel
+			}
+			if tt.cancelOnSend {
+				srv.cancelOnSend = cancel
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+
+			err := NewStreamingServer(nil, director, registry, 0).Process(srv)
+			if tt.wantCode == codes.Canceled {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.Equal(t, tt.wantCode, status.Code(err))
+			}
+			require.Len(t, srv.sentResponses, tt.wantSends)
+			require.Len(t, errorLines, tt.wantErrorLogs, "unexpected error logs: %v", errorLines)
+		})
+	}
+}
+
+func TestProcessRequestErrorOmitsBody(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		verbosity int
+	}{
+		{name: "debug", verbosity: logutil.DEBUG},
+		{name: "trace", verbosity: logutil.TRACE},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var logged []string
+			capture := funcr.New(func(prefix, args string) {
+				logged = append(logged, prefix+" "+args)
+			}, funcr.Options{Verbosity: tt.verbosity})
+			body := []byte(`{"model":"m","messages":[{"role":"user","content":"private_prompt_content"},{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"private_tool_name","arguments":"private_tool_arguments"}}]}],"tools":[{"type":"function","function":{"name":"private_tool_name","parameters":{"type":"object","properties":{"private_schema_property":{"type":"string"}}}}}]}`)
+			srv := &replayProcessServer{
+				ctx: log.IntoContext(context.Background(), capture),
+				reqs: []*extProcPb.ProcessingRequest{
+					newRequestHeaders(map[string]string{":path": "/v1/chat/completions", "x-request-id": "req-private-error-log"}),
+					{Request: &extProcPb.ProcessingRequest_RequestBody{
+						RequestBody: &extProcPb.HttpBody{Body: body, EndOfStream: true},
+					}},
+				},
+			}
+			director := &rejectingDirector{err: errcommon.Error{
+				Code: errcommon.ServiceUnavailable,
+				Msg:  "no endpoints available for the given request",
+			}}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			require.NoError(t, NewStreamingServer(nil, director, registry, 0).Process(srv))
+			require.Len(t, srv.sentResponses, 1)
+			require.Equal(t, envoyTypePb.StatusCode_ServiceUnavailable, srv.sentResponses[0].GetImmediateResponse().GetStatus().GetCode())
+
+			output := strings.Join(logged, "\n")
+			require.Equal(t, 1, strings.Count(output, "Failed to process request"))
+			require.Contains(t, output, "no endpoints available for the given request")
+			require.Contains(t, output, "req-private-error-log")
+			for _, privateValue := range []string{"private_prompt_content", "private_tool_name", "private_tool_arguments", "private_schema_property"} {
+				require.NotContains(t, output, privateValue)
+			}
+			require.NotContains(t, output, `"request"=`)
 		})
 	}
 }

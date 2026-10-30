@@ -31,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -271,7 +273,7 @@ func TestPreRequest_RecordsPredictionModality(t *testing.T) {
 
 	req := tokenizedRequest("req-predicted-mm", 8*testBlockSize)
 	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img"},
+		{Modality: reqcommon.ModalityImage, Hash: "img"},
 		{Modality: "audio", Hash: "aud"},
 	}
 
@@ -356,7 +358,7 @@ func TestPreRequest_MaximaCarryModality(t *testing.T) {
 	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(2, 8, testBlockSize).WithCachedBlockCount(2))
 	req := tokenizedRequest("req-best-modality", 8*testBlockSize)
 	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img"},
+		{Modality: reqcommon.ModalityImage, Hash: "img"},
 		{Modality: "audio", Hash: "aud"},
 	}
 	_ = p.PreRequest(ctx, req, primaryOnly("default", endpoint))
@@ -494,6 +496,104 @@ func TestProduceThenPreRequest_RecordsBothMaxima(t *testing.T) {
 		sharedPrefixHistogram(t, promptTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum())
 }
 
+type countingGetEndpoint struct {
+	scheduling.Endpoint
+	gets int
+}
+
+func (e *countingGetEndpoint) Get(key plugin.DataKey) (datalayer.Cloneable, bool) {
+	e.gets++
+	return e.Endpoint.Get(key)
+}
+
+func TestBestAvailableState_Clone(t *testing.T) {
+	id := freshEndpoints()[0].GetMetadata().ID
+	state := &bestAvailableState{
+		cachedTokens:          7 * testBlockSize,
+		predictedCachedTokens: map[datalayer.ID]int{id: testBlockSize},
+	}
+	cloned, ok := state.Clone().(*bestAvailableState)
+	require.True(t, ok)
+	require.Equal(t, state, cloned)
+
+	cloned.predictedCachedTokens[id] = 0
+	assert.Equal(t, testBlockSize, state.predictedCachedTokens[id])
+}
+
+func TestProduceThenPreRequest_ReadsOnlySelectedMatchInfo(t *testing.T) {
+	for _, scenario := range []string{"decode", "prefill", "no-scored-candidates", "missing-selected-match"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			prefixmetrics.Register()
+
+			name := "precise-prediction-reads-" + scenario
+			const chosenBlocks, scoredBlocks, filteredBlocks, promptBlocks = 1, 5, 7, 8
+			idx := &fakeKVCacheIndexer{
+				computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+					return make([]kvblock.BlockHash, promptBlocks), nil
+				},
+				matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+					return map[string]kvcache.PodMatch{
+						"10.0.0.1:8080": {MatchedBlocks: chosenBlocks, BlocksByTier: map[string]int{"gpu": chosenBlocks}},
+						"10.0.0.2:8080": {MatchedBlocks: scoredBlocks, BlocksByTier: map[string]int{"gpu": scoredBlocks}},
+						"10.0.0.3:8080": {MatchedBlocks: filteredBlocks, BlocksByTier: map[string]int{"gpu": filteredBlocks}},
+					}, nil
+				},
+			}
+			p := newProducerForProduceAndPreRequest(ctx, name, idx)
+			endpoints := freshEndpoints()
+			filteredMeta := *endpoints[1].GetMetadata()
+			filteredMeta.ID.Namespace = "other"
+			filteredMeta.Address = "10.0.0.3"
+			endpoints = append(endpoints, scheduling.NewEndpoint(&filteredMeta, nil, nil))
+			req := tokenizedRequest("req-prediction-reads", promptBlocks*testBlockSize)
+			req.TargetModel = "test-model"
+			require.NoError(t, p.Produce(ctx, req, endpoints))
+
+			chosen := &countingGetEndpoint{Endpoint: endpoints[0]}
+			// The scheduler can copy endpoints while preserving their identities.
+			scored := &countingGetEndpoint{Endpoint: scheduling.NewEndpoint(
+				endpoints[1].GetMetadata(), nil, endpoints[1].Clone())}
+			result := primaryWithScored("decode", chosen, chosen, scored, scheduling.NewEndpoint(nil, nil, nil))
+			role := prefixmetrics.RoleDecode
+			wantBest, wantAvailable := scoredBlocks, filteredBlocks
+			switch scenario {
+			case "prefill":
+				result.ProfileResults[experimentalPrefillProfile] = result.ProfileResults["decode"]
+				result.ProfileResults["decode"] = &scheduling.ProfileRunResult{
+					TargetEndpoints: []scheduling.Endpoint{endpoints[2]},
+				}
+				role = prefixmetrics.RolePrefill
+			case "no-scored-candidates":
+				result = primaryOnly("decode", chosen)
+				wantBest, wantAvailable = chosenBlocks, chosenBlocks
+			case "missing-selected-match":
+				chosen.Endpoint = scheduling.NewEndpoint(endpoints[0].GetMetadata(), nil, nil)
+			}
+
+			before := sharedPrefixHistogram(t, predictedCachedTokensMetric, name, role).GetSampleCount()
+			require.NoError(t, p.PreRequest(ctx, req, result))
+			assert.Equal(t, 1, chosen.gets)
+			assert.Zero(t, scored.gets, "candidate predictions must come from Produce state")
+			_, err := p.pluginState.Read(req.RequestID, bestAvailableStateKey)
+			require.ErrorIs(t, err, plugin.ErrNotFound)
+
+			if scenario == "missing-selected-match" {
+				for _, metric := range []string{predictedCachedTokensMetric, bestPredictedMetric, bestAvailableMetric} {
+					assert.Equal(t, before, sharedPrefixHistogram(t, metric, name, role).GetSampleCount())
+				}
+				return
+			}
+			assert.Equal(t, float64(chosenBlocks*testBlockSize),
+				sharedPrefixHistogram(t, predictedCachedTokensMetric, name, role).GetSampleSum())
+			assert.Equal(t, float64(wantBest*testBlockSize),
+				sharedPrefixHistogram(t, bestPredictedMetric, name, role).GetSampleSum())
+			assert.Equal(t, float64(wantAvailable*testBlockSize),
+				sharedPrefixHistogram(t, bestAvailableMetric, name, role).GetSampleSum())
+		})
+	}
+}
+
 // A profile handler that rebuilds the result from its targets alone, such as
 // the data-parallel one, leaves no scored candidates. Both maxima then fall
 // back to the chosen endpoint, so a routing miss toward a warmer candidate is
@@ -587,7 +687,7 @@ func tokenizedRequest(id string, tokenCount int) *scheduling.InferenceRequest {
 func mmRequest(id string, featureTokens int) *scheduling.InferenceRequest {
 	req := tokenizedRequest(id, featureTokens)
 	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img", Offset: 0, Length: featureTokens},
+		{Modality: reqcommon.ModalityImage, Hash: "img", Offset: 0, Length: featureTokens},
 	}
 	return req
 }
@@ -711,8 +811,8 @@ func TestPreRequest_RecordsMMPrediction_TwoImagesFirstMatched(t *testing.T) {
 
 	req := tokenizedRequest("req-mm-two-images", 4*testBlockSize)
 	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
-		{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
+		{Modality: reqcommon.ModalityImage, Hash: "img-a", Offset: 2, Length: 20},
+		{Modality: reqcommon.ModalityImage, Hash: "img-b", Offset: 32, Length: 20},
 	}
 
 	beforePredicted := sharedPrefixHistogram(t, mmPredictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()
@@ -748,13 +848,13 @@ func TestPreRequest_RecordsMMPrediction_MultiPrompt(t *testing.T) {
 					{
 						TokenIDs: make([]uint32, 4*testBlockSize),
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
+							{Modality: reqcommon.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
 						},
 					},
 					{
 						TokenIDs: make([]uint32, 3*testBlockSize),
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 0, Length: 3 * testBlockSize},
+							{Modality: reqcommon.ModalityImage, Hash: "img-b", Offset: 0, Length: 3 * testBlockSize},
 						},
 					},
 				},
@@ -788,8 +888,8 @@ func TestPreRequest_RecordsMMPrediction_MultipleFeaturesInPrompt(t *testing.T) {
 
 	req := tokenizedRequest("req-mm-features", 7*testBlockSize)
 	req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrh.MultiModalFeature{
-		{Modality: fwkrh.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
-		{Modality: fwkrh.ModalityImage, Hash: "img-b", Offset: 4 * testBlockSize, Length: 3 * testBlockSize},
+		{Modality: reqcommon.ModalityImage, Hash: "img-a", Offset: 0, Length: 4 * testBlockSize},
+		{Modality: reqcommon.ModalityImage, Hash: "img-b", Offset: 4 * testBlockSize, Length: 3 * testBlockSize},
 	}
 
 	beforePredicted := sharedPrefixHistogram(t, mmPredictedCachedTokensMetric, name, prefixmetrics.RoleDecode).GetSampleSum()

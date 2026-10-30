@@ -29,6 +29,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -446,7 +447,7 @@ func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64
 			return seconds
 		}
 		rate := e.bytesPerSecond(meta)
-		if n := base64DecodedLen(audioBase64Payload(data)); n > 0 {
+		if n := reqcommon.Base64DecodedLen(audioBase64Payload(data)); n > 0 {
 			return float64(n) / float64(rate)
 		}
 	}
@@ -504,7 +505,7 @@ func wavDurationFromBase64(data string) (seconds float64, ok bool) {
 			}
 			// A streamed WAV can declare a placeholder size, so what the payload
 			// actually carries bounds the data chunk.
-			available := int64(base64DecodedLen(payload)) - body
+			available := int64(reqcommon.Base64DecodedLen(payload)) - body
 			if size <= 0 || size > available {
 				size = available
 			}
@@ -535,16 +536,4 @@ func audioBase64Payload(data string) string {
 		return data[idx+len("base64,"):]
 	}
 	return data
-}
-
-// base64DecodedLen returns the decoded byte length of a standard base64 payload
-// without decoding it. Line-wrapped payloads count their newlines, which reads
-// about 1% long; that only reaches the byte-rate estimate for non-WAV clips,
-// where the byte rate is itself an approximation.
-func base64DecodedLen(rawB64 string) int {
-	n := len(rawB64)
-	for n > 0 && rawB64[n-1] == '=' {
-		n--
-	}
-	return n * 3 / 4
 }

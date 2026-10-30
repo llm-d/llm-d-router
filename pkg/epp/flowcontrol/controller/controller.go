@@ -387,7 +387,7 @@ func (fc *FlowController) tryDistribution(
 	conn contracts.ActiveFlowConnection,
 ) (*internal.FlowItem, error) {
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
-	item := internal.NewItem(req, saturationTTL, enqueueTime, fc.logger)
+	item := internal.NewItem(reqCtx, req, saturationTTL, enqueueTime, fc.logger)
 
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())

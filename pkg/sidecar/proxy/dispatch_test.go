@@ -242,6 +242,92 @@ func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
 }
 
+func TestServer_createRoutes(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, apiType := range []reqcommon.APIType{
+		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions,
+		reqcommon.APITypeMessages, reqcommon.APITypeResponses,
+		reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
+	} {
+		for _, tt := range []struct {
+			name    string
+			method  string
+			suffix  string
+			prefill bool
+		}{
+			{name: "canonical", method: http.MethodPost, prefill: true},
+			{name: "trailing_slash", method: http.MethodPost, suffix: "/", prefill: true},
+			{name: "subpath", method: http.MethodPost, suffix: "/extra"},
+			{name: "subpath_trailing_slash", method: http.MethodPost, suffix: "/extra/"},
+			{name: "get", method: http.MethodGet},
+			{name: "get_trailing_slash", method: http.MethodGet, suffix: "/"},
+		} {
+			t.Run(apiType.String()+"/"+tt.name, func(t *testing.T) {
+				s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ string, gotAPI reqcommon.APIType) {
+					if gotAPI != apiType || hostPort != "127.0.0.1:9000" {
+						t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, apiType)
+					}
+					if r.URL.Path != apiType.Path() || r.URL.RawPath != "" || r.URL.RawQuery != "request=1" {
+						t.Errorf("connector received URL %v, want %s?request=1", r.URL, apiType.Path())
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil || string(body) != "{}" {
+						t.Errorf("connector received body %q and error %v, want {}", body, err)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}
+
+				uri := apiType.Path() + tt.suffix + "?request=1"
+				req := httptest.NewRequest(tt.method, uri, strings.NewReader("{}"))
+				req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+				recorder := httptest.NewRecorder()
+				s.createRoutes().ServeHTTP(recorder, req)
+
+				if tt.prefill {
+					if recorder.Code != http.StatusNoContent {
+						t.Errorf("expected prefill connector, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+				} else {
+					if recorder.Code != http.StatusAccepted {
+						t.Errorf("expected decoder passthrough, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+					if got := recorder.Header().Get("X-Forwarded-URI"); got != uri {
+						t.Errorf("decoder received URI %q, want %q", got, uri)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
+	for _, suffix := range []string{"", "/"} {
+		t.Run("path"+suffix, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}})
+			s.allowlistValidator = &AllowlistValidator{}
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses+suffix, strings.NewReader(statefulResponsesTestBody))
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf("expected stateful fields to be rejected, got status %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 // The plain decoder passthrough: no prefill, encoder, P2P or data-parallel
 // header, so nothing downstream reads the body.
 func TestServer_ResponsesDecoderOnlyPassthroughRejectsStatefulFields(t *testing.T) {

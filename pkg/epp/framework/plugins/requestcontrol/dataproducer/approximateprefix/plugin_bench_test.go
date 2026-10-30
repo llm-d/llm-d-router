@@ -24,7 +24,9 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 )
 
@@ -125,5 +127,101 @@ func BenchmarkProduce(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkProduceCrossSync compares Produce cost with cross-replica merge
+// disabled, enabled with an empty peer window, and enabled with a steady-state
+// peer window already folded into peerMerged (the common hot-path case).
+func BenchmarkProduceCrossSync(b *testing.B) {
+	const (
+		numPods         = 96
+		peerPrompts     = 4
+		hashesPerPrompt = defaultLRUCapacityPerServer / peerPrompts // default window across 4 prompts
+	)
+	syncOn := true
+	syncOff := false
+
+	type mode struct {
+		name   string
+		cfg    config
+		handle plugin.Handle
+		peers  bool
+	}
+	modes := []mode{
+		{
+			name: "syncOff",
+			cfg: func() config {
+				c := defaultConfig
+				c.SyncCrossReplicaState = &syncOff
+				c.AutoTune = false
+				c.BlockSizeTokens = benchBlockSize
+				return c
+			}(),
+			handle: testHandle(),
+		},
+		{
+			name: "syncOnEmpty",
+			cfg: func() config {
+				c := defaultConfig
+				c.SyncCrossReplicaState = &syncOn
+				c.AutoTune = false
+				c.BlockSizeTokens = benchBlockSize
+				return c
+			}(),
+			handle: testHandleWithSyncer(),
+		},
+		{
+			name: "syncOnSteady",
+			cfg: func() config {
+				c := defaultConfig
+				c.SyncCrossReplicaState = &syncOn
+				c.AutoTune = false
+				c.BlockSizeTokens = benchBlockSize
+				return c
+			}(),
+			handle: testHandleWithSyncer(),
+			peers:  true,
+		},
+	}
+
+	for _, m := range modes {
+		b.Run(fmt.Sprintf("%s/pods=%d", m.name, numPods), func(b *testing.B) {
+			p, err := newDataProducer(b.Context(), ApproxPrefixCachePluginType, m.cfg, m.handle)
+			if err != nil {
+				b.Fatal(err)
+			}
+			pods, endpoints := benchPods(numPods)
+			query := benchLayouts["sharedPrefix"](p, pods)
+			req := &fwksched.InferenceRequest{RequestID: "bench", TargetModel: "bench-model", Body: tokenizedBody(query)}
+			if m.peers {
+				attachPeerWindow(endpoints, p, peerPrompts, hashesPerPrompt)
+				// Warm peerMerged so the loop measures steady-state merge cost.
+				if err := p.Produce(b.Context(), req, endpoints); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := p.Produce(b.Context(), req, endpoints); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func attachPeerWindow(endpoints []fwksched.Endpoint, p *dataProducer, prompts, hashesPerPrompt int) {
+	for i, ep := range endpoints {
+		promptsU64 := make([][]uint64, prompts)
+		for j := range promptsU64 {
+			hashes := make([]uint64, hashesPerPrompt)
+			for k := range hashes {
+				hashes[k] = uint64(i+1)<<32 | uint64(j+1)<<16 | uint64(k+1)
+			}
+			promptsU64[j] = hashes
+		}
+		ep.Put(p.syncHashDK, &attrprefix.PrefixHashSet{Prompts: promptsU64})
 	}
 }

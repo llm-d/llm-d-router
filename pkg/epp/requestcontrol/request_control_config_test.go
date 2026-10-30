@@ -34,6 +34,7 @@ package requestcontrol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -54,8 +55,10 @@ type orderTestData struct{}
 
 func (d *orderTestData) Clone() fwkdl.Cloneable { return &orderTestData{} }
 
+var errResponderNotImplemented = errors.New("responder not implemented")
+
 // hookPlugin implements every requestcontrol extension point plus Produces and
-// Consumes, so a single instance lands on all seven Config hook lists and is ranked
+// Consumes, so a single instance lands on all Config hook lists and is ranked
 // by the data-dependency DAG. Leaving produces or consumes nil makes the instance
 // a pure consumer or a pure producer respectively.
 type hookPlugin struct {
@@ -88,6 +91,9 @@ func (p *hookPlugin) ResponseBody(_ context.Context, _ *fwksched.InferenceReques
 func (p *hookPlugin) Admit(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
 	return nil
 }
+func (p *hookPlugin) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+	return nil, errResponderNotImplemented
+}
 
 // unrankedPlugin implements a hook but is neither a producer nor a consumer, so
 // the data-dependency DAG never ranks it. Ordering must not drop it.
@@ -101,6 +107,9 @@ func (p *unrankedPlugin) TypedName() fwkplugin.TypedName {
 func (p *unrankedPlugin) PreRequest(_ context.Context, _ *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	return nil
 }
+func (p *unrankedPlugin) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+	return nil, errResponderNotImplemented
+}
 
 // Compile-time proof that the mocks still satisfy every extension point. Without
 // these, an interface change upstream would silently drop a mock from a hook list
@@ -113,7 +122,9 @@ var (
 	_ fwkrc.PreRequest              = &hookPlugin{}
 	_ fwkrc.ResponseHeaderProcessor = &hookPlugin{}
 	_ fwkrc.ResponseBodyProcessor   = &hookPlugin{}
+	_ fwkrc.Responder               = &hookPlugin{}
 	_ fwkrc.PreRequest              = &unrankedPlugin{}
+	_ fwkrc.Responder               = &unrankedPlugin{}
 )
 
 func names[T interface{ TypedName() fwkplugin.TypedName }](plugins []T) []string {
@@ -190,6 +201,11 @@ func TestConfig_OrderPlugins_AllHookLists(t *testing.T) {
 			name: "dataProducer orders producer before consumer",
 			got:  names(cfg.dataProducerPlugins),
 			want: []string{"P/mock", "C/mock"},
+		},
+		{
+			name: "responders order producer before consumer and keeps unranked plugins",
+			got:  names(cfg.responders),
+			want: []string{"P/mock", "C/mock", "U/mock"},
 		},
 	}
 
@@ -302,6 +318,19 @@ func TestConfig_OrderPlugins_InputOrderIndependent(t *testing.T) {
 			assert.Equal(t, wantRanked, names(cfg.responseReceivedPlugins), "responseReceived")
 			assert.Equal(t, wantRanked, names(cfg.responseStreamingPlugins), "responseStreaming")
 			assert.Equal(t, wantRanked, names(cfg.dataProducerPlugins), "dataProducer")
+			assert.Equal(t, wantPreReq, names(cfg.responders), "responders")
 		})
 	}
+}
+
+func TestConfig_OrderPlugins_WithResponders(t *testing.T) {
+	t.Parallel()
+
+	first := &unrankedPlugin{name: "B"}
+	second := &unrankedPlugin{name: "A"}
+	cfg := NewConfig().WithResponders(first, second)
+
+	cfg.OrderPlugins(nil)
+
+	assert.Equal(t, []string{"A/mock", "B/mock"}, names(cfg.Responders()))
 }

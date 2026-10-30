@@ -75,6 +75,7 @@ router:
           data:
             envoy.yaml: |
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+              {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
               admin:
                 address:
                   socket_address:
@@ -154,6 +155,14 @@ router:
                             typed_config:
                               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                               stat_prefix: http-8081
+                              # Only EPP may set the destination header. Removing any client-supplied value
+                              # before route selection keeps clients from picking the backend themselves.
+                              early_header_mutation_extensions:
+                                - name: envoy.http.early_header_mutation.header_mutation
+                                  typed_config:
+                                    "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+                                    mutations:
+                                      - remove: x-gateway-destination-endpoint
                               route_config:
                                 name: vllm
                                 virtual_hosts:
@@ -162,6 +171,13 @@ router:
                                     routes:
                                       - match:
                                           prefix: "/"
+                                          {{- if $fallback }}
+                                          # EPP sets this header and clears the route cache, so requests it
+                                          # scheduled re-match here and go to the endpoint it picked.
+                                          headers:
+                                            - name: x-gateway-destination-endpoint
+                                              present_match: true
+                                          {{- end }}
                                         route:
                                           cluster: original_destination_cluster
                                           timeout: 86400s
@@ -172,6 +188,35 @@ router:
                                           envoy.filters.http.ext_proc:
                                             "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
                                             config: {}
+                                      {{- if $fallback }}
+                                      # Fail-open: EPP was unreachable and set no destination, so load-balance
+                                      # across the model servers without endpoint picking.
+                                      - match:
+                                          prefix: "/"
+                                        route:
+                                          cluster: inference_pool_fallback
+                                          timeout: 86400s
+                                          idle_timeout: 86400s
+                                          upgrade_configs:
+                                            - upgrade_type: websocket
+                                        # Internal routing and screening headers (pkg/epp/util/request/headers.go).
+                                        # EPP removes client values on the scheduled route; this route skips EPP. The
+                                        # P/D sidecar connects to the worker addresses they carry. Removed here rather
+                                        # than before ext_proc because EPP screeners read x-llm-d-pin-host-port.
+                                        request_headers_to_remove:
+                                          - x-llm-d-prefiller-host-port
+                                          - x-prefiller-host-port
+                                          - x-llm-d-encoder-hosts-ports
+                                          - x-encoder-hosts-ports
+                                          - x-data-parallel-host-port
+                                          - x-llm-d-kv-cache-source-host-port
+                                          - x-kv-cache-source-host-port
+                                          - x-llm-d-pin-host-port
+                                        typed_per_filter_config:
+                                          envoy.filters.http.ext_proc:
+                                            "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                                            config: {}
+                                      {{- end }}
                               http_filters:
                                 - name: envoy.filters.http.ext_proc
                                   typed_config:
@@ -238,6 +283,33 @@ router:
                     original_dst_lb_config:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
+                  {{- if $fallback }}
+                  # Model servers behind the headless fallback Service, used only when fail-open
+                  # skips EPP. STRICT_DNS resolves every ready pod IP (refreshed every 5s by default).
+                  - name: inference_pool_fallback
+                    type: STRICT_DNS
+                    connect_timeout: 10s
+                    lb_policy: LEAST_REQUEST
+                    circuit_breakers:
+                      thresholds:
+                        - max_connections: 40000
+                          max_pending_requests: 40000
+                          max_requests: 40000
+                    outlier_detection:
+                      split_external_local_origin_errors: true
+                      consecutive_local_origin_failure: 5
+                      base_ejection_time: 30s
+                      max_ejection_percent: 50
+                    load_assignment:
+                      cluster_name: inference_pool_fallback
+                      endpoints:
+                        - lb_endpoints:
+                            - endpoint:
+                                address:
+                                  socket_address:
+                                    address: {{ printf "%s.%s.svc.%s" (include "llm-d-router.proxy.fallbackServiceName" .) .Release.Namespace (.Values.router.clusterDomain | default "cluster.local") }}
+                                    port_value: {{ include "llm-d-router.proxy.fallbackPort" . }}
+                  {{- end }}
                   - name: ext_proc
                     type: {{ include "llm-d-router.proxy.extProcClusterType" . }}
                     {{- if $isPriorityRouting }}
@@ -262,6 +334,10 @@ router:
                       max_ejection_percent: 50
                       # Hold ejection for 30s to allow replacement pod startup and avoid flapping.
                       base_ejection_time: 30s
+                    {{- else if include "llm-d-router.proxy.discoveryServiceName" . }}
+                    # Fail fast on EPP pod IPs that are gone but not yet removed by DNS refresh or health checks.
+                    connect_timeout: 1s
+                    lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
                     {{- else }}
                     connect_timeout: 86400s
                     lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
@@ -350,7 +426,8 @@ router:
           - "envoy-proxy"
           - "--log-level"
           - "warn"
-          - "--cpuset-threads"
+          - "--concurrency"
+          - "8"
           - "--drain-strategy"
           - "immediate"
           - "--drain-time-s"

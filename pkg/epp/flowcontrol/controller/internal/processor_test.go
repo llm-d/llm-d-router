@@ -219,7 +219,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(req, ttl, h.clock.Now(), logr.Discard())
+	return NewItem(context.Background(), req, ttl, h.clock.Now(), logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -926,7 +926,7 @@ func TestProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
-					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, tc.itemByteSize)
 					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
 				})
@@ -938,7 +938,7 @@ func TestProcessor(t *testing.T) {
 				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
 				}
-				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, 1)
 				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
 				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
 			})
@@ -2129,7 +2129,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
+				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
 				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 

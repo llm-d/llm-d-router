@@ -8,6 +8,26 @@ imagePullSecrets: []
 
 epp:
   replicas: 1
+  # Empty preserves automatic leader election for fixed replica counts > 1.
+  # Explicit modes: leader-elected or all-active.
+  haMode: ""
+
+  # Alpha: share in-flight load between active EPP replicas using external Redis 7.4+.
+  # Enabling this selects all-active mode and allows experimental plugins.
+  crossReplica:
+    enabled: false
+    syncInterval: 200ms
+    publishTimeout: 1s
+    redis:
+      address: ""
+      db: 0
+      stateTTL: 2s
+      coordinationTTL: 180s
+      # Existing Secret in the release namespace, exposed through passwordEnv.
+      # passwordSecretRef:
+      #   name: redis-auth
+      #   key: password
+      passwordSecretRef: {}
 
   # Pod-level securityContext, inherited by every container in the EPP pod. The
   # latency predictor images declare no user and run as root unless runAsUser is
@@ -16,8 +36,19 @@ epp:
   # Container-level securityContext for the EPP container.
   securityContext: {}
 
-  # Overrides the EPP Deployment's spec.strategy. Unset means `type: Recreate`,
-  # which is the recommended default for the stateful single-active-replica pattern.
+  # Container lifecycle for the EPP container, rendered verbatim. When unset
+  # or null, the chart renders a preStop sleep of 5 seconds on Kubernetes
+  # >= 1.30 so endpoint removal propagates before SIGTERM. Set to override
+  # the hook. The EPP image is distroless, so an exec hook requires an image
+  # that ships a shell. Set to an empty map ({}) to disable the hook and
+  # render no lifecycle at all.
+  # lifecycle:
+  #   preStop:
+  #     exec:
+  #       command: ["/bin/sh", "-c", "drain.sh"]
+
+  # Overrides the EPP Deployment's spec.strategy. All-active mode and autoscaling
+  # default to RollingUpdate (maxUnavailable: 0, maxSurge: 1); otherwise Recreate.
   #
   # With replicas > 1 the chart enables leader election, and standby replicas stay
   # NotReady by design, so a `Recreate` Deployment never reports Available=True and
@@ -31,6 +62,17 @@ epp:
   #   rollingUpdate:
   #     maxUnavailable: 1
   #     maxSurge: 0
+
+  # PodDisruptionBudget for the EPP Deployment. Disabled while unset; enabling it without a
+  # disruption field, or with both, fails the render, and minAvailable >= 1 with fewer than 2
+  # effective replicas (replicas, or autoscaling.minReplicas when autoscaled) also fails: a
+  # single-replica Deployment with minAvailable: 1 can never satisfy its budget, so every
+  # voluntary disruption -- node drains above all -- blocks until the timeout. The EPP pod in
+  # sidecar proxy mode is governed by THIS budget alone; the proxy needs no separate one.
+  #
+  # podDisruptionBudget:
+  #   enabled: true
+  #   minAvailable: 1
   image:
     registry: ghcr.io/llm-d
     repository: llm-d-router-endpoint-picker
@@ -119,6 +161,30 @@ epp:
 # By default no proxy is configured
 proxy:
   enabled: false
+  # PodDisruptionBudget for the service-mode proxy Deployment. Ignored in sidecar mode (the
+  # proxy shares the EPP pod, so router.epp.podDisruptionBudget governs it). Same validation
+  # rules as the EPP budget: exactly one of minAvailable / maxUnavailable, and minAvailable
+  # requires at least 2 effective replicas (replicas, or autoscaling.minReplicas when
+  # autoscaled).
+  #
+  # podDisruptionBudget:
+  #   enabled: true
+  #   minAvailable: 1
+
+  # Container lifecycle for the proxy container, rendered verbatim in both
+  # sidecar and service mode. When unset or null, the chart renders a
+  # preStop sleep of 5 seconds on Kubernetes >= 1.30 so endpoint removal
+  # propagates before SIGTERM. Set to override the hook, for example an
+  # httpGet hook that fails Envoy's health check via its admin endpoint and
+  # lets active connections drain (requires an admin listener configured in
+  # the Envoy config and its port exposed in proxy.ports). The Envoy image is
+  # distroless, so an exec hook requires an image that ships a shell. Set to
+  # an empty map ({}) to disable the hook and render no lifecycle at all.
+  # lifecycle:
+  #   preStop:
+  #     httpGet:
+  #       path: /healthcheck/fail
+  #       port: admin
 
 # Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
 # `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
@@ -134,7 +200,7 @@ tokenizer:
   image:
     registry: docker.io
     repository: vllm/vllm-openai-cpu
-    tag: v0.19.1
+    tag: v0.31.0
     pullPolicy: IfNotPresent
   port: 8000
   command: []
@@ -217,6 +283,21 @@ modelServers:
 
 latencyPredictor:
   enabled: false
+  # Deployment mode. `sidecar` runs the training and prediction servers as
+  # containers in the EPP pod. `service` runs the training server as a
+  # single-replica Deployment and the prediction servers as a Deployment with
+  # `predictionServers.count` replicas. Each Deployment has one Service, so all
+  # prediction replicas share a single Service, and EPP points at the two
+  # Service URLs.
+  mode: sidecar
+  # Pod-level securityContext for the training and prediction pods in service
+  # mode. The images declare no user and run as root unless runAsUser is set.
+  # In sidecar mode router.epp.podSecurityContext applies instead.
+  podSecurityContext: {}
+  # Affinity and tolerations for the training and prediction pods in service
+  # mode. Empty uses router.epp.affinity and router.epp.tolerations.
+  affinity: {}
+  tolerations: []
   # Training Server Configuration
   trainingServer:
     securityContext: {}
@@ -261,7 +342,11 @@ latencyPredictor:
 
   # Prediction Server Configuration
   predictionServers:
+    # Number of prediction servers: containers in the EPP pod in sidecar mode,
+    # pods in the prediction Deployment in service mode.
     count: 1
+    # Listen port of the first prediction server. Sidecar containers take
+    # consecutive ports from here; service mode uses only this port.
     startPort: 8001
     securityContext: {}
     image:
@@ -312,4 +397,3 @@ latencyPredictor:
     LATENCY_MAX_SAMPLE_SIZE: "10000"
     LATENCY_MAX_CONCURRENT_DISPATCHES: "36"
     LATENCY_COALESCE_WINDOW_MS: "1"
-

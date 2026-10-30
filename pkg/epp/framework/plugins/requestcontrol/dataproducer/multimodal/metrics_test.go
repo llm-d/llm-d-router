@@ -27,8 +27,8 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
@@ -37,7 +37,7 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 
 	pod := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
 	podKey := pod.String()
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 
 	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img))
 	initialHits := testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey, img))
@@ -69,7 +69,7 @@ func TestDeletedPodHitSeriesRemoved(t *testing.T) {
 	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
 	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
 	producer := newTestProducer(t, nil, nil)
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 	producer.putCacheEntry("hash-1", podA, podB)
 	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
 
@@ -88,7 +88,7 @@ func TestStalePodHitSeriesRemoved(t *testing.T) {
 	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
 	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
 	producer := newTestProducer(t, nil, func() []k8stypes.NamespacedName { return []k8stypes.NamespacedName{podA} })
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 	producer.putCacheEntry("hash-1", podA, podB)
 	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
 
@@ -130,7 +130,7 @@ func TestRegisterEncoderCacheMetrics(t *testing.T) {
 func TestProduceRecordsMetrics(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	request := requestWithHashes("req-1", map[string]int{"hash-1": 1, "hash-2": 1})
-	img := string(fwkrh.ModalityImage)
+	img := string(reqcommon.ModalityImage)
 
 	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img))
 

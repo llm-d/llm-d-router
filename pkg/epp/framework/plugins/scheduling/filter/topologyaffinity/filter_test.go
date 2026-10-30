@@ -129,8 +129,8 @@ func TestFilter_MatchesPeerFromHeaderWhenNoAttribute(t *testing.T) {
 	sameHost := makeEndpoint(t, "same-host", &attrtopology.Topology{Hostname: "h1"})
 
 	f := newTestFilter(topoutil.LevelHost)
-	f.peerTopologyHeader = "x-peer-topology"
-	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-peer-topology": "host=h1"}}
+	f.peerTopologyHeader = "x-llm-d-peer-topology"
+	req := &fwksched.InferenceRequest{Headers: map[string]string{"x-llm-d-peer-topology": "host=h1"}}
 	got := f.Filter(context.Background(), req, []fwksched.Endpoint{sameHost})
 	require.Len(t, got, 1)
 	assert.Equal(t, "same-host", got[0].GetMetadata().ID.Name)
@@ -162,11 +162,11 @@ func TestFactory_Defaults(t *testing.T) {
 }
 
 func TestFactory_PeerTopologyHeader(t *testing.T) {
-	p, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peerTopologyHeader": "x-peer-topology"}`)), nil)
+	p, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"peerTopologyHeader": "x-llm-d-peer-topology"}`)), nil)
 	require.NoError(t, err)
 	f, ok := p.(*Filter)
 	require.True(t, ok)
-	assert.Equal(t, "x-peer-topology", f.peerTopologyHeader)
+	assert.Equal(t, "x-llm-d-peer-topology", f.peerTopologyHeader)
 }
 
 func TestFactory_PeerTopologyHeaderRejectsNonDefault(t *testing.T) {

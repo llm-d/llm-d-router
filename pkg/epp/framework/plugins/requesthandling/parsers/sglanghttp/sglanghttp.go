@@ -46,8 +46,9 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser           = &SGLangHTTPParser{}
-	_ fwkrh.PriorityRewriter = &SGLangHTTPParser{}
+	_ fwkrh.Parser            = &SGLangHTTPParser{}
+	_ fwkrh.ModelNameRewriter = &SGLangHTTPParser{}
+	_ fwkrh.PriorityRewriter  = &SGLangHTTPParser{}
 )
 
 // SGLangHTTPParser implements fwkrh.Parser for SGLang's native /generate
@@ -168,7 +169,7 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	return &fwkrh.ParseResult{Body: &fwkrh.InferenceRequestBody{
+	body := &fwkrh.InferenceRequestBody{
 		Generate: &fwkrh.GenerateRequest{
 			TokenIDs:  tokenIDs,
 			Text:      text,
@@ -177,7 +178,21 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		Payload:         fwkrh.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
-	}, SkipResponseProcessing: false}, nil
+	}
+	if model, ok := bodyMap["model"].(string); ok {
+		body.Model = model
+	}
+	return &fwkrh.ParseResult{Body: body, SkipResponseProcessing: false}, nil
+}
+
+// RewriteModelName writes the resolved model into the request payload map.
+func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return payload, nil
+	}
+	m["model"] = model
+	return m, nil
 }
 
 // RewritePriority removes any client-supplied priority from the SGLang /generate

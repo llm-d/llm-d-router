@@ -109,7 +109,7 @@ spec:
             secretKeyRef:
               key: token
               name: hf-secret
-        image: vllm/vllm-openai-cpu:v0.19.1
+        image: vllm/vllm-openai-cpu:v0.31.0
         imagePullPolicy: IfNotPresent
         livenessProbe:
           failureThreshold: 10

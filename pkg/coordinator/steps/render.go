@@ -124,6 +124,14 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// The pipeline's only check of this invariant: this is the first step to
+	// pair on Modality (see modIndex in applyRenderResponse), replace-media-urls
+	// entries are already in place, and the later readers take whatever this
+	// accepted. The generate path arrives with an empty slice and fills it in
+	// executeGenerate below, where extractMultimodalEntries guards itself.
+	if err := validateEntryModalities(reqCtx.MultimodalEntries); err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeVLLMGenerate:
 		return s.executeGenerate(ctx, reqCtx)
@@ -133,6 +141,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return s.executeRender(ctx, reqCtx, reqcommon.PathChatCompletions)
 	case reqcommon.APITypeResponses:
 		return s.executeRender(ctx, reqCtx, reqcommon.PathResponses)
+	case reqcommon.APITypeMessages:
+		return s.executeRender(ctx, reqCtx, reqcommon.PathMessages)
 	default:
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
@@ -190,9 +200,21 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.MultimodalEntries = entries
 
-	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(entries))
+	// Counted per modality: a token-in features map names its own modalities,
+	// so attributing every entry to image would mislabel an audio or video
+	// one. boundMediaType folds anything but image into MediaTypeOther.
+	var imageItems, otherItems int
+	for _, entry := range entries {
+		if entry.Modality == reqcommon.ModalityImage {
+			imageItems++
+			continue
+		}
+		otherItems++
+	}
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, imageItems)
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeOther, otherItems)
 
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "mm_entries", len(entries))
 	return nil
 }
 
@@ -291,33 +313,100 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		return err
 	}
 
-	imageHashes := renderResp.Features.MMHashes[ModalityImage]
-	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
-	imageKwargs := renderResp.Features.KwargsData[ModalityImage]
-
+	// Length check: sum of per-modality slice lengths must match len(entries).
+	totalHashes, totalPlaceholders, totalKwargs, totalMetadata := 0, 0, 0, 0
+	for _, hashes := range renderResp.Features.MMHashes {
+		totalHashes += len(hashes)
+	}
+	for _, placeholders := range renderResp.Features.MMPlaceholders {
+		totalPlaceholders += len(placeholders)
+	}
+	for _, kwargs := range renderResp.Features.KwargsData {
+		totalKwargs += len(kwargs)
+	}
+	for _, metadata := range renderResp.Features.MMMetadata {
+		totalMetadata += len(metadata)
+	}
 	expected := len(reqCtx.MultimodalEntries)
-	if len(imageHashes) != expected {
-		return fmt.Errorf("render returned %d mm_hashes but expected %d", len(imageHashes), expected)
+	if totalHashes != expected {
+		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
-	if len(imagePlaceholders) != expected {
-		return fmt.Errorf("render returned %d mm_placeholders but expected %d", len(imagePlaceholders), expected)
+	if totalPlaceholders != expected {
+		return fmt.Errorf("render returned %d mm_placeholders but expected %d", totalPlaceholders, expected)
 	}
-	if len(imageKwargs) != expected {
-		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
+	if totalKwargs != expected {
+		return fmt.Errorf("render returned %d kwargs_data but expected %d", totalKwargs, expected)
+	}
+	// mm_metadata is optional for backward compatibility with older renderers.
+	// An absent field means the renderer predates it and the request simply
+	// takes the kwargs_data path. But once the renderer emits the field, its
+	// slices are part of the contract: a length mismatch, aggregate or
+	// per-modality, means a broken renderer and no entry trusts it — the
+	// whole map is dropped so a misfiled slice cannot leak into any modality.
+	// The request still succeeds: kwargs_data (validated just above) is on
+	// the same response. mm_hashes/mm_placeholders/kwargs_data stay strict
+	// because they have no fallback.
+	if totalMetadata > 0 && totalMetadata != expected {
+		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; degrading to kwargs_data",
+			"got", totalMetadata, "expected", expected)
+		renderResp.Features.MMMetadata = nil
+	}
+	// Per-modality pairing, checked before any entry takes its slice: a
+	// renderer that files every item under one modality passes the aggregate
+	// check, and the misfiled extras would pair an entry with another
+	// modality's blob.
+	if renderResp.Features.MMMetadata != nil {
+		seenModality := make(map[reqcommon.Modality]bool)
+		for i := range reqCtx.MultimodalEntries {
+			mod := reqCtx.MultimodalEntries[i].Modality
+			if seenModality[mod] {
+				continue
+			}
+			seenModality[mod] = true
+			metadata := renderResp.Features.MMMetadata[mod]
+			if len(metadata) != len(renderResp.Features.MMHashes[mod]) {
+				logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata for modality; degrading to kwargs_data",
+					"modality", mod, "got", len(metadata),
+					"expected", len(renderResp.Features.MMHashes[mod]))
+				renderResp.Features.MMMetadata = nil
+				break
+			}
+		}
 	}
 
+	// Entries in order, each pulling its hash/placeholder/kwargs from the
+	// response slot at its per-modality position. For an image-only request
+	// that is plain positional pairing: modIndex[image] counts 0, 1, 2...
+	modIndex := make(map[reqcommon.Modality]int)
 	for i := range reqCtx.MultimodalEntries {
-		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
-		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
-		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+		mod := reqCtx.MultimodalEntries[i].Modality
+		idx := modIndex[mod]
+		modIndex[mod]++
+		hashes := renderResp.Features.MMHashes[mod]
+		placeholders := renderResp.Features.MMPlaceholders[mod]
+		kwargs := renderResp.Features.KwargsData[mod]
+		metadata := renderResp.Features.MMMetadata[mod]
+		if idx >= len(hashes) || idx >= len(placeholders) || idx >= len(kwargs) {
+			return fmt.Errorf("render response missing slot %d for modality %s", idx, mod)
+		}
+		reqCtx.MultimodalEntries[i].Hash = hashes[idx]
+		reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		reqCtx.MultimodalEntries[i].Placeholder = placeholders[idx]
+		if idx < len(metadata) {
+			reqCtx.MultimodalEntries[i].MMMetadata = metadata[idx]
+		}
 	}
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
 
-	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
+	logger.V(logutil.DEBUG).Info("response",
+		"mm_hashes", renderResp.Features.MMHashes,
+		"mm_placeholders", renderResp.Features.MMPlaceholders,
+		"kwargs_data_len", totalKwargs,
+		"mm_metadata_len", totalMetadata)
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "mm_entries", totalHashes)
 	return nil
 }
 
@@ -372,9 +461,10 @@ type renderResponse struct {
 }
 
 type renderFeatures struct {
-	MMHashes       map[string][]string                    `json:"mm_hashes"`
-	MMPlaceholders map[string][]pipeline.PlaceholderRange `json:"mm_placeholders"`
-	KwargsData     map[string][]string                    `json:"kwargs_data"`
+	MMHashes       map[reqcommon.Modality][]string                    `json:"mm_hashes"`
+	MMPlaceholders map[reqcommon.Modality][]pipeline.PlaceholderRange `json:"mm_placeholders"`
+	KwargsData     map[reqcommon.Modality][]string                    `json:"kwargs_data"`
+	MMMetadata     map[reqcommon.Modality][]string                    `json:"mm_metadata"`
 }
 
 // completionsRenderResponse is a minimal view of the per-prompt object returned

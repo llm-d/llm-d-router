@@ -12,10 +12,15 @@ A collection of `ModelData` entries describing the models exposed by an endpoint
   - `Object`: Object type as reported by the model server (i.e. `model`).
   - `Created`: Unix timestamp reported by the model server.
   - `OwnedBy`: Owner reported by the model server (e.g. `vllm`, `sglang`).
-  - `Parent`: Parent model identifier (optional, e.g. for LoRA).
+  - `ShutdownDate`: Optional `YYYY-MM-DD` date when the model will no longer be available. Invalid
+    or non-string values are ignored.
+  - `Parent`: Parent model identifier for internal use (e.g. for LoRA adapters).
 
 ## Producers
 
 The following plugins produce this attribute:
 
 - **`models-data-extractor`** (Data Layer): Extracts the list of served models from the endpoint's `/v1/models` API response.
+
+The `models-responder` consumes the per-endpoint collection for the pool-wide `GET /v1/models`
+response and inference screening.

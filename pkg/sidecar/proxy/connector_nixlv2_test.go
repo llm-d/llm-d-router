@@ -30,8 +30,8 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -135,7 +135,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -230,6 +230,30 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		response := sendChatCompletionsRequest(proxyBaseAddr)
 
 		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 0))
+	})
+
+	It("should keep the decoder cached tokens when the prefiller reports no usage block", func() {
+		// A prefill response without usage measured nothing, so the decoder's
+		// own count is the only one there is.
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 49))
+	})
+
+	It("should keep the decoder cached tokens when the handoff produced no transfer params", func() {
+		// No blocks moved, so the decoder recomputes the prompt and nothing
+		// inflates the count it reports.
+		testInfo.prefillHandler.RawResponse = `{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 49))
 	})
 
 	It("should overwrite decoder cached tokens when prefiller reports zero cached tokens", func() {
@@ -440,7 +464,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -551,7 +575,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -608,7 +632,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -665,7 +689,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -816,7 +840,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -1033,7 +1057,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		rp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		if rp.StatusCode != 200 {
-			bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(rp.Body)
 			Fail(string(bp))
 		}
 
@@ -1118,6 +1142,11 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv[requestFieldRemoteDPRank]).To(Equal(pRank))
 		Expect(dkv[requestFieldTransferID]).To(Equal(pkv[requestFieldTransferID]))
 		Expect(dkv[requestFieldTransferID]).ToNot(BeEmpty())
+
+		By("decode remote_request_id matches its request ID header")
+		requestID := env.decodeHandler.GetCompletionHeaders()[0].Get(reqcommon.RequestIDHeaderKey)
+		Expect(requestID).ToNot(BeEmpty())
+		Expect(dkv).To(HaveKeyWithValue("remote_request_id", requestID))
 
 		By("both HTTP requests share the same X-Data-Parallel-Rank header")
 		ph := dpRankHeader(env.prefillHandler, 0)
@@ -1530,7 +1559,7 @@ func (env *moriProxyEnv) sendTo(path, body string) {
 	rp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())
 	defer rp.Body.Close()
-	responseBody, _ := io.ReadAll(rp.Body) //nolint:errcheck
+	responseBody, _ := io.ReadAll(rp.Body)
 	Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
 }
 

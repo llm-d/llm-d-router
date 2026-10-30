@@ -31,6 +31,8 @@ func TestBoundModel_EmptyIsUnknown(t *testing.T) {
 func TestBoundRoute_ClosedSet(t *testing.T) {
 	require.Equal(t, RouteChatCompletions, boundRoute(RouteChatCompletions))
 	require.Equal(t, RouteCompletions, boundRoute(RouteCompletions))
+	require.Equal(t, RouteResponses, boundRoute(RouteResponses))
+	require.Equal(t, RouteMessages, boundRoute(RouteMessages))
 	require.Equal(t, RouteGenerate, boundRoute(RouteGenerate))
 	require.Equal(t, RouteUnknown, boundRoute("/v1/chat/completions"))
 	require.Equal(t, RouteUnknown, boundRoute(""))

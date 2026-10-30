@@ -19,38 +19,17 @@ package metrics
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
-
-// newHistogram returns a bare histogram to observe into, so these tests assert
-// exemplar behavior without depending on the registered metric's labels.
-func newHistogram() prometheus.Histogram {
-	return prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "test_exemplar_histogram",
-		Buckets: []float64{0.1, 1, 10},
-	})
-}
-
-// collectExemplars returns the exemplar attached to each bucket that carries one.
-func collectExemplars(t *testing.T, h prometheus.Histogram) []*dto.Exemplar {
-	t.Helper()
-	var m dto.Metric
-	require.NoError(t, h.(prometheus.Metric).Write(&m))
-	require.NotNil(t, m.Histogram)
-
-	var found []*dto.Exemplar
-	for _, bucket := range m.Histogram.Bucket {
-		if bucket.Exemplar != nil {
-			found = append(found, bucket.Exemplar)
-		}
-	}
-	return found
-}
 
 func ctxWithSpan(t *testing.T, sampled bool) context.Context {
 	t.Helper()
@@ -88,66 +67,135 @@ func exemplarLabels(e *dto.Exemplar) map[string]string {
 	return labels
 }
 
-func TestObserveWithTraceExemplar_RecordingSpanAttachesBothIDs(t *testing.T) {
-	h := newHistogram()
+// latencyRecorder records one observation through a latency recorder and names
+// the series it lands on.
+type latencyRecorder struct {
+	name   string
+	record func(ctx context.Context)
+	vec    *prometheus.HistogramVec
+	labels []string
+}
 
-	ctx, span := ctxWithRecordingSpan(t)
-	defer span.End()
-	observeWithTraceExemplar(ctx, h, 0.5)
-
-	exemplars := collectExemplars(t, h)
-	require.Len(t, exemplars, 1, "a sampled span should attach exactly one exemplar")
-
-	sc := span.SpanContext()
-	labels := exemplarLabels(exemplars[0])
-	require.Equal(t, map[string]string{
-		exemplarTraceIDLabel: sc.TraceID().String(),
-		exemplarSpanIDLabel:  sc.SpanID().String(),
-	}, labels)
-
-	// OpenMetrics caps an exemplar's whole label set at 128 runes; exceeding it
-	// makes client_golang reject the observation at runtime.
-	runes := 0
-	for name, value := range labels {
-		runes += len([]rune(name)) + len([]rune(value))
+func latencyRecorders() []latencyRecorder {
+	received := time.Now()
+	firstToken := received.Add(50 * time.Millisecond)
+	complete := received.Add(250 * time.Millisecond)
+	return []latencyRecorder{
+		{
+			name: "ttft",
+			record: func(ctx context.Context) {
+				RecordRequestTTFT(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", true, received, firstToken)
+			},
+			vec:    llmdRequestTTFT,
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String(), "true"},
+		},
+		{
+			name: "tpot",
+			record: func(ctx context.Context) {
+				RecordRequestTPOT(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", true, received, firstToken, complete, 5)
+			},
+			vec:    llmdRequestTPOT,
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
+		},
+		{
+			name: "itl",
+			record: func(ctx context.Context) {
+				RecordInterTokenLatency(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", 0.02)
+			},
+			vec:    llmdInterTokenLatency,
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
+		},
+		{
+			name: "ntpot",
+			record: func(ctx context.Context) {
+				RecordNormalizedTimePerOutputToken(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", received, complete, 5)
+			},
+			vec:    llmdNormalizedTimePerOutputToken,
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
+		},
+		{
+			name: "scheduler",
+			record: func(ctx context.Context) {
+				RecordSchedulerE2ELatency(ctx, 3*time.Millisecond)
+			},
+			vec: llmdSchedulerE2ELatency,
+		},
+		{
+			name: "flow_control_queue",
+			record: func(ctx context.Context) {
+				RecordFlowControlRequestQueueDuration(ctx, "f", "1", "Dispatched", "pool", "m", "t", 20*time.Millisecond)
+			},
+			vec:    llmdFlowControlRequestQueueDuration,
+			labels: []string{"f", "1", "Dispatched", "pool", "m", "t"},
+		},
 	}
-	require.LessOrEqual(t, runes, prometheus.ExemplarMaxRunes)
-	require.InDelta(t, 0.5, exemplars[0].GetValue(), 1e-9)
 }
 
-// TestObserveWithTraceExemplar_PropagatedSpanAttachesTraceIDOnly covers EPP
-// tracing off with the caller's trace sampled: only trace_id is attached, since
-// the span belongs to the caller.
-func TestObserveWithTraceExemplar_PropagatedSpanAttachesTraceIDOnly(t *testing.T) {
-	h := newHistogram()
-
-	observeWithTraceExemplar(ctxWithSpan(t, true), h, 0.5)
-
-	exemplars := collectExemplars(t, h)
-	require.Len(t, exemplars, 1, "a sampled trace still links, even without an EPP span")
-	require.Equal(t, map[string]string{
-		exemplarTraceIDLabel: "4bf92f3577b34da6a3ce929d0e0e4736",
-	}, exemplarLabels(exemplars[0]), "the span ID would name a span the EPP never created")
+// bucketExemplars returns the exemplars on a histogram's buckets.
+func bucketExemplars(h *dto.Histogram) []*dto.Exemplar {
+	var found []*dto.Exemplar
+	for _, bucket := range h.GetBucket() {
+		if bucket.Exemplar != nil {
+			found = append(found, bucket.Exemplar)
+		}
+	}
+	return found
 }
 
-func TestObserveWithTraceExemplar_UnsampledSpanAttachesNothing(t *testing.T) {
-	h := newHistogram()
+func TestLatencyRecordersAttachTraceExemplars(t *testing.T) {
+	for _, r := range latencyRecorders() {
+		t.Run(r.name+"/sampled", func(t *testing.T) {
+			Reset()
+			ctx, span := ctxWithRecordingSpan(t)
+			defer span.End()
+			r.record(ctx)
 
-	// The span carries a valid trace ID, but no trace was exported for it, so an
-	// exemplar would link a dashboard to a trace that does not exist.
-	observeWithTraceExemplar(ctxWithSpan(t, false), h, 0.5)
+			h, err := getHistogramVecLabelValues(t, r.vec, r.labels...)
+			require.NoError(t, err)
+			exemplars := bucketExemplars(h)
+			require.Len(t, exemplars, 1)
+			require.Equal(t, span.SpanContext().TraceID().String(), exemplarLabels(exemplars[0])[metricsutil.ExemplarTraceIDLabel])
+		})
 
-	require.Empty(t, collectExemplars(t, h), "an unsampled span must not attach an exemplar")
+		t.Run(r.name+"/unsampled", func(t *testing.T) {
+			Reset()
+			r.record(ctxWithSpan(t, false))
+
+			h, err := getHistogramVecLabelValues(t, r.vec, r.labels...)
+			require.NoError(t, err)
+			require.Empty(t, bucketExemplars(h))
+			require.Equal(t, uint64(1), h.GetSampleCount())
+		})
+	}
 }
 
-func TestObserveWithTraceExemplar_NoSpanStillObserves(t *testing.T) {
-	h := newHistogram()
+// BenchmarkRecordInterTokenLatency measures the exemplar cost on the ITL path,
+// which records once per streaming chunk.
+func BenchmarkRecordInterTokenLatency(b *testing.B) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	b.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	sampledCtx, span := tp.Tracer("exemplar-bench").Start(context.Background(), "request")
+	defer span.End()
 
-	observeWithTraceExemplar(context.Background(), h, 0.5)
+	unsampledCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1},
+		SpanID:  trace.SpanID{1},
+	}))
 
-	require.Empty(t, collectExemplars(t, h), "no span means no exemplar")
-
-	var m dto.Metric
-	require.NoError(t, h.(prometheus.Metric).Write(&m))
-	require.Equal(t, uint64(1), m.Histogram.GetSampleCount(), "the observation itself must still be recorded")
+	for _, bc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"no-span", context.Background()},
+		{"unsampled", unsampledCtx},
+		{"sampled", sampledCtx},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			Reset()
+			b.ReportAllocs()
+			for b.Loop() {
+				RecordInterTokenLatency(bc.ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", 0.02)
+			}
+		})
+	}
 }

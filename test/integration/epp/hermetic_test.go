@@ -47,6 +47,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -285,8 +286,9 @@ dataLayer:
 					name:     "no backend pods available",
 					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 					pods:     nil,
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-						"no pods available in datastore"),
+					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+						"no pods available in datastore",
+						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 				{
 					name: "request missing model field",
@@ -491,7 +493,9 @@ dataLayer:
 					if len(tc.wantSpans) > 0 {
 						setHeaders := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
 						require.NotEmpty(t, headerValue(setHeaders, "traceparent"), "expected traceparent when tracing is enabled")
+						require.NotEmpty(t, headerValue(setHeaders, tracing.FairnessIDHandoffHeader), "expected the attribution handoff on a sampled trace")
 						removeW3CTraceContextHeaders(responses)
+						asUntracedAttributionHandoff(responses[0])
 					}
 
 					if diff := cmp.Diff(tc.wantResponses, responses,
@@ -583,6 +587,26 @@ func removeW3CTraceContextHeaders(responses []*extProcPb.ProcessingResponse) {
 			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
 		}
 	}
+}
+
+// asUntracedAttributionHandoff rewrites a sampled response's attribution handoff into
+// the untraced shape the shared expectations use: removed rather than set. The
+// handoff values are asserted in TestTraceContextDownstreamPropagation.
+func asUntracedAttributionHandoff(resp *extProcPb.ProcessingResponse) {
+	mutation := resp.GetRequestHeaders().GetResponse().GetHeaderMutation()
+	if mutation == nil {
+		return
+	}
+	kept := make([]*configPb.HeaderValueOption, 0, len(mutation.GetSetHeaders()))
+	for _, h := range mutation.GetSetHeaders() {
+		switch h.GetHeader().GetKey() {
+		case tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader:
+		default:
+			kept = append(kept, h)
+		}
+	}
+	mutation.SetHeaders = kept
+	mutation.RemoveHeaders = append(mutation.RemoveHeaders, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
 }
 
 func filterOutW3CTraceContextHeaders(headers []*configPb.HeaderValueOption) []*configPb.HeaderValueOption {

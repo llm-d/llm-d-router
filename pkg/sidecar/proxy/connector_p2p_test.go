@@ -25,8 +25,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -57,7 +58,7 @@ var _ = Describe("P2P Connector", func() {
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		if resp.StatusCode != 200 {
-			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(resp.Body)
 			Fail(string(bp))
 		}
 
@@ -126,7 +127,7 @@ var _ = Describe("P2P Connector", func() {
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		if resp.StatusCode != 200 {
-			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(resp.Body)
 			Fail(string(bp))
 		}
 
@@ -242,7 +243,7 @@ var _ = Describe("P2P Connector", func() {
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).ToNot(HaveOccurred())
 		if resp.StatusCode != 200 {
-			bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+			bp, _ := io.ReadAll(resp.Body)
 			Fail(string(bp))
 		}
 
@@ -284,7 +285,7 @@ var _ = DescribeTable("p2pPortFor",
 			dpBasePort: dpBasePort,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: dpSize},
 		}
-		Expect(s.p2pPortFor(target)).To(Equal(want))
+		Expect(s.p2pPortFor(log.Log, target)).To(Equal(want))
 	},
 	Entry("single DP uses the base port regardless of target", 1, 8000, "10.0.0.5:8003", 7777),
 	Entry("rank 0 target uses the base port", 4, 8000, "10.0.0.5:8000", 7777),
@@ -304,7 +305,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.p2pSourceParams("10.0.0.9:8002")
+		params := s.p2pSourceParams(log.Log, "10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
@@ -315,7 +316,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
+		params := s.Clone().p2pSourceParams(log.Log, "10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
 
@@ -324,7 +325,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.p2pSourceParams("http://10.0.0.9:8002")
+		params := s.p2pSourceParams(log.Log, "http://10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
@@ -338,7 +339,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8007")
+		s.addP2PPullToPrefill(log.Log, params, "10.0.6.107:8003", "10.0.6.107:8007")
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
@@ -353,7 +354,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8003")
+		s.addP2PPullToPrefill(log.Log, params, "10.0.6.107:8003", "10.0.6.107:8003")
 
 		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 	})
@@ -365,7 +366,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8003")
+		s.addP2PPullToPrefill(log.Log, params, "https://10.0.6.107:8003", "10.0.6.107:8003")
 
 		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 	})
@@ -379,13 +380,35 @@ var _ = Describe("addP2PPullToPrefill", func() {
 
 		// https exercises the normalized passthrough: the injected params must
 		// derive from the bare host:port, not the scheme-qualified original.
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8007")
+		s.addP2PPullToPrefill(log.Log, params, "https://10.0.6.107:8003", "10.0.6.107:8007")
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.0.6.107"))
 		Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
 	})
+	DescribeTable("IPv6 endpoint identity",
+		func(source, prefiller string, wantPull bool) {
+			s := &Server{
+				dpBasePort: 8000,
+				config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
+			}
+			params := map[string]any{}
+			s.addP2PPullToPrefill(log.Log, params, source, prefiller)
+			if !wantPull {
+				Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
+				return
+			}
+			p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("2001:db8::1"))
+			Expect(p2p[reqcommon.FieldRemotePort]).To(Equal(7780))
+		},
+		Entry("expanded address is the same endpoint", "[2001:0db8:0:0:0:0:0:1]:8003", "[2001:db8::1]:8003", false),
+		Entry("uppercase URL is the same endpoint", "https://[2001:DB8::1]:8003", "[2001:db8::1]:8003", false),
+		Entry("zone is preserved for equivalent addresses", "http://[fe80:0:0:0:0:0:0:1%25eth0]:8003", "[fe80::1%eth0]:8003", false),
+		Entry("another rank remains a peer", "https://[2001:0DB8::1]:8003", "[2001:db8::1]:8007", true),
+	)
 })
 
 var _ = DescribeTable("normalizeEndpoint",
@@ -396,6 +419,9 @@ var _ = DescribeTable("normalizeEndpoint",
 	Entry("http scheme stripped", "http://10.0.6.107:8003", "10.0.6.107:8003"),
 	Entry("https scheme stripped", "https://10.0.6.107:8003", "10.0.6.107:8003"),
 	Entry("IPv6 literal canonicalized", "[::1]:8003", "[::1]:8003"),
+	Entry("IPv6 expanded address", "[2001:0DB8:0:0:0:0:0:1]:8003", "[2001:db8::1]:8003"),
+	Entry("IPv6 URL zone", "http://[fe80:0:0:0:0:0:0:1%25eth0]:8003", "[fe80::1%eth0]:8003"),
+	Entry("hostname unchanged", "model-worker:8003", "model-worker:8003"),
 	Entry("portless value returned as-is", "10.0.6.107", "10.0.6.107"),
 	Entry("portless URL reduced to host", "http://10.0.6.107", "10.0.6.107"),
 )

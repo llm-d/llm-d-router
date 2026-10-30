@@ -26,23 +26,13 @@ import (
 	"sort"
 	"strings"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
 const nilStr = "<nil>"
-
-// Modality identifies the type of multimodal content in a prompt.
-type Modality string
-
-// Modality values match the model-server's multimodal hash keys so labels agree
-// across backends.
-const (
-	ModalityImage Modality = "image"
-	ModalityAudio Modality = "audio"
-	ModalityVideo Modality = "video"
-)
 
 // RequestPayload represents a strongly-typed unmarshaled request payload or raw bytes.
 type RequestPayload interface {
@@ -260,10 +250,10 @@ func (tp *TokenizedRequest) TokenCount() int {
 
 // MultiModalFeature holds all data needed for prefix-cache scoring of a single
 // multimodal item. Items are ordered by token position within the prompt.
-// Currently only ModalityImage is supported.
+// Currently only reqcommon.ModalityImage is supported.
 type MultiModalFeature struct {
 	// Modality identifies the type of content.
-	Modality Modality
+	Modality reqcommon.Modality
 	// Hash is the content hash of the item, used for KV-cache reuse across requests.
 	Hash string
 	// Offset is the index of the first placeholder token for this item
@@ -597,14 +587,17 @@ type ImagesGenerationsRequest struct {
 	Size string `json:"size,omitempty"`
 	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
 	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// NegativePrompt describes what to avoid in the generated image(s) and is
+	// encoded alongside Prompt for classifier-free guidance.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
 	if i == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
-		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, NegativePromptLength: %d}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
 }
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
@@ -783,6 +776,57 @@ type VideoBlock struct {
 	URL string `json:"url,omitempty"`
 }
 
+// UnmarshalJSON takes the type of a part without one from its media field, in
+// the order vLLM checks them, since vLLM serves parts such as {"image_url": "<url>"}.
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	type contentBlock ContentBlock
+	if err := json.Unmarshal(data, (*contentBlock)(b)); err != nil {
+		return err
+	}
+	if b.Type == "" {
+		switch {
+		case b.ImageURL.URL != "":
+			b.Type = reqcommon.PartTypeImageURL
+		case b.AudioURL.URL != "":
+			b.Type = reqcommon.PartTypeAudioURL
+		case b.InputAudio.Data != "":
+			b.Type = reqcommon.PartTypeInputAudio
+		case b.VideoURL.URL != "":
+			b.Type = reqcommon.PartTypeVideoURL
+		}
+	}
+	return nil
+}
+
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *ImageBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *AudioURLBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *VideoBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+func unmarshalMediaURL(data []byte, url *string) error {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '"' {
+		return json.Unmarshal(data, url)
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	*url = obj.URL
+	return nil
+}
+
 // UnmarshalJSON accepts either a string or an array of content blocks. The first
 // byte selects the format because each json.Unmarshal rescans the whole value,
 // which is costly for content blocks carrying base64 media.
@@ -891,20 +935,24 @@ type AnthropicContent struct {
 	Structured []AnthropicContentBlock
 }
 
+// UnmarshalJSON accepts either a string or an array of content blocks. The first
+// byte selects the format, as in Content.UnmarshalJSON. A malformed block returns
+// its own decode error unwrapped, so nested content does not repeat a prefix.
 func (ac *AnthropicContent) UnmarshalJSON(data []byte) error {
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		ac.Raw = str
-		return nil
-	}
-
-	var blocks []AnthropicContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var blocks []AnthropicContentBlock
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			return err
+		}
 		ac.Structured = blocks
 		return nil
 	}
-
-	return errors.New("anthropic content: must be a string or an array of content blocks")
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return errors.New("anthropic content: must be a string or an array of content blocks")
+	}
+	ac.Raw = str
+	return nil
 }
 
 func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
@@ -936,15 +984,22 @@ func (ac AnthropicContent) textLen() int {
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// image source fields (base64 or URL)
-	Source *AnthropicImageSource `json:"source,omitempty"`
+	// Source keeps raw JSON bytes because its shape depends on Type: an object
+	// for image and document blocks, a URL string for search_result blocks.
+	// Read an image block's source with ImageSource.
+	Source json.RawMessage `json:"source,omitempty"`
 	// tool_use fields (assistant messages): the model's request to call a tool.
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 	// tool_result fields (user messages): the outcome of a tool_use call.
-	ToolUseID string           `json:"tool_use_id,omitempty"`
-	Content   AnthropicContent `json:"content,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	// Content keeps raw JSON bytes because its shape depends on Type: a string
+	// or an array of blocks on tool_result and mcp_tool_result, an object on
+	// the server tool results (web_search_tool_result_error,
+	// bash_code_execution_result). Read a tool_result block's content with
+	// ToolResultContent.
+	Content json.RawMessage `json:"content,omitempty"`
 	// thinking field (assistant messages): extended-thinking replay.
 	Thinking string `json:"thinking,omitempty"`
 }
@@ -954,4 +1009,34 @@ type AnthropicImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+}
+
+// ImageSource decodes the source of an image block. It returns nil for other
+// block types, and for an image block whose source is absent or is not an
+// image-source object. Each call decodes Source again, which can hold megabytes
+// of base64, so call it once per block rather than inside a loop.
+func (b AnthropicContentBlock) ImageSource() *AnthropicImageSource {
+	if b.Type != "image" {
+		return nil
+	}
+	var src *AnthropicImageSource
+	if err := json.Unmarshal(b.Source, &src); err != nil {
+		return nil
+	}
+	return src
+}
+
+// ToolResultContent decodes the content of a tool_result block, a string or
+// an array of blocks. It returns the zero value for other block types and for
+// a tool_result whose content is absent or does not decode. Each call decodes
+// Content again, so call it once per block.
+func (b AnthropicContentBlock) ToolResultContent() AnthropicContent {
+	if b.Type != reqcommon.BlockTypeToolResult {
+		return AnthropicContent{}
+	}
+	var content AnthropicContent
+	if err := json.Unmarshal(b.Content, &content); err != nil {
+		return AnthropicContent{}
+	}
+	return content
 }

@@ -1,0 +1,55 @@
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+
+# ThunderAgent scheduling for agentic workloads: per-pod admission control
+# with strict session-to-pod affinity (a minimal implementation of
+# arXiv 2602.13692). Clients carry a session identifier in the x-session-id
+# header.
+#
+# One thunder-agent instance is referenced from three slots:
+#   - the scheduling profile (pin a session to the pod that holds its KV),
+#   - the flow-control saturation detector (feeds the plugin its per-cycle
+#     view of the endpoint pool; it never gates and always reports
+#     unsaturated),
+#   - the fairness policy (the actual gate: turns of admitted sessions always
+#     dispatch; paused and new sessions are admitted only when they fit a
+#     pod, paused ones first, smallest first; idle sessions past the lease
+#     are paused on demand to make room).
+#
+# Held requests can wait up to headWaitStarvationMs. defaultRequestTTL is 0
+# (no queue eviction), so the gateway route timeout must be raised
+# accordingly, or clients disconnect before admission.
+
+featureGates:
+- flowControl
+
+plugins:
+- type: agent-identity
+  parameters:
+    additionalSessionHeaders:
+    - x-session-id
+- type: thunder-agent
+  name: thunder
+  parameters:
+    capacityTokens: 4194304        # fallback when cache_config_info is absent
+    utilThreshold: 1.0             # fraction of pod KV capacity, 1.0 = 100%
+    idleLeaseSeconds: 30           # idle sessions keep their room this long; about a typical tool call
+    headWaitStarvationMs: 1800000  # forced admission backstop
+    evictionTtlSeconds: 3600       # idle session state retention; must exceed headWaitStarvationMs
+- type: max-score-picker
+- type: single-profile-handler
+
+flowControl:
+  # No queue eviction: a held request is force-admitted by the starvation
+  # backstop instead of being rejected with 429.
+  defaultRequestTTL: "0s"
+  saturationDetector:
+    pluginRef: thunder
+  defaultPriorityBand:
+    fairnessPolicyRef: thunder
+
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: thunder
+  - pluginRef: max-score-picker

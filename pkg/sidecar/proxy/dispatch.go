@@ -56,11 +56,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		defer span.End()
+		ctx = context.WithValue(ctx, toolCallingRequestSpanKey, span)
+		ctx = context.WithValue(ctx, toolCallingTelemetryEnabledKey{}, s.config.EnableToolCallingTelemetry)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
-		// logger is process-scoped, so seed it into the context first. Connectors
-		// reached from here still log through s.logger and stay uncorrelated;
-		// the request context carries the correlated logger for them to adopt.
+		// logger is process-scoped, so seed it into the context, where the
+		// connectors this handler dispatches to read it.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 
@@ -217,7 +218,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
-		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+		if !s.forwardDataParallel || !s.dataParallelHandler(w, r, func() {
+			observeToolCallingPassthrough(r, apiType)
+		}) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
 				return
@@ -226,6 +229,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				s.runChunkedDecode(w, r)
 				return
 			}
+			observeToolCallingPassthrough(r, apiType)
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}

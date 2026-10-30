@@ -35,6 +35,8 @@ const (
 	domainRank = "rank"
 	// domainValue maps proportionally to numerical priority values.
 	domainValue = "value"
+	// domainExplicit uses operator-supplied priority anchors, interpolating missing priorities by priority value and clamping outside the anchor range.
+	domainExplicit = "explicit"
 )
 
 const (
@@ -49,11 +51,13 @@ type apiConfig struct {
 	// Shape selects the interpolation curve used to distribute ceilings across the range.
 	//
 	// Optional, defaults to "linear". Currently only "linear" is supported.
+	// Unused and rejected when domain is "explicit".
 	Shape *string `json:"shape,omitempty"`
 
 	// Domain selects how priority levels are mapped to positions in the ceiling range.
 	//   - "rank": equal spacing by ordinal rank, ignoring numerical values.
 	//   - "value": spacing proportional to numerical priority differences.
+	//   - "explicit": priority levels map to ceilings via operator-supplied anchors with value-based interpolation.
 	//
 	// Optional, defaults to "rank".
 	Domain *string `json:"domain,omitempty"`
@@ -61,14 +65,23 @@ type apiConfig struct {
 	// MinCeiling is the admission ceiling assigned to the lowest-priority traffic.
 	// Determines how aggressively the lowest priority is gated as saturation rises.
 	//
-	// Required. Must be in [0.0, 1.0) and strictly less than MaxCeiling.
+	// Required when domain is not "explicit". Must be in [0.0, 1.0) and strictly less than MaxCeiling.
+	// Unused and rejected when domain is "explicit".
 	MinCeiling *float64 `json:"minCeiling"`
 
 	// MaxCeiling is the admission ceiling assigned to the highest-priority traffic.
 	// A value of 1.0 means the highest priority is only gated at full saturation.
 	//
 	// Defaults to 1.0 if unset. Must be in (0.0, 1.0] and strictly greater than MinCeiling.
+	// Unused and rejected when domain is "explicit".
 	MaxCeiling *float64 `json:"maxCeiling,omitempty"`
+
+	// Ceilings maps configured priority levels (anchors) to their admission ceilings in [0.0, 1.0].
+	// Missing priorities interpolate linearly between anchors over priority value, or clamp to boundary anchors.
+	//
+	// Required when domain is "explicit". Ceilings must be monotonically non-increasing
+	// when priorities are sorted highest-first. Unused and rejected when domain is not "explicit".
+	Ceilings map[int]float64 `json:"ceilings,omitempty"`
 }
 
 // config is the internal, fully-validated configuration used by the policy.
@@ -77,6 +90,7 @@ type config struct {
 	domain     string
 	minCeiling float64
 	maxCeiling float64
+	ceilings   map[int]float64
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -98,16 +112,28 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 		return nil, fmt.Errorf("invalid priority holdback policy configuration: %w", err)
 	}
 
-	return &config{
-		shape:      *safeCfg.Shape,
-		domain:     *safeCfg.Domain,
-		minCeiling: *safeCfg.MinCeiling,
-		maxCeiling: *safeCfg.MaxCeiling,
-	}, nil
+	cfg := &config{
+		domain: *safeCfg.Domain,
+	}
+	if *safeCfg.Domain == domainExplicit {
+		cfg.ceilings = safeCfg.Ceilings
+	} else {
+		cfg.shape = *safeCfg.Shape
+		cfg.minCeiling = *safeCfg.MinCeiling
+		cfg.maxCeiling = *safeCfg.MaxCeiling
+	}
+
+	return cfg, nil
 }
 
 // checkRequired verifies that mandatory fields are present before defaulting.
 func checkRequired(cfg *apiConfig) error {
+	if cfg.Domain != nil && *cfg.Domain == domainExplicit {
+		if len(cfg.Ceilings) == 0 {
+			return errors.New("ceilings is required when domain is \"explicit\"")
+		}
+		return nil
+	}
 	if cfg.MinCeiling == nil {
 		return errors.New("minCeiling is required")
 	}
@@ -116,11 +142,15 @@ func checkRequired(cfg *apiConfig) error {
 
 // applyDefaults populates unset optional fields with their standard defaults.
 func applyDefaults(cfg *apiConfig) {
-	if cfg.Shape == nil {
-		cfg.Shape = ptr.To(defaultShape)
-	}
 	if cfg.Domain == nil {
 		cfg.Domain = ptr.To(defaultDomain)
+	}
+	if *cfg.Domain == domainExplicit {
+		// shape and maxCeiling defaults do not apply for the explicit domain.
+		return
+	}
+	if cfg.Shape == nil {
+		cfg.Shape = ptr.To(defaultShape)
 	}
 	if cfg.MaxCeiling == nil {
 		cfg.MaxCeiling = ptr.To(defaultMaxCeiling)
@@ -130,6 +160,10 @@ func applyDefaults(cfg *apiConfig) {
 // validateConfig checks the constraints of the fully defaulted configuration.
 // It aggregates all validation failures rather than failing on the first error.
 func validateConfig(cfg *apiConfig) error {
+	if cfg.Domain != nil && *cfg.Domain == domainExplicit {
+		return validateExplicitConfig(cfg)
+	}
+
 	var errs []error
 
 	if cfg.Shape != nil {
@@ -145,8 +179,8 @@ func validateConfig(cfg *apiConfig) error {
 		switch *cfg.Domain {
 		case domainRank, domainValue:
 		default:
-			errs = append(errs, fmt.Errorf("unsupported domain %q, must be one of: %q, %q",
-				*cfg.Domain, domainRank, domainValue))
+			errs = append(errs, fmt.Errorf("unsupported domain %q, must be one of: %q, %q, %q",
+				*cfg.Domain, domainRank, domainValue, domainExplicit))
 		}
 	}
 
@@ -161,6 +195,49 @@ func validateConfig(cfg *apiConfig) error {
 	if cfg.MinCeiling != nil && cfg.MaxCeiling != nil && *cfg.MinCeiling >= *cfg.MaxCeiling {
 		errs = append(errs, fmt.Errorf("minCeiling (%f) must be strictly less than maxCeiling (%f)",
 			*cfg.MinCeiling, *cfg.MaxCeiling))
+	}
+	if len(cfg.Ceilings) > 0 {
+		errs = append(errs, errors.New("ceilings must not be set when domain is not \"explicit\""))
+	}
+
+	return errors.Join(errs...)
+}
+
+// validateExplicitConfig validates the constraints specific to domain "explicit".
+func validateExplicitConfig(cfg *apiConfig) error {
+	var errs []error
+
+	if cfg.Shape != nil {
+		errs = append(errs, errors.New("shape must not be set when domain is \"explicit\""))
+	}
+	if cfg.MinCeiling != nil {
+		errs = append(errs, errors.New("minCeiling must not be set when domain is \"explicit\""))
+	}
+	if cfg.MaxCeiling != nil {
+		errs = append(errs, errors.New("maxCeiling must not be set when domain is \"explicit\""))
+	}
+
+	// Validate individual ceiling values.
+	for p, c := range cfg.Ceilings {
+		if c < 0.0 || c > 1.0 {
+			errs = append(errs, fmt.Errorf("ceiling for priority %d must be in [0.0, 1.0], got %f", p, c))
+		}
+	}
+
+	// Validate monotonicity: ceilings must be non-increasing as priorities decrease.
+	// Only check after individual value errors are clear to avoid misleading messages.
+	if len(errs) == 0 {
+		anchors := buildExplicitAnchors(cfg.Ceilings)
+		for i := len(anchors) - 1; i > 0; i-- {
+			if anchors[i-1].ceiling > anchors[i].ceiling {
+				errs = append(errs, fmt.Errorf(
+					"ceilings must be monotonically non-increasing (highest priority first): "+
+						"priority %d has ceiling %f which exceeds priority %d ceiling %f",
+					anchors[i-1].priority, anchors[i-1].ceiling,
+					anchors[i].priority, anchors[i].ceiling))
+				break
+			}
+		}
 	}
 
 	return errors.Join(errs...)

@@ -29,25 +29,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // Content-block types read by the estimate backend.
 const (
-	blockTypeText       = "text"
-	blockTypeImage      = "image"
-	blockTypeImageURL   = "image_url"
-	blockTypeThinking   = "thinking"
-	blockTypeToolUse    = "tool_use"
-	blockTypeToolResult = "tool_result"
+	blockTypeText     = "text"
+	blockTypeImageURL = "image_url"
+	blockTypeThinking = "thinking"
+	blockTypeToolUse  = "tool_use"
 )
 
 const (
 	// Per-request billing hashes must not defeat prefix caching.
 	anthropicBillingHeaderPrefix = "x-anthropic-billing-header"
-	// The base64 image fallback matches vLLM's Anthropic conversion.
-	defaultImageMediaType = "image/jpeg"
 )
 
 func anthropicSystemText(ac fwkrh.AnthropicContent) string {
@@ -74,17 +71,18 @@ func appendImageBlock(blocks []tokenizerTypes.ContentBlock, src *fwkrh.Anthropic
 }
 
 func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokenizerTypes.ContentBlock) {
-	if b.Content.Raw != "" {
-		return b.Content.Raw, nil
+	content := b.ToolResultContent()
+	if content.Raw != "" {
+		return content.Raw, nil
 	}
 	var parts []string
 	var imageBlocks []tokenizerTypes.ContentBlock
-	for _, item := range b.Content.Structured {
+	for _, item := range content.Structured {
 		switch item.Type {
 		case blockTypeText:
 			parts = append(parts, item.Text)
-		case blockTypeImage:
-			imageBlocks = appendImageBlock(imageBlocks, item.Source)
+		case reqcommon.BlockTypeImage:
+			imageBlocks = appendImageBlock(imageBlocks, item.ImageSource())
 		}
 	}
 	return strings.Join(parts, "\n"), imageBlocks
@@ -94,17 +92,7 @@ func anthropicImageToURL(src *fwkrh.AnthropicImageSource) string {
 	if src == nil {
 		return ""
 	}
-	if src.Type == "url" || src.URL != "" {
-		return src.URL
-	}
-	if src.Data == "" {
-		return ""
-	}
-	mediaType := src.MediaType
-	if mediaType == "" {
-		mediaType = defaultImageMediaType
-	}
-	return "data:" + mediaType + ";base64," + src.Data
+	return reqcommon.AnthropicImageURL(src.Type, src.URL, src.Data, src.MediaType)
 }
 
 // estimateBackend packs request bytes into pseudo-tokens with no real tokenizer.
@@ -279,12 +267,26 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 	case body.Completions != nil:
 		return []byte(body.Completions.Prompt.PlainText()), nil
 	case body.Embeddings != nil:
-		return json.Marshal(body.Embeddings.Input)
+		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
+	case body.Images != nil:
+		return []byte(imageGenerationText(body.Images)), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
+}
+
+// imageGenerationText joins an images-generations/edits request's prompt with
+// its negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func imageGenerationText(r *fwkrh.ImagesGenerationsRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Prompt
+	}
+	return r.Prompt + "\n" + r.NegativePrompt
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
@@ -306,32 +308,63 @@ func (b estimateBackend) chatCompletionsBytes(chat *fwkrh.ChatCompletionsRequest
 }
 
 // appendChatMessage flattens a single chat-completions message into the byte
-// stream, recording multimodal placeholders on aligned boundaries.
+// stream, recording multimodal placeholders on aligned boundaries. Assistant
+// tool_calls follow the content, matching tool_use blocks in messagesBytes and
+// function_call items in appendResponsesItem.
 func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiModalFeature, msg fwkrh.Message, meta mmMetadata) ([]byte, []fwkrh.MultiModalFeature) {
 	if msg.Role != "" {
 		out = append(out, []byte(msg.Role)...)
 	}
 	if msg.Content.Raw != "" {
 		out = append(out, []byte(msg.Content.Raw)...)
-		return out, features
+		return appendChatToolCalls(out, msg.ToolCalls), features
 	}
 	for _, block := range msg.Content.Structured {
 		switch block.Type {
 		case blockTypeText:
 			out = append(out, []byte(block.Text)...)
 		case "image_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
 		case "video_url":
-			out, features = appendMMAsset(out, features, fwkrh.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityVideo, block.VideoURL.URL, b.vid.placeholderCount(meta.video))
 		case "audio_url":
 			// A clip carried by URL has no payload to read a duration from.
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount("", meta.audio))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityAudio, block.AudioURL.URL, b.aud.placeholderCount("", meta.audio))
 		case "input_audio":
 			data := block.InputAudio.Data + block.InputAudio.Format
-			out, features = appendMMAsset(out, features, fwkrh.ModalityAudio, data, b.aud.placeholderCount(block.InputAudio.Data, meta.audio))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityAudio, data, b.aud.placeholderCount(block.InputAudio.Data, meta.audio))
 		}
 	}
-	return out, features
+	return appendChatToolCalls(out, msg.ToolCalls), features
+}
+
+// appendChatToolCalls flattens an assistant message's tool_calls: the function
+// name and its arguments. Arguments are a JSON string on the wire; an object is
+// accepted too and contributes its JSON encoding. A call of any other shape
+// contributes nothing.
+func appendChatToolCalls(out []byte, toolCalls []any) []byte {
+	for _, call := range toolCalls {
+		c, ok := call.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := c["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := fn["name"].(string); ok {
+			out = append(out, []byte(name)...)
+		}
+		switch args := fn["arguments"].(type) {
+		case string:
+			out = append(out, []byte(args)...)
+		case map[string]any:
+			if raw, err := json.Marshal(args); err == nil {
+				out = append(out, raw...)
+			}
+		}
+	}
+	return out
 }
 
 // messagesBytes flattens an Anthropic /v1/messages request into pseudo-token
@@ -359,9 +392,9 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 			switch block.Type {
 			case blockTypeText:
 				out = append(out, []byte(block.Text)...)
-			case blockTypeImage:
-				if content, count := b.img.placeholderForAnthropicImage(block.Source); content != "" {
-					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, content, count)
+			case reqcommon.BlockTypeImage:
+				if content, count := b.img.placeholderForAnthropicImage(block.ImageSource()); content != "" {
+					out, features = appendMMAsset(out, features, reqcommon.ModalityImage, content, count)
 				}
 			case blockTypeThinking:
 				out = append(out, []byte(block.Thinking)...)
@@ -369,12 +402,12 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 				out = append(out, []byte(block.ID)...)
 				out = append(out, []byte(block.Name)...)
 				out = append(out, block.Input...)
-			case blockTypeToolResult:
+			case reqcommon.BlockTypeToolResult:
 				text, imageBlocks := anthropicToolResultContent(block)
 				out = append(out, []byte(text)...)
 				for _, img := range imageBlocks {
 					url := img.ImageURL.URL
-					out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
+					out, features = appendMMAsset(out, features, reqcommon.ModalityImage, url, b.img.placeholderCount(url))
 				}
 			}
 		}
@@ -436,16 +469,16 @@ func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiM
 			out = append(out, []byte(role)...)
 		}
 		return b.appendResponsesContent(out, features, m["content"])
-	case "function_call":
+	case responsesItemTypeFunctionCall:
 		if name, ok := m["name"].(string); ok {
 			out = append(out, []byte(name)...)
 		}
 		if args, ok := m["arguments"].(string); ok {
 			out = append(out, []byte(args)...)
 		}
-	case "function_call_output":
+	case responsesItemTypeFunctionCallOutput:
 		out = appendResponsesOutputText(out, m["output"])
-	case "reasoning":
+	case responsesItemTypeReasoning:
 		out = appendResponsesSummaryText(out, m["summary"])
 	}
 	return out, features
@@ -518,7 +551,7 @@ func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh
 		}
 	case "input_image":
 		if url, ok := p["image_url"].(string); ok && url != "" {
-			out, features = appendMMAsset(out, features, fwkrh.ModalityImage, url, b.img.placeholderCount(url))
+			out, features = appendMMAsset(out, features, reqcommon.ModalityImage, url, b.img.placeholderCount(url))
 		}
 	}
 	return out, features
@@ -527,7 +560,7 @@ func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh
 // appendMMAsset aligns out to a token boundary, appends count placeholder
 // pseudo-tokens derived from a stable content hash, and records the matching
 // feature under modality so labels agree with the vllm backend.
-func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality fwkrh.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
+func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality reqcommon.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
 	out = align(out)
 	offset := len(out) / fwkrh.BytesPerToken
 
