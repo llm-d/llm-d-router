@@ -42,29 +42,22 @@ func TestSGLangKV_Params(t *testing.T) {
 		},
 	}
 
-	// Prefill: must have the required bootstrap fields; bootstrap_room is random so check type.
 	prefill := c.PreparePrefillKVParams(context.Background(), reqCtx)
-	if prefill["do_remote_decode"] != true {
-		t.Errorf("prefill: do_remote_decode = %v, want true", prefill["do_remote_decode"])
-	}
-	if prefill["do_remote_prefill"] != false {
-		t.Errorf("prefill: do_remote_prefill = %v, want false", prefill["do_remote_prefill"])
+	if len(prefill) != 2 {
+		t.Errorf("prefill params = %v, want only bootstrap port and room", prefill)
 	}
 	if prefill[reqcommon.FieldBootstrapPort] != sglangBootstrapPort {
 		t.Errorf("prefill: %s = %v, want %d", reqcommon.FieldBootstrapPort, prefill[reqcommon.FieldBootstrapPort], sglangBootstrapPort)
 	}
-	room, ok := prefill[reqcommon.FieldBootstrapRoom].(string)
-	if !ok || room == "" {
-		t.Errorf("prefill: %s = %v (%T), want non-empty string", reqcommon.FieldBootstrapRoom, prefill[reqcommon.FieldBootstrapRoom], prefill[reqcommon.FieldBootstrapRoom])
+	room, ok := prefill[reqcommon.FieldBootstrapRoom].(int64)
+	if !ok || room < 0 || room >= 1<<53 {
+		t.Errorf("prefill: %s = %v (%T), want int64 in [0, 2^53)", reqcommon.FieldBootstrapRoom, prefill[reqcommon.FieldBootstrapRoom], prefill[reqcommon.FieldBootstrapRoom])
 	}
 
-	// Decode: forwards prefill-response kv_transfer_params plus remote flags.
 	wantDecode := map[string]any{
 		reqcommon.FieldBootstrapHost: "10.0.0.42",
 		reqcommon.FieldBootstrapPort: 8998,
 		reqcommon.FieldBootstrapRoom: int64(12345),
-		"do_remote_decode":           false,
-		"do_remote_prefill":          true,
 	}
 	if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, wantDecode) {
 		t.Errorf("decode params:\n got=%v\nwant=%v", got, wantDecode)
