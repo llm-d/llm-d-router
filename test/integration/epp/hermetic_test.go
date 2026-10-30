@@ -286,8 +286,9 @@ dataLayer:
 					name:     "no backend pods available",
 					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
 					pods:     nil,
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-						"no pods available in datastore"),
+					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
+						"no pods available in datastore",
+						errcommon.RequestDroppedReasonNoEndpoints),
 				},
 				{
 					name: "request missing model field",

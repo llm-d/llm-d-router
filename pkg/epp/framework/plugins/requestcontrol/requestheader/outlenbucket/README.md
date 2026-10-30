@@ -31,7 +31,7 @@ Classification (first match wins):
 
 1. `enable_thinking=true` -> **LONG**.
 2. `thinking_budget > 4000` (without explicit `enable_thinking`) -> **LONG**.
-3. `tool_choice` is `required` or a named function -> **SHORT**.
+3. `tool_choice` is `required` or a named function (Messages: `any` or `tool`) -> **SHORT**.
 4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice != none` -> **SHORT**.
 5. `continue_final_message=true` -> **SHORT**.
 6. `max_output_tokens < 500` -> **SHORT** (explicit client cap).
@@ -44,7 +44,8 @@ the typed body for chat-completions and `/v1/responses`. The Responses API reads
 thinking activation from `reasoning.effort` on the raw request payload.
 Claude `/v1/messages` is not inspected for these: its thinking signals are not
 surfaced, so a tool-call there could not be told apart from a reasoning request
-and is left UNKNOWN. `max_output_tokens` is the normalized client cap and
+and is left UNKNOWN. Its `tool_choice` is read the same way as on
+chat-completions. `max_output_tokens` is the normalized client cap and
 applies regardless of shape.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
@@ -60,7 +61,8 @@ concurrent use.
 - `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
 - `request.Body.Responses.Tools` -- presence implies `has_tools`.
 - `request.Body.ChatCompletions.ContinueFinalMessage` -- `continue_final_message`.
-- `request.Body.Payload["tool_choice"]` -- string or named-function object.
+- `request.Body.Payload["tool_choice"]` -- in the format of the request's API
+  (chat-completions, `/v1/responses` or `/v1/messages`).
 - `request.Body.Payload["reasoning"]["effort"]` -- `reasoning.effort` on `/v1/responses`
   (`"none"` disables thinking; any other non-empty value enables it).
 - `request.Body.MaxOutputTokens` -- normalized client output cap.

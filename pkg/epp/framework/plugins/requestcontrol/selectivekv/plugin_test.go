@@ -35,6 +35,7 @@ import (
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 )
 
 type recordingRegistrar struct {
@@ -466,6 +467,31 @@ func TestSelectiveKVPreRequestMutatesOpenAIParserOutput(t *testing.T) {
 			}
 		}`, string(encoded))
 	})
+}
+
+func TestSelectiveKVPreRequestSkipsDecisionAPIs(t *testing.T) {
+	for _, tt := range []struct {
+		path   string
+		body   string
+		parser requesthandling.Parser
+	}{
+		{"/v1/systemone", `{"model":"m","state":"s","questions":{"q":{"type":"noul"}}}`, systemone.NewSystemOneParser()},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			p, err := New("test", Config{LoadPolicy: PolicyDisable, OffloadPolicy: PolicyDisable})
+			require.NoError(t, err)
+			headers := map[string]string{":path": tt.path}
+			parsed, err := tt.parser.ParseRequest(context.Background(), []byte(tt.body), headers)
+			require.NoError(t, err)
+			request := &scheduling.InferenceRequest{Body: parsed.Body, Headers: headers}
+
+			require.NoError(t, p.PreRequest(context.Background(), request, nil))
+			assert.False(t, request.Body.Mutated)
+			payload, ok := request.Body.Payload.AsMap()
+			require.True(t, ok)
+			assert.NotContains(t, payload, "kv_transfer_params")
+		})
+	}
 }
 
 func TestSelectiveKVThresholdPolicyConsumesConfiguredData(t *testing.T) {

@@ -69,25 +69,46 @@ jobs:
               continue
             fi
             match=0
-            # The merge queue squashes a PR into one commit authored as the
-            # PR's account; an account with "keep my email private" set gets
-            # a <id>+<login>@users.noreply.github.com author address there,
-            # which never equals the Signed-off-by email the original
-            # per-commit checks on the PR already verified under
-            # pull_request_target. Trust it only when the login embedded in
-            # that address matches the PR's actual author, so a forged
-            # noreply-shaped address for someone else's account still fails.
-            if [ "$is_merge_group" -eq 1 ] && [[ "$author_email" =~ ^[0-9]+\+(.+)@users\.noreply\.github\.com$ ]]; then
-              commit_login="${BASH_REMATCH[1]}"
-              if [ "$commit_login" = "$pr_author_login" ]; then
-                match=1
-              fi
+            author_email_lc="${author_email,,}"
+            pr_author_login_lc="${pr_author_login,,}"
+            # The merge queue squashes a PR into one commit; either the commit
+            # author or a Signed-off-by trailer can carry the real email while
+            # the other carries the noreply form an account with "keep my
+            # email private" set uses, so both sides are checked against the
+            # noreply pattern. The real email is not lost in that case: the
+            # per-commit checks under pull_request_target already verified it
+            # on every commit of the PR. A noreply address is trusted only
+            # when the login embedded in it matches the PR's actual author, so
+            # a forged noreply-shaped address for someone else's account fails.
+            #
+            # A trailer satisfies the exact-email match when it carries an
+            # address equal to the author email, compared without regard to
+            # case because mail providers treat the local part that way. A
+            # value written by hand is accepted on the same terms as one
+            # produced by git commit -s; use git to write it.
+            author_noreply_login=""
+            if [[ "$author_email" =~ ^[0-9]+\+(.+)@users\.noreply\.github\.com$ ]]; then
+              author_noreply_login="${BASH_REMATCH[1],,}"
+            fi
+            if [ "$is_merge_group" -eq 1 ] && [ -n "$author_noreply_login" ] && [ "$author_noreply_login" = "$pr_author_login_lc" ]; then
+              match=1
             fi
             while IFS= read -r line; do
               [ -z "$line" ] && continue
-              case "$line" in
-                *"<$author_email>"*) match=1 ;;
-              esac
+              trailer_email=""
+              if [[ "$line" =~ ([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+) ]]; then
+                trailer_email="${BASH_REMATCH[1]}"
+              fi
+              trailer_email_lc="${trailer_email,,}"
+              if [ "$trailer_email_lc" = "$author_email_lc" ]; then
+                match=1
+              fi
+              if [ "$is_merge_group" -eq 1 ] && [[ "$trailer_email" =~ ^[0-9]+\+(.+)@users\.noreply\.github\.com$ ]]; then
+                trailer_noreply_login="${BASH_REMATCH[1],,}"
+                if [ "$trailer_noreply_login" = "$pr_author_login_lc" ]; then
+                  match=1
+                fi
+              fi
               case " $bot_allowlist " in
                 *" $author_name "*)
                   case "$line" in

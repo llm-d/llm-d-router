@@ -154,6 +154,38 @@ func TestEstimateOutlen(t *testing.T) {
 			want: Unknown,
 		},
 		{
+			name: "messages tool_choice auto -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Messages: &fwkrh.MessagesRequest{Tools: []fwkrh.AnthropicTool{{Name: "f"}}},
+				Payload:  fwkrh.PayloadMap{"tool_choice": json.RawMessage(`{"type":"auto"}`)},
+			},
+			want: Unknown,
+		},
+		{
+			name: "messages tool_choice none -> UNKNOWN",
+			body: &fwkrh.InferenceRequestBody{
+				Messages: &fwkrh.MessagesRequest{},
+				Payload:  fwkrh.PayloadMap{"tool_choice": json.RawMessage(`{"type":"none"}`)},
+			},
+			want: Unknown,
+		},
+		{
+			name: "messages tool_choice any -> SHORT (forced tool call)",
+			body: &fwkrh.InferenceRequestBody{
+				Messages: &fwkrh.MessagesRequest{},
+				Payload:  fwkrh.PayloadMap{"tool_choice": json.RawMessage(`{"type":"any"}`)},
+			},
+			want: Short,
+		},
+		{
+			name: "messages tool_choice tool -> SHORT (forced tool call)",
+			body: &fwkrh.InferenceRequestBody{
+				Messages: &fwkrh.MessagesRequest{},
+				Payload:  fwkrh.PayloadMap{"tool_choice": json.RawMessage(`{"type":"tool","name":"f"}`)},
+			},
+			want: Short,
+		},
+		{
 			name: "tools on responses shape -> SHORT",
 			body: &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{Tools: oneTool}},
 			want: Short,
@@ -376,23 +408,23 @@ func TestStringFromAny(t *testing.T) {
 }
 
 func TestToolChoiceKind(t *testing.T) {
-	require.Equal(t, "none", toolChoiceKind("none"))
-	require.Equal(t, "auto", toolChoiceKind("auto"))
-	require.Equal(t, "required", toolChoiceKind("required"))
-	require.Equal(t, "custom", toolChoiceKind("custom"))
-	require.Equal(t, "named", toolChoiceKind(namedToolChoice))
-	require.Equal(t, "", toolChoiceKind(nil))
-	require.Equal(t, "", toolChoiceKind(42))
+	chat := &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{}}
+	require.Equal(t, "none", toolChoiceKind(chat, "none"))
+	require.Equal(t, "auto", toolChoiceKind(chat, "auto"))
+	require.Equal(t, "required", toolChoiceKind(chat, "required"))
+	require.Equal(t, "unknown", toolChoiceKind(chat, "custom"))
+	require.Equal(t, "named", toolChoiceKind(chat, namedToolChoice))
+	require.Equal(t, "unknown", toolChoiceKind(chat, nil))
+	require.Equal(t, "unknown", toolChoiceKind(chat, 42))
 
 	// UnmarshalEnvelope stores tool_choice objects and strings as json.RawMessage
 	// on real chat-completions requests, so the classifier must decode both forms.
-	require.Equal(t, "named", toolChoiceKind(json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`)))
-	require.Equal(t, "required", toolChoiceKind(json.RawMessage(`"required"`)))
-	require.Equal(t, "auto", toolChoiceKind(json.RawMessage(`"auto"`)))
-	require.Equal(t, "custom", toolChoiceKind(json.RawMessage(`"custom"`)))
-	require.Equal(t, "none", toolChoiceKind(json.RawMessage(`"none"`)))
-	require.Equal(t, "", toolChoiceKind(json.RawMessage("")))
-	require.Equal(t, "", toolChoiceKind(json.RawMessage(`123`)))
+	require.Equal(t, "named", toolChoiceKind(chat, json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`)))
+	require.Equal(t, "required", toolChoiceKind(chat, json.RawMessage(`"required"`)))
+	require.Equal(t, "auto", toolChoiceKind(chat, json.RawMessage(`"auto"`)))
+	require.Equal(t, "none", toolChoiceKind(chat, json.RawMessage(`"none"`)))
+	require.Equal(t, "unknown", toolChoiceKind(chat, json.RawMessage("")))
+	require.Equal(t, "unknown", toolChoiceKind(chat, json.RawMessage(`123`)))
 }
 
 func TestEstimateOutlen_ResponsesSignals(t *testing.T) {

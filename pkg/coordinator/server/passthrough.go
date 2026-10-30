@@ -135,7 +135,11 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				logger.V(logutil.DEFAULT).Info("passthrough proxy: request body exceeds cap", "capBytes", maxBytesErr.Limit)
-				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				if isOpenAIPassthroughPath(req.URL.Path) {
+					rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusRequestEntityTooLarge, "request body too large")
+				} else {
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+				}
 				return
 			}
 			// A request whose context already ended (client disconnected, or a
@@ -150,8 +154,23 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			} else {
 				logger.Error(err, "passthrough proxy error")
 			}
-			w.WriteHeader(http.StatusBadGateway)
+			if isOpenAIPassthroughPath(req.URL.Path) {
+				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID))
+			} else {
+				w.WriteHeader(http.StatusBadGateway)
+			}
 		},
+	}
+}
+
+// Match exact endpoints because DetectAPIType treats unknown paths as OpenAI.
+func isOpenAIPassthroughPath(path string) bool {
+	switch path {
+	case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses,
+		reqcommon.PathModels, reqcommon.PathEmbeddings:
+		return true
+	default:
+		return false
 	}
 }
 

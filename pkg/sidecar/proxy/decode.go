@@ -273,6 +273,12 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			span.SetStatus(codes.Error, "chunk decode failed")
 			maps.Copy(w.Header(), bw.headers)
 			w.WriteHeader(bw.statusCode)
+			if streamingEnabled && chunkIndex > 0 {
+				// The status went out with the first chunk, so the error is sent the
+				// way vLLM reports a failure in a stream: as a data event before [DONE].
+				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, bw.bodyBytes(), reqcommon.SSEDone)
+				return
+			}
 			WriteAll(w, bw.bodyBytes())
 			return
 		}
@@ -301,8 +307,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Accumulated text forms the assistant message for the next chunk.
 		textAccum.WriteString(chunkText)
 
+		terminal := finishReason != "" && finishReason != finishReasonLength
+		// Guard against infinite loop: if the chunk produced no tokens and no
+		// text there is nothing to continue from.
+		empty := chunkTokens == 0 && chunkText == ""
+
 		if streamingEnabled {
-			if err := emitSSEChunk(w, chunkResponse); err != nil {
+			last := terminal || empty || remainingTokens(originalMaxTokens, totalTokens) == 0
+			if err := emitSSEChunk(w, chunkResponse, last); err != nil {
 				s.logger.Error(err, "failed to write SSE chunk to client")
 				return
 			}
@@ -311,15 +323,13 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		if finishReason != "" && finishReason != finishReasonLength {
+		if terminal {
 			s.logger.V(logging.DEBUG).Info("chunked decode: terminal finish reason, stopping",
 				"finishReason", finishReason, "chunks", chunkIndex)
 			break
 		}
 
-		// Guard against infinite loop: if the chunk produced no tokens and no
-		// text there is nothing to continue from.
-		if chunkTokens == 0 && chunkText == "" {
+		if empty {
 			s.logger.Info("chunked decode: empty chunk with no tokens, stopping to avoid infinite loop",
 				"chunk", chunkIndex)
 			break
@@ -457,7 +467,9 @@ func extractFinishReason(response map[string]any) string {
 
 // emitSSEChunk writes one SSE data event to w, converting a buffered
 // non-streaming response into a streaming delta event (chat or legacy).
-func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
+// Unless last is set, finish_reason is null: the decoder stopped that chunk at
+// its chunk budget, and the next chunk continues the response.
+func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
 	streamChunk := maps.Clone(chunkResponse)
 
 	if choices, _ := chunkResponse[responseFieldChoices].([]any); len(choices) > 0 {
@@ -470,7 +482,10 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 			text := extractChoiceText(choice)
 			streamChoice := map[string]any{
 				responseFieldIndex:        choice[responseFieldIndex],
-				responseFieldFinishReason: choice[responseFieldFinishReason],
+				responseFieldFinishReason: nil,
+			}
+			if last {
+				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
 			}
 			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
 			streamChoices = append(streamChoices, streamChoice)

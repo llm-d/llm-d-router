@@ -29,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	commonrequest "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -233,6 +234,13 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 	if request.Body.Generate != nil {
 		logger.Info("skipping selective KV policy: native generate request",
 			"requestID", request.RequestID)
+		return nil
+	}
+	// Neither engine reads kv_transfer_params on /v1/systemone: vLLM forbids unknown
+	// fields and returns 400, while SGLang ignores them.
+	if path := fwkrequest.GetRequestPath(request.Headers); fwkrequest.MatchPathSuffix(path, fwkrequest.SystemOnePathSuffix) {
+		logger.Info("skipping selective KV policy: decision API does not use kv_transfer_params",
+			"requestID", request.RequestID, "path", path)
 		return nil
 	}
 	payload, ok := request.Body.Payload.(requesthandling.PayloadMap)

@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -818,6 +820,89 @@ func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
 	return true
 }
 
+func TestHandleResponseMetricsByAPISurface(t *testing.T) {
+	for _, apiType := range []reqcommon.APIType{reqcommon.APITypeMessages, reqcommon.APITypeChatCompletions} {
+		for _, mode := range []string{"json", "streaming", "interrupted"} {
+			t.Run(apiType.String()+"/"+mode, func(t *testing.T) {
+				eppmetrics.Register()
+				eppmetrics.Reset()
+				t.Cleanup(eppmetrics.Reset)
+				streaming := mode != "json"
+				complete := mode != "interrupted"
+				contentType := reqcommon.ContentTypeJSON
+				chunks := [][]byte{[]byte(`{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":1}}`)}
+				if apiType == reqcommon.APITypeChatCompletions {
+					chunks = [][]byte{[]byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`)}
+				}
+				if streaming {
+					contentType = fwkrequest.MediaTypeEventStream
+					if apiType == reqcommon.APITypeMessages {
+						chunks = [][]byte{
+							[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1}}}` + "\n\n"),
+							[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"output_tokens":3}}` + "\n\n"),
+							[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
+						}
+					} else {
+						chunks = [][]byte{
+							[]byte("data: " + `{"choices":[{"delta":{"content":"hi"}}]}` + "\n\n"),
+							[]byte("data: " + `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}` + "\n\n"),
+							[]byte("data: [DONE]\n\n"),
+						}
+					}
+				}
+				server := NewStreamingServer(nil, &mockDirector{}, NewParserRegistry([]fwkrh.Parser{
+					openai.NewOpenAIParser(), anthropic.NewAnthropicParser(),
+				}, logr.Discard()), 0)
+				reqCtx := &RequestContext{
+					IncomingModelName: "model", TargetModelName: "model", apiSurface: apiType.Surface(),
+					RequestReceivedTimestamp: time.Now().Add(-time.Second), modelServerStreaming: streaming,
+					Request:  &Request{Headers: map[string]string{":path": apiType.Path()}},
+					Response: &Response{Headers: map[string]string{reqcommon.HeaderContentType: contentType}},
+				}
+				ctx := logutil.NewTestLoggerIntoContext(context.Background())
+				size := 0
+				for i, chunk := range chunks {
+					last := complete && i == len(chunks)-1
+					if last {
+						reqCtx.responseCompleteTimestamp = time.Now()
+					}
+					server.HandleResponseBody(ctx, reqCtx, chunk, last)
+					size += len(chunk)
+				}
+				labels := map[string]string{"api_surface": apiType.String()}
+				for name, sum := range map[string]float64{
+					"llm_d_epp_request_input_tokens": 3, "llm_d_epp_request_output_tokens": 3,
+					"llm_d_epp_request_cached_tokens": 1, "llm_d_epp_response_size_bytes": float64(size),
+				} {
+					if complete {
+						histogram := findHistogramMetric(t, name, labels)
+						require.Equal(t, uint64(1), histogram.GetSampleCount(), name)
+						require.Equal(t, sum, histogram.GetSampleSum(), name)
+					} else {
+						require.Zero(t, histogramSampleCount(t, name, labels), name)
+					}
+				}
+				wantCount := uint64(0)
+				if complete {
+					wantCount = 1
+				}
+				for _, name := range []string{"llm_d_epp_request_ntpot_seconds", "llm_d_epp_request_ttft_seconds"} {
+					require.Equal(t, wantCount, histogramSampleCount(t, name, labels), name)
+				}
+				if !streaming {
+					wantCount = 0
+				}
+				require.Equal(t, wantCount, histogramSampleCount(t, "llm_d_epp_request_streaming_tpot_seconds", labels))
+				wantITL := uint64(0)
+				if streaming {
+					wantITL = uint64(len(chunks) - 1)
+				}
+				require.Equal(t, wantITL, histogramSampleCount(t, "llm_d_epp_request_streaming_itl_seconds", labels))
+			})
+		}
+	}
+}
+
 func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	t.Parallel()
 
@@ -858,6 +943,23 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
+			name: "Split mid-event: usage line cut across chunks",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"choices":[{"text":"Hello"}]}` + "\n" + `data: {"usage":{"prompt_tok`), endOfStream: false},
+				{body: []byte(`ens":5,"completion_tokens":10,"total_tokens":15}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+		},
+		{
+			name: "Split mid-event: usage line ends at end of stream without newline",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":5,`), endOfStream: false},
+				{body: []byte(`"completion_tokens":10,"total_tokens":15}}`), endOfStream: true},
+			},
+			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+		},
+		{
 			name: "No Usage Data",
 			chunks: []chunkStream{
 				{body: []byte(`data: {"choices":[{"text":"Hello"}]}` + "\n"), endOfStream: false},
@@ -891,6 +993,102 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	}
 }
 
+// A large response.completed event split across chunks must still yield usage.
+func TestHandleResponseBodyModelStreaming_LargeResponsesCompletedSplit(t *testing.T) {
+	t.Parallel()
+
+	stream := "event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"instructions":"` + strings.Repeat("x", 200_000) +
+		`","usage":{"input_tokens":290000,"output_tokens":900,"total_tokens":290900}}}` + "\n\n"
+	want := fwkrh.Usage{PromptTokens: 290000, CompletionTokens: 900, TotalTokens: 290900}
+
+	for _, chunkSize := range []int{len(stream), 65536, 16384, 1000} {
+		t.Run(strconv.Itoa(chunkSize), func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:          &Response{Headers: map[string]string{"content-type": "text/event-stream"}},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			}
+			for i := 0; i < len(stream); i += chunkSize {
+				end := min(i+chunkSize, len(stream))
+				server.HandleResponseBody(context.Background(), reqCtx, []byte(stream[i:end]), end == len(stream))
+			}
+			assert.Equal(t, want.PromptTokens, reqCtx.Usage.PromptTokens)
+			assert.Equal(t, want.CompletionTokens, reqCtx.Usage.CompletionTokens)
+			assert.Equal(t, 2, reqCtx.StreamedEvents)
+		})
+	}
+}
+
+func TestCompleteSSELines(t *testing.T) {
+	t.Parallel()
+
+	oversized := strings.Repeat("x", maxSSELineBytes)
+	tests := []struct {
+		name   string
+		chunks []string
+		want   []string // parser input per chunk
+	}{
+		{
+			name:   "partial line carried to the next chunk",
+			chunks: []string{"a\nb", "c", "d\ne", "f"},
+			want:   []string{"a\n", "", "bcd\n", "ef"},
+		},
+		{
+			name:   "final chunk returned whole with the carry",
+			chunks: []string{"a\nb", "c\nd"},
+			want:   []string{"a\n", "bc\nd"},
+		},
+		{
+			name:   "oversized line dropped up to its newline",
+			chunks: []string{"a\n" + oversized, "x", "tail\nb\n", "c"},
+			want:   []string{"a\n", "", "b\n", "c"},
+		},
+		{
+			name:   "oversized tail in one chunk dropped up to its newline",
+			chunks: []string{"a\n" + oversized + "x", "tail\nb\n", "c"},
+			want:   []string{"a\n", "b\n", "c"},
+		},
+		{
+			name:   "oversized complete line dropped without skipping the next chunk",
+			chunks: []string{"a\n" + oversized + "x\n", "b\n"},
+			want:   []string{"a\n", "b\n"},
+		},
+		{
+			name:   "short lines over the cap in total kept",
+			chunks: []string{strings.Repeat(strings.Repeat("y", 1023)+"\n", 5000), "b\n"},
+			want:   []string{strings.Repeat(strings.Repeat("y", 1023)+"\n", 5000), "b\n"},
+		},
+		{
+			name:   "oversized last line at end of stream dropped",
+			chunks: []string{"a\n" + oversized, "x"},
+			want:   []string{"a\n", ""},
+		},
+		{
+			name:   "oversized tail of the final chunk dropped",
+			chunks: []string{"a\n", "b\n" + oversized + "x"},
+			want:   []string{"a\n", "b\n"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &RequestContext{}
+			for i, chunk := range tc.chunks {
+				got := completeSSELines(context.Background(), reqCtx, []byte(chunk), i == len(tc.chunks)-1)
+				assert.Equal(t, tc.want[i], string(got), "chunk %d", i)
+			}
+		})
+	}
+
+	assert.True(t, isEventStream("text/event-stream; charset=utf-8"))
+	assert.False(t, isEventStream("application/grpc"))
+}
+
 // The Anthropic streaming format reports prompt tokens in message_start and completion
 // tokens in a message_delta that reaches the EPP in a later chunk.
 func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.T) {
@@ -912,6 +1110,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",
@@ -944,6 +1143,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 		"target_model_name": "target-model",
 		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
+		"api_surface":       reqcommon.APITypeMessages.String(),
 	}
 	// Each token count belongs to one request, so accumulating usage across chunks must not
 	// turn into a second observation on the chunk that completes it.
@@ -981,6 +1181,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 	reqCtx := &RequestContext{
 		IncomingModelName: "incoming-model",
 		TargetModelName:   "target-model",
+		apiSurface:        reqcommon.APITypeMessages.Surface(),
 		Request: &Request{
 			Headers: map[string]string{
 				":path": "/v1/messages",
@@ -1012,6 +1213,7 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 		"target_model_name": "target-model",
 		"fairness_id":       reqcommon.DefaultFairnessID,
 		"priority":          "0",
+		"api_surface":       reqcommon.APITypeMessages.String(),
 	}
 	inputTokens := findHistogramMetric(t, "llm_d_epp_request_input_tokens", labels)
 	require.Equal(t, uint64(1), inputTokens.GetSampleCount())
@@ -1509,4 +1711,50 @@ func BenchmarkObserveToolCallingResponse(b *testing.B) {
 			}
 		}
 	}
+}
+
+// TestUsageFinalEventWins asserts the recorded usage is the final usage event
+// of the stream, even when an ext_proc boundary falls inside a usage line.
+func TestUsageFinalEventWins(t *testing.T) {
+	hdr := map[string]string{"content-type": "text/event-stream"}
+	usageLine := func(c int) string {
+		return fmt.Sprintf("data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":%d,\"total_tokens\":%d}}\n", c, 5+c)
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Response:          &Response{Headers: hdr},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+	chunks := []string{
+		usageLine(1) + `data: {"usage":{"prompt_tokens":5,"completion_to`,
+		`kens":2,"total_tokens":7}}` + "\n" + usageLine(3),
+	}
+	for i, c := range chunks {
+		server.HandleResponseBody(context.Background(), reqCtx, []byte(c), i == len(chunks)-1)
+	}
+
+	assert.Equal(t, 3, reqCtx.Usage.CompletionTokens, "the final usage event must win")
+	assert.Equal(t, 8, reqCtx.Usage.TotalTokens)
+}
+
+// TestCapAppliesToWholeLine asserts maxSSELineBytes bounds every line,
+// not only the one carried across chunks.
+func TestCapAppliesToWholeLine(t *testing.T) {
+	t.Run("oversized line complete in one chunk", func(t *testing.T) {
+		reqCtx := &RequestContext{}
+		got := completeSSELines(context.Background(), reqCtx,
+			[]byte(strings.Repeat("x", maxSSELineBytes+1)+"\n"), false)
+		assert.Empty(t, got, "a line over the cap must be dropped")
+	})
+
+	t.Run("oversized line closed by a later chunk", func(t *testing.T) {
+		reqCtx := &RequestContext{}
+		completeSSELines(context.Background(), reqCtx, []byte(strings.Repeat("x", maxSSELineBytes-10)), false)
+		got := completeSSELines(context.Background(), reqCtx, []byte(strings.Repeat("y", 100)+"\n"), false)
+		assert.Empty(t, got, "a line over the cap must be dropped")
+	})
 }

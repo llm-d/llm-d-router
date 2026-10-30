@@ -141,9 +141,10 @@ type Options struct {
 	//
 	// Configuration.
 	//
-	ConfigFile   string   // The path to the configuration file.
-	ConfigText   string   // The configuration specified as text, in lieu of a file.
-	FeatureGates []string // Feature gates applied on top of the configuration's featureGates.
+	ConfigFile     string   // The path to the configuration file.
+	ConfigText     string   // The configuration specified as text, in lieu of a file.
+	ObjectivesFile string   // Objectives (name, priority) loaded in file-discovery mode.
+	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
 
@@ -282,6 +283,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+	fs.StringVar(&opts.ObjectivesFile, "objectives-file", opts.ObjectivesFile,
+		"YAML file of objectives (name, priority) loaded at startup. File-discovery mode only.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
 		"Comma-separated list of feature gates to enable or disable, in kubelet style "+
 			"(e.g., 'flowControl=true'). A bare name enables the gate. Applied after the "+

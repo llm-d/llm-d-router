@@ -344,8 +344,30 @@ that depends on a Kubernetes API server is inactive:
   canary). The reconciler is not started; `ds.ModelRewriteGet` returns nil
   for every request. There is no file-mode equivalent today.
 - **`InferenceObjective`** (per-request SLO objectives). The reconciler is
-  not started; objective lookups return nil. Plugins that depend on
-  per-request SLO data will see no objectives configured.
+  not started. Without `--objectives-file`, objective lookups return nil
+  and every request gets priority 0. With it, objectives are loaded from
+  the file once at startup:
+
+  ```yaml
+  objectives:
+    - name: interactive
+      priority: 10
+    - name: batch      # priority < 0 is sheddable
+      priority: -1
+    - name: default    # priority defaults to 0
+  ```
+
+  - The `x-llm-d-inference-objective` header value must equal an
+    objective's `name`. Any other value runs at priority 0 without an error.
+  - Every objective applies to this EPP; pool targeting is not evaluated.
+    In Kubernetes mode an objective that does not target the served pool
+    is dropped.
+  - With the `flowControl` feature gate, a band is provisioned for each
+    priority before the EPP serves. With the gate off there are no bands,
+    but priority < 0 is still sheddable under the legacy admission
+    controller.
+  - The file is not re-read; the file-discovery `watchFile` option does
+    not apply to it.
 - **`k8s-notification-source` data layer plugin** (and any other notification
   source that needs the controller manager). The plugin loads from config
   but is never bound to a manager, so it produces no events. Remove it from

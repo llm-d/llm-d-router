@@ -249,7 +249,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
 | `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
 | `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
@@ -544,7 +544,7 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.31.0` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -572,7 +572,7 @@ router:
     image:
       registry: docker.io
       repository: vllm/vllm-openai-cpu
-      tag: v0.19.1
+      tag: v0.31.0
     env:
       - name: HF_TOKEN
         valueFrom:

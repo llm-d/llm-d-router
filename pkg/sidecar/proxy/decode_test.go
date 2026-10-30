@@ -553,6 +553,34 @@ var _ = Describe("Chunked Decode", func() {
 
 	Describe("streaming", func() {
 
+		It("ends the stream with an error event when a later chunk fails", func() {
+			errorBody := `{"error":{"message":"maximum context length exceeded","type":"BadRequestError","param":null,"code":400}}`
+			calls := 0
+			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 1 {
+					fmt.Fprint(w, chatResponse("hello ", finishReasonLength, 5, 5))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, errorBody)
+			}))
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			body, err := io.ReadAll(resp.Body)
+			Expect(err).ToNot(HaveOccurred())
+
+			events := strings.Split(strings.TrimSuffix(string(body), "\n\n"), "\n\n")
+			Expect(events).To(HaveLen(3))
+			Expect(events[0]).To(HavePrefix(reqcommon.SSEDataPrefix))
+			Expect(events[1]).To(Equal(reqcommon.SSEDataPrefix + errorBody))
+			Expect(events[2]).To(Equal(reqcommon.SSEDone))
+		})
+
 		It("emits one SSE event per chunk and terminates with [DONE]", func() {
 			ti := newChunkedTestSetup(5, []string{
 				chatResponse("hello ", "length", 5, 5),
@@ -593,6 +621,46 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(completionTokens).To(Equal(10))
 			Expect(totalTokens).To(Equal(15))
 		})
+
+		DescribeTable("reports a finish reason only on the last chunk",
+			func(maxTokens int, decodeResponses []string, wantFinishReasons []any) {
+				ti := newChunkedTestSetup(5, decodeResponses)
+				defer ti.stop()
+
+				resp := doPost(ti.addr, fmt.Sprintf(
+					`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":%d,"stream":true}`, maxTokens))
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+				var finishReasons []any
+				scanner := bufio.NewScanner(resp.Body)
+				for scanner.Scan() {
+					data, ok := strings.CutPrefix(scanner.Text(), reqcommon.SSEDataPrefix)
+					if !ok || scanner.Text() == reqcommon.SSEDone {
+						continue
+					}
+					var event map[string]any
+					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
+					if choice := firstChoice(event); choice != nil {
+						Expect(choice).To(HaveKey(responseFieldFinishReason))
+						finishReasons = append(finishReasons, choice[responseFieldFinishReason])
+					}
+				}
+				Expect(scanner.Err()).ToNot(HaveOccurred())
+				Expect(finishReasons).To(Equal(wantFinishReasons))
+			},
+			Entry("decoder stops in a later chunk", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", "stop", 10, 3),
+			}, []any{nil, "stop"}),
+			Entry("token budget runs out", 10, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", finishReasonLength, 10, 5),
+			}, []any{nil, finishReasonLength}),
+			Entry("chunk produces nothing to continue from", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("", finishReasonLength, 10, 0),
+			}, []any{nil, finishReasonLength}),
+		)
 	})
 
 	Describe("helper functions", func() {

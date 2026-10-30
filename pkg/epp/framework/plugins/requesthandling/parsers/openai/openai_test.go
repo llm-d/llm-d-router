@@ -1987,6 +1987,30 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "ResponsesAPI incomplete terminal event carries usage",
+			chunk: []byte("event: response.incomplete\ndata: {\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13}},\"type\":\"response.incomplete\"}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 3,
+					TotalTokens:      13,
+				},
+				StreamedEvents: 1,
+			},
+		},
+		{
+			name:  "ResponsesAPI failed terminal event carries usage",
+			chunk: []byte("event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"total_tokens\":10}},\"type\":\"response.failed\"}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10,
+					CompletionTokens: 0,
+					TotalTokens:      10,
+				},
+				StreamedEvents: 1,
+			},
+		},
+		{
 			name:  "ResponsesAPI with multiple events extracts from completed",
 			chunk: []byte("event: response.output_text.delta\ndata: {\"delta\":\"Hello\",\"type\":\"response.output_text.delta\"}\n\nevent: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":39,\"output_tokens\":10,\"total_tokens\":49}},\"type\":\"response.completed\"}"),
 			want: &fwkrh.ParsedResponse{

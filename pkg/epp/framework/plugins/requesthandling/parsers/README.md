@@ -4,10 +4,12 @@ This directory contains parser plugins used to parse and understand the payloads
 
 ## Supported Parsers
 
-*   **`openai-parser`**: A parser supporting the [OpenAI API](https://developers.openai.com/api/reference/overview). Along with `anthropic-parser` and `vllmhttp-parser`, it is registered by default if no parsers are explicitly specified.
+*   **`openai-parser`**: A parser supporting the [OpenAI API](https://developers.openai.com/api/reference/overview). Along with `anthropic-parser`, `vllmhttp-parser` and `systemone-parser`, it is registered by default if no parsers are explicitly specified.
 *   **`anthropic-parser`**: A parser designed to handle requests for the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). It supports both standard JSON and streaming SSE responses.
 *   **`vllmgrpc-parser`**: A parser designed to handle requests specifically for the [vLLM gRPC API](https://docs.vllm.ai/en/latest/api/vllm/entrypoints/grpc_server/).
 *   **`vllmhttp-parser`**: A parser for vLLM HTTP endpoints that are not part of the OpenAI-compatible API surface — specifically `/inference/v1/generate` (which accepts pre-tokenized prompts and multimodal features). Because it only handles this path, you must also configure `openai-parser` if you want to support OpenAI-compatible paths on the same route.
+*   **`systemone-parser`**: A parser for the [System One API](https://docs.typesafe.ai/api), `POST /v1/systemone`.
+    *   **Drawback**: The engine renders the prompts, so prefix-cache-aware scorers get no signal for these requests.
 *   **`sglanghttp-parser`**: A parser for SGLang's native HTTP `/generate` endpoint, which is not part of the OpenAI-compatible API. It supports one prompt per request, as `input_ids` or `text`; a batched request, where either field holds a list of prompts, is rejected with a 400. Configure `openai-parser` alongside it if you also want to handle OpenAI-compatible paths on the same route.
 *   **`vertexai-parser`**: A parser designed to handle requests for the Vertex AI gRPC API, specifically supporting [PredictionService/ChatCompletions](https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L235). For unsupported Vertex AI APIs, it skips parsing and lets the request pass through without interpretation resulting in routing to a random endpoint.
 *   **`passthrough-parser`**: A model-agnostic parser that supports any request format by passing the request body through without interpretation. It claims no paths, so it acts as the fallback for unmatched traffic and is included last in the default parser list.
@@ -25,7 +27,7 @@ The EPP resolves incoming request paths to the matching parser using longest-suf
 
 Registration stops at the first parser claiming no paths. Any parser listed after it is skipped, so a fallback belongs last.
 
-If no parsers are specified, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, and `passthrough-parser` are used by default. The trailing `passthrough-parser` means a path none of the others claim is forwarded to the model server without interpretation, and is scheduled without payload-derived signals, rather than rejected with `400`.
+If no parsers are specified, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, `systemone-parser`, and `passthrough-parser` are used by default. The trailing `passthrough-parser` means a path none of the others claim is forwarded to the model server without interpretation, and is scheduled without payload-derived signals, rather than rejected with `400`.
 
 An explicit `requestHandler.parsers` list is used as given. It gains no fallback, so a path no listed parser claims is rejected. Add `passthrough-parser` as the last entry to forward that traffic instead.
 

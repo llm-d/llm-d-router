@@ -279,8 +279,9 @@ steps read and mutate. The load-bearing fields:
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
-`Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
+`Host`, `Content-Length`, `Content-Type`, and `Accept-Encoding` removed, normalized to
+lowercase. Steps use it as the base header set, then stamp the request ID and
+`x-llm-d-epp-profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
 request. Client-provided values of the coordinator-owned headers are discarded: EPP
 routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
