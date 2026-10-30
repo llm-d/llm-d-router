@@ -211,14 +211,20 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
 	// is the admission rejection. Later failures leave the decision as admitted.
 	admitting := false
+	// untypedDenier is the type of an Admitter whose untyped denial is returned as Internal.
+	var untypedDenier string
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			if admitting && span.IsRecording() {
+				reason := admissionReason(err)
+				if untypedDenier != "" {
+					reason = "admitter:" + untypedDenier
+				}
 				span.SetAttributes(
 					semconv.LLMDEPPAdmissionDecision("rejected"),
-					semconv.LLMDEPPAdmissionReason(admissionReason(err)),
+					semconv.LLMDEPPAdmissionReason(reason),
 				)
 			}
 		}
@@ -337,15 +343,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}()
 
 	// Run admit request plugins
-	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+	if denier, denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
 		// Preserve a typed errcommon.Error from the denying Admitter so the
 		// status code it chose (e.g. ResourceExhausted for a shed) and its
 		// headers (the x-llm-d-request-dropped-reason) reach Envoy intact.
-		// An untyped denial keeps collapsing to Internal, as before.
+		// An untyped denial keeps collapsing to Internal, as before, so the
+		// span names the Admitter to tell it apart from an internal error.
 		var e errcommon.Error
 		if errors.As(denyReason, &e) {
 			return reqCtx, e
 		}
+		untypedDenier = denier.Type
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 	admitting = false
@@ -880,7 +888,7 @@ func (d *Director) runScreeners(ctx context.Context,
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (fwkplugin.TypedName, error) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
@@ -895,13 +903,13 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 			if debugEnabled {
 				loggerDebug.Info("Admit plugin denied the request", "plugin", name, "reason", denyReason.Error())
 			}
-			return denyReason
+			return name, denyReason
 		}
 		if debugEnabled {
 			loggerDebug.Info("Completed running Admit plugin successfully", "plugin", name)
 		}
 	}
-	return nil
+	return fwkplugin.TypedName{}, nil
 }
 
 // admissionReason returns the reason for an admission rejection: the dropped-reason header
