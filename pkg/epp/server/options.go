@@ -234,7 +234,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Pod label holding the pod's index in a data-parallel group that spans pods, such as "+
 			"leaderworkerset.sigs.k8s.io/worker-index. Pod k then serves global ranks k*N to k*N+N-1, where N is "+
 			"the pod's rank count, and requests and metrics use the global rank. A pod with more than one rank "+
-			"and no valid label gets no endpoints.")
+			"and no valid label gets no endpoints. vLLM's Python API server reads x-data-parallel-rank as a "+
+			"pod-local index under hybrid or external load balancing, so this label requires the vLLM Rust frontend.")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,

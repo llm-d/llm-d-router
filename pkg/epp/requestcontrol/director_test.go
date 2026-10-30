@@ -707,7 +707,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			inferenceObjectiveName: objectiveName,
 		},
 		{
-			name: "data-parallel ranks of one pod share one destination and its best score",
+			name: "a data-parallel rank is sent without fallback destinations and takes its address's best score",
 			reqBodyMap: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
@@ -721,7 +721,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				ObjectiveKey:    objectiveName,
 				TargetModelName: model,
 				TargetPod:       rank1Endpoint.GetMetadata(),
-				TargetEndpoint:  "192.168.5.100:8000,192.168.2.100:8000",
+				TargetEndpoint:  "192.168.5.100:8000",
 				TargetEndpointScores: map[string]float64{
 					"192.168.5.100:8000": 0.83,
 					"192.168.2.100:8000": 0.74,
@@ -2823,6 +2823,62 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			var e errcommon.Error
 			require.ErrorAs(t, err, &e)
 			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
+}
+
+func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	endpoint := func(name, address string, rank, ranksPerPort int) fwksched.Endpoint {
+		return &fwksched.ScoredEndpoint{Endpoint: fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+			ID:               types.NamespacedName{Name: name, Namespace: "default"},
+			Address:          address,
+			Port:             "8000",
+			RankIndex:        rank,
+			RanksPerPort:     ranksPerPort,
+			DataParallelRank: rank + 2,
+		}, nil, nil)}
+	}
+	result := func(targets ...fwksched.Endpoint) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			ProfileResults:     map[string]*fwksched.ProfileRunResult{"decode": {TargetEndpoints: targets}},
+			PrimaryProfileName: "decode",
+		}
+	}
+
+	tests := []struct {
+		name         string
+		result       *fwksched.SchedulingResult
+		wantEndpoint string
+		wantRank     string
+	}{
+		{
+			name:         "rank endpoint sets its global rank and drops fallbacks",
+			result:       result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2), endpoint("pod1-rank-0", "10.0.0.1", 0, 2), endpoint("pod2", "10.0.0.2", 0, 0)),
+			wantEndpoint: "10.0.0.1:8000",
+			wantRank:     "3",
+		},
+		{
+			name:         "endpoint without ranks keeps the client's header and its fallbacks",
+			result:       result(endpoint("pod2", "10.0.0.2", 0, 0), endpoint("pod1-rank-1", "10.0.0.1", 1, 2)),
+			wantEndpoint: "10.0.0.2:8000,10.0.0.1:8000",
+			wantRank:     "7",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := &Director{requestControlPlugins: *NewConfig()}
+			headers := map[string]string{routing.DataParallelRankHeader: "7"}
+			reqCtx := &handlers.RequestContext{
+				Request:           &handlers.Request{Headers: headers},
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "req", Headers: headers},
+			}
+
+			got, err := dir.prepareRequest(ctx, reqCtx, tt.result)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEndpoint, got.TargetEndpoint)
+			assert.Equal(t, tt.wantRank, got.SchedulingRequest.Headers[routing.DataParallelRankHeader])
 		})
 	}
 }

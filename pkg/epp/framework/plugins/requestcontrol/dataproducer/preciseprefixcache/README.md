@@ -54,20 +54,16 @@ requires a vLLM build with
 whose wire format can still change.
 
 When a pod serves several data-parallel ranks behind its port (see
-[data-parallel-rank-header](../../dprankheader/README.md)), each rank of the pod
+[Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)), each rank of the pod
 is its own endpoint on the pod's address and port. With pod discovery, each
 rank's events reach the index under `<address>:<port>/rank-<RankIndex>`, so the
 ranks of one pod are scored separately. Without pod discovery, the index learns
 a pod's identity from the event topic, and all ranks of a pod share one score.
 
-vLLM offsets each engine's publisher, replay and snapshot ports by its global
-data-parallel rank. A rank endpoint's subscriber dials `socketPort` plus that
-global rank, so it matches vLLM's default ports, including when a data-parallel
-group spans pods (`--data-parallel-start-rank-label`). Do not lower the
-configured KV-events base port per pod for these pods. That adjustment, described
-for wide-EP in [docs/disaggregation.md](../../../../../../docs/disaggregation.md),
-applies to pools with one rank per target port, whose subscribers dial
-`socketPort` plus the port's position.
+A rank endpoint's subscriber dials `socketPort` plus the endpoint's global
+data-parallel rank, as vLLM offsets each engine's publisher, replay and snapshot
+ports. For the base ports to configure on each pod, see the wide-EP notes in
+[docs/disaggregation.md](../../../../../../../docs/disaggregation.md#kv-connector---kv-connector).
 
 A subscriber that joins mid-stream, or sees the engine restart, loads the
 snapshot instead of replaying buffered events, then follows live events after

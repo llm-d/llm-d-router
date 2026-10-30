@@ -54,7 +54,7 @@ pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
 `x-kv-cache-source-host-port`), so a sidecar that predates the rename still
 routes. The old names are deprecated and will be removed.
 
-When the Prefill Worker serves several data-parallel ranks behind its port (see [data-parallel-rank-header](../pkg/epp/framework/plugins/requestcontrol/dprankheader/README.md)), EPP also sends
+When the Prefill Worker serves several data-parallel ranks behind its port (see [Data-parallel ranks behind one port](data-parallel-ranks.md)), EPP also sends
 `x-llm-d-prefiller-data-parallel-rank` with the data-parallel rank it picked on
 the Prefill Worker. The sidecar sends that rank to the Prefill Worker as
 `x-data-parallel-rank`. Without the header, the sidecar removes
@@ -721,6 +721,12 @@ With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
 `5557-5564`, and serving `8000-8007`. Only the socket bases are
 compensated; `data_parallel_index` and the global rank carried in KV-event
 batches are unchanged.
+
+Pools of [rank endpoints](data-parallel-ranks.md), where one port serves
+several ranks and `--data-parallel-start-rank-label` gives the EPP each
+pod's global ranks, keep vLLM's default bases on every pod: the EPP's
+KV-event subscribers and the sidecar's P2P `remote_port` add the global
+rank to the configured base, as vLLM does.
 
 ### General Sidecar Flags
 

@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -498,11 +499,21 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
 
-	for _, pod := range primaryResult.TargetEndpoints {
+	targets := primaryResult.TargetEndpoints
+	// A data-parallel rank endpoint is reached through its pod's shared port and
+	// the rank header. The header applies to every destination, so a fallback
+	// would run the request on a rank the scheduler did not pick.
+	if len(targets) > 0 && targets[0].GetMetadata().RanksPerPort > 1 {
+		targets = targets[:1]
+		if reqCtx.SchedulingRequest.Headers == nil {
+			reqCtx.SchedulingRequest.Headers = map[string]string{}
+		}
+		reqCtx.SchedulingRequest.Headers[routing.DataParallelRankHeader] = strconv.Itoa(targets[0].GetMetadata().DataParallelRank)
+	}
+	for _, pod := range targets {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
-		// Data-parallel rank endpoints of one pod share its address and port.
 		if !slices.Contains(targetEndpoints, curEndpoint) {
 			targetEndpoints = append(targetEndpoints, curEndpoint)
 		}
