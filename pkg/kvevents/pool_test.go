@@ -95,6 +95,41 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 	return keys
 }
 
+func TestBigramStoreValidationAndFormatLifecycle(t *testing.T) {
+	lookahead := uint32(33)
+	for _, tc := range []struct {
+		blockSize  int
+		hashes     []uint64
+		wantReason string
+	}{
+		{blockSize: 0, hashes: []uint64{100}, wantReason: "invalid_block_size"},
+		{blockSize: 2, hashes: []uint64{100, 101}, wantReason: "non_dense_block_span"},
+		{blockSize: 2, hashes: []uint64{100}},
+	} {
+		event := &BlockStoredEvent{
+			Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+			BlockSize: tc.blockSize, BlockHashes: tc.hashes,
+		}
+		ok, reason := blockStoredEventDigestible(event, 1)
+		require.Equal(t, tc.wantReason == "", ok)
+		require.Equal(t, tc.wantReason, reason)
+	}
+	pool, _, _ := newTestPool(t, 1)
+	pool.processEventBatch(t.Context(), &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+		BlockSize: 2, BlockHashes: []uint64{100},
+	}}}, "pod", "model")
+	format, ok := pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	require.Equal(t, kvblock.CacheFormat{Bigram: true, BlockSize: 2}, format)
+	pool.clearPod(t.Context(), "pod", false)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	pool.clearPod(t.Context(), "pod", true)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.False(t, ok)
+}
+
 type sourceEndpointAdapter struct{}
 
 func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {

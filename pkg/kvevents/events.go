@@ -102,12 +102,14 @@ type EngineAdapter interface {
 type BlockStoredEvent struct {
 	BlockHashes []uint64
 	Tokens      []uint32
-	ParentHash  uint64
-	BlockSize   int
-	DeviceTier  string
-	LoraID      *int
-	LoraName    *string
-	ExtraKeys   [][]any
+	// LookaheadToken completes the last bigram. Tokens contains only cached positions.
+	LookaheadToken *uint32
+	ParentHash     uint64
+	BlockSize      int
+	DeviceTier     string
+	LoraID         *int
+	LoraName       *string
+	ExtraKeys      [][]any
 	// GroupIdx identifies the vLLM KV cache group that emitted this event.
 	GroupIdx *int
 	// KVCacheSpecKind carries vLLM's semantic cache type for the group.
