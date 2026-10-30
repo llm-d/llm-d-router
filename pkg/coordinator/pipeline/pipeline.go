@@ -150,6 +150,12 @@ func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, e
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	logger := log.FromContext(ctx)
+	defer func() {
+		if reqCtx.PrefillDrain != nil {
+			reqCtx.PrefillDrain.Cancel()
+			reqCtx.PrefillDrain = nil
+		}
+	}()
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, pipelineSpanName,
 		trace.WithSpanKind(trace.SpanKindInternal),
