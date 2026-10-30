@@ -57,6 +57,7 @@ const (
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
@@ -88,6 +89,7 @@ const (
 	FieldRole                 = "role"
 	FieldType                 = "type"
 	FieldURL                  = "url"
+	FieldUUID                 = "uuid" // content part field vLLM keys a multimodal item's hash on
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"

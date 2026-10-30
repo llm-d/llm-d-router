@@ -185,7 +185,7 @@ func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams
 			"offset": entry.Placeholder.Offset,
 			"length": entry.Placeholder.Length,
 		})
-		if _, hasEC := ecTransferParams[entry.Hash]; hasEC && entry.MMMetadata != "" {
+		if _, ok := ecDescriptor(ecTransferParams, entry.Hash); ok && entry.MMMetadata != "" {
 			kwargsByMod[mod] = append(kwargsByMod[mod], nil)
 			metadataByMod[mod] = append(metadataByMod[mod], kwargsSentinel(entry.MMMetadata))
 		} else {
@@ -459,7 +459,7 @@ func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMo
 	return map[string]any{
 		reqcommon.FieldType: partType,
 		reqcommon.FieldURL:  url,
-		"uuid":              entry.Hash,
+		reqcommon.FieldUUID: entry.Hash,
 	}, nil
 }
 

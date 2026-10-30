@@ -60,6 +60,8 @@ func renderServer(t *testing.T, gotMMPayload *any) *httptest.Server {
 		*gotMMPayload = v
 		if present {
 			require.Equal(t, false, parsed["return_mm_kwargs"], "the deprecated alias must travel with mm_payload")
+		} else {
+			require.NotContains(t, parsed, "return_mm_kwargs", "a request without mm_payload must carry neither field")
 		}
 		features := map[string]any{
 			"mm_hashes": map[string]any{"image": []string{"h-img"}, "audio": []string{"h-aud"}},
@@ -79,6 +81,10 @@ func renderServer(t *testing.T, gotMMPayload *any) *httptest.Server {
 }
 
 func runRender(t *testing.T, params map[string]any, gotMMPayload *any) *pipeline.RequestContext {
+	return runRenderBody(t, params, mmKwargsChatBody(), gotMMPayload)
+}
+
+func runRenderBody(t *testing.T, params map[string]any, body map[string]any, gotMMPayload *any) *pipeline.RequestContext {
 	server := renderServer(t, gotMMPayload)
 	t.Cleanup(server.Close)
 	step, err := NewRenderStep(nil, params)
@@ -87,7 +93,7 @@ func runRender(t *testing.T, params map[string]any, gotMMPayload *any) *pipeline
 	reqCtx := &pipeline.RequestContext{
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "m",
-		Body:         mmKwargsChatBody(),
+		Body:         body,
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityAudio},
 		},
@@ -122,6 +128,23 @@ func TestRenderStep_MMPayload(t *testing.T) {
 	for _, bad := range []any{"pixels", true, "metadata"} {
 		_, err := NewRenderStep(nil, map[string]any{"mm_payload": bad})
 		require.Error(t, err, "mm_payload %v", bad)
+	}
+}
+
+// A body that sets either preprocessing kwargs field is rendered with the
+// tensors: the content_parts path preprocesses media at the deployment
+// defaults, so the client's kwargs cannot travel with it.
+func TestRenderStep_ProcessorKwargsKeepTensors(t *testing.T) {
+	for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
+		t.Run(field, func(t *testing.T) {
+			body := mmKwargsChatBody()
+			body[field] = map[string]any{"max_pixels": 100000}
+			var got any = "unset"
+			reqCtx := runRenderBody(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, body, &got)
+			require.Nil(t, got, "a body setting %s must not carry mm_payload", field)
+			require.Empty(t, reqCtx.MMPayload)
+			require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
+		})
 	}
 }
 
@@ -317,6 +340,29 @@ func TestGenerateContentParts_Errors(t *testing.T) {
 	}
 }
 
+// Entries of one modality pair with the client's parts of that modality in
+// order, so each part's uuid is the hash of the entry it feeds.
+func TestGenerateContentParts_SameModalityPairing(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AAA"}},
+			map[string]any{"type": "text", "text": "and"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,BBB"}},
+		}}}},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h2"},
+		},
+	}
+	parts, err := generateContentParts(reqCtx)
+	require.NoError(t, err)
+	require.Equal(t, "data:image/png;base64,AAA", parts[0][reqcommon.FieldURL])
+	require.Equal(t, "h1", parts[0][reqcommon.FieldUUID])
+	require.Equal(t, "data:image/png;base64,BBB", parts[1][reqcommon.FieldURL])
+	require.Equal(t, "h2", parts[1][reqcommon.FieldUUID])
+}
+
 // With OpenAI passthrough on, encode and prefill forward the client body and
 // never build content_parts, so the flag changes nothing on that path.
 func TestPrefillStep_OpenAIFormatIgnoresMMPayload(t *testing.T) {
@@ -339,4 +385,26 @@ func TestPrefillStep_OpenAIFormatIgnoresMMPayload(t *testing.T) {
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 	require.NotContains(t, prefillBody, "content_parts")
 	require.Contains(t, prefillBody, "messages")
+}
+
+// A text-only generate request carries no multimodal input at all.
+func TestPrefillStep_TextOnlyGenerateOmitsFeatures(t *testing.T) {
+	var prefillBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&prefillBody))
+		_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+	}))
+	defer server.Close()
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{Address: server.URL}),
+		map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "m",
+		Body:         map[string]any{"model": "m", "messages": []any{}},
+		TokenIDs:     []int{1, 2},
+	}
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.NotContains(t, prefillBody, "features")
+	require.Contains(t, prefillBody, "token_ids")
 }

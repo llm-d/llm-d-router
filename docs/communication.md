@@ -187,7 +187,7 @@ POST <rendering_service_address>/v1/chat/completions/render
 Content-Type: application/json
 ```
 
-Body is the full `reqCtx.Body` (with data: URIs from stage 1). Unless the render step sets `mm_payload: tensors`, the render copy also carries `"mm_payload": "none"` and its deprecated alias `"return_mm_kwargs": false`; both are added to the render copy only, and later stages see the client body without them.
+Body is the full `reqCtx.Body` (with data: URIs from stage 1). Unless the render step sets `mm_payload: tensors`, the render copy also carries `"mm_payload": "none"` and its deprecated alias `"return_mm_kwargs": false`; both are added to the render copy only, and later stages see the client body without them. A body that sets `mm_processor_kwargs` or `media_io_kwargs` is rendered without them, so render returns the tensors: both fields change preprocessing and feed vLLM's multimodal hash, and the generate format's `content_parts` path preprocesses media at the deployment defaults (vLLM's `/v1/messages` accepts neither field for the same reason; see [Stage 5](#stage-5-prefill)).
 
 ```json
 {
@@ -319,6 +319,8 @@ vLLM returns `token_ids`, `mm_hashes` and `mm_placeholders` unchanged and sets `
 ```
 
 The coordinator skips the `kwargs_data` length check, leaves every `KwargsData` empty, and records the configured `mm_payload` on the request context. Generate-format encode requests then carry the client's media as `content_parts` (see [Stage 4](#stage-4-encode-fan-out-one-per-media-entry)). The generate-format prefill request carries `features` with `mm_metadata` when every entry has metadata (from this response, or rebuilt from the encode response's EC descriptors) and EC coverage, and `content_parts` otherwise (see [Stage 5](#stage-5-prefill)). A renderer without the field ignores it and returns the tensors, and the request takes the `features` path.
+
+Once the tensors are omitted, the encode and prefill workers' `/inference/v1/generate` must accept `content_parts` (vllm-project/vllm#51478) and key `ec_transfer_params` by the supplied `uuid`. A worker without `content_parts` support rejects the request: unlike a renderer without `mm_payload`, there is no fallback once render omits the tensors, so the renderer and the workers must run versions that agree.
 
 Measured with Qwen3-VL-32B and one 640x448 JPEG, the render response is 575,449 bytes with `mm_payload: tensors` and 1,641 bytes with the tensors omitted.
 
@@ -1083,7 +1085,7 @@ With a renderer that emits `features.mm_metadata` (see vLLM
 [#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
 `kwargs_data` for an entry when `ec_transfer_params` covers that entry.
 
-It applies when render returns the tensors (render step `mm_payload: tensors`, or a renderer that ignores the field) and when the render step omits the tensors (`mm_payload: none`): the coordinator takes each entry's `mm_metadata` from the render response when it carries one and rebuilds the rest from the metadata the encode response publishes in its EC descriptor, so prefill carries `features` with `mm_metadata` and `null` `kwargs_data` when every entry is covered, and `content_parts` with the client's media otherwise.
+It applies when render returns the tensors and when the render step omits them (`mm_payload: none`; see [2.A](#response-with-mm_payload-none)): the coordinator takes each entry's `mm_metadata` from the render response when it carries one and rebuilds the rest from the metadata the encode response publishes in its EC descriptor, so prefill carries `features` with `mm_metadata` and `null` `kwargs_data` when every entry is covered, and `content_parts` with the client's media otherwise.
 
 This applies to prefill legs that carry a `features` map: the completions and
 generate wire formats. A chat-completions client reaches those legs when

@@ -405,8 +405,11 @@ pipeline:
         # mm_metadata comes from the render response or is rebuilt from the
         # encode response's EC descriptors when every entry has metadata and
         # EC coverage, else the client's media as content_parts. A renderer
-        # that ignores the field returns the tensors, which are then used as
-        # when tensors. Default none.
+        # that ignores the field returns the tensors, and the request takes
+        # the tensors path. A body that sets mm_processor_kwargs or
+        # media_io_kwargs is rendered with the tensors either way: the
+        # content_parts path preprocesses media at the deployment defaults.
+        # Default none.
         # mm_payload: tensors
 
     # -------------------------------------------------------------------

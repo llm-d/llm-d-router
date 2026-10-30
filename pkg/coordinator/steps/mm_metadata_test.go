@@ -48,15 +48,30 @@ func TestMMMetadataFromEC_MatchesVLLM(t *testing.T) {
 	require.Equal(t, vllmGridThwMetadata, got)
 }
 
+// vllmGridThwMetadataVideo is vllmGridThwMetadata with a second field added:
+// the same value encoding under video_grid_thw, keys in sorted order. Composed
+// from the captured vLLM bytes, since one item never carries both fields.
+const vllmGridThwMetadataVideo = "gq5pbWFnZV9ncmlkX3Rod4KkZGF0YZOlaW50NjSRA8cYAwEAAAAAAAAARAAAAAAAAAB4AAAAAAAAAKVmaWVsZJKnYmF0Y2hlZIGra2VlcF9vbl9jcHXDrnZpZGVvX2dyaWRfdGh3gqRkYXRhk6VpbnQ2NJEDxxgDAQAAAAAAAABEAAAAAAAAAHgAAAAAAAAApWZpZWxkkqdiYXRjaGVkgatrZWVwX29uX2NwdcM="
+
+func TestMMMetadataFromEC_SortsKeysAcrossFields(t *testing.T) {
+	got, ok := mmMetadataFromEC(map[string]any{
+		"video_grid_thw": []any{float64(1), float64(68), float64(120)},
+		"image_grid_thw": []any{float64(1), float64(68), float64(120)},
+	})
+	require.True(t, ok)
+	require.Equal(t, vllmGridThwMetadataVideo, got)
+}
+
 func TestMMMetadataFromEC_RejectsUnsupportedValues(t *testing.T) {
 	for name, metadata := range map[string]map[string]any{
-		"empty":          {},
-		"nil":            nil,
-		"not a list":     {"image_grid_thw": float64(3)},
-		"empty list":     {"image_grid_thw": []any{}},
-		"fraction":       {"image_grid_thw": []any{1.5, float64(2)}},
-		"string element": {"image_grid_thw": []any{"1"}},
-		"nested list":    {"timestamps": []any{[]any{0.5}}},
+		"empty":             {},
+		"nil":               nil,
+		"not a list":        {"image_grid_thw": float64(3)},
+		"empty list":        {"image_grid_thw": []any{}},
+		"fraction":          {"image_grid_thw": []any{1.5, float64(2)}},
+		"string element":    {"image_grid_thw": []any{"1"}},
+		"nested list":       {"timestamps": []any{[]any{0.5}}},
+		"non-grid int list": {"timestamps": []any{float64(1), float64(2)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, ok := mmMetadataFromEC(metadata)

@@ -26,6 +26,7 @@ import (
 
 	"github.com/vmihailenco/msgpack/v5"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -33,6 +34,15 @@ import (
 // the inline bytes of a small tensor (CUSTOM_TYPE_RAW_VIEW in
 // vllm/v1/serial_utils.py).
 const vllmRawViewExt = 3
+
+// batchedInt64MetadataFields are the placeholder-metadata fields the rebuild
+// can encode: batched int64 keep_on_cpu fields, the image_grid_thw and
+// video_grid_thw shapes the Qwen-VL family uses. A field outside the set has
+// no known layout, so its metadata is left to the worker via content_parts.
+var batchedInt64MetadataFields = map[string]struct{}{
+	"image_grid_thw": {},
+	"video_grid_thw": {},
+}
 
 // mmMetadataFromEC builds the mm_metadata item vLLM's render would return for
 // one entry, from the "metadata" object an encode response publishes in its
@@ -61,6 +71,9 @@ func mmMetadataFromEC(metadata map[string]any) (item string, ok bool) {
 		return "", false
 	}
 	for _, key := range keys {
+		if _, ok := batchedInt64MetadataFields[key]; !ok {
+			return "", false
+		}
 		values, ok := int64Values(metadata[key])
 		if !ok {
 			return "", false
@@ -81,12 +94,12 @@ func mmMetadataFromEC(metadata map[string]any) (item string, ok bool) {
 func entriesWithECMetadata(entries []pipeline.MultimodalEntry, ecParams map[string]any) ([]pipeline.MultimodalEntry, bool) {
 	out := make([]pipeline.MultimodalEntry, len(entries))
 	for i, entry := range entries {
-		desc, _ := ecParams[entry.Hash].(map[string]any)
-		if len(desc) == 0 {
+		desc, ok := ecDescriptor(ecParams, entry.Hash)
+		if !ok {
 			return nil, false
 		}
 		if entry.MMMetadata == "" {
-			metadata, _ := desc["metadata"].(map[string]any)
+			metadata, _ := desc[reqcommon.FieldECDescriptorMetadata].(map[string]any)
 			item, ok := mmMetadataFromEC(metadata)
 			if !ok {
 				return nil, false
@@ -96,6 +109,17 @@ func entriesWithECMetadata(entries []pipeline.MultimodalEntry, ecParams map[stri
 		out[i] = entry
 	}
 	return out, true
+}
+
+// ecDescriptor returns the transfer descriptor ecParams carries for hash. ok
+// is false when there is none the worker could load the encoder output
+// through: a missing key, a non-object value, or an empty object.
+func ecDescriptor(ecParams map[string]any, hash string) (map[string]any, bool) {
+	desc, _ := ecParams[hash].(map[string]any)
+	if len(desc) == 0 {
+		return nil, false
+	}
+	return desc, true
 }
 
 // int64Values reads a JSON array of integers, as decoded into []any.

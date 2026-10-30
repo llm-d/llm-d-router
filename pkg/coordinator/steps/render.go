@@ -434,6 +434,19 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	return nil
 }
 
+// bodySetsProcessorKwargs reports whether the client body sets either
+// preprocessing kwargs field. Both change preprocessing and feed vLLM's
+// multimodal hash, so a request that sets them cannot run on the
+// content_parts path, which preprocesses media at the deployment defaults.
+func bodySetsProcessorKwargs(body map[string]any) bool {
+	for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
+		if v, ok := body[field]; ok && v != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // postRender marshals reqCtx.Body, asking for no tensors unless mm_payload is
 // tensors, POSTs it to <serviceAddress><basePath>/render, and decodes the JSON
 // response into out.
@@ -446,10 +459,18 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	renderBody := reqCtx.Body
 	if s.mmPayload != pipeline.MMPayloadTensors {
-		// vLLM has no metadata-only render payload; prefill rebuilds it.
-		renderBody = maps.Clone(reqCtx.Body)
-		renderBody[reqcommon.FieldReturnMMKwargs] = false
-		renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
+		if bodySetsProcessorKwargs(reqCtx.Body) {
+			// The generate format's content_parts path preprocesses media at
+			// the deployment defaults, so the client's preprocessing kwargs
+			// cannot travel with it. Keep the tensors form, whose output
+			// render already processed with them.
+			logger.V(logutil.DEFAULT).Info("body sets mm_processor_kwargs or media_io_kwargs; requesting tensors")
+		} else {
+			// vLLM has no metadata-only render payload; prefill rebuilds it.
+			renderBody = maps.Clone(reqCtx.Body)
+			renderBody[reqcommon.FieldReturnMMKwargs] = false
+			renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
+		}
 	}
 	body, err := json.Marshal(renderBody)
 	if err != nil {

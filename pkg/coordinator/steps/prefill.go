@@ -199,15 +199,17 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 // applyGenerateMMInputs sets the multimodal input on a generate prefill body:
 // features when the entries carry tensors, or when the tensors were omitted but
 // every entry has mm_metadata and EC coverage; otherwise the client's media as
-// content_parts with the collapsed token_ids. vLLM takes content_parts or
-// features, not both, and expands the placeholders of a content_parts prompt
-// itself.
+// content_parts with the collapsed token_ids. The two forms are exclusive on
+// the wire; see docs/communication.md stage 5.
 func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipeline.RequestContext, ecParams map[string]any, body map[string]any) error {
 	entries := reqCtx.MultimodalEntries
 	if reqCtx.MMPayload == "" {
 		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
-		// see buildPrefillMMFeatures.
-		body["features"] = buildPrefillMMFeatures(entries, ecParams)
+		// see buildPrefillMMFeatures. A text-only request omits features
+		// entirely.
+		if features := buildPrefillMMFeatures(entries, ecParams); features != nil {
+			body["features"] = features
+		}
 		return nil
 	}
 	if withMetadata, ok := entriesWithECMetadata(entries, ecParams); ok {
