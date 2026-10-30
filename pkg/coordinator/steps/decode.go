@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -42,22 +43,34 @@ func init() {
 }
 
 type DecodeStep struct {
-	gwClient *gateway.Client
-	kv       kv.Connector
+	useOpenAIFormat bool
+	outputMode      string
+	gwClient        *gateway.Client
+	kv              kv.Connector
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
 	if gwClient == nil {
 		return nil, errors.New("decode: gateway client is required")
 	}
-	if err := rejectUseOpenAIFormatOverride(DecodeStepName, params); err != nil {
-		return nil, err
+	useOpenAI, err := parseUseOpenAIFormat(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	outputMode, err := parseOutputMode(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	kvConn, err := buildKVConnector(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
+	return &DecodeStep{
+		useOpenAIFormat: useOpenAI,
+		outputMode:      outputMode,
+		gwClient:        gwClient,
+		kv:              kvConn,
+	}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -65,13 +78,23 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
+	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	body, err := s.prepareDecodeBody(ctx, reqCtx, format)
+	if err != nil {
 		return err
 	}
 
-	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
+	// The tokens-in format is served on the generate route whatever the client
+	// called, so the leg is addressed by the format rather than by the client's
+	// own path. On an OpenAI-format leg the two are the same path.
+	path := reqCtx.OriginalPath
+	if format == reqcommon.APITypeVLLMGenerate {
+		path = reqcommon.PathVLLMGenerate
+	}
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", path, "format", format, "stream", reqCtx.Stream)
+
+	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, path, body, nil)
 	if err != nil {
 		return err
 	}
@@ -97,33 +120,107 @@ func (s *DecodeStep) responseWriter(reqCtx *pipeline.RequestContext) (http.Respo
 	return usage.NewCachedTokensResponseWriter(reqCtx.ResponseWriter, *reqCtx.PrefillCachedTokens, reqCtx.Stream)
 }
 
-// prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
-// prefill and conditional-decode). decode is the terminal pipeline step: its body
-// is streamed straight to the client and no later step reads reqCtx.Body. A clone
-// would also be insufficient, since injectUUIDs mutates nested values that a shallow
+// prepareDecodeBody returns the body the decode leg sends. On an OpenAI-format
+// leg it mutates reqCtx.Body in place rather than on a clone (unlike prefill and
+// conditional-decode). decode is the terminal pipeline step: its body is streamed
+// straight to the client and no later step reads reqCtx.Body. A clone would also
+// be insufficient, since injectUUIDs mutates nested values that a shallow
 // maps.Clone would still share. This is sound only while the pipeline runs steps
 // sequentially; if it ever goes concurrent, decode must copy like the others.
-func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+//
+// The generate format is built fresh instead, since the client's body carries the
+// wrong shape whenever its own path is not the generate route.
+func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
-	format := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
 	kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate:
+	case reqcommon.APITypeVLLMGenerate:
+		return s.buildGenerateBody(reqCtx, kvParams), nil
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+		return reqCtx.Body, nil
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
+		return reqCtx.Body, nil
 	default:
 		// kvParams and injectUUIDs above already ran; both are harmless here
-		// since the request fails on this return and reqCtx.Body is never sent.
-		return unreachableFormatError(format)
+		// since the request fails on this return and no body is sent.
+		return nil, unreachableFormatError(format)
 	}
-	return nil
+}
+
+// buildGenerateBody builds the tokens-in decode body: the rendered token IDs,
+// the client's own sampling_params (decode generates the real output, so its
+// caps are not rewritten the way prefill's CapSingleToken rewrites them), and
+// the KV handoff params at the top level.
+//
+// output_mode defaults to text, which asks the worker for detokenized text
+// beside the token IDs so a tokens-in pipeline answers the client without a
+// second /derender call. A derender step needs tokens instead, the only mode
+// that endpoint accepts. A worker predating the field ignores either value and
+// answers with token IDs only.
+//
+// A client that called the generate route keeps every other field it sent
+// (cache_salt, priority, stream_options, ...); a client on another route has
+// none to keep, since its body describes a different API, so only its output
+// cap and stream flag carry across.
+func (s *DecodeStep) buildGenerateBody(reqCtx *pipeline.RequestContext, kvParams map[string]any) map[string]any {
+	clientAPI := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+
+	body := map[string]any{}
+	if clientAPI == reqcommon.APITypeVLLMGenerate {
+		body = maps.Clone(reqCtx.Body)
+	} else {
+		body[reqcommon.FieldStream] = reqCtx.Stream
+	}
+	body["request_id"] = reqCtx.RequestID
+	body["token_ids"] = reqCtx.TokenIDs
+	body[reqcommon.FieldModel] = reqCtx.Model
+	body[reqcommon.FieldOutputMode] = s.outputMode
+	body[reqcommon.FieldKVTransferParams] = kvParams
+	if features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, nil); features != nil {
+		body["features"] = features
+	}
+
+	// sampling_params is required by the generate API and has no server-side
+	// default, so a client whose limits sit at the top level of another API's
+	// body needs them moved under here; without the move the worker falls back
+	// to its own max_tokens default (16) and truncates the answer, and the
+	// client's min_tokens floor is lost.
+	//
+	// The cap is read through OutputTokenLimit rather than copied by name,
+	// since each API names it differently (max_completion_tokens,
+	// max_output_tokens) and the generate API accepts only max_tokens.
+	// min_tokens is named the same everywhere, so it is carried across as is.
+	sampling, _ := body[reqcommon.FieldSamplingParams].(map[string]any)
+	limits := make(map[string]any, len(sampling)+2)
+	maps.Copy(limits, sampling)
+	if clientAPI != reqcommon.APITypeVLLMGenerate {
+		if limit, ok := reqcommon.OutputTokenLimit(reqCtx.Body, clientAPI); ok {
+			limits[reqcommon.FieldMaxTokens] = limit
+		}
+		if floor, ok := reqCtx.Body[reqcommon.FieldMinTokens]; ok && floor != nil {
+			limits[reqcommon.FieldMinTokens] = floor
+		}
+	}
+	body[reqcommon.FieldSamplingParams] = limits
+
+	// The derender mode parses the whole message server-side and vLLM refuses
+	// it with stream: true, so the leg is sent unstreamed and the complete
+	// answer is forwarded to the client in one write. A client that asked to
+	// stream still gets its answer, in a single frame rather than a sequence.
+	if s.outputMode == reqcommon.OutputModeDerender {
+		body[reqcommon.FieldStream] = false
+		delete(body, reqcommon.FieldStreamOptions)
+	}
+
+	return body
 }
 
 // injectUUIDs tags each media content part with the uuid the decode backend

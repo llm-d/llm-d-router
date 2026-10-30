@@ -42,6 +42,30 @@ type APISurface int
 
 const APISurfaceUnknown APISurface = 0
 
+// output_mode values of the vLLM generate API, naming what a response carries
+// beyond its token IDs. The field defaults to tokens, and a server
+// predating it ignores the value and answers with token IDs either way.
+//
+// OutputModeText adds the detokenized text to each choice. vLLM rejects it
+// with 400 on a worker that loads no tokenizer (--tokens-only,
+// --skip-tokenizer-init) or whose request sets sampling_params.detokenize to
+// false.
+//
+// OutputModeDerender adds the parsed assistant message (content, reasoning,
+// tool_calls) instead, applying the engine's own parsers in the decode call.
+// vLLM rejects it with 400 alongside stream: true, and on a server with a tool
+// or reasoning parser configured it also requires a parse_context built by
+// /render. It postdates OutputModeText, so a worker that knows only the
+// earlier modes answers 400 for an unknown mode.
+//
+// The default, tokens, has no constant here: the coordinator never asks for it.
+// Decode streams its response to the client, so a token-IDs-only body would
+// reach the caller with no text in it.
+const (
+	OutputModeText     = "text"
+	OutputModeDerender = "derender"
+)
+
 // APIType is the inference API a request was sent to. Path and the output
 // token cap treat a value outside the constants below as
 // APITypeChatCompletions; String reports it as APIType(N).
