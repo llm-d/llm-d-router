@@ -49,6 +49,45 @@ func TestHashLRUAllocatesOnFirstAdd(t *testing.T) {
 	}
 }
 
+func TestHashLRUHomeIsSeeded(t *testing.T) {
+	const capacity = 64
+	a := newHashLRU(capacity)
+	b := newHashLRU(capacity)
+	a.Add(1)
+	b.Add(1)
+	n := uint64(len(a.slots))
+	clustered := 0
+	differ := 0
+	const keys = 256
+	for i := range keys {
+		// Every one of these keys shares a home when the slot is key % len(slots).
+		key := blockHash(uint64(i) * n)
+		if a.home(key) == a.home(0) {
+			clustered++
+		}
+		if a.home(key) != b.home(key) {
+			differ++
+		}
+	}
+	if clustered == keys {
+		t.Fatal("every key landed in one slot")
+	}
+	if differ == 0 {
+		t.Fatal("two tables share a home function")
+	}
+}
+
+func TestHashLRUCapsOversizedCapacity(t *testing.T) {
+	c := newHashLRU(maxHashLRUCapacity + 1)
+	if c.capacity != defaultLRUCapacityPerServer {
+		t.Fatalf("capacity %d, want %d", c.capacity, defaultLRUCapacityPerServer)
+	}
+	c.Add(1)
+	if !c.Contains(1) {
+		t.Fatal("add into a capped cache missed")
+	}
+}
+
 func TestHashLRUZeroCapacity(t *testing.T) {
 	c := newHashLRU(0)
 	c.Add(1)

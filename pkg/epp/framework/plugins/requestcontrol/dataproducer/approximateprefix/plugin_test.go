@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -221,6 +222,10 @@ func TestDataProducerValidation(t *testing.T) {
 		AutoTune:               false,
 		BlockSizeTokens:        1,
 		MaxPrefixBlocksToMatch: -1,
+	}, {
+		AutoTune:             false,
+		BlockSizeTokens:      1,
+		LRUCapacityPerServer: maxHashLRUCapacity + 1,
 	}}
 
 	for _, config := range validConfigs {
@@ -410,6 +415,8 @@ func TestMakeserver_AutotuneCapacityInRouterBlocks(t *testing.T) {
 		{name: "cache smaller than one router block", metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 2}, want: 1},
 		{name: "engine block size not reported", metrics: &fwkdl.Metrics{CacheNumBlocks: 1000}, want: 1000},
 		{name: "prefix match unit below the engine block", metrics: &fwkdl.Metrics{CacheBlockSize: 4096, CachePrefixMatchUnit: 32, CacheNumBlocks: 1000}, want: 64000},
+		{name: "reported block count above the index limit", metrics: &fwkdl.Metrics{CacheNumBlocks: maxHashLRUCapacity + 1}, want: defaultLRUCapacityPerServer},
+		{name: "scaled block count overflows", metrics: &fwkdl.Metrics{CacheBlockSize: math.MaxInt, CacheNumBlocks: 2}, want: defaultLRUCapacityPerServer},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

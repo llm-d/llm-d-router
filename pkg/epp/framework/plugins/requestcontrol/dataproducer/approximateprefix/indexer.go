@@ -68,8 +68,11 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 	defer i.mu.Unlock()
 	if pc = i.pods[pod.ServerID]; pc == nil {
 		lruSize := pod.NumOfGPUBlocks
-		if lruSize <= 0 {
+		if lruSize <= 0 || lruSize > maxHashLRUCapacity {
 			lruSize = i.defaultLRUSize
+		}
+		if lruSize <= 0 || lruSize > maxHashLRUCapacity {
+			lruSize = defaultLRUCapacityPerServer
 		}
 		pc = &podCache{lru: newHashLRU(lruSize)}
 		i.pods[pod.ServerID] = pc

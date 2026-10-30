@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -193,6 +194,9 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 	if config.MaxPrefixBlocksToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
+	if config.LRUCapacityPerServer > maxHashLRUCapacity {
+		return nil, fmt.Errorf("invalid configuration: LRUCapacityPerServer must be <= %d (current value: %d)", maxHashLRUCapacity, config.LRUCapacityPerServer)
 	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
@@ -682,21 +686,44 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
+	if p.config.LRUCapacityPerServer > 0 {
+		gpuBlocks = p.config.LRUCapacityPerServer
+	}
 	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
 		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
 		// block, which minBlockSizeTokens can make larger. Size the LRU to the
 		// engine's token capacity so it does not outlive the engine's cache.
-		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
-			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
+		// A reported size past maxHashLRUCapacity, or one whose scaling overflows,
+		// keeps the configured capacity. The table is allocated in full on the
+		// first Add, so an unbounded report would reserve that much memory at once.
+		if blocks, ok := scaledLRUCapacity(targetEndpoint.GetMetrics().CacheNumBlocks, targetEndpoint.GetMetrics().CacheBlockSize, p.GetBlockSize([]fwksched.Endpoint{targetEndpoint})); ok {
+			gpuBlocks = blocks
 		}
-	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
 		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
 		NumOfGPUBlocks: gpuBlocks,
 	}
+}
+
+// scaledLRUCapacity converts an engine block count into router-block capacity.
+// engineBlockSize 0 means the count is already in router blocks. ok is false
+// when the result would overflow or exceed maxHashLRUCapacity.
+func scaledLRUCapacity(numBlocks, engineBlockSize, routerBlockSize int) (int, bool) {
+	if numBlocks <= 0 {
+		return 0, false
+	}
+	if engineBlockSize <= 0 {
+		return numBlocks, numBlocks <= maxHashLRUCapacity
+	}
+	if routerBlockSize <= 0 || numBlocks > math.MaxInt/engineBlockSize {
+		return 0, false
+	}
+	blocks := numBlocks * engineBlockSize / routerBlockSize
+	if blocks < 1 {
+		blocks = 1
+	}
+	return blocks, blocks <= maxHashLRUCapacity
 }
 
 // GetBlockSize returns the block size in tokens, potentially auto-tuned from endpoint metrics.

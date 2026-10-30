@@ -16,6 +16,8 @@ limitations under the License.
 
 package approximateprefix
 
+import "hash/maphash"
+
 // idxNil is the prev/next sentinel. It fills 31 bits so it can sit beside the
 // occupied flag in prev. Slot indexes therefore have to stay below 2^31.
 const idxNil = uint32(0x7FFFFFFF)
@@ -38,8 +40,12 @@ type hashSlot struct {
 // slots is twice capacity so a lookup stops within a few entries, and the
 // slice is allocated on the first Add. head is the most recently added or
 // refreshed hash; tail is the next eviction. Contains does not move a hit.
+// seed mixes the block hash before it selects a slot. Block hashes are public
+// xxhash values, so an unseeded home would let a client place many hashes in
+// one probe run.
 type hashLRU struct {
 	slots    []hashSlot
+	seed     maphash.Seed
 	capacity int
 	n        int
 	head     uint32
@@ -48,9 +54,9 @@ type hashLRU struct {
 
 func newHashLRU(capacity int) *hashLRU {
 	if capacity > maxHashLRUCapacity {
-		panic("hash LRU capacity exceeds slot index range")
+		capacity = defaultLRUCapacityPerServer
 	}
-	return &hashLRU{capacity: capacity, head: idxNil, tail: idxNil}
+	return &hashLRU{capacity: capacity, seed: maphash.MakeSeed(), head: idxNil, tail: idxNil}
 }
 
 func (c *hashLRU) Len() int { return c.n }
@@ -109,7 +115,12 @@ func (c *hashLRU) find(key blockHash) (uint32, bool) {
 }
 
 func (c *hashLRU) home(key blockHash) uint32 {
-	return uint32(uint64(key) % uint64(len(c.slots))) // #nosec G115 -- the modulus is below len(slots), bounded by newHashLRU.
+	n := uint64(len(c.slots))
+	if n == 0 {
+		return 0
+	}
+	// #nosec G115 -- the modulus is len(slots), bounded by newHashLRU.
+	return uint32(maphash.Comparable(c.seed, key) % n)
 }
 
 func (c *hashLRU) evictOldest() {
