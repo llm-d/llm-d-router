@@ -197,26 +197,25 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 }
 
 // applyGenerateMMInputs sets the multimodal input on a generate prefill body:
-// features when the entries carry tensors or rebuilt metadata, or the client's
-// media as content_parts with the collapsed token_ids. vLLM takes content_parts
-// or features, not both, and expands the placeholders of a content_parts prompt
+// features when the entries carry tensors, or when the tensors were omitted but
+// every entry has mm_metadata and EC coverage; otherwise the client's media as
+// content_parts with the collapsed token_ids. vLLM takes content_parts or
+// features, not both, and expands the placeholders of a content_parts prompt
 // itself.
 func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipeline.RequestContext, ecParams map[string]any, body map[string]any) error {
 	entries := reqCtx.MultimodalEntries
-	switch reqCtx.MMPayload {
-	case "":
+	if reqCtx.MMPayload == "" {
 		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
 		// see buildPrefillMMFeatures.
 		body["features"] = buildPrefillMMFeatures(entries, ecParams)
 		return nil
-	case pipeline.MMPayloadMetadata:
-		if withMetadata, ok := entriesWithECMetadata(entries, ecParams); ok {
-			body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
-			return nil
-		}
-		log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
-			"ec_transfer_params carry no usable metadata for an entry; sending media as content_parts")
 	}
+	if withMetadata, ok := entriesWithECMetadata(entries, ecParams); ok {
+		body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
+		return nil
+	}
+	log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
+		"an entry has no EC coverage or no mm_metadata; sending media as content_parts")
 	tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, entries)
 	if err != nil {
 		return err

@@ -108,10 +108,10 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 	switch mmPayload {
 	case "":
 		mmPayload = pipeline.MMPayloadNone
-	case pipeline.MMPayloadTensors, pipeline.MMPayloadMetadata, pipeline.MMPayloadNone:
+	case pipeline.MMPayloadTensors, pipeline.MMPayloadNone:
 	default:
-		return nil, fmt.Errorf("mm_payload must be %q, %q or %q, got %q",
-			pipeline.MMPayloadTensors, pipeline.MMPayloadMetadata, pipeline.MMPayloadNone, mmPayload)
+		return nil, fmt.Errorf("mm_payload must be %q or %q, got %q",
+			pipeline.MMPayloadTensors, pipeline.MMPayloadNone, mmPayload)
 	}
 
 	transport := &http.Transport{

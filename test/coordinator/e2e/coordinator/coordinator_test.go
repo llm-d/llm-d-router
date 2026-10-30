@@ -80,7 +80,7 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 	}))
 
 	ginkgo.When("the renderer ignores mm_payload and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
-		// The render step asks for no tensors (mm_payload: metadata). The
+		// The render step asks for no tensors (mm_payload: none). The
 		// simulator returns kwargs_data anyway, as a vLLM without the field
 		// does, so encode and prefill keep the features path and send no
 		// content_parts.

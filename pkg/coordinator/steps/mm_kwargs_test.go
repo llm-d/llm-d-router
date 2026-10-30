@@ -97,23 +97,18 @@ func runRender(t *testing.T, params map[string]any, gotMMPayload *any) *pipeline
 }
 
 func TestRenderStep_MMPayload(t *testing.T) {
-	for _, mode := range []string{pipeline.MMPayloadMetadata, pipeline.MMPayloadNone} {
-		t.Run(mode, func(t *testing.T) {
-			var got any
-			reqCtx := runRender(t, map[string]any{"mm_payload": mode}, &got)
-			require.Equal(t, pipeline.MMPayloadNone, got, "render must ask vLLM to omit tensors")
-			require.Equal(t, mode, reqCtx.MMPayload)
-			require.Empty(t, reqCtx.MultimodalEntries[0].KwargsData)
-			require.Equal(t, "h-img", reqCtx.MultimodalEntries[0].Hash)
-			require.NotContains(t, reqCtx.Body, "mm_payload", "the field must not leak into the client body forwarded downstream")
-			require.NotContains(t, reqCtx.Body, "return_mm_kwargs")
-		})
-	}
-
-	// The default is none: an unset param asks the renderer to omit the tensors
-	// like an explicit none.
 	var got any
-	reqCtx := runRender(t, map[string]any{}, &got)
+	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
+	require.Equal(t, pipeline.MMPayloadNone, got, "render must ask vLLM to omit tensors")
+	require.Equal(t, pipeline.MMPayloadNone, reqCtx.MMPayload)
+	require.Empty(t, reqCtx.MultimodalEntries[0].KwargsData)
+	require.Equal(t, "h-img", reqCtx.MultimodalEntries[0].Hash)
+	require.NotContains(t, reqCtx.Body, "mm_payload", "the field must not leak into the client body forwarded downstream")
+	require.NotContains(t, reqCtx.Body, "return_mm_kwargs")
+
+	// An unset param asks the renderer to omit the tensors like an explicit
+	// none.
+	reqCtx = runRender(t, map[string]any{}, &got)
 	require.Equal(t, pipeline.MMPayloadNone, got, "the default must ask vLLM to omit tensors")
 	require.Equal(t, pipeline.MMPayloadNone, reqCtx.MMPayload)
 	require.Empty(t, reqCtx.MultimodalEntries[0].KwargsData)
@@ -124,7 +119,7 @@ func TestRenderStep_MMPayload(t *testing.T) {
 	require.Empty(t, reqCtx.MMPayload)
 	require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
 
-	for _, bad := range []any{"pixels", true} {
+	for _, bad := range []any{"pixels", true, "metadata"} {
 		_, err := NewRenderStep(nil, map[string]any{"mm_payload": bad})
 		require.Error(t, err, "mm_payload %v", bad)
 	}
@@ -215,7 +210,7 @@ func TestRenderStep_RendererIgnoringMMPayloadKeepsFeatures(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadMetadata})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	reqCtx := &pipeline.RequestContext{
@@ -234,7 +229,7 @@ func TestRenderStep_TextOnlyLeavesMMPayloadUnset(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"token_ids": []int{1, 2}})
 	}))
 	defer server.Close()
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadMetadata})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	reqCtx := &pipeline.RequestContext{

@@ -67,10 +67,10 @@ var coordinatorConfigNIXLGenerate = strings.Replace(
 	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false", 1)
 
 // coordinatorConfigNIXLGenerateMMPayload is coordinatorConfigNIXLGenerate with
-// the render step asking the renderer for no tensors (mm_payload: metadata).
+// the render step asking the renderer for no tensors (mm_payload: none).
 var coordinatorConfigNIXLGenerateMMPayload = strings.Replace(
 	coordinatorConfigNIXLGenerate, "timeout: 60s\n    - type: encode",
-	"timeout: 60s\n        mm_payload: metadata\n    - type: encode", 1)
+	"timeout: 60s\n        mm_payload: none\n    - type: encode", 1)
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its

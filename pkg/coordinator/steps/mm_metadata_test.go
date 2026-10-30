@@ -96,9 +96,12 @@ func (e *ecServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func runEncodePrefill(t *testing.T, srv *ecServer) {
 	var got any
-	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadMetadata}, &got)
+	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
 	require.Equal(t, pipeline.MMPayloadNone, got)
+	encodePrefill(t, srv, reqCtx)
+}
 
+func encodePrefill(t *testing.T, srv *ecServer, reqCtx *pipeline.RequestContext) {
 	server := httptest.NewServer(srv)
 	t.Cleanup(server.Close)
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
@@ -111,9 +114,10 @@ func runEncodePrefill(t *testing.T, srv *ecServer) {
 	require.NoError(t, prefill.Execute(context.Background(), reqCtx))
 }
 
-// With mm_payload metadata, encode carries the media and prefill gets
-// mm_metadata rebuilt from the encode response instead of the media.
-func TestEncodeAndPrefill_MMPayloadMetadata(t *testing.T) {
+// With the tensors omitted and every entry covered, encode carries the media
+// and prefill gets mm_metadata rebuilt from the encode response instead of the
+// media.
+func TestEncodeAndPrefill_MMPayloadNoneRebuildsMetadata(t *testing.T) {
 	srv := &ecServer{metadata: func(string) map[string]any { return gridThw(1, 68, 120) }}
 	runEncodePrefill(t, srv)
 
@@ -136,7 +140,7 @@ func TestEncodeAndPrefill_MMPayloadMetadata(t *testing.T) {
 
 // One entry without usable metadata sends the whole prefill request as
 // content_parts: vLLM cannot mix features and content_parts.
-func TestEncodeAndPrefill_MMPayloadMetadataFallsBackToContentParts(t *testing.T) {
+func TestEncodeAndPrefill_MMPayloadNoneFallsBackToContentParts(t *testing.T) {
 	srv := &ecServer{metadata: func(hash string) map[string]any {
 		if hash == "h-aud" {
 			return nil
@@ -150,4 +154,42 @@ func TestEncodeAndPrefill_MMPayloadMetadataFallsBackToContentParts(t *testing.T)
 	require.Len(t, body["content_parts"], 2)
 	require.Equal(t, []any{float64(1), float64(9), float64(7), float64(8), float64(2)}, body["token_ids"])
 	require.Contains(t, body, reqcommon.FieldECTransferParams)
+}
+
+// mm_metadata the render response carried is sent as-is: the EC descriptor
+// needs no metadata for an entry render already described.
+func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 9, 9, 9, 2},
+			"features": map[string]any{
+				"mm_hashes":       map[string]any{"image": []string{"h-img"}},
+				"mm_placeholders": map[string]any{"image": []any{map[string]any{"offset": 1, "length": 3}}},
+				"mm_metadata":     map[string]any{"image": []string{vllmGridThwMetadata}},
+			},
+		})
+	}))
+	defer server.Close()
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	require.NoError(t, err)
+	step.(*RenderStep).SetServiceAddress(server.URL)
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "m",
+		Body: map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testImageURL}},
+		}}}},
+		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage}},
+	}
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, vllmGridThwMetadata, reqCtx.MultimodalEntries[0].MMMetadata)
+
+	srv := &ecServer{metadata: func(string) map[string]any { return nil }}
+	encodePrefill(t, srv, reqCtx)
+
+	body := srv.prefill
+	require.NotContains(t, body, "content_parts")
+	features := body["features"].(map[string]any)
+	require.Equal(t, map[string]any{"image": []any{vllmGridThwMetadata}}, features["mm_metadata"])
+	require.Equal(t, map[string]any{"image": []any{nil}}, features["kwargs_data"])
 }

@@ -72,21 +72,27 @@ func mmMetadataFromEC(metadata map[string]any) (item string, ok bool) {
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), true
 }
 
-// entriesWithECMetadata returns a copy of entries with MMMetadata rebuilt from
-// each entry's ec_transfer_params descriptor. ok is false when any entry has no
-// descriptor or no metadata mmMetadataFromEC can encode: vLLM's prefill needs
-// either the tensors or the metadata for every item, and the request has
-// neither tensors nor a way to send part of its media.
+// entriesWithECMetadata returns a copy of entries with MMMetadata set for every
+// entry, taking the metadata the render response carried when it has one and
+// rebuilding the rest from each entry's ec_transfer_params descriptor. ok is
+// false when any entry has no descriptor, or no metadata from either source:
+// vLLM's prefill needs either the tensors or the metadata for every item, and
+// the request has neither tensors nor a way to send part of its media.
 func entriesWithECMetadata(entries []pipeline.MultimodalEntry, ecParams map[string]any) ([]pipeline.MultimodalEntry, bool) {
 	out := make([]pipeline.MultimodalEntry, len(entries))
 	for i, entry := range entries {
 		desc, _ := ecParams[entry.Hash].(map[string]any)
-		metadata, _ := desc["metadata"].(map[string]any)
-		item, ok := mmMetadataFromEC(metadata)
-		if !ok {
+		if len(desc) == 0 {
 			return nil, false
 		}
-		entry.MMMetadata = item
+		if entry.MMMetadata == "" {
+			metadata, _ := desc["metadata"].(map[string]any)
+			item, ok := mmMetadataFromEC(metadata)
+			if !ok {
+				return nil, false
+			}
+			entry.MMMetadata = item
+		}
 		out[i] = entry
 	}
 	return out, true
