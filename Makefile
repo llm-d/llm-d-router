@@ -227,7 +227,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate
+presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-review-playbook
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -358,6 +358,10 @@ verify-manifests: kubectl-validate ## Validate deployment manifests.
 .PHONY: verify-boilerplate
 verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
 	hack/copyright.sh verify
+
+.PHONY: verify-review-playbook
+verify-review-playbook: image-build-builder ## Check that docs/review/ is valid and docs/review_playbook.md is in sync.
+	$(BUILDER_RUN) 'python3 hack/render_playbook.py --check'
 
 ##@ Helm
 
