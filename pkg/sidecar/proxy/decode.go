@@ -281,7 +281,21 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			if streamingEnabled && chunkIndex > 0 {
 				// The status went out with the first chunk, so the error is sent the
 				// way vLLM reports a failure in a stream: as a data event before [DONE].
-				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, bw.bodyBytes(), reqcommon.SSEDone)
+				errorBody := bw.bodyBytes()
+				var flatError errorResponse
+				if json.Unmarshal(errorBody, &flatError) == nil && flatError.Object == "error" {
+					var err error
+					errorBody, err = json.Marshal(reqcommon.OpenAIErrorResponse{Error: reqcommon.OpenAIError{
+						Message: flatError.Message,
+						Type:    flatError.Type,
+						Code:    flatError.Code,
+					}})
+					if err != nil {
+						logger.Error(err, "failed to marshal SSE error")
+						return
+					}
+				}
+				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, errorBody, reqcommon.SSEDone)
 				return
 			}
 			WriteAll(w, bw.bodyBytes())
