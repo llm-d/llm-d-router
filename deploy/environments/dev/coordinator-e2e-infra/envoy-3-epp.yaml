@@ -123,6 +123,31 @@ data:
                                         cluster_name: ext_proc_encode
                                         authority: ${EPP_NAME_ENCODE}.${NAMESPACE}:9002
                                       timeout: 10s
+                            # SGLang prefill exposes the selected worker to the coordinator.
+                            - match:
+                                path: "/generate"
+                                headers:
+                                  - name: x-llm-d-epp-profile
+                                    string_match:
+                                      exact: prefill
+                              route:
+                                cluster: original_destination_cluster
+                                timeout: 0s
+                                idle_timeout: 86400s
+                              response_headers_to_add:
+                                - header:
+                                    key: x-llm-d-prefiller-host-port
+                                    value: "%UPSTREAM_HOST%"
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                              typed_per_filter_config:
+                                envoy.filters.http.ext_proc:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                                  overrides:
+                                    grpc_service:
+                                      envoy_grpc:
+                                        cluster_name: ext_proc_prefill
+                                        authority: ${EPP_NAME_PREFILL}.${NAMESPACE}:9002
+                                      timeout: 10s
                             # x-llm-d-epp-profile: prefill -> the prefill EPP's ext_proc cluster.
                             - match:
                                 prefix: "/"
