@@ -111,6 +111,7 @@ jobs:
         run: make lint
 
       - name: Run govulncheck
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
           govulncheck ./...
