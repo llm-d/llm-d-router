@@ -305,11 +305,11 @@ func (r *cachedTokensUsageRewriter) processJSON(body []byte) ([]byte, bool) {
 	if err := json.Unmarshal(body, &response); err != nil || response == nil {
 		return nil, false
 	}
-	block, topLevel := r.observe(response)
-	if r.cachedTokens == nil || !topLevel || !setCachedTokens(block, *r.cachedTokens) {
+	block, wrapper := r.observe(response)
+	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
 		return body, true
 	}
-	return marshalWithUsage(response, block, body), true
+	return marshalWithUsage(response, wrapper, block, body), true
 }
 
 func (r *cachedTokensUsageRewriter) processSSE(body []byte) ([]byte, bool) {
@@ -370,16 +370,16 @@ func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isD
 	if err := json.Unmarshal(data, &response); err != nil || response == nil {
 		return line, true, false
 	}
-	block, topLevel := r.observe(response)
-	if r.dropUsageOnly && topLevel && hasEmptyChoices(response) {
+	block, wrapper := r.observe(response)
+	if r.dropUsageOnly && block != nil && wrapper == "" && hasEmptyChoices(response) {
 		return nil, true, true
 	}
-	if r.cachedTokens == nil || !topLevel || !setCachedTokens(block, *r.cachedTokens) {
+	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
 		return line, true, false
 	}
 	updated := make([]byte, 0, len(line))
 	updated = append(updated, []byte(reqcommon.SSEDataPrefix)...)
-	updated = append(updated, marshalWithUsage(response, block, data)...)
+	updated = append(updated, marshalWithUsage(response, wrapper, block, data)...)
 	updated = append(updated, lineEnding...)
 	return updated, true, false
 }
@@ -387,18 +387,18 @@ func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isD
 // observe decodes the usage block a response carries and reports it to the
 // observer. It is the top-level "usage" for chat, completions, generate and
 // the final Responses and Messages objects; "response.usage" for Responses
-// stream events; "message.usage" for the Messages message_start event. Only a
-// top-level block is rewritten, so topLevel says which kind was found. A null
-// usage, which Responses sends on its early events, counts as absent.
-func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage) (block map[string]any, topLevel bool) {
+// stream events; "message.usage" for the Messages message_start event. wrapper
+// names the object that holds a nested block and is empty for a top-level one.
+// A null usage, which Responses sends on its early events, counts as absent.
+func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage) (block map[string]any, wrapper string) {
 	if raw, ok := response[reqcommon.FieldUsage]; ok {
-		if err := json.Unmarshal(raw, &block); err == nil && block != nil {
-			topLevel = true
+		if err := json.Unmarshal(raw, &block); err != nil {
+			block = nil
 		}
 	}
 	if block == nil {
-		for _, wrapper := range []string{fieldResponse, fieldMessage} {
-			raw, ok := response[wrapper]
+		for _, key := range []string{fieldResponse, fieldMessage} {
+			raw, ok := response[key]
 			if !ok {
 				continue
 			}
@@ -408,7 +408,7 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 			}
 			var nested map[string]any
 			if err := json.Unmarshal(inner[reqcommon.FieldUsage], &nested); err == nil && nested != nil {
-				block = nested
+				block, wrapper = nested, key
 				break
 			}
 		}
@@ -416,18 +416,38 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 	if block != nil && r.onUsage != nil {
 		r.onUsage(block)
 	}
-	return block, topLevel
+	return block, wrapper
 }
 
-// marshalWithUsage re-encodes response with block as its usage, leaving every
-// other value as the raw JSON it arrived as. On an encoding error the
-// original bytes are returned unchanged.
-func marshalWithUsage(response map[string]json.RawMessage, block map[string]any, original []byte) []byte {
+// rewritable reports whether the cached-token rewrite applies to a usage block
+// found under wrapper: the top-level block, and response.usage on Responses
+// stream events such as response.completed.
+func rewritable(wrapper string) bool {
+	return wrapper == "" || wrapper == fieldResponse
+}
+
+// marshalWithUsage re-encodes response with block as its usage, or as the
+// usage of response[wrapper] when wrapper is set, leaving every other value as
+// the raw JSON it arrived as. On an encoding error the original bytes are
+// returned unchanged.
+func marshalWithUsage(response map[string]json.RawMessage, wrapper string, block map[string]any, original []byte) []byte {
 	usage, err := json.Marshal(block)
 	if err != nil {
 		return original
 	}
-	response[reqcommon.FieldUsage] = usage
+	if wrapper != "" {
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(response[wrapper], &inner); err != nil {
+			return original
+		}
+		inner[reqcommon.FieldUsage] = usage
+		if usage, err = json.Marshal(inner); err != nil {
+			return original
+		}
+		response[wrapper] = usage
+	} else {
+		response[reqcommon.FieldUsage] = usage
+	}
 	updated, err := json.Marshal(response)
 	if err != nil {
 		return original

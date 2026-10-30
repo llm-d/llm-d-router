@@ -122,6 +122,22 @@ func TestReplaceCachedTokens(t *testing.T) {
 			want: "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"prompt_tokens_details\":{\"cached_tokens\":7}}}\n\ndata: [DONE]\n",
 		},
 		{
+			name: "streamed responses completed event",
+			body: "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":64,\"input_tokens_details\":{\"cached_tokens\":500},\"total_tokens\":68}}}\n\n",
+			want: "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":64,\"input_tokens_details\":{\"cached_tokens\":7},\"total_tokens\":68}},\"type\":\"response.completed\"}\n\n",
+		},
+		{
+			name: "streamed responses incomplete event",
+			body: "data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":64,\"input_tokens_details\":{\"cached_tokens\":500}}}}\n\n",
+			want: "data: {\"response\":{\"usage\":{\"input_tokens\":64,\"input_tokens_details\":{\"cached_tokens\":7}}},\"type\":\"response.incomplete\"}\n\n",
+		},
+		{
+			// Responses events before the terminal one carry no usage.
+			name: "streamed responses event without usage",
+			body: "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"usage\":null}}\n\n",
+			want: "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"usage\":null}}\n\n",
+		},
+		{
 			name: "non-JSON streamed data lines",
 			body: "event: ping\ndata: not-json\n\ndata: [DONE]\n",
 			want: "event: ping\ndata: not-json\n\ndata: [DONE]\n",
