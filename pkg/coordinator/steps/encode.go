@@ -103,7 +103,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var partsByMod map[reqcommon.Modality][]mediaPart
-	if format != reqcommon.APITypeVLLMGenerate || reqCtx.MMKwargsOmitted {
+	if format != reqcommon.APITypeVLLMGenerate || reqCtx.MMPayload != "" {
 		partsByMod = clientMediaParts(reqCtx)
 	}
 
@@ -260,7 +260,7 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// preprocesses nothing, so the client's mm_processor_kwargs and
 		// media_io_kwargs have no effect here. Render already applied them and
 		// returned the result as entry.Hash and entry.KwargsData.
-		if reqCtx.MMKwargsOmitted {
+		if reqCtx.MMPayload != "" {
 			return s.buildEncodeContentPartsBody(reqCtx, entry, localIdx, partsByMod)
 		}
 		body := map[string]any{

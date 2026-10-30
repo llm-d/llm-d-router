@@ -47,7 +47,7 @@ type RenderStep struct {
 	serviceAddress            string
 	maxTotalTokens            int
 	maxTotalPlaceholderTokens int
-	returnMMKwargs            bool
+	mmPayload                 string
 	client                    *http.Client
 }
 
@@ -101,9 +101,17 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		maxPlaceholders = v
 	}
 
-	returnMMKwargs, _, err := paramBool(params, "return_mm_kwargs")
+	mmPayload, err := paramString(params, "mm_payload")
 	if err != nil {
 		return nil, err
+	}
+	switch mmPayload {
+	case "":
+		mmPayload = pipeline.MMPayloadNone
+	case pipeline.MMPayloadTensors, pipeline.MMPayloadMetadata, pipeline.MMPayloadNone:
+	default:
+		return nil, fmt.Errorf("mm_payload must be %q, %q or %q, got %q",
+			pipeline.MMPayloadTensors, pipeline.MMPayloadMetadata, pipeline.MMPayloadNone, mmPayload)
 	}
 
 	transport := &http.Transport{
@@ -120,7 +128,7 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		serviceAddress:            address,
 		maxTotalTokens:            maxTokens,
 		maxTotalPlaceholderTokens: maxPlaceholders,
-		returnMMKwargs:            returnMMKwargs,
+		mmPayload:                 mmPayload,
 		client:                    &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
 }
@@ -336,9 +344,9 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		totalMetadata += len(metadata)
 	}
 	expected := len(reqCtx.MultimodalEntries)
-	// A renderer without the return_mm_kwargs field ignores it and returns the
+	// A renderer without the mm_payload field ignores it and returns the
 	// tensors, which keep the features path.
-	omitted := !s.returnMMKwargs && expected > 0 && totalKwargs == 0
+	omitted := s.mmPayload != pipeline.MMPayloadTensors && expected > 0 && totalKwargs == 0
 	if totalHashes != expected {
 		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
@@ -413,7 +421,9 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
-	reqCtx.MMKwargsOmitted = omitted
+	if omitted {
+		reqCtx.MMPayload = s.mmPayload
+	}
 
 	logger.V(logutil.DEBUG).Info("response",
 		"mm_hashes", renderResp.Features.MMHashes,
@@ -424,9 +434,9 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	return nil
 }
 
-// postRender marshals reqCtx.Body, with return_mm_kwargs false unless the
-// step enables it, POSTs it to <serviceAddress><basePath>/render,
-// and decodes the JSON response into out.
+// postRender marshals reqCtx.Body, asking for no tensors unless mm_payload is
+// tensors, POSTs it to <serviceAddress><basePath>/render, and decodes the JSON
+// response into out.
 func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) error {
 	if s.serviceAddress == "" {
 		return errors.New("render: service address not configured (set 'address' in render step params)")
@@ -435,9 +445,11 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	renderBody := reqCtx.Body
-	if !s.returnMMKwargs {
+	if s.mmPayload != pipeline.MMPayloadTensors {
+		// vLLM has no metadata-only render payload; prefill rebuilds it.
 		renderBody = maps.Clone(reqCtx.Body)
-		renderBody["return_mm_kwargs"] = false
+		renderBody[reqcommon.FieldReturnMMKwargs] = false
+		renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
 	}
 	body, err := json.Marshal(renderBody)
 	if err != nil {

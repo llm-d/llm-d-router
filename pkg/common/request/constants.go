@@ -93,6 +93,11 @@ const (
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+	// FieldMMPayload selects what a vLLM render response carries for each
+	// multimodal item; FieldReturnMMKwargs is its deprecated boolean alias,
+	// the only one vLLM v0.32 reads.
+	FieldMMPayload      = "mm_payload"
+	FieldReturnMMKwargs = "return_mm_kwargs"
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap

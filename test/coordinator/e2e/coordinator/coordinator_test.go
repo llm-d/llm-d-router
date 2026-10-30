@@ -79,15 +79,16 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		})
 	}))
 
-	ginkgo.When("the renderer ignores return_mm_kwargs and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
-		// The render step asks for no tensors by default. The simulator returns
-		// kwargs_data anyway, as a vLLM without the field does, so encode and
-		// prefill keep the features path and send no content_parts.
+	ginkgo.When("the renderer ignores mm_payload and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
+		// The render step asks for no tensors (mm_payload: metadata). The
+		// simulator returns kwargs_data anyway, as a vLLM without the field
+		// does, so encode and prefill keep the features path and send no
+		// content_parts.
 		ginkgo.It("keeps the features path on encode and prefill", func() {
 			logs := runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 				modelName, inlineImageDataURI,
-			)), allSteps, 1, tokenLimits{}, coordinatorConfigNIXLGenerate)
+			)), allSteps, 1, tokenLimits{}, coordinatorConfigNIXLGenerateMMPayload)
 			verifyFeaturesPath(logs)
 		})
 	}))
@@ -209,7 +210,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	// verifyCoordinatorSteps only substring-matches the prefill body and would
 	// still pass with the params nested, so this parses the structured http_body
 	// to pin the field's location.
-	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate {
+	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate || cfg == coordinatorConfigNIXLGenerateMMPayload {
 		verifyToplevelTransferParams(logs)
 	}
 	if threeEPP {
@@ -224,7 +225,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		}
 		// Mirrors resolveFormat: the pipeline sends generate for a native generate
 		// request and for a chat request with passthrough disabled, chat otherwise.
-		requestsSpeakChat := path != reqcommon.PathVLLMGenerate && cfg != coordinatorConfigNIXLGenerate
+		requestsSpeakChat := path != reqcommon.PathVLLMGenerate && cfg != coordinatorConfigNIXLGenerate && cfg != coordinatorConfigNIXLGenerateMMPayload
 		verifyTokenLimits(logs, limits, requestsSpeakChat, capSteps)
 	}
 

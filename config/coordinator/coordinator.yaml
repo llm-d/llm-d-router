@@ -397,14 +397,16 @@ pipeline:
         # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 
-        # return_mm_kwargs asks the rendering service to return the processed
-        # multimodal tensors (kwargs_data). When false, render returns only
-        # token ids, hashes and placeholders, and generate-format encode and
-        # prefill requests (use_openai_format: false) carry the client's media
-        # as content_parts with an unexpanded prompt. A renderer that ignores
-        # the field returns the tensors, which are then used as when true.
-        # Default false.
-        # return_mm_kwargs: false
+        # mm_payload selects what the rendering service returns for multimodal
+        # entries. tensors: the processed tensors (kwargs_data). metadata or
+        # none: only token ids, hashes and placeholders. On metadata,
+        # generate-format prefill requests (use_openai_format: false) carry
+        # features whose mm_metadata is rebuilt from the encode response's EC
+        # descriptors; on none, encode and prefill requests carry the client's
+        # media as content_parts with an unexpanded prompt. A renderer that
+        # ignores the field returns the tensors, which are then used as when
+        # tensors. Default none.
+        # mm_payload: metadata
 
     # -------------------------------------------------------------------
     # conditional-decode: optional shortcut for text-only chats. When

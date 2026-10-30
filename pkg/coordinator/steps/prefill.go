@@ -180,25 +180,8 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if reqCtx.MMKwargsOmitted {
-			// vLLM takes content_parts or features, not both, and expands
-			// the placeholders of a content_parts prompt itself.
-			tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, reqCtx.MultimodalEntries)
-			if err != nil {
-				return nil, err
-			}
-			parts, err := generateContentParts(reqCtx)
-			if err != nil {
-				return nil, err
-			}
-			body["token_ids"] = tokenIDs
-			body["content_parts"] = parts
-		} else if features := buildPrefillMMFeatures(reqCtx.MultimodalEntries, ecParams); features != nil {
-			// The only consumer of the per-entry mm_metadata/kwargs_data
-			// choice; see buildPrefillMMFeatures. Built inside this branch
-			// rather than above the switch so chat-completions requests never
-			// build-and-drop a features map they do not ship.
-			body["features"] = features
+		if err := s.applyGenerateMMInputs(ctx, reqCtx, ecParams, body); err != nil {
+			return nil, err
 		}
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
@@ -211,6 +194,40 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		// changes.
 		return nil, unreachableFormatError(format)
 	}
+}
+
+// applyGenerateMMInputs sets the multimodal input on a generate prefill body:
+// features when the entries carry tensors or rebuilt metadata, or the client's
+// media as content_parts with the collapsed token_ids. vLLM takes content_parts
+// or features, not both, and expands the placeholders of a content_parts prompt
+// itself.
+func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipeline.RequestContext, ecParams map[string]any, body map[string]any) error {
+	entries := reqCtx.MultimodalEntries
+	switch reqCtx.MMPayload {
+	case "":
+		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
+		// see buildPrefillMMFeatures.
+		body["features"] = buildPrefillMMFeatures(entries, ecParams)
+		return nil
+	case pipeline.MMPayloadMetadata:
+		if withMetadata, ok := entriesWithECMetadata(entries, ecParams); ok {
+			body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
+			return nil
+		}
+		log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
+			"ec_transfer_params carry no usable metadata for an entry; sending media as content_parts")
+	}
+	tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, entries)
+	if err != nil {
+		return err
+	}
+	parts, err := generateContentParts(reqCtx)
+	if err != nil {
+		return err
+	}
+	body["token_ids"] = tokenIDs
+	body["content_parts"] = parts
+	return nil
 }
 
 type prefillResponse struct {
