@@ -323,6 +323,44 @@ var _ = Describe("createDecoderProxyHandler", func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
 		Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
 	})
+
+	// The catch-all route reaches the decoder without the inference handler,
+	// so its requests carry no context logger.
+	It("logs a decoder failure through the proxy logger when the request has no context logger", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+		logged := captureLogs(proxy, 0)
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+		Expect(*logged).To(ContainElement(ContainSubstring("failed to connect to vLLM decoder")))
+	})
+
+	It("logs a decoder failure through the request's context logger", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+		proxyLogged := captureLogs(proxy, 0)
+		var requestLogged []string
+		requestLogger := funcr.New(func(prefix, args string) {
+			requestLogged = append(requestLogged, prefix+" "+args)
+		}, funcr.Options{})
+		r := postBody(`{"model":"m"}`)
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(httptest.NewRecorder(),
+			r.WithContext(log.IntoContext(r.Context(), requestLogger)))
+
+		Expect(requestLogged).To(ContainElement(ContainSubstring("failed to connect to vLLM decoder")))
+		Expect(*proxyLogged).To(BeEmpty())
+	})
 })
 
 // captureLogs points the proxy logger at the returned slice, keeping entries up

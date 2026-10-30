@@ -60,9 +60,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		ctx = context.WithValue(ctx, toolCallingTelemetryEnabledKey{}, s.config.EnableToolCallingTelemetry)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
-		// logger is process-scoped, so seed it into the context first; handlers
-		// and connectors below read the correlated logger from the request
-		// context.
+		// logger is process-scoped, so seed it into the context, where the
+		// connectors this handler dispatches to read it.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 

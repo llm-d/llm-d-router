@@ -45,13 +45,13 @@ func (s *Server) fanoutEncoderCollect(
 	requestID string,
 	apiType reqcommon.APIType,
 ) (map[string]any, int, int, error) {
+	logger := log.FromContext(ctx)
 	items := s.mmItemsForFanout(ctx, originalRequest, requestID, apiType)
 	if len(items) == 0 {
-		log.FromContext(ctx).V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
+		logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, 0, 0, nil
 	}
 
-	logger := log.FromContext(ctx)
 	var (
 		params      = make(map[string]any)
 		paramsMu    sync.Mutex

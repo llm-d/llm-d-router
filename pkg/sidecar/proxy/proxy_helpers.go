@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -164,7 +165,11 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 	decoderProxy.ErrorHandler = func(res http.ResponseWriter, r *http.Request, err error) {
 
 		// Log errors from the decoder proxy
-		logger := log.FromContext(r.Context())
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			// Requests on the catch-all route skip the handler that seeds one.
+			logger = s.logger
+		}
 		var writeError error
 		switch {
 		case errors.Is(err, syscall.ECONNREFUSED):
