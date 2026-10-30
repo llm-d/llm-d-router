@@ -1237,14 +1237,16 @@ type fakeSubscriberManager struct {
 	ids             []string
 	sourceEndpoints []string
 	endpoints       []string
+	replayEndpoints []string
 }
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _, _ string,
+	id, sourceEndpoint, endpoint, replayEndpoint, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)
+	f.replayEndpoints = append(f.replayEndpoints, replayEndpoint)
 	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
 	f.endpoints = append(f.endpoints, endpoint)
 	return nil
