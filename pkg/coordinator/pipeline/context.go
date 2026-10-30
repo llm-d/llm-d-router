@@ -45,6 +45,7 @@ var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
+	routing.PrefillEndpointHeader:         true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
 }
@@ -185,6 +186,8 @@ type RequestContext struct {
 	// decode step. Populated by PrefillStep; consumed by the KV connector when
 	// building the decode request.
 	KVTransferParams map[string]any
+	// PrefillResult receives the streaming prefill error, or nil on success.
+	PrefillResult <-chan error
 	// PrefillCachedTokens is the prompt-cache hit count the prefill worker
 	// reported, read from the details object its route documents:
 	// usage.prompt_tokens_details.cached_tokens, or

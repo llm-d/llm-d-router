@@ -17,16 +17,22 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"mime"
+	"net"
+	"net/http"
 
+	"github.com/openai/openai-go/packages/ssestream"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -92,6 +98,10 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	path := format.Path()
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
+	handedOff := false
+	if format == reqcommon.APITypeSGLangGenerate && reqCtx.PrefillResult != nil {
+		return errors.New("prefill: a prefill stream is already running")
+	}
 	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
 		logMsg:   "request body",
 		step:     PrefillStepName,
@@ -103,9 +113,37 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if !handedOff {
+			_ = resp.Body.Close()
+		}
+	}()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	reqCtx.CaptureResponseHeaders(resp.Header)
+	if format == reqcommon.APITypeSGLangGenerate {
+		mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get(reqcommon.HeaderContentType))
+		if mediaErr != nil || mediaType != reqcommon.MediaTypeEventStream {
+			return errors.New("prefill: streaming SGLang requires an event stream")
+		}
+		host, _, endpointErr := net.SplitHostPort(resp.Header.Get(routing.PrefillEndpointHeader))
+		if endpointErr != nil || host == "" {
+			return errors.New("prefill: streaming SGLang requires a valid selected endpoint response header")
+		}
+		reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = host
+		result := make(chan error, 1)
+		go func() {
+			defer resp.Body.Close()
+			err := drainSGLangPrefill(resp)
+			if err != nil && ctx.Err() == nil {
+				logger.Error(err, "prefill stream failed")
+			}
+			result <- err
+		}()
+		reqCtx.PrefillResult = result
+		handedOff = true
+		return nil
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
@@ -131,9 +169,47 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		reqCtx.PrefillCachedTokens = &cachedTokens
 	}
 
-	reqCtx.CaptureResponseHeaders(resp.Header)
-
 	logger.V(logutil.DEFAULT).Info("complete")
+	return nil
+}
+
+func drainSGLangPrefill(resp *http.Response) error {
+	stream := ssestream.NewDecoder(resp)
+	terminal := false
+	for stream.Next() {
+		data := bytes.TrimSpace(stream.Event().Data)
+		if len(data) == 0 || bytes.Equal(data, []byte(reqcommon.SSEDoneMarker)) {
+			continue
+		}
+		var event struct {
+			Error    *json.RawMessage `json:"error"`
+			MetaInfo struct {
+				FinishReason struct {
+					Type       string `json:"type"`
+					StatusCode *int   `json:"status_code"`
+					Message    string `json:"message"`
+				} `json:"finish_reason"`
+			} `json:"meta_info"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			return fmt.Errorf("decode SGLang prefill event: %w", err)
+		}
+		if event.Error != nil {
+			return fmt.Errorf("SGLang prefill error: %s", *event.Error)
+		}
+		finish := event.MetaInfo.FinishReason
+		// A null status_code indicates an abort without an initiator-supplied reason.
+		if finish.Type == "abort" && finish.StatusCode != nil {
+			return fmt.Errorf("SGLang prefill aborted (%d): %s", *finish.StatusCode, finish.Message)
+		}
+		terminal = terminal || finish.Type != ""
+	}
+	if err := stream.Err(); err != nil {
+		return err
+	}
+	if !terminal {
+		return errors.New("SGLang prefill stream closed without a terminal event")
+	}
 	return nil
 }
 
