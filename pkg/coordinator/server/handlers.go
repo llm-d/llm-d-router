@@ -251,12 +251,13 @@ func inferenceRoute(path string) string {
 // chat templates render into the prompt verbatim. The steps that read messages
 // or input decode them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldModel:          {},
-	reqcommon.FieldStream:         {},
-	"prompt":                      {},
-	"token_ids":                   {},
-	reqcommon.FieldSamplingParams: {},
-	"features":                    {},
+	reqcommon.FieldModel:               {},
+	reqcommon.FieldStream:              {},
+	"prompt":                           {},
+	"token_ids":                        {},
+	reqcommon.FieldSamplingParams:      {},
+	"features":                         {},
+	reqcommon.FieldDisaggPrefillDPRank: {},
 }
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.

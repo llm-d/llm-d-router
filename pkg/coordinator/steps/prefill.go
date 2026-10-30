@@ -79,6 +79,9 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
+	if reqCtx.OriginalPath == reqcommon.PathSGLangGenerate {
+		format = reqcommon.APITypeSGLangGenerate
+	}
 	body, err := s.buildPrefillBody(ctx, reqCtx, format)
 	if err != nil {
 		return fmt.Errorf("prefill: %w", err)
@@ -138,6 +141,30 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 }
 
 func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
+	if format == reqcommon.APITypeSGLangGenerate {
+		if s.kv.Name() != kv.SGLang || !reqCtx.Stream {
+			return nil, fmt.Errorf("/generate prefill requires kv-sglang and stream=true: %w", pipeline.ErrBadRequest)
+		}
+		if reqCtx.Body[reqcommon.FieldDisaggPrefillDPRank] != nil {
+			return nil, fmt.Errorf("client-supplied disagg_prefill_dp_rank is unsupported: %w", pipeline.ErrBadRequest)
+		}
+		if sampling, present := reqCtx.Body[reqcommon.FieldSamplingParams]; present {
+			params, ok := sampling.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("SGLang prefill requires one sampling_params object: %w", pipeline.ErrBadRequest)
+			}
+			n, present, err := paramInt(params, reqcommon.FieldN)
+			if err != nil || (present && n != 1) {
+				return nil, fmt.Errorf("SGLang prefill requires sampling_params.n=1: %w", pipeline.ErrBadRequest)
+			}
+		}
+		body := maps.Clone(reqCtx.Body)
+		// Prefill registers the room locally; decode uses the selected endpoint address.
+		body[reqcommon.FieldBootstrapHost] = "127.0.0.1"
+		reqCtx.KVTransferParams = s.kv.PreparePrefillKVParams(ctx, reqCtx)
+		maps.Copy(body, reqCtx.KVTransferParams)
+		return body, nil
+	}
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err

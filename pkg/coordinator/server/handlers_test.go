@@ -502,16 +502,17 @@ func TestHandleInference_BodyKeepsNestedKeyOrder(t *testing.T) {
 func TestDecodeRequestBody(t *testing.T) {
 	tools := `[{"type":"function","function":{"parameters":{"properties":{"b":{},"a":{}}}}}]`
 	parsed, err := decodeRequestBody([]byte(`{"model":"m","stream":true,"prompt":"hi","token_ids":[1],` +
-		`"sampling_params":{"max_tokens":5},"features":{},"tools":` + tools + `}`))
+		`"sampling_params":{"max_tokens":5},"disagg_prefill_dp_rank":null,"features":{},"tools":` + tools + `}`))
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{
-		"model":           "m",
-		"stream":          true,
-		"prompt":          "hi",
-		"token_ids":       []any{1.0},
-		"sampling_params": map[string]any{"max_tokens": 5.0},
-		"features":        map[string]any{},
-		"tools":           json.RawMessage(tools),
+		"model":                            "m",
+		"stream":                           true,
+		"prompt":                           "hi",
+		"token_ids":                        []any{1.0},
+		"sampling_params":                  map[string]any{"max_tokens": 5.0},
+		reqcommon.FieldDisaggPrefillDPRank: nil,
+		"features":                         map[string]any{},
+		"tools":                            json.RawMessage(tools),
 	}, parsed)
 
 	for _, body := range []string{`[1,2]`, `null`, `"text"`} {
