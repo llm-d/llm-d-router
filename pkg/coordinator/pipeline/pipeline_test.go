@@ -182,6 +182,12 @@ func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
 
 func TestPipeline_AbortsOnError(t *testing.T) {
 	executed := map[string]bool{}
+	released := false
+	cancelled := false
+	reqCtx := &RequestContext{PrefillDrain: NewPrefillDrain(
+		func() { released = true },
+		func() { cancelled = true },
+	)}
 	steps := []Step{
 		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
 			executed["a"] = true
@@ -194,7 +200,10 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	}
 
 	p := New(steps)
-	err := p.Execute(context.Background(), &RequestContext{})
+	err := p.Execute(context.Background(), reqCtx)
+	require.False(t, released)
+	require.True(t, cancelled)
+	require.Nil(t, reqCtx.PrefillDrain)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -204,6 +213,26 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	if executed["b"] {
 		t.Fatal("step b should NOT have executed")
 	}
+}
+
+func TestPrefillDrain_OutcomeRunsOnce(t *testing.T) {
+	released := 0
+	cancelled := 0
+	drain := NewPrefillDrain(
+		func() { released++ },
+		func() { cancelled++ },
+	)
+	drain.Release()
+	drain.Cancel()
+	drain.Release()
+	require.Equal(t, 1, released)
+	require.Equal(t, 0, cancelled)
+
+	want := errors.New("prefill drain failed")
+	drain.Complete(want)
+	drain.Complete(nil)
+	<-drain.Done()
+	require.ErrorIs(t, drain.Err(), want)
 }
 
 func TestPipeline_StopsOnErrPipelineDone(t *testing.T) {
