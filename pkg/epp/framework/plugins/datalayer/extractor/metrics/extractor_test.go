@@ -561,6 +561,32 @@ func TestExtractorReadsGlobalEngineOfRankEndpoint(t *testing.T) {
 	}
 }
 
+// SGLang labels its per-rank series dp_rank.
+func TestExtractorReadsOwnSGLangRank(t *testing.T) {
+	ctx := context.Background()
+	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)
+	if err != nil {
+		t.Fatalf("failed to create extractor: %v", err)
+	}
+	queue := &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum()}
+	for rank, v := range map[string]float64{"0": 6, "1": 10} {
+		queue.Metric = append(queue.Metric, &dto.Metric{
+			Label: []*dto.LabelPair{{Name: proto.String("dp_rank"), Value: proto.String(rank)}},
+			Gauge: &dto.Gauge{Value: ptr.To(v)},
+		})
+	}
+	data := sourcemetrics.PrometheusMetricMap{"sglang:num_queue_reqs": queue}
+
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+		Labels:    map[string]string{DefaultEngineTypeLabelKey: "sglang"},
+		RankIndex: 1, RanksPerPort: 2, DataParallelRank: 1,
+	}, nil)
+	_ = extractor.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep})
+	if got := ep.GetMetrics().WaitingQueueSize; got != 10 {
+		t.Errorf("WaitingQueueSize: want 10 (dp_rank 1), got %d", got)
+	}
+}
+
 func TestExtractorRankEndpointKeepsSeriesWithoutRankLabel(t *testing.T) {
 	ctx := context.Background()
 	extractor, err := newCoreMetricsExtractorPlugin(ctx, MetricsExtractorType, nil)

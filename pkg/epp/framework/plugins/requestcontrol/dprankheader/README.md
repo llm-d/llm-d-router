@@ -27,6 +27,10 @@ With the coordinator, each phase is a separate request that the EPP schedules on
 
 With the P/D sidecar, one scheduling run picks the decode endpoint (primary profile) and the prefill endpoint. The header carries the decode rank. The disaggregation profile handler sends the prefill rank to the sidecar in `x-llm-d-prefiller-data-parallel-rank`, and the sidecar sets `x-data-parallel-rank` on the prefill request from it. See [Routing headers](../../../../../../docs/disaggregation.md#routing-headers).
 
+## SGLang
+
+SGLang's `/v1/chat/completions` and `/v1/completions` read the same `x-data-parallel-rank` header (its `routed_dp_rank`), and its metrics label each rank's series `dp_rank`, which the built-in `sglang` metrics config reads. SGLang's native `/generate` reads the rank from `x-override-routed-dp-rank`, and only when SGLang runs with `SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES=1`; set `headerName` to `x-override-routed-dp-rank` for it.
+
 ## gRPC
 
 Envoy forwards request headers to a gRPC upstream as metadata, so the same header reaches vLLM as the `x-data-parallel-rank` metadata key.

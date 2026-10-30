@@ -131,6 +131,7 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "",
 		CacheBlockSizeSpec:  "sglang:page_size",
 		CacheNumBlocksSpec:  "sglang:num_pages",
+		RankLabelName:       "dp_rank",
 	},
 	{
 		Name:                "atom",
