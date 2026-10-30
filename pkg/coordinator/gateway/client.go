@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -88,9 +89,9 @@ func NewWithTransport(transport *http.Transport, baseURL string) *Client {
 }
 
 // Request sends an HTTP request to the gateway at the given path. The returned
-// response body is always readable; it is buffered into memory only at TRACE,
-// where it is logged and re-wrapped, and otherwise handed back as the unread
-// stream. The caller owns closing the body.
+// response body is always readable; non-streaming bodies are buffered only at
+// TRACE, where they are logged and re-wrapped. Streaming bodies remain unread.
+// The caller owns closing the body.
 func (c *Client) Request(ctx context.Context, method, path string, body []byte, headers map[string]string) (*http.Response, error) {
 	url := c.baseURL + path
 
@@ -121,9 +122,9 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		return nil, fmt.Errorf("sending request to gateway: %w", err)
 	}
 
-	// Buffer the body only to log it at TRACE; otherwise hand the caller the
-	// unread stream so large prefill/encode responses are not held in memory.
-	if v := logger.V(logutil.TRACE); v.Enabled() {
+	// Streamed responses must return headers before the body completes.
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get(ContentTypeHeader))
+	if v := logger.V(logutil.TRACE); v.Enabled() && mediaType != reqcommon.MediaTypeEventStream {
 		respBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		var replay io.Reader = bytes.NewReader(respBody)

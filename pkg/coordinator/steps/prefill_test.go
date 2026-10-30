@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
@@ -33,6 +34,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -1221,6 +1223,142 @@ func countLogMsgs(infos []capturedLog, substr string) int {
 	return n
 }
 
+func TestPrefillStep_SGLangInvalidResponseHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		endpoint    string
+		wantErr     string
+	}{
+		{
+			name:        "missing endpoint",
+			contentType: reqcommon.MediaTypeEventStream,
+			wantErr:     "selected endpoint response header",
+		},
+		{
+			name:        "non-streaming response",
+			contentType: reqcommon.ContentTypeJSON,
+			endpoint:    "127.0.0.1:8000",
+			wantErr:     "event stream",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(reqcommon.HeaderContentType, tc.contentType)
+				w.Header().Set(routing.PrefillEndpointHeader, tc.endpoint)
+			}))
+			t.Cleanup(gw.Close)
+			step, err := NewPrefillStep(gateway.NewWithTransport(nil, gw.URL), map[string]any{ParamKVConnector: kv.SGLang})
+			require.NoError(t, err)
+			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathSGLangGenerate, Stream: true, Body: map[string]any{"stream": true}}
+			err = step.Execute(t.Context(), reqCtx)
+			require.ErrorContains(t, err, tc.wantErr)
+			require.NotErrorIs(t, err, pipeline.ErrBadRequest)
+			require.Nil(t, reqCtx.PrefillDrain)
+		})
+	}
+}
+
+func TestDrainSGLangPrefill(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		err  string
+	}{
+		{name: "completed prefill", body: "data: {\"meta_info\":{\"finish_reason\":{\"type\":\"length\",\"length\":0}}}\n\n" + reqcommon.SSEDone + "\n\n"},
+		{name: "error event", body: "data: {\"error\":{\"message\":\"bootstrap failed\"}}\n\n", err: "bootstrap failed"},
+		{name: "native abort", body: "data: {\"meta_info\":{\"finish_reason\":{\"type\":\"abort\",\"status_code\":500,\"message\":\"bootstrap failed\"}}}\n\n", err: "bootstrap failed"},
+		{name: "abort without status", body: "data: {\"error\":null,\"meta_info\":{\"finish_reason\":{\"type\":\"abort\",\"status_code\":null}}}\n\n"},
+		{name: "empty stream", err: "without a terminal event"},
+		{name: "done only", body: reqcommon.SSEDone + "\n\n", err: "without a terminal event"},
+		{name: "nonterminal event", body: "data: {\"meta_info\":{\"finish_reason\":null}}\n\n", err: "without a terminal event"},
+		{name: "truncated error", body: "data: {\"error\":{\"message\":\"bootstrap failed\"}}\n", err: "without a terminal event"},
+		{name: "malformed JSON", body: "data: {\n\n", err: "decode SGLang prefill event"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(test.body))}
+			err := drainSGLangPrefill(resp)
+			if test.err != "" {
+				require.ErrorContains(t, err, test.err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+	t.Run("reader failure", func(t *testing.T) {
+		reader, writer := io.Pipe()
+		t.Cleanup(func() { _ = reader.Close() })
+		upstreamErr := errors.New("upstream disconnected")
+		go func() {
+			_, _ = io.WriteString(writer, "data: {}\n\n")
+			_ = writer.CloseWithError(upstreamErr)
+		}()
+		require.ErrorIs(t, drainSGLangPrefill(&http.Response{Body: reader}), upstreamErr)
+	})
+}
+
+func TestPrefillStep_SGLangCleanup(t *testing.T) {
+	grace := 50 * time.Millisecond
+	for _, name := range []string{"client cancellation", "explicit abort", "grace expiry"} {
+		t.Run(name, func(t *testing.T) {
+			testCtx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			t.Cleanup(stop)
+			ctx, cancel := context.WithCancel(testCtx)
+			graceLogs := make(chan struct{}, 1)
+			ctx = log.IntoContext(ctx, funcr.New(func(_, line string) {
+				if strings.Contains(line, "prefill grace expired") {
+					graceLogs <- struct{}{}
+				}
+			}, funcr.Options{}))
+			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set(reqcommon.HeaderContentType, reqcommon.MediaTypeEventStream)
+				w.Header().Set(routing.PrefillEndpointHeader, "127.0.0.1:8000")
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			t.Cleanup(gw.Close)
+			t.Cleanup(cancel)
+			step, err := NewPrefillStep(gateway.NewWithTransport(nil, gw.URL), map[string]any{ParamKVConnector: kv.SGLang, "prefill_grace": grace.String()})
+			require.NoError(t, err)
+			reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathSGLangGenerate, Stream: true, Body: map[string]any{"stream": true}}
+			require.NoError(t, step.Execute(ctx, reqCtx))
+			t.Cleanup(func() { reqCtx.PrefillDrain.Cancel() })
+			started := time.Now()
+			switch name {
+			case "client cancellation":
+				cancel()
+			case "explicit abort":
+				reqCtx.PrefillDrain.Cancel()
+			case "grace expiry":
+				reqCtx.PrefillDrain.Release()
+				cancel()
+			}
+			select {
+			case <-reqCtx.PrefillDrain.Done():
+				require.ErrorIs(t, reqCtx.PrefillDrain.Err(), context.Canceled)
+				if name == "grace expiry" {
+					require.GreaterOrEqual(t, time.Since(started), grace)
+					require.Len(t, graceLogs, 1)
+				} else {
+					require.Empty(t, graceLogs)
+				}
+			case <-testCtx.Done():
+				t.Fatal("prefill did not cancel")
+			}
+		})
+	}
+}
+
+func TestNewPrefillStep_InvalidGrace(t *testing.T) {
+	for _, value := range []string{"0s", "-1s", "30"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := NewPrefillStep(gateway.NewWithTransport(nil, "http://gateway"), map[string]any{"prefill_grace": value})
+			require.ErrorContains(t, err, "prefill:")
+		})
+	}
+}
+
 func TestPrefillStep_SGLangRequestScope(t *testing.T) {
 	step, err := NewPrefillStep(gateway.NewWithTransport(nil, "http://gateway"), map[string]any{ParamKVConnector: kv.SGLang})
 	require.NoError(t, err)
@@ -1245,5 +1383,41 @@ func TestPrefillStep_SGLangRequestScope(t *testing.T) {
 				require.ErrorIs(t, err, pipeline.ErrBadRequest)
 			}
 		})
+	}
+}
+
+func TestPrefillStep_SGLangLateFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	release := make(chan struct{})
+	failureLogs := make(chan struct{}, 1)
+	ctx = log.IntoContext(ctx, funcr.New(func(_, line string) {
+		if strings.Contains(line, "prefill stream failed") && strings.Contains(line, "bootstrap failed") {
+			failureLogs <- struct{}{}
+		}
+	}, funcr.Options{}))
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set(reqcommon.HeaderContentType, reqcommon.MediaTypeEventStream)
+		w.Header().Set(routing.PrefillEndpointHeader, "127.0.0.1:8000")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, "data: {\"error\":{\"message\":\"bootstrap failed\"}}\n\n")
+		case <-r.Context().Done():
+		}
+	}))
+	defer gw.Close()
+	step, err := NewPrefillStep(gateway.NewWithTransport(nil, gw.URL), map[string]any{ParamKVConnector: kv.SGLang})
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathSGLangGenerate, Stream: true, Body: map[string]any{"stream": true}}
+	require.NoError(t, step.Execute(ctx, reqCtx))
+	defer reqCtx.PrefillDrain.Cancel()
+	reqCtx.PrefillDrain.Release()
+	close(release)
+	select {
+	case <-failureLogs:
+	case <-ctx.Done():
+		t.Fatal("late prefill failure was not logged")
 	}
 }
