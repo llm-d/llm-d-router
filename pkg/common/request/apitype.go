@@ -23,14 +23,18 @@ import (
 
 // API paths shared by routing components.
 const (
-	PathChatCompletions = "/v1/chat/completions"
-	PathCompletions     = "/v1/completions"
-	PathResponses       = "/v1/responses"
-	PathModels          = "/v1/models"
-	PathEmbeddings      = "/v1/embeddings"
-	PathMessages        = "/v1/messages"
-	PathVLLMGenerate    = "/inference/v1/generate"
-	PathSGLangGenerate  = "/generate"
+	PathChatCompletions   = "/v1/chat/completions"
+	PathCompletions       = "/v1/completions"
+	PathResponses         = "/v1/responses"
+	PathConversations     = "/v1/conversations"
+	PathModels            = "/v1/models"
+	PathEmbeddings        = "/v1/embeddings"
+	PathAudioSpeech       = "/v1/audio/speech"
+	PathImagesGenerations = "/v1/images/generations"
+	PathImagesEdits       = "/v1/images/edits"
+	PathMessages          = "/v1/messages"
+	PathVLLMGenerate      = "/inference/v1/generate"
+	PathSGLangGenerate    = "/generate"
 )
 
 // APISurface identifies a generation API for observability. Its zero value is unknown.

@@ -167,7 +167,8 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 func isOpenAIPassthroughPath(path string) bool {
 	switch path {
 	case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses,
-		reqcommon.PathModels, reqcommon.PathEmbeddings:
+		reqcommon.PathConversations, reqcommon.PathModels, reqcommon.PathEmbeddings, reqcommon.PathAudioSpeech,
+		reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits:
 		return true
 	default:
 		return false
