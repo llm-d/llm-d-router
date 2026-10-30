@@ -1,5 +1,7 @@
 # Review Playbook
 
+<!-- Generated from docs/review/ by hack/render_playbook.py. Do not edit directly; regenerate with: python3 hack/render_playbook.py -->
+
 This playbook records the engineering and review standards for `llm-d-router`. It is distilled from maintainer review feedback across pull requests and issues. Reviewers cite these rules when flagging defects, and authors check their changes against each section before opening a pull request. See [AGENTS.md](../AGENTS.md) for pull request mechanics, commit sign-off, logging conventions, and prose style rules.
 
 ## Scope and process
