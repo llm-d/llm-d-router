@@ -314,6 +314,7 @@ func parseAsyncBrokerConfig(params map[string]any) (*asyncBrokerConfig, error) {
 	// The entrypoint injects connector and format defaults into every step's
 	// params; they are not async-broker settings.
 	delete(clean, steps.ParamKVConnector)
+	delete(clean, steps.ParamKVConnectorParams)
 	delete(clean, steps.ParamECConnector)
 	delete(clean, "use_openai_format")
 

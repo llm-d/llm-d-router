@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"sync"
 
 	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,20 +30,17 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// envSGLangBootstrapPort optionally overrides the bootstrap port advertised to
-// prefill pods. A value that is not a valid integer is rejected in favor of the
-// default and logged, so the fallback is observable.
+// paramBootstrapPort is the kv_connector_params key that sets the bootstrap
+// port advertised to prefill pods. When it is absent, envSGLangBootstrapPort is
+// read instead; an invalid env value falls back to the default and is logged,
+// so the fallback is observable.
 const (
+	paramBootstrapPort         = "bootstrap_port"
 	envSGLangBootstrapPort     = "SGLANG_BOOTSTRAP_PORT"
 	defaultSGLangBootstrapPort = 8998
 )
 
-var (
-	sglangBootstrapPortOnce sync.Once
-	sglangBootstrapPort     int
-)
-
-// parseSGLangBootstrapPort resolves the bootstrap port from the raw env value.
+// parseSGLangBootstrapPort resolves the bootstrap port from a raw value.
 // An empty value selects the default. rejected is true when a non-empty value
 // fails to parse or falls outside the valid TCP port range, in which case the
 // default is returned.
@@ -59,20 +55,33 @@ func parseSGLangBootstrapPort(raw string) (port int, rejected bool) {
 	return p, false
 }
 
-// resolveSGLangBootstrapPort reads SGLANG_BOOTSTRAP_PORT once on first use,
-// where a configured context logger is available to report a rejected value.
-func resolveSGLangBootstrapPort(ctx context.Context) int {
-	sglangBootstrapPortOnce.Do(func() {
-		raw := os.Getenv(envSGLangBootstrapPort)
-		port, rejected := parseSGLangBootstrapPort(raw)
-		if rejected {
-			log.FromContext(ctx).WithName(loggerName).Error(
-				fmt.Errorf("invalid %s %q", envSGLangBootstrapPort, raw),
-				"using default SGLang bootstrap port", "default", defaultSGLangBootstrapPort)
+// newSGLangKV builds the SGLang connector from its kv_connector_params. An
+// invalid parameter is a configuration error; only the env fallback degrades
+// to the default.
+func newSGLangKV(params map[string]any) (Connector, error) {
+	for k := range params {
+		if k != paramBootstrapPort {
+			return nil, fmt.Errorf("kv_connector_params: unknown key %q for %s", k, SGLang)
 		}
-		sglangBootstrapPort = port
-	})
-	return sglangBootstrapPort
+	}
+	if v, ok := params[paramBootstrapPort]; ok {
+		// fmt.Sprint renders every integral numeric type the config decoder
+		// produces as plain digits, so one parser validates all of them.
+		raw := fmt.Sprint(v)
+		port, rejected := parseSGLangBootstrapPort(raw)
+		if raw == "" || rejected {
+			return nil, fmt.Errorf("kv_connector_params.%s: invalid port %v (want 1-65535)", paramBootstrapPort, v)
+		}
+		return sglangKV{bootstrapPort: port}, nil
+	}
+	raw := os.Getenv(envSGLangBootstrapPort)
+	port, rejected := parseSGLangBootstrapPort(raw)
+	if rejected {
+		log.Log.WithName(loggerName).Error(
+			fmt.Errorf("invalid %s %q", envSGLangBootstrapPort, raw),
+			"using default SGLang bootstrap port", "default", defaultSGLangBootstrapPort)
+	}
+	return sglangKV{bootstrapPort: port}, nil
 }
 
 // sglangKV implements the SGLang KV transfer protocol. Both prefill and decode
@@ -80,15 +89,17 @@ func resolveSGLangBootstrapPort(ctx context.Context) int {
 // expected to echo bootstrap fields back in its kv_transfer_params response;
 // PrepareDecodeKVParams forwards those verbatim so the decode pod can open the
 // bootstrap channel to the prefill pod.
-type sglangKV struct{}
+type sglangKV struct {
+	bootstrapPort int
+}
 
 func (sglangKV) Name() string { return SGLang }
 
-func (sglangKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
+func (c sglangKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{
 		reqcommon.FieldDoRemoteDecode:  true,
 		reqcommon.FieldDoRemotePrefill: false,
-		reqcommon.FieldBootstrapPort:   resolveSGLangBootstrapPort(ctx),
+		reqcommon.FieldBootstrapPort:   c.bootstrapPort,
 		reqcommon.FieldBootstrapRoom:   uuid.NewString(),
 	}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)

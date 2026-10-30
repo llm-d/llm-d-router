@@ -131,6 +131,11 @@ pipeline:
   #   kv-sglang         - SGLang-style KV bootstrap
   kv_connector: kv-shared-storage
 
+  # kv_connector_params configures the pipeline kv_connector. Only kv-sglang
+  # takes parameters; see docs/coordinator_architecture.md.
+  # kv_connector_params:
+  #   bootstrap_port: 8998
+
   # ec_connector picks the protocol used to ship encoded multimodal embedding
   # tensors from encoder pods to prefill pods.
   #   ec-nixl           - NIXL P2P RDMA
@@ -442,7 +447,9 @@ pipeline:
       #   for the text-only fast path.
       #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
-      #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #   kv_connector: kv-sglang   # overrides pipeline.kv_connector
+      #   kv_connector_params:      # overrides pipeline.kv_connector_params (kv-sglang only)
+      #     bootstrap_port: 9100
 
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.

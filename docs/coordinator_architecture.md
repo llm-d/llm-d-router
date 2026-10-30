@@ -426,10 +426,12 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
 
-The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
-overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
-is read once on the first prefill request that uses the connector; a non-integer value is
-rejected in favor of the default and logged at error level.
+The `kv-sglang` `bootstrap_port` advertised to prefill pods is set by the
+`bootstrap_port` key of `kv_connector_params` (see [Connector selection](#connector-selection)).
+Integers, integral floats such as `9100.0`, and numeric strings such as `"9100"` are accepted. An invalid value (not an integer in 1-65535) fails pipeline construction at startup.
+Without the key, the `SGLANG_BOOTSTRAP_PORT` environment variable is read when the
+pipeline is built, and an invalid value there is rejected in favor of the default 8998
+and logged at error level.
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -637,10 +639,11 @@ edit: registration is the only wiring step.
 - Config values arrive as `map[string]any` decoded by viper. Integers decode as `int`,
   booleans as `bool`, durations as `string` (parse with `time.ParseDuration`), strings
   as `string`. Type-assert defensively and supply a default when the key is absent.
-- Connector names (`kv_connector`, `ec_connector`) and `use_openai_format` are injected
-  into every step's `params` by the entrypoint before the factory runs (see below), so a
-  step can read them without the operator repeating them per step. The constants are
-  `steps.ParamKVConnector` and `steps.ParamECConnector`.
+- Connector names (`kv_connector`, `ec_connector`), `kv_connector_params` and
+  `use_openai_format` are injected into every step's `params` by the entrypoint before the
+  factory runs (see below), so a step can read them without the operator repeating them per
+  step. The constants are `steps.ParamKVConnector`, `steps.ParamKVConnectorParams` and
+  `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
   (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
@@ -667,7 +670,7 @@ prefill or decode bodies obtains a connector by name in its factory and calls th
 connector interface during `Execute`:
 
 ```go
-kvConn, err := kv.Build(kvName) // kvName from params[ParamKVConnector]
+kvConn, err := kv.Build(kvName, kvParams) // from params[ParamKVConnector], params[ParamKVConnectorParams]
 ecConn, err := ec.Build(ecName) // ecName from params[ParamECConnector]
 ```
 
@@ -739,11 +742,17 @@ connector. They must agree with the connector configured on the vLLM pods.
 | Key | Values | Default |
 | :---- | :---- | :---- |
 | `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang` | `kv-shared-storage` |
+| `kv_connector_params` | map of connector settings; `kv-sglang` accepts `bootstrap_port`, the other KV connectors accept none | empty |
 | `ec_connector` | `ec-nixl`, `ec-shared-storage` | `ec-shared-storage` |
 
 KV and EC are independent: `ec-nixl` can pair with `kv-shared-storage`, and so on. A
 single step may override the default in its own `params` (`kv_connector:` /
-`ec_connector:`), which is rarely needed.
+`kv_connector_params:` / `ec_connector:`), which is rarely needed. A step inherits
+`pipeline.kv_connector_params` only when it sets no `kv_connector_params` of its own and
+its `kv_connector` is unset or matches `pipeline.kv_connector`; a step that names a
+different connector does not inherit them. A step's `kv_connector_params` replaces the
+pipeline map as a whole. An unknown key fails pipeline construction when the pipeline
+has a `prefill` or `decode` step, since those steps build the connector.
 
 ### Should the coordinator use the tokens-in format?
 
@@ -817,8 +826,8 @@ only the request carrier differs.
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
-| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. | `kv_connector` |
+| `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `kv_connector_params`, `ec_connector` |
+| `decode` | Stream the final completion to the client. | `kv_connector`, `kv_connector_params` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

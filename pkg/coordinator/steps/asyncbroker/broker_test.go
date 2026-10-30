@@ -178,6 +178,7 @@ func TestAsyncBrokerConfigValidation(t *testing.T) {
 	params := base()
 	params[steps.ParamKVConnector] = "kv-shared-storage"
 	params[steps.ParamECConnector] = "ec-shared-storage"
+	params[steps.ParamKVConnectorParams] = map[string]any{"bootstrap_port": 9100}
 	params["use_openai_format"] = true
 	_, err := New(nil, params)
 	require.NoError(t, err)
