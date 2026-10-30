@@ -521,10 +521,14 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
-	servers := []server{p.makeserver(targetEndpoint)}
-
+	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
+	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
+	servers := make([]server, 0, 2)
+	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
+		servers = append(servers, p.makeserver(targetEndpoint))
+	}
 	// Also record for prefill node if present in P/D disaggregated mode.
-	if pr, exists := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
+	if disaggregated {
 		servers = append(servers, p.makeserver(pr.TargetEndpoints[0]))
 	}
 
