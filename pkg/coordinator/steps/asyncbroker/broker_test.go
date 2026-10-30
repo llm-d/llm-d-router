@@ -354,16 +354,60 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 }
 
 // cancelAfterSubmit ends the request context once the enqueue has succeeded,
-// so the client is gone when the hold begins.
+// so the client is gone when the hold begins. A non-nil err replaces the
+// submit's success, as for a reply lost after Redis ran the enqueue.
 type cancelAfterSubmit struct {
 	asyncSubmitter
 	cancel context.CancelFunc
+	err    error
 }
 
 func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) error {
 	err := s.asyncSubmitter.SubmitRequest(ctx, req)
 	s.cancel()
+	if err == nil {
+		err = s.err
+	}
 	return err
+}
+
+// A client gone during the submit is cancelled pre-dispatch in both queued
+// modes, whatever the id's origin, including a failed submit that reached Redis.
+func TestAsyncBrokerCancelsAbandonedSubmit(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		clientID  string
+		submitErr error
+	}{
+		{name: "enqueue, generated id", mode: "enqueue"},
+		{name: "enqueue, client-chosen id", mode: "enqueue", clientID: "req-test-1"},
+		{name: "enqueue, failed submit", mode: "enqueue", submitErr: context.Canceled},
+		{name: "enqueue, client-chosen id, failed submit", mode: "enqueue", clientID: "req-test-1", submitErr: context.Canceled},
+		{name: "wait, client-chosen id", mode: "wait", clientID: "req-test-1"},
+		{name: "wait, failed submit", mode: "wait", submitErr: context.Canceled},
+		{name: "wait, client-chosen id, failed submit", mode: "wait", clientID: "req-test-1", submitErr: context.Canceled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			headers := map[string]string{defaultModeHeader: tc.mode, defaultTenantHeader: "team-a"}
+			if tc.clientID != "" {
+				headers["X-Request-Id"] = tc.clientID
+			}
+			reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel, err: tc.submitErr}
+
+			err := step.Execute(ctx, reqCtx)
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+			cancelled, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "req-test-1"))).Result()
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), cancelled)
+		})
+	}
 }
 
 func upstreamRequestCount(t *testing.T, reg *prometheus.Registry, upstream string) float64 {
