@@ -18,6 +18,7 @@ package approximateprefix
 
 import (
 	"math/rand/v2"
+	"runtime"
 	"strconv"
 	"testing"
 	"unsafe"
@@ -206,4 +207,60 @@ const benchmarkHashLRUCapacity = 31250
 
 func benchmarkHashKey(i int) blockHash {
 	return blockHash(uint64(i+1) * 0x9E3779B97F4A7C15)
+}
+
+// BenchmarkHashLRURetainedHeap reports the heap one full cache retains.
+// MiB-per-100-endpoints is that measurement times 100. Each endpoint owns a
+// separate cache, which is how a 100-endpoint EPP holds this index.
+func BenchmarkHashLRURetainedHeap(b *testing.B) {
+	const endpoints = 100
+	for _, capacity := range []int{benchmarkHashLRUCapacity, 72000} {
+		b.Run(strconv.Itoa(capacity), func(b *testing.B) {
+			keys := make([]blockHash, capacity)
+			for i := range keys {
+				keys[i] = benchmarkHashKey(i)
+			}
+			report := func(b *testing.B, retained float64) {
+				b.ReportMetric(retained/float64(capacity), "bytes-per-hash")
+				b.ReportMetric(retained/(1<<20), "MiB-per-endpoint")
+				b.ReportMetric(retained*endpoints/(1<<20), "MiB-per-100-endpoints")
+			}
+			measure := func(b *testing.B, fill func() any) {
+				var sum, n float64
+				for b.Loop() {
+					var before, after runtime.MemStats
+					runtime.GC()
+					runtime.ReadMemStats(&before)
+					kept := fill()
+					runtime.GC()
+					runtime.ReadMemStats(&after)
+					sum += float64(int64(after.HeapAlloc) - int64(before.HeapAlloc))
+					n++
+					runtime.KeepAlive(kept)
+				}
+				report(b, sum/n)
+			}
+			b.Run("simplelru", func(b *testing.B) {
+				measure(b, func() any {
+					lru, err := simplelru.NewLRU[blockHash, struct{}](capacity, nil)
+					if err != nil {
+						b.Fatal(err)
+					}
+					for _, key := range keys {
+						lru.Add(key, struct{}{})
+					}
+					return lru
+				})
+			})
+			b.Run("compact", func(b *testing.B) {
+				measure(b, func() any {
+					lru := newHashLRU(capacity)
+					for _, key := range keys {
+						lru.Add(key)
+					}
+					return lru
+				})
+			})
+		})
+	}
 }
