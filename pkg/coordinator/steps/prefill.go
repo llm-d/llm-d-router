@@ -17,16 +17,23 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"mime"
+	"net"
+	"net/http"
+	"time"
 
+	"github.com/openai/openai-go/packages/ssestream"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
@@ -47,6 +54,7 @@ type PrefillStep struct {
 	gwClient        *gateway.Client
 	kv              kv.Connector
 	ec              ec.Connector
+	prefillGrace    time.Duration
 }
 
 func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -65,11 +73,22 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("prefill: %w", err)
 	}
+	grace, present, err := paramDuration(params, "prefill_grace")
+	if err != nil {
+		return nil, fmt.Errorf("prefill: %w", err)
+	}
+	if !present {
+		grace = 30 * time.Second
+	}
+	if grace <= 0 {
+		return nil, errors.New("prefill: prefill_grace must be positive")
+	}
 	return &PrefillStep{
 		useOpenAIFormat: useOpenAI,
 		gwClient:        gwClient,
 		kv:              kvConn,
 		ec:              ecConn,
+		prefillGrace:    grace,
 	}, nil
 }
 
@@ -95,7 +114,42 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	path := format.Path()
 	logger.V(logutil.DEFAULT).Info("sending request", "path", path)
 
-	resp, err := postToGateway(ctx, logger, s.gwClient, gatewayRequest{
+	prefillCtx := ctx
+	var done chan error
+	var pending *pipeline.PendingPrefill
+	handedOff := false
+	if format == reqcommon.APITypeSGLangGenerate {
+		if reqCtx.Prefill != nil {
+			return errors.New("prefill: a prefill stream is already running")
+		}
+		var cancel context.CancelFunc
+		prefillCtx, cancel = context.WithCancel(context.WithoutCancel(ctx))
+		stop := context.AfterFunc(ctx, cancel)
+		done = make(chan error, 1)
+		pending = &pipeline.PendingPrefill{Done: done, Finish: func(success bool) {
+			stop()
+			if !success {
+				cancel()
+				return
+			}
+			go func() {
+				defer cancel()
+				timer := time.NewTimer(s.prefillGrace)
+				defer timer.Stop()
+				select {
+				case <-done:
+				case <-timer.C:
+					logger.Info("prefill grace expired", "grace", s.prefillGrace)
+				}
+			}()
+		}}
+		defer func() {
+			if !handedOff {
+				pending.Finish(false)
+			}
+		}()
+	}
+	resp, err := postToGateway(prefillCtx, logger, s.gwClient, gatewayRequest{
 		logMsg:   "request body",
 		step:     PrefillStepName,
 		upstream: coordmetrics.UpstreamPrefill,
@@ -106,9 +160,37 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if !handedOff {
+			_ = resp.Body.Close()
+		}
+	}()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	reqCtx.CaptureResponseHeaders(resp.Header)
+	if done != nil {
+		mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get(reqcommon.HeaderContentType))
+		if mediaErr != nil || mediaType != reqcommon.MediaTypeEventStream {
+			return errors.New("prefill: streaming SGLang requires an event stream")
+		}
+		host, _, endpointErr := net.SplitHostPort(resp.Header.Get(routing.PrefillEndpointHeader))
+		if endpointErr != nil || host == "" {
+			return errors.New("prefill: streaming SGLang requires a valid selected endpoint response header")
+		}
+		reqCtx.KVTransferParams[reqcommon.FieldBootstrapHost] = host
+		go func() {
+			defer resp.Body.Close()
+			defer close(done)
+			err := drainSGLangPrefill(resp)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error(err, "prefill stream failed")
+			}
+			done <- err
+		}()
+		reqCtx.Prefill = pending
+		handedOff = true
+		return nil
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
@@ -134,9 +216,47 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 		reqCtx.PrefillCachedTokens = &cachedTokens
 	}
 
-	reqCtx.CaptureResponseHeaders(resp.Header)
-
 	logger.V(logutil.DEFAULT).Info("complete")
+	return nil
+}
+
+func drainSGLangPrefill(resp *http.Response) error {
+	stream := ssestream.NewDecoder(resp)
+	terminal := false
+	for stream.Next() {
+		data := bytes.TrimSpace(stream.Event().Data)
+		if len(data) == 0 || bytes.Equal(data, []byte(reqcommon.SSEDoneMarker)) {
+			continue
+		}
+		var event struct {
+			Error    *json.RawMessage `json:"error"`
+			MetaInfo struct {
+				FinishReason struct {
+					Type       string `json:"type"`
+					StatusCode *int   `json:"status_code"`
+					Message    string `json:"message"`
+				} `json:"finish_reason"`
+			} `json:"meta_info"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			return fmt.Errorf("decode SGLang prefill event: %w", err)
+		}
+		if event.Error != nil {
+			return fmt.Errorf("SGLang prefill error: %s", *event.Error)
+		}
+		finish := event.MetaInfo.FinishReason
+		// A null status_code indicates an abort without an initiator-supplied reason.
+		if finish.Type == "abort" && finish.StatusCode != nil {
+			return fmt.Errorf("SGLang prefill aborted (%d): %s", *finish.StatusCode, finish.Message)
+		}
+		terminal = terminal || finish.Type != ""
+	}
+	if err := stream.Err(); err != nil {
+		return err
+	}
+	if !terminal {
+		return errors.New("SGLang prefill stream closed without a terminal event")
+	}
 	return nil
 }
 
