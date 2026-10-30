@@ -478,7 +478,7 @@ func TestToolCallingRequestSpans(t *testing.T) {
 					strings.NewReader(fmt.Sprintf(`{%s,"max_tokens":%d}`, fields, budget)))
 				if route == "shared" {
 					r.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
-					s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, target, _ string, api reqcommon.APIType) {
+					s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, target string, _ p2pRouting, api reqcommon.APIType) {
 						s.handleSharedStorage(w, r, target, api)
 					}
 				}
@@ -632,9 +632,9 @@ func TestPDToolCallingStageSpans(t *testing.T) {
 					rw := httptest.NewRecorder()
 					switch connector {
 					case "nixl", "parallel":
-						s.handleNIXLV2(rw, r, prefillURL.Host, "", api)
+						s.handleNIXLV2(rw, r, prefillURL.Host, p2pRouting{}, api)
 					case "p2p":
-						s.handleP2P(rw, r, prefillURL.Host, "", api)
+						s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, api)
 					case "mooncake":
 						s.mooncakeEngineIDs.Add(prefillURL.Host, map[string]string{"0": "engine"})
 						s.handleMooncake(rw, r, prefillURL.Host, api)
@@ -714,7 +714,7 @@ func TestPDToolCallingSummaryOnSetupFailure(t *testing.T) {
 				if connector == "mooncake" {
 					s.handleMooncake(rw, r, bootstrapURL.Host, tt.api)
 				} else {
-					s.handleNIXLV2(rw, r, bootstrapURL.Host, "", tt.api)
+					s.handleNIXLV2(rw, r, bootstrapURL.Host, p2pRouting{}, tt.api)
 				}
 				root.End()
 				require.Equal(t, http.StatusBadGateway, rw.Code)
@@ -889,7 +889,7 @@ func runPrefillHandler(t *testing.T, logged *[]string) (downstream logr.Logger) 
 	s.logger = capture
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
-	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ string, _ reqcommon.APIType) {
+	s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, _ string, _ p2pRouting, _ reqcommon.APIType) {
 		downstream = log.FromContext(r.Context())
 	}
 

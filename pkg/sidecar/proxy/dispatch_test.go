@@ -17,11 +17,13 @@ limitations under the License.
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,6 +32,7 @@ import (
 	"k8s.io/utils/set"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
 // testPrefillHeaderRouting is a shared table-driven helper that exercises
@@ -174,7 +177,7 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 				s.prefillSamplerFn = func(n int) int { return i % n }
 				var hostPort string
 				var capturedReq *http.Request
-				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ string, _ reqcommon.APIType) {
+				s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, selectedHostPort string, _ p2pRouting, _ reqcommon.APIType) {
 					hostPort = selectedHostPort
 					capturedReq = r
 				}
@@ -274,7 +277,7 @@ func TestServer_createRoutes(t *testing.T) {
 			t.Run(apiType.String()+"/"+tt.name, func(t *testing.T) {
 				s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
 				s.allowlistValidator = &AllowlistValidator{}
-				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ string, gotAPI reqcommon.APIType) {
+				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ p2pRouting, gotAPI reqcommon.APIType) {
 					if gotAPI != apiType || hostPort != "127.0.0.1:9000" {
 						t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, apiType)
 					}
@@ -404,9 +407,10 @@ func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing
 	requireStatefulResponsesRejected(t, recorder, dispatched)
 }
 
-// decodeWithP2PSource reads the body itself, so this path checks twice.
+// A connector that can pull over the P2P tier reads the body before the
+// decoder-only branch, so the guard runs on that read.
 func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T) {
-	s := NewProxy(Config{Port: "8000"})
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading})
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
 
@@ -416,12 +420,160 @@ func TestServer_ResponsesP2PSourcePassthroughRejectsStatefulFields(t *testing.T)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(statefulResponsesTestBody))
-	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:9000")
 	recorder := httptest.NewRecorder()
 
 	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
 
 	requireStatefulResponsesRejected(t, recorder, dispatched)
+}
+
+// A connector that can pull over the P2P tier reads the body for the pull
+// source when the source header is set; that read fails closed on a client
+// that drops the connection mid-body.
+func TestServer_P2PSourceBodyReadRejectsUnreadableBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+
+	var dispatched bool
+	s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		dispatched = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:7777")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+	if dispatched {
+		t.Errorf("expected decoder proxy not to be invoked on an unreadable body")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+// The decoder-only branch forwards the body byte for byte: it does not read
+// the body when the connector cannot pull over the P2P tier or when no source
+// header announces a source, and a body it reads is re-marshaled only when a
+// source block was removed from it.
+func TestServer_DecoderOnlyPassthroughLeavesBodyUnread(t *testing.T) {
+	const body = `{"model":"m","messages":[],"kv_transfer_params":{"remote_kv_source":{"remote_host":"10.0.0.5"}}}`
+	// Keys out of sorted order at the top level and inside an inspected field,
+	// which json.Marshal would reorder.
+	const noSourceBody = `{"model":"m","messages":[],"sampling_params":{"top_p":0.9,"temperature":0.5}}`
+	tests := []struct {
+		name        string
+		connector   string
+		headerName  string
+		body        string
+		wantWarning bool
+	}{
+		// A source on a connector that cannot pull means the plugin is enabled
+		// on a pool whose sidecar cannot use it, which is worth a line.
+		{"connector cannot pull", constants.KVConnectorSharedStorage, routing.KVCacheSourceHeader, body, true},
+		{"no source header", constants.KVConnectorOffloading, "", body, false},
+		// The retired name carries a serving address an older EPP set; it is
+		// neither read nor forwarded.
+		{"retired source header name", constants.KVConnectorOffloading, routing.LegacyKVCacheSourceHeaders[0], body, false},
+		{"source header without a source block", constants.KVConnectorOffloading, routing.KVCacheSourceHeader, noSourceBody, false},
+	}
+	stripped := routing.AllHeaderNames(routing.KVCacheSourceHeader)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", KVConnector: tt.connector})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			logged := captureLogs(s, 0)
+
+			var forwarded string
+			var forwardedHeaders http.Header
+			s.decoderProxy = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				forwarded = string(raw)
+				forwardedHeaders = r.Header.Clone()
+			})
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tt.body))
+			if tt.headerName != "" {
+				req.Header.Set(tt.headerName, "10.0.0.5:7777")
+			}
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+			if forwarded != tt.body {
+				t.Errorf("forwarded body = %s, want %s", forwarded, tt.body)
+			}
+			for _, name := range stripped {
+				if v := forwardedHeaders.Get(name); v != "" {
+					t.Errorf("%s forwarded: %q", name, v)
+				}
+			}
+			warned := slices.ContainsFunc(*logged, func(line string) bool { return strings.Contains(line, "connector does not support P2P pulls") })
+			if warned != tt.wantWarning {
+				t.Errorf("warning logged = %v, want %v: %v", warned, tt.wantWarning, *logged)
+			}
+		})
+	}
+}
+
+// The decode pod dials the prefill P2P address. A host equal to the prefill
+// target's passes on the IsAllowed check of that target alone; any other host
+// must be on the allowlist, so a forged header naming a host outside the pool
+// gets 403 and no pod request.
+func TestServer_PrefillP2PAddressOutsideAllowlistIsForbidden(t *testing.T) {
+	poolHosts := set.New("prefill1", "prefill2")
+	tests := []struct {
+		name         string
+		p2pHost      string
+		allowedHosts set.Set[string]
+		wantCode     int
+	}{
+		{"prefill target's own host", "prefill1", poolHosts, http.StatusOK},
+		{"prefill target's own host without a host allowlist", "prefill1", set.New[string](), http.StatusOK},
+		{"another pool host", "prefill2", poolHosts, http.StatusOK},
+		{"another pool host without a host allowlist", "prefill2", set.New[string](), http.StatusForbidden},
+		{"host outside the pool", "169.254.169.254", poolHosts, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading})
+			s.allowlistValidator = &AllowlistValidator{
+				enabled:        true,
+				allowedTargets: set.New("prefill1:8000", "prefill2:8000"),
+				allowedHosts:   tt.allowedHosts,
+			}
+			s.dataParallelProxies = make(map[string]http.Handler)
+
+			var dispatched *p2pPeer
+			s.handlePDConnector = func(w http.ResponseWriter, _ *http.Request, _ string, p2p p2pRouting, _ reqcommon.APIType) {
+				dispatched = p2p.prefill
+				w.WriteHeader(http.StatusOK)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","messages":[]}`))
+			req.Header.Set(routing.PrefillEndpointHeader, "prefill1:8000")
+			req.Header.Set(routing.KVCachePrefillHeader, tt.p2pHost+":7777")
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+			if recorder.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, tt.wantCode, recorder.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				if dispatched != nil {
+					t.Errorf("P/D connector called with prefill peer %s", dispatched)
+				}
+				return
+			}
+			if want := (p2pPeer{host: tt.p2pHost, port: 7777}); dispatched == nil || *dispatched != want {
+				t.Errorf("P/D connector prefill peer = %s, want %s", dispatched, &want)
+			}
+		})
+	}
 }
 
 // The decoder-only branch's body read fails closed: a client that drops the
@@ -579,7 +731,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdEncoders []string
 			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ reqcommon.APIType) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ *p2pPeer, _ reqcommon.APIType) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders
@@ -589,7 +741,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 
 			var pdCalled bool
 			var pdHost string
-			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
+			s.handlePDConnector = func(_ http.ResponseWriter, r *http.Request, host string, _ p2pRouting, _ reqcommon.APIType) {
 				pdCalled = true
 				pdHost = host
 				capturedReq = r
@@ -662,5 +814,104 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An accepted body source travels in p2pRouting, so the body forwarded to
+// a path that passes an empty routing, such as the encoder path, must not
+// carry it: vLLM would pull without the sidecar having composed the pull.
+func TestServer_EncoderPathForwardsBodyWithoutSource(t *testing.T) {
+	encoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
+	}))
+	defer encoder.Close()
+
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading, ECConnector: constants.ECExampleConnector})
+	s.allowlistValidator = &AllowlistValidator{}
+	s.dataParallelProxies = make(map[string]http.Handler)
+	logged := captureLogs(s, 0)
+
+	var forwarded map[string]any
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = map[string]any{}
+		_ = json.Unmarshal(raw, &forwarded)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	const body = `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/image.jpg"}]}],` +
+		`"kv_transfer_params":{"remote_kv_source":{"kv_request_id":"k","remote_host":"10.0.0.5","remote_port":7777}}}`
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, strings.NewReader(body))
+	req.Header.Set(routing.EncoderEndpointsHeader, strings.TrimPrefix(encoder.URL, "http://"))
+	req.Header.Set(routing.KVCacheSourceHeader, "10.0.0.5:7777")
+	recorder := httptest.NewRecorder()
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeResponses)(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if forwarded == nil {
+		t.Fatal("decoder not reached")
+	}
+	if _, ok := forwarded[reqcommon.FieldKVTransferParams]; ok {
+		t.Errorf("forwarded body carries kv_transfer_params: %v", forwarded[reqcommon.FieldKVTransferParams])
+	}
+	// The dropped pull is visible to the operator.
+	if !slices.ContainsFunc(*logged, func(line string) bool { return strings.Contains(line, "not wired through encoder disaggregation") }) {
+		t.Errorf("no warning for the dropped source: %v", *logged)
+	}
+}
+
+// decodeWithP2PSource reads the body itself when the dispatcher left it
+// unread, so a source without a parsed body never writes into a nil map.
+func TestServer_DecodeWithP2PSourceReadsUnreadBody(t *testing.T) {
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading})
+	s.allowlistValidator = &AllowlistValidator{}
+
+	var forwarded map[string]any
+	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		forwarded = map[string]any{}
+		_ = json.Unmarshal(raw, &forwarded)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","messages":[]}`))
+	recorder := httptest.NewRecorder()
+
+	s.decodeWithP2PSource(recorder, req, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.5", port: 7777}}})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	kvParams, _ := forwarded[reqcommon.FieldKVTransferParams].(map[string]any)
+	if _, ok := kvParams[reqcommon.FieldRemoteKVSource]; !ok || forwarded["model"] != "m" {
+		t.Errorf("forwarded body = %v, want the client body with remote_kv_source", forwarded)
+	}
+}
+
+// The dispatcher parses the prefill P2P port header once; the encoder path
+// receives it with the rest of the routing.
+func TestServer_EncoderPathCarriesPrefillP2PPort(t *testing.T) {
+	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading, ECConnector: constants.ECConnectorNIXL})
+	s.allowlistValidator = &AllowlistValidator{}
+
+	var got *p2pPeer
+	s.handleECConnector = func(_ http.ResponseWriter, _ *http.Request, _ string, _ []string, prefill *p2pPeer, _ reqcommon.APIType) {
+		got = prefill
+	}
+
+	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","messages":[]}`))
+	req.Header.Set(routing.EncoderEndpointsHeader, "enc:8000")
+	req.Header.Set(routing.PrefillEndpointHeader, "prefill:8000")
+	req.Header.Set(routing.KVCachePrefillHeader, "prefill:7778")
+
+	s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+	if got == nil || *got != (p2pPeer{host: "prefill", port: 7778}) {
+		t.Fatalf("prefill P2P address = %v, want prefill:7778", got)
 	}
 }
