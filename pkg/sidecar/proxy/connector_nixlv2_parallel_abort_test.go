@@ -157,10 +157,10 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 var _ = Describe("deferredCommitWriter responseStarted", func() {
 
 	It("reports the response as started only once decode's output is relayed", func() {
-		dcw := newDeferredCommitWriter(httptest.NewRecorder())
+		dcw := newDeferredCommitWriter()
 		Expect(dcw.responseStarted()).To(BeFalse())
 
-		Expect(dcw.commit()).To(BeTrue())
+		Expect(dcw.commit(httptest.NewRecorder())).To(BeTrue())
 		// Committed, but decode has emitted nothing, so the commit is deferred
 		// and the response is still the caller's to write.
 		Expect(dcw.responseStarted()).To(BeFalse())
@@ -170,11 +170,11 @@ var _ = Describe("deferredCommitWriter responseStarted", func() {
 	})
 
 	It("reports no response started after an abort", func() {
-		dcw := newDeferredCommitWriter(httptest.NewRecorder())
+		dcw := newDeferredCommitWriter()
 		_, err := dcw.Write([]byte("partial"))
 		Expect(err).ToNot(HaveOccurred())
 		dcw.abort()
 		Expect(dcw.responseStarted()).To(BeFalse())
-		Expect(dcw.commit()).To(BeFalse())
+		Expect(dcw.commit(httptest.NewRecorder())).To(BeFalse())
 	})
 })
