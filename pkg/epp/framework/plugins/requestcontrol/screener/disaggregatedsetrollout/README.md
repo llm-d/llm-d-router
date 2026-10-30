@@ -421,6 +421,15 @@ sets for the whole rollout.
   `conversation`, bodies without a user message, and prefixes containing tool
   calls or non-text blocks (such as images, audio, video, or E/P/D encode
   priming requests without a session identifier).
+- Pre-tokenized requests are keyed only by a session identifier from
+  `sources`. Token IDs carry no turn boundary, so the conversation prefix never
+  applies to them: vLLM `/inference/v1/generate`, SGLang `/generate`, tokenized
+  vLLM gRPC Generate and Embed, and completions or embeddings with token-ID
+  input fall back to the weighted random draw unless a source resolves.
+  Configure `sources` (for example a session header) when tokenized traffic
+  needs revision affinity. vLLM gRPC Generate with text input is a completions
+  request and behaves the same way. Vertex AI gRPC chat completions and
+  Responses requests use the conversation prefix like their HTTP forms.
 - Shares hold in aggregate across keys for any number of revisions. Changing
   one revision's share or coverage moves keys only to or from that revision;
   sessions on the remaining covered revisions stay put regardless of revision

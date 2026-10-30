@@ -24,6 +24,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
 func chatText(role, text string) Message {
@@ -158,6 +161,23 @@ func TestWriteConversationPrefixCacheSalt(t *testing.T) {
 	assert.NotEqual(t, unsalted, salted)
 }
 
+// TestWriteConversationPrefixIgnoresPayload covers the Vertex AI gRPC parser,
+// which keeps the protobuf envelope as the payload next to the typed request:
+// the prefix depends only on the typed request.
+func TestWriteConversationPrefixIgnoresPayload(t *testing.T) {
+	envelope := PayloadProto{Message: wrapperspb.String("vertex envelope")}
+
+	chat := chatBody(chatText("user", "hi"))
+	grpcChat := chatBody(chatText("user", "hi"))
+	grpcChat.Payload = envelope
+	assert.Equal(t, conversationPrefix(t, chat), conversationPrefix(t, grpcChat))
+
+	responses := responsesBody(t, `{"input":"hi"}`)
+	grpcResponses := responsesBody(t, `{"input":"hi"}`)
+	grpcResponses.Payload = envelope
+	assert.Equal(t, conversationPrefix(t, responses), conversationPrefix(t, grpcResponses))
+}
+
 func TestWriteConversationPrefixUnkeyed(t *testing.T) {
 	image := json.RawMessage(`{"type":"url","url":"https://example.com/a.jpg"}`)
 	tests := []struct {
@@ -166,8 +186,32 @@ func TestWriteConversationPrefixUnkeyed(t *testing.T) {
 	}{
 		{"nil body", nil},
 		{"completions", &InferenceRequestBody{Completions: &CompletionsRequest{Prompt: Prompt{Raw: "hi"}}}},
+		{"completions token IDs", &InferenceRequestBody{Completions: &CompletionsRequest{Prompt: Prompt{TokenIDs: [][]uint32{{1, 2, 3}}}}}},
+		// The vLLM gRPC parser's tokenized Generate shape.
+		{"grpc tokenized generate", &InferenceRequestBody{
+			Completions:      &CompletionsRequest{Prompt: Prompt{TokenIDs: [][]uint32{{1, 2, 3}}}},
+			Payload:          PayloadProto{Message: wrapperspb.String("tokenized")},
+			TokenizedRequest: NewTokenizedRequest([][]uint32{{1, 2, 3}}),
+		}},
+		{"grpc text generate", &InferenceRequestBody{
+			Completions: &CompletionsRequest{Prompt: Prompt{Raw: "hi"}},
+			Payload:     PayloadProto{Message: wrapperspb.String("text")},
+		}},
 		{"generate", &InferenceRequestBody{Generate: &GenerateRequest{Text: "hi"}}},
+		{"generate token IDs", &InferenceRequestBody{Generate: &GenerateRequest{
+			TokenIDs: []uint32{1, 2, 3},
+			Features: &tokenization.MultiModalFeatures{MMHashes: map[string][]string{"image": {"h"}}},
+		}}},
 		{"embeddings", &InferenceRequestBody{Embeddings: &EmbeddingsRequest{Input: EmbeddingsInput{Raw: "hi"}}}},
+		{"embeddings token IDs", &InferenceRequestBody{Embeddings: &EmbeddingsRequest{Input: EmbeddingsInput{TokenIDs: [][]uint32{{1, 2, 3}}}}}},
+		// Parsers that forward the payload without a typed request (passthrough,
+		// render-only, unsupported gRPC paths) leave nothing to walk, even when
+		// the payload holds chat messages.
+		{"payload map only", &InferenceRequestBody{
+			Payload:       PayloadMap{"messages": []any{map[string]any{"role": "user", "content": "hi"}}},
+			RenderRequest: true,
+		}},
+		{"raw payload only", &InferenceRequestBody{Payload: RawPayload(`{"messages":[{"role":"user","content":"hi"}]}`)}},
 		{"conversations", &InferenceRequestBody{Conversations: &ConversationsRequest{
 			Items: []ConversationItem{{Type: "message", Role: "user", Content: "hi"}},
 		}}},
