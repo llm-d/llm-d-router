@@ -408,16 +408,19 @@ sets for the whole rollout.
 
 - Key order is the first non-empty session identifier from `sources`, in
   order, then the text conversation up to and including its first user message
-  (plus `cache_salt`) for OpenAI chat completions and Anthropic messages. An
-  `attribute: agent-identity` source reads the identifier resolved by the
+  (plus `cache_salt`) for OpenAI chat completions, Anthropic messages, and
+  OpenAI Responses. A Responses string `instructions` precedes the input, and a
+  string `input` counts as one user message. An `attribute: agent-identity`
+  source reads the identifier resolved by the
   [`agent-identity`](../../requestheader/agentidentity/README.md) plugin, which
   keeps an agent session on one revision across context compaction. Later turns
   repeat that prefix or session identifier, so turns of a session select one
   revision while sessions sharing only a system prompt still spread out.
 - Requests with nothing to key on fall back to the weighted random draw:
-  completions, Responses, bodies without a user message, and prefixes containing
-  non-text blocks (such as images, audio, video, or E/P/D encode priming
-  requests without a session identifier).
+  completions, Responses requests that set `previous_response_id` or
+  `conversation`, bodies without a user message, and prefixes containing tool
+  calls or non-text blocks (such as images, audio, video, or E/P/D encode
+  priming requests without a session identifier).
 - Shares hold in aggregate across keys for any number of revisions. Changing
   one revision's share or coverage moves keys only to or from that revision;
   sessions on the remaining covered revisions stay put regardless of revision

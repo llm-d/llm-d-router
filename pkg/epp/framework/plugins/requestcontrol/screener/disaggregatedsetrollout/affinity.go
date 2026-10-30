@@ -23,8 +23,6 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
@@ -44,7 +42,7 @@ func (c *Screener) affinityKey(ctx context.Context, request *fwksched.InferenceR
 	}
 	var digest xxhash.Digest
 	digest.Reset()
-	if !writeConversationPrefix(&digest, request.Body) {
+	if !request.Body.WriteConversationPrefix(&digest) {
 		return 0, sourceRandom
 	}
 	return digest.Sum64(), sourcePrefix
@@ -80,92 +78,4 @@ func rendezvousScore(key uint64, revision string, share float64) float64 {
 	// Map the top 53 hash bits onto (0, 1] so math.Log is finite and <= 0.
 	u := float64((digest.Sum64()>>11)+1) / (1 << 53)
 	return -math.Log(u) / share
-}
-
-// fieldSeparator ends each hashed field so adjacent fields cannot run together.
-var fieldSeparator = []byte{0}
-
-// writeConversationPrefix hashes the text conversation up to and including its
-// first user message. Every later turn of a session repeats that prefix, so
-// the turns share one key, while sessions that share only a system prompt
-// still spread across revisions. It returns false when no text user prefix is
-// present or when the prefix contains non-text blocks.
-func writeConversationPrefix(digest *xxhash.Digest, body *fwkrh.InferenceRequestBody) bool {
-	if body == nil {
-		return false
-	}
-	switch {
-	case body.ChatCompletions != nil:
-		chat := body.ChatCompletions
-		writeField(digest, chat.CacheSalt)
-		for _, message := range chat.Messages {
-			if len(message.ToolCalls) > 0 {
-				return false
-			}
-			writeField(digest, message.Role)
-			hasText, ok := writeChatContent(digest, message.Content)
-			if !ok {
-				return false
-			}
-			if message.Role == reqcommon.RoleUser {
-				return hasText
-			}
-		}
-		return false
-	case body.Messages != nil:
-		messages := body.Messages
-		writeField(digest, messages.CacheSalt)
-		if _, ok := writeAnthropicContent(digest, messages.System); !ok {
-			return false
-		}
-		for _, message := range messages.Messages {
-			writeField(digest, message.Role)
-			hasText, ok := writeAnthropicContent(digest, message.Content)
-			if !ok {
-				return false
-			}
-			if message.Role == reqcommon.RoleUser {
-				return hasText
-			}
-		}
-		return false
-	default:
-		// Completions carry no turn boundary, so a fixed-length prefix would
-		// collapse every session behind a long shared preamble onto one key.
-		return false
-	}
-}
-
-// writeField writes s followed by fieldSeparator.
-func writeField(digest *xxhash.Digest, s string) {
-	_, _ = digest.WriteString(s)
-	_, _ = digest.Write(fieldSeparator)
-}
-
-func writeChatContent(digest *xxhash.Digest, content fwkrh.Content) (hasText, ok bool) {
-	hasText = content.Raw != ""
-	_, _ = digest.WriteString(content.Raw)
-	for _, block := range content.Structured {
-		if block.Type != "text" {
-			return false, false
-		}
-		_, _ = digest.WriteString(block.Text)
-		hasText = hasText || block.Text != ""
-	}
-	_, _ = digest.Write(fieldSeparator)
-	return hasText, true
-}
-
-func writeAnthropicContent(digest *xxhash.Digest, content fwkrh.AnthropicContent) (hasText, ok bool) {
-	hasText = content.Raw != ""
-	_, _ = digest.WriteString(content.Raw)
-	for _, block := range content.Structured {
-		if block.Type != "text" {
-			return false, false
-		}
-		_, _ = digest.WriteString(block.Text)
-		hasText = hasText || block.Text != ""
-	}
-	_, _ = digest.Write(fieldSeparator)
-	return hasText, true
 }
