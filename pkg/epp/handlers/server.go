@@ -393,6 +393,9 @@ func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason 
 	case err != nil:
 		if e, isErr := err.(errcommon.Error); isErr {
 			if dropped := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; dropped != "" {
+				if dropped == string(errcommon.RequestDroppedReasonContextCancelled) {
+					return outcomeCancelled, dropped, true
+				}
 				return outcomeRejected, dropped, true
 			}
 		}

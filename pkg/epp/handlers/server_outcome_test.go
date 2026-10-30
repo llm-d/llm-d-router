@@ -122,7 +122,7 @@ func TestProcessRecordsRequestOutcome(t *testing.T) {
 			name:        "client leaves while queued",
 			reqs:        outcomeRequest("/v1/completions", outcomeTestBody),
 			directorErr: droppedError(errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonContextCancelled),
-			wantOutcome: "rejected",
+			wantOutcome: "cancelled",
 			wantReason:  string(errcommon.RequestDroppedReasonContextCancelled),
 		},
 		{
