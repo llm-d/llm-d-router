@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 
 	"github.com/go-logr/logr"
@@ -107,20 +108,52 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
-	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
+	decodeCtx := ctx
+	if drain := reqCtx.PrefillDrain; drain != nil {
+		var cancel context.CancelCauseFunc
+		decodeCtx, cancel = context.WithCancelCause(ctx)
+		defer cancel(nil)
+		go func() {
+			select {
+			case <-drain.Done():
+				if err := drain.Err(); err != nil {
+					cancel(fmt.Errorf("prefill stream: %w", err))
+				}
+			case <-decodeCtx.Done():
+			}
+		}()
+	}
+	proxyReq, err := newDecodeProxyRequest(decodeCtx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
 	if err != nil {
 		return err
 	}
 
 	writer, finalize := s.responseWriter(reqCtx, parity, injectedUsage)
 	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
+	if reqCtx.PrefillDrain != nil && context.Cause(decodeCtx) != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Prefill failure cancels the proxy while the client is still connected.
+		if out.Status != 0 {
+			panic(http.ErrAbortHandler)
+		}
+		return context.Cause(decodeCtx)
+	}
 	if err := finalize(); err != nil {
 		// The buffered tail could not be forwarded, so the client holds a
 		// truncated response. Nothing can be written to say so: the status and
 		// the body before the tail are already on the wire.
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
 	}
-	return out.streamedError(DecodeStepName)
+	if err := out.streamedError(DecodeStepName); err != nil {
+		return err
+	}
+	if reqCtx.PrefillDrain != nil {
+		reqCtx.PrefillDrain.Release()
+		reqCtx.PrefillDrain = nil
+	}
+	return nil
 }
 
 // responseWriter returns the writer the decode response is streamed through,
@@ -286,6 +319,11 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {
+	case reqcommon.APITypeSGLangGenerate:
+		if s.kv.Name() != kv.SGLang || reqCtx.PrefillDrain == nil {
+			return fmt.Errorf("/generate decode requires kv-sglang and a streaming prefill: %w", pipeline.ErrBadRequest)
+		}
+		maps.Copy(reqCtx.Body, kvParams)
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
