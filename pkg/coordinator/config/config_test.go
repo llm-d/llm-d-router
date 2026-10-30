@@ -51,6 +51,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
 		{"server.metrics_cert_dir", cfg.Server.MetricsCertDir, ""},
 		{"server.secure_serving", cfg.Server.SecureServing, true},
+		{"server.enable_sglang_pd", cfg.Server.EnableSGLangPD, false},
 		{"server.cert_path", cfg.Server.CertPath, ""},
 		{"server.tls_min_version", cfg.Server.TLSMinVersion, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
@@ -86,6 +87,12 @@ func TestLoadEnvOverride(t *testing.T) {
 		envVal string
 		check  func(*Config) (got, want any)
 	}{
+		{
+			name:   "SGLang opt-in",
+			envKey: "COORDINATOR_SERVER_ENABLE_SGLANG_PD",
+			envVal: "true",
+			check:  func(c *Config) (any, any) { return c.Server.EnableSGLangPD, true },
+		},
 		{
 			name:   "top-level scalar",
 			envKey: "COORDINATOR_LOG_LEVEL",
