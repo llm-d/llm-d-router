@@ -140,6 +140,34 @@ func TestAffinityKeyAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestAffinityKeyResponses(t *testing.T) {
+	screener := newTestScreener(prefixAffinityConfig())
+	request := func(raw string) *fwksched.InferenceRequest {
+		var responses fwkrh.ResponsesRequest
+		if err := json.Unmarshal([]byte(raw), &responses); err != nil {
+			t.Fatal(err)
+		}
+		return &fwksched.InferenceRequest{
+			Headers: map[string]string{},
+			Body:    &fwkrh.InferenceRequestBody{Responses: &responses},
+		}
+	}
+	first := mustKey(t, screener, request(`{"instructions":"system","input":"question"}`))
+	next := mustKey(t, screener, request(`{"instructions":"system","input":[
+		{"role":"user","content":"question"},
+		{"role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+		{"role":"user","content":"more"}]}`))
+	if first != next {
+		t.Fatalf("later turn keyed %v, want %v", next, first)
+	}
+	if other := mustKey(t, screener, request(`{"instructions":"system","input":"different question"}`)); other == first {
+		t.Fatal("different first user messages must not share a key")
+	}
+	if key, source := screener.affinityKey(t.Context(), request(`{"previous_response_id":"resp_1","input":"more"}`)); source != sourceRandom {
+		t.Fatalf("stateful Responses turn: want random fallback, got key %v from %s", key, source)
+	}
+}
+
 func TestAffinityKeyPrecedence(t *testing.T) {
 	screener := newTestScreener(prefixAffinityConfig(testSources...))
 	withAgentID := func(headers map[string]string, agentID, prompt string) *fwksched.InferenceRequest {
