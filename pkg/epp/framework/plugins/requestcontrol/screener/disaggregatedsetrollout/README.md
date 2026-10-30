@@ -479,6 +479,16 @@ never silently substitutes another revision or crosses revisions.
   selections that matched no endpoint and failed closed.
 - `llm_d_epp_disaggregatedset_revision_gating_share`: current weighted share
   from `0` to `1` for each observed revision. Incomplete revisions report `0`.
+- `llm_d_router_endpoint_picker_disaggregatedset_revision_selection_total`:
+  requests screened onto a revision, labeled by `revision` and by `source`, the
+  path that chose it: `header` (strict revision header), `coordinated`
+  (revision already stored under the decision ID), `session` (affinity session
+  identifier), `prefix` (affinity conversation prefix), `random` (affinity off
+  or nothing to key on), or `single` (only one covered revision). Overflowed
+  requests keep the source of their draw. A strict header that matches no
+  endpoint is not counted here. The share of `session` and `prefix` shows how
+  much traffic revision affinity covers. Set log verbosity to `4` to log the
+  request ID, revision, and source of every selection.
 
-The share gauge removes a revision's series when that revision disappears from
-the observed Pod set.
+The share gauge, the overflow counter, and the selection counter remove a
+revision's series when that revision disappears from the observed Pod set.

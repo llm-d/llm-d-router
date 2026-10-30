@@ -29,24 +29,25 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
-// affinityKey returns a deterministic hash key for the request, and false when
-// affinity is off or the request has nothing to key on.
+// affinityKey returns a deterministic hash key for the request and the source
+// it came from, or sourceRandom when affinity is off or the request has nothing
+// to key on.
 //
 // The first session identifier resolved from Affinity.Sources takes
 // precedence over the text conversation prefix.
-func (c *Screener) affinityKey(ctx context.Context, request *fwksched.InferenceRequest) (uint64, bool) {
+func (c *Screener) affinityKey(ctx context.Context, request *fwksched.InferenceRequest) (uint64, selectionSource) {
 	if c.config.RevisionGating.affinityMode() != AffinityModePrefix || request == nil {
-		return 0, false
+		return 0, sourceRandom
 	}
 	if session := sessionaffinity.ResolveSessionID(ctx, request, c.config.RevisionGating.Affinity.Sources); session != "" {
-		return xxhash.Sum64String(session), true
+		return xxhash.Sum64String(session), sourceSession
 	}
 	var digest xxhash.Digest
 	digest.Reset()
 	if !writeConversationPrefix(&digest, request.Body) {
-		return 0, false
+		return 0, sourceRandom
 	}
-	return digest.Sum64(), true
+	return digest.Sum64(), sourcePrefix
 }
 
 // pickRendezvousRevision selects a revision in proportion to shares using

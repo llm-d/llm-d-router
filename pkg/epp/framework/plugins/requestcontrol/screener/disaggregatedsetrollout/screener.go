@@ -24,6 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -51,6 +52,8 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 		result := c.filterRevisions(endpoints, nil, requestedRevision)
 		if len(result) == 0 {
 			recordStrictRevisionNoMatch(c.typedName.Name)
+		} else {
+			c.recordSelection(ctx, request, requestedRevision, sourceHeader)
 		}
 		return result
 	}
@@ -74,11 +77,13 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 		allowedRevisions[revision] = struct{}{}
 	}
 	chosenRevision := requestedRevision
+	source := sourceHeader
 	// A forwarded revision header is authoritative. In particular, a decode
 	// request in P/D must use the revision stamped by prefill; it must not depend
 	// on the two EPPs sharing a CrossReplicaSyncer.
 	if chosenRevision == "" {
-		drawn, overflowed := c.chooseRevision(ctx, request, endpoints, shares)
+		var drawn, overflowed string
+		drawn, overflowed, source = c.chooseRevision(ctx, request, endpoints, shares)
 		chosenRevision = overflowed
 		decided := false
 		if decisionID := revisionDecisionID(request); distribution.needsCoordination && decisionID != "" && chosenRevision != "" {
@@ -89,6 +94,9 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 				return nil
 			}
 		}
+		if decided {
+			source = sourceCoordinated
+		}
 		// Count an overflow once per decision: a later call under the same
 		// decision ID gets the stored revision and is not a new overflow.
 		if overflowed != drawn && !decided {
@@ -96,35 +104,48 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 		}
 	}
 	result := c.filterRevisions(endpoints, allowedRevisions, chosenRevision)
-	if requestedRevision != "" && len(result) == 0 {
+	if len(result) > 0 {
+		c.recordSelection(ctx, request, chosenRevision, source)
+	} else if requestedRevision != "" {
 		recordStrictRevisionNoMatch(c.typedName.Name)
 	}
 	return result
 }
 
+// recordSelection is called only for a selection that kept endpoints, so the
+// revision label takes only values of revisions present in the pool.
+func (c *Screener) recordSelection(ctx context.Context, request *fwksched.InferenceRequest, revision string, source selectionSource) {
+	recordRevisionSelection(c.typedName.Name, revision, source)
+	if logger := log.FromContext(ctx).V(logging.DEBUG); logger.Enabled() {
+		logger.Info("Selected rollout revision", "requestID", request.RequestID, "revision", revision, "source", source)
+	}
+}
+
+// chooseRevision returns the drawn revision, the revision after overflow, and
+// the source of the draw.
 func (c *Screener) chooseRevision(
 	ctx context.Context,
 	request *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint,
 	shares map[string]float64,
-) (string, string) {
+) (string, string, selectionSource) {
 	if len(shares) <= 1 {
 		for revision := range shares {
-			return revision, revision
+			return revision, revision, sourceSingle
 		}
-		return "", ""
+		return "", "", sourceSingle
 	}
-	if key, keyed := c.affinityKey(ctx, request); keyed {
+	if key, source := c.affinityKey(ctx, request); source != sourceRandom {
 		drawn := pickRendezvousRevision(shares, key)
 		return drawn, c.overflowRevision(ctx, request, endpoints, shares, drawn, func(withRoom map[string]float64) string {
 			return pickRendezvousRevision(withRoom, key)
-		})
+		}), source
 	}
 	draw := rand.Float64() //#nosec G404 -- traffic split across revisions, not security-sensitive
 	drawn := pickWeightedRevision(shares, draw)
 	return drawn, c.overflowRevision(ctx, request, endpoints, shares, drawn, func(withRoom map[string]float64) string {
 		return pickWeightedRevision(withRoom, drawWithin(shares, drawn, draw))
-	})
+	}), sourceRandom
 }
 
 func (c *Screener) requestedRevision(request *fwksched.InferenceRequest) string {
