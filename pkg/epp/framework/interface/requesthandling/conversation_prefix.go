@@ -37,6 +37,12 @@ var prefixFieldSeparator = []byte{0}
 // returns false when the request type has no turn boundary, when no text user
 // message is present, or when the prefix contains non-text content; w then
 // holds partial output and must be discarded.
+//
+// Only the typed chat completions, Anthropic messages, and Responses requests
+// are read; Payload and TokenizedRequest are not. Pre-tokenized requests
+// (token-ID completions and generate prompts over HTTP or gRPC, tokenized
+// embeddings) and bodies without a typed request always return false, so
+// callers must key them by other means, such as a session identifier.
 func (b *InferenceRequestBody) WriteConversationPrefix(w PrefixWriter) bool {
 	switch {
 	case b == nil:

@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"testing"
 
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -165,6 +167,70 @@ func TestAffinityKeyResponses(t *testing.T) {
 	}
 	if key, source := screener.affinityKey(t.Context(), request(`{"previous_response_id":"resp_1","input":"more"}`)); source != sourceRandom {
 		t.Fatalf("stateful Responses turn: want random fallback, got key %v from %s", key, source)
+	}
+}
+
+// TestAffinityKeyTokenizedRequestsUseOnlySessionID checks that pre-tokenized
+// bodies, as the vLLM gRPC, vLLM HTTP generate, and SGLang parsers build them,
+// key only on a session identifier and otherwise fall back to random.
+func TestAffinityKeyTokenizedRequestsUseOnlySessionID(t *testing.T) {
+	tokens := []uint32{1, 2, 3}
+	bodies := map[string]func() *fwkrh.InferenceRequestBody{
+		"grpc tokenized generate": func() *fwkrh.InferenceRequestBody {
+			return &fwkrh.InferenceRequestBody{
+				Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{tokens}}},
+				Payload:          fwkrh.PayloadProto{Message: wrapperspb.String("generate")},
+				TokenizedRequest: fwkrh.NewTokenizedRequest([][]uint32{tokens}),
+			}
+		},
+		"grpc tokenized embed": func() *fwkrh.InferenceRequestBody {
+			return &fwkrh.InferenceRequestBody{
+				Embeddings: &fwkrh.EmbeddingsRequest{Input: fwkrh.EmbeddingsInput{TokenIDs: [][]uint32{tokens}}},
+				Payload:    fwkrh.PayloadProto{Message: wrapperspb.String("embed")},
+			}
+		},
+		"vLLM and SGLang generate token IDs": func() *fwkrh.InferenceRequestBody {
+			return &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{TokenIDs: tokens},
+				Payload:  fwkrh.PayloadMap{"token_ids": tokens},
+			}
+		},
+		"completions token IDs": func() *fwkrh.InferenceRequestBody {
+			return &fwkrh.InferenceRequestBody{
+				Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{tokens}}},
+			}
+		},
+	}
+	screener := newTestScreener(prefixAffinityConfig(testSources...))
+	sessionKey := mustKey(t, screener, chatRequest(map[string]string{testSessionHeader: "session-a"}, chatMessage("user", "hi")))
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			withSession := &fwksched.InferenceRequest{Headers: map[string]string{testSessionHeader: "session-a"}, Body: body()}
+			key, source := screener.affinityKey(t.Context(), withSession)
+			if source != sourceSession || key != sessionKey {
+				t.Fatalf("with session header: got key %v from %s, want %v from %s", key, source, sessionKey, sourceSession)
+			}
+			withoutSession := &fwksched.InferenceRequest{Headers: map[string]string{}, Body: body()}
+			if key, source := screener.affinityKey(t.Context(), withoutSession); source != sourceRandom {
+				t.Fatalf("without session header: want random fallback, got key %v from %s", key, source)
+			}
+		})
+	}
+}
+
+// TestAffinityKeyVertexGRPCChat checks that a chat request carrying the Vertex
+// AI gRPC envelope as its payload keys on the same prefix as its HTTP form.
+func TestAffinityKeyVertexGRPCChat(t *testing.T) {
+	screener := newTestScreener(prefixAffinityConfig())
+	http := chatRequest(nil, chatMessage("user", "question"))
+	grpc := chatRequest(nil, chatMessage("user", "question"))
+	grpc.Body.Payload = fwkrh.PayloadProto{Message: wrapperspb.String("vertex envelope")}
+	key, source := screener.affinityKey(t.Context(), grpc)
+	if source != sourcePrefix {
+		t.Fatalf("want %s, got %s", sourcePrefix, source)
+	}
+	if want := mustKey(t, screener, http); key != want {
+		t.Fatalf("gRPC chat keyed %v, want %v from the HTTP form", key, want)
 	}
 }
 
