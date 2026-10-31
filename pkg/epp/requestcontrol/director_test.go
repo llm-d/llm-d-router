@@ -84,9 +84,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -626,15 +626,15 @@ func TestDirector_HandleRequest(t *testing.T) {
 	objectiveNameSheddable := "imFoodReviewSheddable"
 	objectiveNameResolve := "imFoodReviewResolve"
 	// InferenceObjective definitions
-	ioFoodReview := testutil.MakeV1InferenceObjective("ioFoodReview").
+	ioFoodReview := fwkapix.MakeV1InferenceObjective("ioFoodReview").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(2).
 		ObjRef()
-	ioFoodReviewSheddable := testutil.MakeV1InferenceObjective("imFoodReviewSheddable").
+	ioFoodReviewSheddable := fwkapix.MakeV1InferenceObjective("imFoodReviewSheddable").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(-1).
 		ObjRef()
-	ioFoodReviewResolve := testutil.MakeV1InferenceObjective("imFoodReviewResolve").
+	ioFoodReviewResolve := fwkapix.MakeV1InferenceObjective("imFoodReviewResolve").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(1).
 		ObjRef()

@@ -21,8 +21,9 @@ limitations under the License.
 //   - R1: test/framework/{net,context,k8s} import only the standard
 //     library, Kubernetes API/machinery packages, and logr. They never
 //     import pkg/.
-//   - R2: test/framework/gaie additionally imports GAIE/apix API types
-//     and pkg/common/routing. It never imports pkg/epp.
+//   - R2: test/framework/{gaie,apix} additionally import GAIE (gaie) or
+//     llm-d apix (apix) API types and pkg/common/routing. They never
+//     import pkg/epp.
 //   - R3: test/framework/epp imports R1/R2 packages, leaf pkg/epp
 //     packages (metadata), and pkg/common. It never imports
 //     pkg/epp/server or cmd/.
