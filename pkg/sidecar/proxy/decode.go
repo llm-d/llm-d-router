@@ -226,7 +226,10 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// min_tokens would otherwise exceed the lowered per-chunk max_tokens.
 		// Once the floor has been met, drop it so a later chunk is not forced
 		// to suppress EOS and does not get min_tokens > max_tokens.
-		if minTokens, ok := toInt(body[reqcommon.FieldMinTokens]); ok {
+		// An invalid client value is forwarded unchanged so the first chunk
+		// fails with the same 400 as an unchunked request.
+		if minTokens, ok := toInt(body[reqcommon.FieldMinTokens]); ok &&
+			minTokens >= 0 && (originalMaxTokens < 0 || minTokens <= originalMaxTokens) {
 			if remainingMin := minTokens - totalTokens; remainingMin > 0 {
 				chunkReq[reqcommon.FieldMinTokens] = min(remainingMin, chunkBudget)
 			} else {
