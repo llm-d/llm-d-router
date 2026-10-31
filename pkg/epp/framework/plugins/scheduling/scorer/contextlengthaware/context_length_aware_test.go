@@ -631,6 +631,28 @@ func highestScored(scores map[scheduling.Endpoint]float64) scheduling.Endpoint {
 	return best
 }
 
+func TestCustomLabelMultiPromptUsesTotal(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "small"},
+			"10.0.0.1", map[string]string{testPrefillWorkRangeLabel: "0-2048"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "large"},
+			"10.0.0.2", map[string]string{testPrefillWorkRangeLabel: "2049-8192"}),
+	}
+	plugin := NewContextLengthAware("custom-label", &contextLengthAwareParameters{
+		Label:           testPrefillWorkRangeLabel,
+		EnableFiltering: true,
+	})
+	request := createPromptsRequest(1500, 1500, 1500, 1500)
+
+	filtered := plugin.Filter(ctx, request, endpoints)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "large", filtered[0].GetMetadata().ID.Name)
+
+	scores := plugin.Score(ctx, request, endpoints)
+	assert.Greater(t, scores[endpoints[1]], scores[endpoints[0]])
+}
+
 func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
