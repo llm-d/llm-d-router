@@ -1237,14 +1237,16 @@ type fakeSubscriberManager struct {
 	ids             []string
 	sourceEndpoints []string
 	endpoints       []string
+	replayEndpoints []string
 }
 
 func (f *fakeSubscriberManager) EnsureSubscriber(
 	_ context.Context,
-	id, sourceEndpoint, endpoint, _, _, _ string,
+	id, sourceEndpoint, endpoint, replayEndpoint, _, _ string,
 	_ bool,
 ) error {
 	f.ids = append(f.ids, id)
+	f.replayEndpoints = append(f.replayEndpoints, replayEndpoint)
 	f.sourceEndpoints = append(f.sourceEndpoints, sourceEndpoint)
 	f.endpoints = append(f.endpoints, endpoint)
 	return nil
@@ -1335,4 +1337,87 @@ func TestDumpStateCaps(t *testing.T) {
 	assert.Equal(t, maxDumpSubscribers+5, state.TotalSubscribers)
 	assert.Len(t, state.SpeculativeEntries, maxDumpSpeculativeEntries)
 	assert.Equal(t, maxDumpSpeculativeEntries+7, state.TotalSpeculativeEntries)
+}
+
+func rankEndpoints() []scheduling.Endpoint {
+	endpoints := make([]scheduling.Endpoint, 0, 2)
+	for rank := range 2 {
+		endpoints = append(endpoints, scheduling.NewEndpoint(
+			&fwkdl.EndpointMetadata{
+				ID:           k8stypes.NamespacedName{Name: fmt.Sprintf("pod-a-rank-%d", rank)},
+				Address:      "10.0.0.1",
+				Port:         "8000",
+				RankIndex:    rank,
+				RanksPerPort: 2,
+			}, nil, nil))
+	}
+	return endpoints
+}
+
+// With pod discovery each rank publishes on its own subscriber, so rank
+// endpoints sharing a pod's address and port read their own rank's matches.
+func TestProduce_RankEndpointsMatchTheirOwnRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := rankEndpoints()
+	var gotFilter sets.Set[string]
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return []kvblock.BlockHash{0xCAFE}, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			gotFilter = podFilter
+			return map[string]kvcache.PodMatch{
+				"10.0.0.1:8000/rank-1": {WeightedScore: 1, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+			}, nil
+		},
+	}
+	p := newProducerWithIndexer(ctx, idx)
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, PodDiscoveryConfig: kvevents.DefaultPodReconcilerConfig()}
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-rank",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+	assert.Equal(t, sets.New("10.0.0.1:8000/rank-0", "10.0.0.1:8000/rank-1"), gotFilter)
+
+	matchBlocks := func(ep scheduling.Endpoint) int {
+		raw, ok := ep.Get(attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("test"))
+		require.True(t, ok)
+		info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+		require.True(t, ok)
+		return info.MatchBlocks()
+	}
+	assert.Equal(t, 0, matchBlocks(endpoints[0]))
+	assert.Equal(t, 1, matchBlocks(endpoints[1]))
+}
+
+// Without pod discovery the index identifies a pod by the event topic, which
+// carries no rank, so rank endpoints keep the plain address and port.
+func TestProduce_RankEndpointsWithoutPodDiscoveryUseAddressAndPort(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	var gotFilter sets.Set[string]
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return []kvblock.BlockHash{0xCAFE}, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, podFilter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			gotFilter = podFilter
+			return map[string]kvcache.PodMatch{}, nil
+		},
+	}
+	p := newProducerWithIndexer(ctx, idx)
+	req := &scheduling.InferenceRequest{
+		RequestID:   "req-rank-no-discovery",
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, testBlockSize)}}},
+		},
+	}
+
+	require.NoError(t, p.Produce(ctx, req, rankEndpoints()))
+	assert.Equal(t, sets.New("10.0.0.1:8000"), gotFilter)
 }
