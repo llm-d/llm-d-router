@@ -49,6 +49,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -899,7 +900,7 @@ type requestIntegrityDirector struct {
 	checkSnapshot      func(context.Context, []byte)
 }
 
-func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	d.called = true
 	if d.checkSnapshot != nil {
 		d.checkSnapshot(ctx, reqCtx.Request.RawBody)
@@ -1283,7 +1284,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 				require.Equal(t, tt.wantErrorStatus, srv.sentResponses[0].GetImmediateResponse().GetStatus().GetCode())
 				wantErrorMessage := tt.wantErrorMessage
 				if tt.path == reqcommon.PathMessages {
-					var messages fwkrh.MessagesRequest
+					var messages fwkrequest.MessagesRequest
 					if decodeErr := json.Unmarshal([]byte(tt.body), &messages); decodeErr != nil {
 						wantErrorMessage = "error parsing messages request: " + decodeErr.Error()
 					}

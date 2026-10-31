@@ -27,11 +27,12 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 const (
@@ -70,7 +71,7 @@ func (p PrefixBasedPDDeciderConfig) validate() error {
 // compile-time type assertions
 var (
 	_ deciderPlugin           = &PrefixBasedPDDecider{}
-	_ fwkrc.PreRequest        = &PrefixBasedPDDecider{}
+	_ fwkrh.PreRequest        = &PrefixBasedPDDecider{}
 	_ plugin.ConsumerPlugin   = &PrefixBasedPDDecider{}
 	_ plugin.ProducerPlugin   = &PrefixBasedPDDecider{}
 	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
@@ -164,7 +165,7 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 // outcome this plugin reads back in PreRequest.
 func (d *PrefixBasedPDDecider) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{
-		fwkrc.ConditionalDecodeHandledAttributeKey: false,
+		fwkrh.ConditionalDecodeHandledAttributeKey: false,
 		remotePrefillDecisionAttributeKey:          remotePrefillDecision{},
 	}
 }
@@ -178,7 +179,7 @@ func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			d.prefixMatchInfoDK:                  attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
 		},
 	}
 }
@@ -198,7 +199,7 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	// Claim ownership of the header for the director's default-deny check:
 	// this plugin evaluated the preference, even if its own decision is to
 	// forward (below).
-	request.PutAttribute(fwkrc.ConditionalDecodeHandledAttributeKey, true)
+	request.PutAttribute(fwkrh.ConditionalDecodeHandledAttributeKey, true)
 	if d.config.NonCachedTokens == 0 {
 		return nil
 	}

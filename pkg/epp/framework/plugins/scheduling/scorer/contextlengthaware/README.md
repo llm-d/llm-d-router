@@ -70,7 +70,7 @@ not consume this attribute and always uses total prompt length.
 
 #### P2P Cache-Aware Prefill Work
 
-The named [P2P source producer](../../../requestcontrol/dataproducer/p2psource/README.md)
+The named [P2P source producer](../../../requesthandling/dataproducer/p2psource/README.md)
 publishes a request-wide reusable-prefix floor `G` from confirmed CPU-tier
 cache data. The context-length-aware plugin uses:
 
@@ -108,7 +108,7 @@ by a pod. Label every candidate in the prefill profile because unlabeled pods
 are retained by filtering as general-purpose candidates.
 
 Configure `p2p-cache-source` as shown in the
-[producer configuration](../../../requestcontrol/dataproducer/p2psource/README.md#configuration).
+[producer configuration](../../../requesthandling/dataproducer/p2psource/README.md#configuration).
 Its `prefillProfileName` must match both the profile selected by
 `disagg-profile-handler` and the profile that references the work classifier.
 The profile's picker is omitted here. Threshold parameters for the gate are
@@ -151,7 +151,7 @@ filter has the opposite cost: every cached follow-up migrates, including when
 the holder is idle and the transfer buys nothing.
 
 The producer and serving pods must satisfy the
-[deployment requirements](../../../requestcontrol/dataproducer/p2psource/README.md#deployment-requirements).
+[deployment requirements](../../../requesthandling/dataproducer/p2psource/README.md#deployment-requirements).
 With `D = 1`, a short-work class for up to 8192 new tokens can use:
 
 ```yaml

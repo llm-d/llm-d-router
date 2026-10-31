@@ -29,6 +29,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
@@ -92,7 +93,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 		malformedData              []byte
 		wantErr                    bool
 		wantSkipResponseProcessing bool
-		want                       *fwkrh.InferenceRequestBody
+		want                       *fwkrequest.InferenceRequestBody
 	}{
 		{
 			name: "Valid Text Request",
@@ -102,11 +103,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{Raw: "Hello world"},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{Raw: "Hello world"},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Text{
 							Text: "Hello world",
@@ -126,13 +127,13 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{
 						TokenIDs: [][]uint32{{11, 12, 13}},
 					},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -141,8 +142,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 							},
 						},
 					}},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{11, 12, 13}}},
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{TokenIDs: []uint32{11, 12, 13}}},
 				},
 			},
 		},
@@ -164,11 +165,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -185,10 +186,10 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					},
 				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
 						TokenIDs: []uint32{101, 102, 103, 104, 105},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
 							{Modality: reqcommon.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
 							{Modality: reqcommon.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
 						},
@@ -214,11 +215,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -235,10 +236,10 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					},
 				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
 						TokenIDs: []uint32{201, 202, 203, 204},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
 							{Modality: reqcommon.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
 							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 2, Length: 2},
 						},
@@ -273,12 +274,12 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				Stream: true,
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
+			want: &fwkrequest.InferenceRequestBody{
 				Stream: true,
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{Raw: "Hello world"},
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{Raw: "Hello world"},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Text{
 							Text: "Hello world",
@@ -296,13 +297,13 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Embed"},
-			want: &fwkrh.InferenceRequestBody{
-				Embeddings: &fwkrh.EmbeddingsRequest{
-					Input: fwkrh.EmbeddingsInput{
+			want: &fwkrequest.InferenceRequestBody{
+				Embeddings: &fwkrequest.EmbeddingsRequest{
+					Input: fwkrequest.EmbeddingsInput{
 						TokenIDs: [][]uint32{{4, 5, 6}},
 					},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.EmbedRequest{
 						Tokenized: &pb.TokenizedInput{
 							OriginalText: "Embed this",
@@ -352,8 +353,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			}
 
 			if tt.wantSkipResponseProcessing && tt.want == nil {
-				tt.want = &fwkrh.InferenceRequestBody{
-					Payload: fwkrh.RawPayload(payload),
+				tt.want = &fwkrequest.InferenceRequestBody{
+					Payload: fwkrequest.RawPayload(payload),
 				}
 			}
 
@@ -446,11 +447,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 5,
 					TotalTokens:      15,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 2,
 					},
 				},
@@ -470,11 +471,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     20,
 					CompletionTokens: 15,
 					TotalTokens:      35,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 5,
 					},
 				},
@@ -507,7 +508,7 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				EmbeddingDim: 2,
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 0,
 					TotalTokens:      10,
@@ -522,7 +523,7 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				EmbeddingDim: 2,
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 0,
 					TotalTokens:      10,
@@ -540,11 +541,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     20,
 					CompletionTokens: 15,
 					TotalTokens:      35,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 0,
 					},
 				},

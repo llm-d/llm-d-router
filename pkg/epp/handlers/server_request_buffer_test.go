@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -153,7 +154,7 @@ func TestProcessReleasesRequestBufferAfterRequestPhase(t *testing.T) {
 // for scheduling.
 type retainingDirector struct{ mockDirector }
 
-func (d *retainingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *retainingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
 	return reqCtx, nil
 }

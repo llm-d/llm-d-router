@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -34,14 +34,14 @@ import (
 // executePluginsAsDAG executes DataProducer plugins as a DAG based on their dependencies asynchronously.
 // So, a plugin is executed only after all its dependencies have been executed.
 // If there is a cycle or any plugin fails with error, it returns an error.
-func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+func executePluginsAsDAG(ctx context.Context, plugins []fwkrh.DataProducer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	return runProducers(ctx, scopeProducers(ctx, plugins, request, endpoints))
 }
 
 // producerInvocation is one DataProducer with the request and endpoints
 // confined to its declarations.
 type producerInvocation struct {
-	plugin     fwkrc.DataProducer
+	plugin     fwkrh.DataProducer
 	request    *fwksched.InferenceRequest
 	endpoints  []fwksched.Endpoint
 	violations *datalayer.Violations
@@ -50,12 +50,12 @@ type producerInvocation struct {
 // scopeProducers confines each producer to its declarations. Scoping copies
 // the request, so it runs on the caller's goroutine rather than on one the
 // timeout path may abandon while the director keeps writing request fields.
-func scopeProducers(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest,
+func scopeProducers(ctx context.Context, plugins []fwkrh.DataProducer, request *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint) []producerInvocation {
 	logger := log.FromContext(ctx)
 	invocations := make([]producerInvocation, len(plugins))
 	for i, plugin := range plugins {
-		scopedRequest, scopedEndpoints, violations := datalayer.ScopeInvocation(logger, fwkrc.DataProducerExtensionPoint, plugin, request, endpoints)
+		scopedRequest, scopedEndpoints, violations := datalayer.ScopeInvocation(logger, fwkrh.DataProducerExtensionPoint, plugin, request, endpoints)
 		invocations[i] = producerInvocation{plugin: plugin, request: scopedRequest, endpoints: scopedEndpoints, violations: violations}
 	}
 	return invocations
@@ -66,7 +66,7 @@ func runProducers(ctx context.Context, invocations []producerInvocation) error {
 		plugin := inv.plugin
 		before := time.Now()
 		err := plugin.Produce(ctx, inv.request, inv.endpoints)
-		metrics.RecordPluginProcessingLatency(fwkrc.DataProducerExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrh.DataProducerExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		if err != nil {
 			return fmt.Errorf("DataProducer %q failed: %w", plugin.TypedName().String(), err)
 		}
@@ -79,8 +79,8 @@ func runProducers(ctx context.Context, invocations []producerInvocation) error {
 
 // producerTimeout returns the producer's declared timeout when it implements
 // TimeoutAwareProducer with a positive value, otherwise dataProducerTimeout.
-func producerTimeout(p fwkrc.DataProducer) time.Duration {
-	if tp, ok := p.(fwkrc.TimeoutAwareProducer); ok {
+func producerTimeout(p fwkrh.DataProducer) time.Duration {
+	if tp, ok := p.(fwkrh.TimeoutAwareProducer); ok {
 		if t := tp.ProduceTimeout(); t > 0 {
 			return t
 		}
@@ -91,7 +91,7 @@ func producerTimeout(p fwkrc.DataProducer) time.Duration {
 // dataProducerPluginsWithTimeout executes DataProducer plugins with a timeout.
 // The child context is cancelled when the timeout fires so plugins can observe cancellation
 // (e.g. abort outbound HTTP calls) and avoid committing state after the director has moved on.
-func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, plugins []fwkrc.DataProducer,
+func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, plugins []fwkrh.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	// The timeout path does not join the producer goroutine. Allocate the
 	// sync.Map before launching it so any cancellation-aware producer finishing

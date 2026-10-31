@@ -31,7 +31,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
@@ -183,7 +183,7 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
 	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
-	if _, ok := any(pluginA).(fwkrc.DataProducer); !ok {
+	if _, ok := any(pluginA).(fwkrh.DataProducer); !ok {
 		t.Fatalf("pluginA should implement DataProducer")
 	}
 
@@ -250,19 +250,19 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		plugins     []fwkrc.DataProducer
+		plugins     []fwkrh.DataProducer
 		expectedDAG map[string][]string
 		expectedErr string
 	}{
 		{
 			name:        "No plugins",
-			plugins:     []fwkrc.DataProducer{},
+			plugins:     []fwkrh.DataProducer{},
 			expectedDAG: map[string][]string{},
 			expectedErr: "",
 		},
 		{
 			name:    "Plugins with no dependencies",
-			plugins: []fwkrc.DataProducer{pluginA, pluginE},
+			plugins: []fwkrh.DataProducer{pluginA, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"E/mock": {},
@@ -271,7 +271,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:    "Simple linear dependency (C -> B -> A)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginC},
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginC},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"B/mock": {"A/mock"},
@@ -281,7 +281,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:    "DAG with multiple dependencies (B -> A, D -> A, E independent)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginD, pluginE},
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginD, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"B/mock": {"A/mock"},
@@ -292,19 +292,19 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:        "Graph with a cycle (X -> Y, Y -> X)",
-			plugins:     []fwkrc.DataProducer{pluginX, pluginY},
+			plugins:     []fwkrh.DataProducer{pluginX, pluginY},
 			expectedDAG: nil,
 			expectedErr: "cycle detected",
 		},
 		{
 			name:        "Data type mismatch between produced and consumed data",
-			plugins:     []fwkrc.DataProducer{pluginZ1, pluginZ2},
+			plugins:     []fwkrh.DataProducer{pluginZ1, pluginZ2},
 			expectedDAG: nil,
 			expectedErr: "data type mismatch between produced and consumed data",
 		},
 		{
 			name:    "Same type different pointers (should succeed)",
-			plugins: []fwkrc.DataProducer{pluginP1, pluginP2},
+			plugins: []fwkrh.DataProducer{pluginP1, pluginP2},
 			expectedDAG: map[string][]string{
 				"P1/mock": {},
 				"P2/mock": {"P1/mock"},

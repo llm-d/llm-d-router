@@ -44,7 +44,7 @@ type ReadinessChecker interface {
 // are required (framework errors if no producer exists) or optional (framework
 // logs a warning but continues if no producer exists).
 //
-// The declared dependencies give every requestcontrol extension point a
+// The declared dependencies give every requesthandling extension point a
 // deterministic order: a plugin runs after the plugins producing the keys it
 // consumes. Producer-before-consumer is the intended semantic on RequestHeader,
 // Screen, Admit, Produce and PreRequest. ResponseHeader and ResponseBody are
@@ -98,7 +98,7 @@ type ProducerPlugin interface {
 // attributes derived from the producer's configuration.
 // Plugins with no attributes may return the bare value-type witness directly.
 type ProducedData struct {
-	// Type is the zero-value Go type witness for Level-1 type checking (e.g., fwkrh.TokenizedRequest{}).
+	// Type is the zero-value Go type witness for Level-1 type checking (e.g., fwkrequest.TokenizedRequest{}).
 	Type any
 
 	// Attributes holds key-value metadata describing the produced data (e.g., {"backend": "vllm"}).

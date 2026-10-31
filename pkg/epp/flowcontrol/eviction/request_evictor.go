@@ -28,7 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -152,7 +152,7 @@ func (p *RequestEvictor) PreRequest(
 func (p *RequestEvictor) ResponseBody(
 	ctx context.Context,
 	request *scheduling.InferenceRequest,
-	response *requestcontrol.Response,
+	response *fwkrh.Response,
 	targetEndpoint *datalayer.EndpointMetadata,
 ) {
 	if !response.EndOfStream {

@@ -216,7 +216,7 @@ func logSSELineDrop(ctx context.Context) {
 // block may carry only some of the fields, so a zero is read as "not reported" and
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
 	}

@@ -167,9 +167,9 @@ func (m *mockDirector) HandleResponseHeader(ctx context.Context, reqCtx *Request
 func (m *mockDirector) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{}
 }
-func (m *mockDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (m *mockDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	if m.stream {
-		reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{Stream: true}}
+		reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Stream: true}}
 	}
 	return reqCtx, nil
 }
@@ -181,12 +181,12 @@ func TestHandleResponseBody(t *testing.T) {
 		name   string
 		body   []byte
 		reqCtx *RequestContext
-		want   fwkrh.Usage
+		want   fwkrequest.Usage
 	}{
 		{
 			name: "success",
 			body: []byte(body),
-			want: fwkrh.Usage{
+			want: fwkrequest.Usage{
 				PromptTokens:     11,
 				TotalTokens:      111,
 				CompletionTokens: 100,
@@ -195,11 +195,11 @@ func TestHandleResponseBody(t *testing.T) {
 		{
 			name: "success with cached tokens",
 			body: []byte(bodyWithCachedTokens),
-			want: fwkrh.Usage{
+			want: fwkrequest.Usage{
 				PromptTokens:     11,
 				TotalTokens:      111,
 				CompletionTokens: 100,
-				PromptTokenDetails: &fwkrh.PromptTokenDetails{
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 					CachedTokens: 10,
 				},
 			},
@@ -207,12 +207,12 @@ func TestHandleResponseBody(t *testing.T) {
 		{
 			name: "success body without usage, the HandleResponseBody should still return non-nil error",
 			body: []byte(bodyWithoutUsage),
-			want: fwkrh.Usage{}, // Since the usage is not set in the responseBody, this usage should be empty.
+			want: fwkrequest.Usage{}, // Since the usage is not set in the responseBody, this usage should be empty.
 		},
 		{
 			name: "success invalid joson body, the HandleResponseBody should still return non-nil error",
 			body: []byte(bodyInvalidJSON),
-			want: fwkrh.Usage{}, // Since the response is invalid json, the usage cannot be extrcated.
+			want: fwkrequest.Usage{}, // Since the response is invalid json, the usage cannot be extrcated.
 		},
 	}
 
@@ -676,7 +676,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 	tests := []struct {
 		name    string
 		body    []byte
-		want    fwkrh.Usage
+		want    fwkrequest.Usage
 		wantErr bool
 	}{
 		{
@@ -689,7 +689,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 			name:    "streaming request with usage",
 			body:    []byte(streamingBodyWithUsage),
 			wantErr: false,
-			want: fwkrh.Usage{
+			want: fwkrequest.Usage{
 				PromptTokens:     7,
 				TotalTokens:      17,
 				CompletionTokens: 10,
@@ -699,11 +699,11 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 			name:    "streaming request with usage and cached tokens",
 			body:    []byte(streamingBodyWithUsageAndCachedTokens),
 			wantErr: false,
-			want: fwkrh.Usage{
+			want: fwkrequest.Usage{
 				PromptTokens:     7,
 				TotalTokens:      17,
 				CompletionTokens: 10,
-				PromptTokenDetails: &fwkrh.PromptTokenDetails{
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 					CachedTokens: 5,
 				},
 			},
@@ -914,14 +914,14 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	tests := []struct {
 		name      string
 		chunks    []chunkStream
-		wantUsage fwkrh.Usage
+		wantUsage fwkrequest.Usage
 	}{
 		{
 			name: "Standard: Usage and DONE in same chunk",
 			chunks: []chunkStream{
 				{body: []byte(`data: {"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}` + "\n" + `data: [DONE]`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+			wantUsage: fwkrequest.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
 			name: "Split: Usage in Chunk 1, DONE in Chunk 2",
@@ -931,7 +931,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 				// Chunk 2: Stream termination. Should NOT overwrite the usage from Chunk 1.
 				{body: []byte(`data: [DONE]`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+			wantUsage: fwkrequest.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
 			name: "Fragmented: Content -> Usage -> DONE",
@@ -940,7 +940,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 				{body: []byte(`data: {"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}` + "\n"), endOfStream: false},
 				{body: []byte(`data: [DONE]`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+			wantUsage: fwkrequest.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
 			name: "Split mid-event: usage line cut across chunks",
@@ -949,7 +949,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 				{body: []byte(`ens":5,"completion_tokens":10,"total_tokens":15}}` + "\n"), endOfStream: false},
 				{body: []byte(`data: [DONE]`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+			wantUsage: fwkrequest.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
 			name: "Split mid-event: usage line ends at end of stream without newline",
@@ -957,7 +957,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 				{body: []byte(`data: {"usage":{"prompt_tokens":5,`), endOfStream: false},
 				{body: []byte(`"completion_tokens":10,"total_tokens":15}}`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
+			wantUsage: fwkrequest.Usage{PromptTokens: 5, CompletionTokens: 10, TotalTokens: 15},
 		},
 		{
 			name: "No Usage Data",
@@ -965,7 +965,7 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 				{body: []byte(`data: {"choices":[{"text":"Hello"}]}` + "\n"), endOfStream: false},
 				{body: []byte(`data: [DONE]`), endOfStream: true},
 			},
-			wantUsage: fwkrh.Usage{}, // Zero values
+			wantUsage: fwkrequest.Usage{}, // Zero values
 		},
 	}
 
@@ -1002,7 +1002,7 @@ func TestHandleResponseBodyModelStreaming_LargeResponsesCompletedSplit(t *testin
 		"event: response.completed\n" +
 		`data: {"type":"response.completed","response":{"instructions":"` + strings.Repeat("x", 200_000) +
 		`","usage":{"input_tokens":290000,"output_tokens":900,"total_tokens":290900}}}` + "\n\n"
-	want := fwkrh.Usage{PromptTokens: 290000, CompletionTokens: 900, TotalTokens: 290900}
+	want := fwkrequest.Usage{PromptTokens: 290000, CompletionTokens: 900, TotalTokens: 290900}
 
 	for _, chunkSize := range []int{len(stream), 65536, 16384, 1000} {
 		t.Run(strconv.Itoa(chunkSize), func(t *testing.T) {
@@ -1130,11 +1130,11 @@ func TestHandleResponseBodyModelStreaming_AnthropicUsageAccumulation(t *testing.
 	}
 
 	// 1000 uncached plus 800 read from the cache.
-	wantUsage := fwkrh.Usage{
+	wantUsage := fwkrequest.Usage{
 		PromptTokens:       1800,
 		CompletionTokens:   200,
 		TotalTokens:        2000,
-		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
 	}
 	assert.Equal(t, wantUsage, reqCtx.Usage, "message_delta must not discard the usage reported by message_start")
 
@@ -1200,11 +1200,11 @@ func TestHandleResponseBodyModelStreaming_AnthropicCumulativeUsage(t *testing.T)
 		server.HandleResponseBody(ctx, reqCtx, chunk, i == len(chunks)-1)
 	}
 
-	wantUsage := fwkrh.Usage{
+	wantUsage := fwkrequest.Usage{
 		PromptTokens:       1800,
 		CompletionTokens:   200,
 		TotalTokens:        2000,
-		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 800},
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
 	}
 	assert.Equal(t, wantUsage, reqCtx.Usage)
 

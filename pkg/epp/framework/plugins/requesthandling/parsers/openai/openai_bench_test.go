@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
@@ -35,7 +36,7 @@ const benchBytesPerToken = 4
 
 var (
 	benchmarkChatParseResult *fwkrh.ParseResult
-	benchmarkChatBody        *fwkrh.InferenceRequestBody
+	benchmarkChatBody        *fwkrequest.InferenceRequestBody
 	benchmarkChatEnvelope    map[string]any
 )
 
@@ -230,9 +231,9 @@ func benchResponsesBody(b *testing.B, input []any, extra map[string]any) []byte 
 // benchWireBytes returns the bytes the tokenizer renders and the director forwards.
 func benchWireBytes(result *fwkrh.ParseResult) ([]byte, error) {
 	switch payload := result.Body.WirePayload().(type) {
-	case fwkrh.RawPayload:
+	case fwkrequest.RawPayload:
 		return payload, nil
-	case fwkrh.Marshaler:
+	case fwkrequest.Marshaler:
 		return payload.Marshal()
 	default:
 		return nil, fmt.Errorf("unexpected wire payload %T", payload)

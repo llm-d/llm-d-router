@@ -26,13 +26,13 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -84,26 +84,26 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 // as the input token count. Any existing tokenized prompt is preserved.
 func withTokens(req *scheduling.InferenceRequest, n int) *scheduling.InferenceRequest {
 	if req.Body.TokenizedRequest == nil {
-		req.Body.TokenizedRequest = &fwkrh.TokenizedRequest{}
+		req.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{}
 	}
-	req.Body.TokenizedRequest.Prompts = []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}}
+	req.Body.TokenizedRequest.Prompts = []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, n)}}
 	return req
 }
 
-func completionsRequestWithPrompt(prompt fwkrh.Prompt) *scheduling.InferenceRequest {
+func completionsRequestWithPrompt(prompt fwkrequest.Prompt) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Completions: &fwkrequest.CompletionsRequest{
 				Prompt: prompt,
 			},
 		},
 	}
 }
 
-func embeddingsRequestWithInput(input fwkrh.EmbeddingsInput) *scheduling.InferenceRequest {
+func embeddingsRequestWithInput(input fwkrequest.EmbeddingsInput) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Embeddings: &fwkrh.EmbeddingsRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Embeddings: &fwkrequest.EmbeddingsRequest{
 				Input: input,
 			},
 		},
@@ -131,13 +131,13 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "completions string array prompt",
 			req: &scheduling.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{
+				Body: &fwkrequest.InferenceRequestBody{
+					Completions: &fwkrequest.CompletionsRequest{
+						Prompt: fwkrequest.Prompt{
 							Strings: []string{"hello world", "foo bar baz"},
 						},
 					},
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
+					TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 5)}}},
 				},
 			},
 			want: 5,
@@ -149,28 +149,28 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		},
 		{
 			name: "completions prompt array",
-			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
+			req: withTokens(completionsRequestWithPrompt(fwkrequest.Prompt{
 				Strings: []string{"hello", "world"},
 			}), 2),
 			wantMin: 2,
 		},
 		{
 			name: "completions token ids uses exact hint",
-			req: withTokens(completionsRequestWithPrompt(fwkrh.Prompt{
+			req: withTokens(completionsRequestWithPrompt(fwkrequest.Prompt{
 				TokenIDs: [][]uint32{{1, 2, 3, 4}},
 			}), 4),
 			want: 4,
 		},
 		{
 			name: "embeddings input array",
-			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+			req: withTokens(embeddingsRequestWithInput(fwkrequest.EmbeddingsInput{
 				Strings: []string{"hello", "world"},
 			}), 2),
 			wantMin: 2,
 		},
 		{
 			name: "embeddings token ids uses exact hint",
-			req: withTokens(embeddingsRequestWithInput(fwkrh.EmbeddingsInput{
+			req: withTokens(embeddingsRequestWithInput(fwkrequest.EmbeddingsInput{
 				TokenIDs: [][]uint32{{1, 2, 3}},
 			}), 3),
 			want: 3,
@@ -178,9 +178,9 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 		{
 			name: "generate request returns exact token count",
 			req: &scheduling.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					Generate:         &fwkrh.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 7)}}},
+				Body: &fwkrequest.InferenceRequestBody{
+					Generate:         &fwkrequest.GenerateRequest{TokenIDs: []uint32{1, 2, 3, 4, 5, 6, 7}},
+					TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 7)}}},
 				},
 			},
 			want: 7,
@@ -499,7 +499,7 @@ func TestDisaggregate_UsesUnweightedCachedBlockCount(t *testing.T) {
 	// Each scenario uses its own request: the decider memoizes its decision on
 	// the request, and production only ever pairs one request with one endpoint.
 	newRequest := func() *scheduling.InferenceRequest {
-		return withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens)
+		return withTokens(completionsRequestWithPrompt(fwkrequest.Prompt{}), inputTokens)
 	}
 
 	decider, err := NewPrefixBasedPDDecider(PrefixBasedPDDeciderConfig{NonCachedTokens: nonCachedTokens})
@@ -745,7 +745,7 @@ func TestPreRequest_ConditionalDecodeGate(t *testing.T) {
 			nonCachedTokens: 5,
 			headers:         preferIfAvailable,
 			result:          resultWithEndpoint(makeTestEndpoint(0)),
-			request:         completionsRequestWithPrompt(fwkrh.Prompt{}),
+			request:         completionsRequestWithPrompt(fwkrequest.Prompt{}),
 			wantReject:      false,
 		},
 		{
@@ -814,7 +814,7 @@ func TestPreRequest_UsesUnweightedCachedBlockCount(t *testing.T) {
 	// the request, and production only ever pairs one request with one endpoint.
 	newRequest := func() *scheduling.InferenceRequest {
 		return withHeaders(
-			withTokens(completionsRequestWithPrompt(fwkrh.Prompt{}), inputTokens),
+			withTokens(completionsRequestWithPrompt(fwkrequest.Prompt{}), inputTokens),
 			map[string]string{"prefer": "if-available"},
 		)
 	}
@@ -903,7 +903,7 @@ func TestPreRequest_ClaimsConditionalDecodeAttribute(t *testing.T) {
 			req := withHeaders(makeRequestWithTokens(10), tt.headers)
 			_ = decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(10)))
 
-			_, claimed := req.GetAttribute(fwkrc.ConditionalDecodeHandledAttributeKey)
+			_, claimed := req.GetAttribute(fwkrh.ConditionalDecodeHandledAttributeKey)
 			assert.Equal(t, tt.wantClaim, claimed)
 		})
 	}

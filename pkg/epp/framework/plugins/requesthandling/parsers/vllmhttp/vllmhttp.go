@@ -117,13 +117,13 @@ func (p *VllmHTTPParser) ParseResponse(ctx context.Context, body []byte, headers
 }
 
 // RewriteModelName delegates to the OpenAI parser; the generate body shares the payload map format.
-func (p *VllmHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
+func (p *VllmHTTPParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
 	return p.openai.RewriteModelName(payload, model)
 }
 
 // RewritePriority delegates to the OpenAI-compatible map rewriter; the generate
 // body shares the same top-level priority field.
-func (p *VllmHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+func (p *VllmHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload request.MarshalablePayload, priority int) (request.MarshalablePayload, bool, error) {
 	return p.openai.RewritePriority(ctx, payload, priority)
 }
 
@@ -135,7 +135,7 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 		return nil, err
 	}
 
-	var generate fwkrh.GenerateRequest
+	var generate request.GenerateRequest
 	if err := json.Unmarshal(rawBody, &generate); err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
@@ -143,16 +143,16 @@ func (p *VllmHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseResul
 		return nil, errors.New("invalid generate request: must have non-empty token_ids field")
 	}
 
-	body := &fwkrh.InferenceRequestBody{
+	body := &request.InferenceRequestBody{
 		Generate: &generate,
-		Payload:  fwkrh.PayloadMap(bodyMap),
+		Payload:  request.PayloadMap(bodyMap),
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		body.Model = model
 	}
 	// max_tokens lives under sampling_params in the generate wire format.
 	if sp, ok := bodyMap["sampling_params"].(map[string]any); ok {
-		body.MaxOutputTokens = fwkrh.MaxOutputTokensFromPayload(sp, "max_tokens")
+		body.MaxOutputTokens = request.MaxOutputTokensFromPayload(sp, "max_tokens")
 	}
 	if stream, ok := bodyMap["stream"].(bool); ok && stream {
 		body.Stream = true

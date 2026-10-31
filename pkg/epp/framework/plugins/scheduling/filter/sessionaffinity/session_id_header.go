@@ -21,7 +21,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
@@ -49,7 +49,7 @@ func (s *sessionIDHeaderStrategy) preRequest(ctx context.Context, request *sched
 	s.PreRequest(ctx, request, schedulingResult)
 }
 
-func (s *sessionIDHeaderStrategy) responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+func (s *sessionIDHeaderStrategy) responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, targetPod *datalayer.EndpointMetadata) {
 	s.ResponseHeader(ctx, request, response, targetPod)
 }
 

@@ -21,33 +21,33 @@ import (
 	"sort"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
-		requestHeaderPlugins:     []fwkrc.RequestHeaderProcessor{},
-		responders:               []fwkrc.Responder{},
-		screeners:                []fwkrc.Screener{},
-		admissionPlugins:         []fwkrc.Admitter{},
-		dataProducerPlugins:      []fwkrc.DataProducer{},
-		preRequestPlugins:        []fwkrc.PreRequest{},
-		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
-		responseStreamingPlugins: []fwkrc.ResponseBodyProcessor{},
+		requestHeaderPlugins:     []fwkrh.RequestHeaderProcessor{},
+		responders:               []fwkrh.Responder{},
+		screeners:                []fwkrh.Screener{},
+		admissionPlugins:         []fwkrh.Admitter{},
+		dataProducerPlugins:      []fwkrh.DataProducer{},
+		preRequestPlugins:        []fwkrh.PreRequest{},
+		responseReceivedPlugins:  []fwkrh.ResponseHeaderProcessor{},
+		responseStreamingPlugins: []fwkrh.ResponseBodyProcessor{},
 	}
 }
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
-	requestHeaderPlugins     []fwkrc.RequestHeaderProcessor
-	responders               []fwkrc.Responder
-	screeners                []fwkrc.Screener
-	admissionPlugins         []fwkrc.Admitter
-	dataProducerPlugins      []fwkrc.DataProducer
-	preRequestPlugins        []fwkrc.PreRequest
-	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
-	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+	requestHeaderPlugins     []fwkrh.RequestHeaderProcessor
+	responders               []fwkrh.Responder
+	screeners                []fwkrh.Screener
+	admissionPlugins         []fwkrh.Admitter
+	dataProducerPlugins      []fwkrh.DataProducer
+	preRequestPlugins        []fwkrh.PreRequest
+	responseReceivedPlugins  []fwkrh.ResponseHeaderProcessor
+	responseStreamingPlugins []fwkrh.ResponseBodyProcessor
 
 	// propagatePriority gates whether the director injects the resolved priority
 	// into the outbound request body. Off by default so the body is untouched.
@@ -62,59 +62,59 @@ func (c *Config) WithPropagatePriority(propagatePriority bool) *Config {
 }
 
 // WithRequestHeaderPlugins sets the given plugins as the RequestHeaderProcessor plugins.
-func (c *Config) WithRequestHeaderPlugins(plugins ...fwkrc.RequestHeaderProcessor) *Config {
+func (c *Config) WithRequestHeaderPlugins(plugins ...fwkrh.RequestHeaderProcessor) *Config {
 	c.requestHeaderPlugins = plugins
 	return c
 }
 
 // Responders returns the plugins that may answer a request instead of routing it. The
 // ext-proc server offers each request to them before endpoint selection.
-func (c *Config) Responders() []fwkrc.Responder {
+func (c *Config) Responders() []fwkrh.Responder {
 	return c.responders
 }
 
 // WithResponders sets the given plugins as the Responder plugins.
-func (c *Config) WithResponders(plugins ...fwkrc.Responder) *Config {
+func (c *Config) WithResponders(plugins ...fwkrh.Responder) *Config {
 	c.responders = plugins
 	return c
 }
 
 // WithScreeners sets the screeners that narrow candidates before request data
 // production and scheduling.
-func (c *Config) WithScreeners(screeners ...fwkrc.Screener) *Config {
+func (c *Config) WithScreeners(screeners ...fwkrh.Screener) *Config {
 	c.screeners = screeners
 	return c
 }
 
 // WithPreRequestPlugins sets the given plugins as the PreRequest plugins.
 // If the Config has PreRequest plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithPreRequestPlugins(plugins ...fwkrc.PreRequest) *Config {
+func (c *Config) WithPreRequestPlugins(plugins ...fwkrh.PreRequest) *Config {
 	c.preRequestPlugins = plugins
 	return c
 }
 
 // WithResponseReceivedPlugins sets the given plugins as the ResponseReceived plugins.
 // If the Config has ResponseReceived plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithResponseReceivedPlugins(plugins ...fwkrc.ResponseHeaderProcessor) *Config {
+func (c *Config) WithResponseReceivedPlugins(plugins ...fwkrh.ResponseHeaderProcessor) *Config {
 	c.responseReceivedPlugins = plugins
 	return c
 }
 
 // WithResponseStreamingPlugins sets the given plugins as the ResponseStreaming plugins.
 // If the Config has ResponseStreaming plugins already, this call replaces the existing plugins with the given ones.
-func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrc.ResponseBodyProcessor) *Config {
+func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrh.ResponseBodyProcessor) *Config {
 	c.responseStreamingPlugins = plugins
 	return c
 }
 
 // WithDataProducerPlugins sets the given plugins as the DataProducer plugins.
-func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config {
+func (c *Config) WithDataProducerPlugins(plugins ...fwkrh.DataProducer) *Config {
 	c.dataProducerPlugins = plugins
 	return c
 }
 
 // WithAdmissionPlugins sets the given plugins as the Admit plugins.
-func (c *Config) WithAdmissionPlugins(plugins ...fwkrc.Admitter) *Config {
+func (c *Config) WithAdmissionPlugins(plugins ...fwkrh.Admitter) *Config {
 	c.admissionPlugins = plugins
 	return c
 }
@@ -124,28 +124,28 @@ func (c *Config) WithAdmissionPlugins(plugins ...fwkrc.Admitter) *Config {
 // If a plugin implements multiple plugin interfaces, it will be added to each corresponding list.
 func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
-		if requestHeaderProcessor, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
+		if requestHeaderProcessor, ok := plugin.(fwkrh.RequestHeaderProcessor); ok {
 			c.requestHeaderPlugins = append(c.requestHeaderPlugins, requestHeaderProcessor)
 		}
-		if responder, ok := plugin.(fwkrc.Responder); ok {
+		if responder, ok := plugin.(fwkrh.Responder); ok {
 			c.responders = append(c.responders, responder)
 		}
-		if screener, ok := plugin.(fwkrc.Screener); ok {
+		if screener, ok := plugin.(fwkrh.Screener); ok {
 			c.screeners = append(c.screeners, screener)
 		}
-		if preRequestPlugin, ok := plugin.(fwkrc.PreRequest); ok {
+		if preRequestPlugin, ok := plugin.(fwkrh.PreRequest); ok {
 			c.preRequestPlugins = append(c.preRequestPlugins, preRequestPlugin)
 		}
-		if responseReceivedPlugin, ok := plugin.(fwkrc.ResponseHeaderProcessor); ok {
+		if responseReceivedPlugin, ok := plugin.(fwkrh.ResponseHeaderProcessor); ok {
 			c.responseReceivedPlugins = append(c.responseReceivedPlugins, responseReceivedPlugin)
 		}
-		if responseStreamingPlugin, ok := plugin.(fwkrc.ResponseBodyProcessor); ok {
+		if responseStreamingPlugin, ok := plugin.(fwkrh.ResponseBodyProcessor); ok {
 			c.responseStreamingPlugins = append(c.responseStreamingPlugins, responseStreamingPlugin)
 		}
-		if dataProducerPlugin, ok := plugin.(fwkrc.DataProducer); ok {
+		if dataProducerPlugin, ok := plugin.(fwkrh.DataProducer); ok {
 			c.dataProducerPlugins = append(c.dataProducerPlugins, dataProducerPlugin)
 		}
-		if admissionPlugin, ok := plugin.(fwkrc.Admitter); ok {
+		if admissionPlugin, ok := plugin.(fwkrh.Admitter); ok {
 			c.admissionPlugins = append(c.admissionPlugins, admissionPlugin)
 		}
 	}

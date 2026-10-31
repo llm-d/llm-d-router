@@ -32,7 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -197,7 +197,7 @@ func TestPreRequest_ReadsEnqueueTimeThroughScope(t *testing.T) {
 
 	p := &ProgramAwarePlugin{name: "scoped-program-aware"}
 	datalayer.RegisterScopeSpecs([]plugin.Plugin{p})
-	scoped, violations := datalayer.ScopeRequest(logr.Discard(), fwkrc.PreRequestExtensionPoint, p, req)
+	scoped, violations := datalayer.ScopeRequest(logr.Discard(), fwkrh.PreRequestExtensionPoint, p, req)
 	require.NoError(t, p.PreRequest(context.Background(), scoped, nil))
 	require.NoError(t, violations.Write())
 
@@ -237,20 +237,20 @@ func TestResponseBody_FinalChunkOnly(t *testing.T) {
 	m.RecordDispatched(time.Time{})
 
 	// Intermediate chunk: in-flight unchanged, completion time unchanged.
-	p.ResponseBody(context.Background(), req, &fwkrc.Response{EndOfStream: false}, nil)
+	p.ResponseBody(context.Background(), req, &fwkrh.Response{EndOfStream: false}, nil)
 	assert.Equal(t, int64(1), m.InFlight())
 	assert.Equal(t, seedTime, m.LastCompletionTime())
 
 	// Final chunk: completion advanced, in-flight decremented.
 	time.Sleep(time.Millisecond)
-	p.ResponseBody(context.Background(), req, &fwkrc.Response{EndOfStream: true}, nil)
+	p.ResponseBody(context.Background(), req, &fwkrh.Response{EndOfStream: true}, nil)
 	assert.Equal(t, int64(0), m.InFlight())
 	assert.True(t, m.LastCompletionTime().After(seedTime))
 }
 
 func TestResponseBody_NilSafe(t *testing.T) {
 	p := &ProgramAwarePlugin{}
-	p.ResponseBody(context.Background(), nil, &fwkrc.Response{EndOfStream: true}, nil)
+	p.ResponseBody(context.Background(), nil, &fwkrh.Response{EndOfStream: true}, nil)
 	p.ResponseBody(context.Background(), &fwksched.InferenceRequest{}, nil, nil)
 }
 

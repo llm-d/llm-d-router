@@ -33,7 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 type responderTestDatastore struct {
@@ -49,7 +49,7 @@ func (d *responderTestDatastore) PodList(_ func(fwkdl.Endpoint) bool) []fwkdl.En
 }
 
 type testResponder struct {
-	response *fwkrc.LocalResponse
+	response *fwkrh.LocalResponse
 	err      error
 	calls    int
 }
@@ -72,7 +72,7 @@ func (r *testResponder) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "test-responder", Name: "test-responder"}
 }
 
-func (r *testResponder) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+func (r *testResponder) Respond(_ context.Context, _ *fwkrh.RequestLine, _ []fwkdl.Endpoint) (*fwkrh.LocalResponse, error) {
 	r.calls++
 	return r.response, r.err
 }
@@ -99,13 +99,13 @@ func newResponderRequestContext() *RequestContext {
 func TestHandleRequestHeadersResponderAnswersGet(t *testing.T) {
 	t.Parallel()
 
-	responder := &testResponder{response: &fwkrc.LocalResponse{
+	responder := &testResponder{response: &fwkrh.LocalResponse{
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       []byte(`{"object":"list"}`),
 	}}
 	server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 	reqCtx := newResponderRequestContext()
 
 	err := server.HandleRequestHeaders(context.Background(), reqCtx, requestHeaders(http.MethodGet))
@@ -121,9 +121,9 @@ func TestHandleRequestHeadersResponderAnswersGet(t *testing.T) {
 func TestHandleRequestHeadersResponderWithNilDatastore(t *testing.T) {
 	t.Parallel()
 
-	responder := &testResponder{response: &fwkrc.LocalResponse{StatusCode: http.StatusOK}}
+	responder := &testResponder{response: &fwkrh.LocalResponse{StatusCode: http.StatusOK}}
 	server := NewStreamingServer(nil, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 	reqCtx := newResponderRequestContext()
 
 	require.NoError(t, server.HandleRequestHeaders(context.Background(), reqCtx, requestHeaders(http.MethodGet)))
@@ -134,7 +134,7 @@ func TestHandleRequestHeadersResponderWithNilDatastore(t *testing.T) {
 func TestImmediateResponseRendersStatusHeadersAndBody(t *testing.T) {
 	t.Parallel()
 
-	response := immediateResponse(&fwkrc.LocalResponse{
+	response := immediateResponse(&fwkrh.LocalResponse{
 		StatusCode: http.StatusCreated,
 		Headers: map[string]string{
 			"content-type": "application/json",
@@ -157,7 +157,7 @@ func TestImmediateResponseRendersStatusHeadersAndBody(t *testing.T) {
 func TestImmediateResponseDefaultsZeroStatusToOK(t *testing.T) {
 	t.Parallel()
 
-	response := immediateResponse(&fwkrc.LocalResponse{})
+	response := immediateResponse(&fwkrh.LocalResponse{})
 
 	immediate := response.GetImmediateResponse()
 	require.NotNil(t, immediate)
@@ -170,7 +170,7 @@ func TestRequestAnsweredLocalSendsImmediateResponse(t *testing.T) {
 	server := &mockProcessServer{}
 	reqCtx := &RequestContext{
 		requestState: requestAnsweredLocal,
-		localResp: immediateResponse(&fwkrc.LocalResponse{
+		localResp: immediateResponse(&fwkrh.LocalResponse{
 			StatusCode: http.StatusOK,
 			Body:       []byte("local"),
 		}),
@@ -189,7 +189,7 @@ func TestHandleRequestHeadersResponderError(t *testing.T) {
 		Msg:  "model data unavailable",
 	}}
 	server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 
 	err := server.HandleRequestHeaders(context.Background(), newResponderRequestContext(), requestHeaders(http.MethodGet))
 
@@ -206,7 +206,7 @@ func TestProcessResponderErrorReturns503(t *testing.T) {
 		Msg:  "model data unavailable",
 	}}
 	server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 	process := &responderProcessServer{
 		request: &extProcPb.ProcessingRequest{
 			Request: &extProcPb.ProcessingRequest_RequestHeaders{
@@ -229,7 +229,7 @@ func TestHandleRequestHeadersDecliningResponderFallsBack(t *testing.T) {
 
 	responder := &testResponder{}
 	server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 	reqCtx := newResponderRequestContext()
 
 	err := server.HandleRequestHeaders(context.Background(), reqCtx, requestHeaders(http.MethodGet))
@@ -243,9 +243,9 @@ func TestHandleRequestHeadersDecliningResponderFallsBack(t *testing.T) {
 func TestHandleRequestHeadersDoesNotOfferPostToResponder(t *testing.T) {
 	t.Parallel()
 
-	responder := &testResponder{response: &fwkrc.LocalResponse{StatusCode: http.StatusOK}}
+	responder := &testResponder{response: &fwkrh.LocalResponse{StatusCode: http.StatusOK}}
 	server := NewStreamingServer(&responderTestDatastore{}, &mockDirector{}, nil, 0)
-	server.SetResponders([]fwkrc.Responder{responder})
+	server.SetResponders([]fwkrh.Responder{responder})
 	reqCtx := newResponderRequestContext()
 
 	err := server.HandleRequestHeaders(context.Background(), reqCtx, requestHeaders(http.MethodPost))

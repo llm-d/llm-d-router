@@ -20,6 +20,7 @@ package parsers
 import (
 	"strings"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
@@ -37,8 +38,8 @@ const (
 // more urgent), matching the InferenceObjective convention; vLLM's native
 // scheduler is the opposite (lower = more urgent), so the value is negated for
 // vLLM targets to keep the same relative ordering across backends.
-func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrequest.MarshalablePayload, priority int) (fwkrequest.MarshalablePayload, bool, error) {
+	m, ok := payload.(fwkrequest.PayloadMap)
 	if !ok {
 		return payload, false, nil
 	}

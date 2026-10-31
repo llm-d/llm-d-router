@@ -135,4 +135,4 @@ endpoints:
       pathPrefix: "/model-b"
 ```
 
-See the [`endpoint-header-stamper` README](../../../requestcontrol/headerstamp/README.md) for stamp configuration (`:path` prepend and header `set` variants, proxy support notes).
+See the [`endpoint-header-stamper` README](../../../requesthandling/headerstamp/README.md) for stamp configuration (`:path` prepend and header `set` variants, proxy support notes).

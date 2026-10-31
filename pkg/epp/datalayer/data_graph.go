@@ -30,7 +30,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
@@ -216,16 +216,16 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
 	}
 
 	// Request control plugins
-	if _, ok := plugin.(fwkrc.DataProducer); ok {
+	if _, ok := plugin.(fwkrh.DataProducer); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.Admitter); ok {
+	if _, ok := plugin.(fwkrh.Admitter); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.PreRequest); ok {
+	if _, ok := plugin.(fwkrh.PreRequest); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.ResponseHeaderProcessor); ok {
+	if _, ok := plugin.(fwkrh.ResponseHeaderProcessor); ok {
 		return RequestControlLayer
 	}
 

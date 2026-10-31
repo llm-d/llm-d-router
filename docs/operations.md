@@ -120,7 +120,7 @@ Novel prompts (window slides) pay snapshot, prompt-key, and indexer `Add` work.
 Reproduce with:
 
 ```bash
-go test ./pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ \
+go test ./pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix/ \
   -run='^$' -bench=BenchmarkProduceCrossSync -benchmem -count=5
 ```
 

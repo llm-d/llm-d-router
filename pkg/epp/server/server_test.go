@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -448,10 +449,10 @@ type testDirector struct {
 	requestHeaders                   map[string]string
 	requestMetadata                  map[string]any
 	handleResponseBodyEndStreamCount int
-	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
+	lastInferenceRequestBody         *fwkrequest.InferenceRequestBody
 }
 
-func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
+func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
 	ts.requestMetadata = reqCtx.Request.Metadata
 	ts.lastInferenceRequestBody = inferenceRequestBody
@@ -503,10 +504,10 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 	if m.skip {
 		return &fwkrh.ParseResult{
 			SkipResponseProcessing: true,
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
+			Body:                   &fwkrequest.InferenceRequestBody{Payload: fwkrequest.RawPayload(body)},
 		}, nil
 	}
-	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil
+	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrequest.InferenceRequestBody{}}, nil
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
@@ -591,7 +592,7 @@ func TestServer_Skip(t *testing.T) {
 	// Verify that the body was forced to have RawPayload
 	require.NotNil(t, director.lastInferenceRequestBody, "InferenceRequestBody should be non-nil")
 	require.NotNil(t, director.lastInferenceRequestBody.Payload, "Payload should be non-nil")
-	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrh.RawPayload)
+	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrequest.RawPayload)
 	require.True(t, ok, "Payload should be RawPayload")
 	require.Equal(t, []byte(`{"model":"test"}`), []byte(rawPayload), "Payload should match raw body")
 

@@ -26,7 +26,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -57,7 +57,7 @@ func TestConfigAddPluginsCollectsScreeners(t *testing.T) {
 
 	require.Len(t, config.screeners, 1)
 	assert.Same(t, screener, config.screeners[0])
-	var _ fwkrc.Screener = screener
+	var _ fwkrh.Screener = screener
 }
 
 func TestRunScreenersIntersectsIndependentSubsets(t *testing.T) {
