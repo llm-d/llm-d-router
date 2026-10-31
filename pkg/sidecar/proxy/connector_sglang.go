@@ -67,6 +67,13 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Inject bootstrap info for both prefill and decode
 	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
+	// With data-parallel prefill ranks, SGLang's prefill otherwise requires rank
+	// bootstrap_room % dp_size, and decode would look the rank up.
+	if rank, _ := r.Context().Value(prefillDPRankKey).(string); rank != "" {
+		if n, err := strconv.Atoi(rank); err == nil {
+			bootstrapInfo[reqcommon.FieldDisaggPrefillDPRank] = n
+		}
+	}
 
 	body, err := json.Marshal(bootstrapInfo)
 	if err != nil {
