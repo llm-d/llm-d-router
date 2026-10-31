@@ -695,10 +695,10 @@ For more details, see the
 
 ### RBAC and Permissions
 
-EPP is namespace-scoped. Its `Role` grants `get/watch/list` on `inferencepools` and `pods`,
-plus `create` on `tokenreviews`/`subjectaccessreviews` for metrics auth
-(`--metrics-endpoint-auth=true`, the default). To disable metrics auth and avoid the
-cluster-scoped RBAC requirement, use `--metrics-endpoint-auth=false`.
+The development environment grants EPP a `Role` with `get/watch/list` on pods and the inference CRDs. It has no
+`ClusterRole`, and `create` rules for `tokenreviews`/`subjectaccessreviews` in a `Role` have no effect, so metrics
+auth cannot work there. Export `METRICS_ENDPOINT_AUTH=false` before `make env-dev-kubernetes` (the script does not
+set it, so it expands empty). For Helm installs see [RBAC](config/charts/README.md#7-rbac).
 
 ### Developer Setup
 
