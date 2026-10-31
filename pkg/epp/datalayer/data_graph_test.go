@@ -78,7 +78,7 @@ func TestOptionalDataDependencyOrder(t *testing.T) {
 	t.Run("configured producer precedes optional consumer", func(t *testing.T) {
 		dag, err := buildDAG(
 			map[string]fwkplugin.ProducerPlugin{"cache/mock": cache, "load/mock": load},
-			map[string]fwkplugin.ConsumerPlugin{"load/mock": load})
+			map[string]fwkplugin.ConsumerPlugin{"load/mock": load}, nil)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"cache/mock"}, dag["load/mock"])
 		ordered, err := util.TopologicalSort(dag)
@@ -325,7 +325,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 					consumers[p.TypedName().String()] = cp
 				}
 			}
-			dag, err := buildDAG(producers, consumers)
+			dag, err := buildDAG(producers, consumers, nil)
 			if err != nil {
 				if tc.expectedErr != "" {
 					assert.Error(t, err)

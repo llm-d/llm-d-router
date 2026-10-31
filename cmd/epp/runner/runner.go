@@ -65,6 +65,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -936,6 +937,15 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
+	// Resolve producer phases after auto-created producers are added, so they
+	// follow the screeners and RequestHandling producers that consume their data.
+	producerPhases := datalayer.ResolveDataProducerPhases(handle.GetAllPlugins(), cfg.DataProducerPhases)
+	r.requestControlConfig.ApplyDataProducerPhases(producerPhases)
+	for name, phase := range producerPhases {
+		if phase == fwkrc.DataProducerPhaseRequestHandling {
+			logger.Info("DataProducer runs before screeners", "plugin", name, "phase", phase)
+		}
+	}
 
 	// Let plugins declare their datalayer source/extractor dependencies before Configure().
 	for _, p := range handle.GetAllPlugins() {
@@ -948,7 +958,7 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// Sort data plugins in DAG order (topological sort). Also check DAG for cycles.
 	// This must run after auto-created producers are added so they are included in the ordering.
-	dag, err := datalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	dag, err := datalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins(), datalayer.WithDataProducerPhases(producerPhases))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the configuration - %w", err)
 	}
