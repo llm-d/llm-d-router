@@ -210,26 +210,25 @@ func (s *EncodeStep) executeOne(
 	return coerceParamsMap(logger, encResp.ECTransferParams, "ec_transfer_params"), resp.Header, nil
 }
 
-func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) []int {
+// buildEncodeTokenIDs builds the encode sub-request prompt: BOS plus the
+// entry's placeholder span as it sits in the full prompt, so the encoder
+// preprocesses the same token sequence the prefiller expands.
+func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.MultimodalEntry) ([]int, error) {
 	bos := 1
-	placeholderTokenID := 0
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
-		// Only the upper bound is checked here; offset >= 0 is guaranteed for all
-		// paths, either by extractMultimodalEntries (generate) or by the trusted
-		// render-service response (chat/completions). A negative offset would
-		// index out of range.
-		if entry.Placeholder.Offset < len(fullTokenIDs) {
-			placeholderTokenID = fullTokenIDs[entry.Placeholder.Offset]
-		}
 	}
-
-	tokenIDs := make([]int, 1+entry.Placeholder.Length)
-	tokenIDs[0] = bos
-	for j := 1; j <= entry.Placeholder.Length; j++ {
-		tokenIDs[j] = placeholderTokenID
+	// offset >= 0 is guaranteed for all paths, either by
+	// extractMultimodalEntries (generate) or by the trusted render-service
+	// response (chat/completions).
+	span := entry.Placeholder
+	if span.Offset < 0 || span.Offset+span.Length > len(fullTokenIDs) {
+		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
+			span.Offset, span.Length, len(fullTokenIDs))
 	}
-	return tokenIDs
+	tokenIDs := make([]int, 0, 1+span.Length)
+	tokenIDs = append(tokenIDs, bos)
+	return append(tokenIDs, fullTokenIDs[span.Offset:span.Offset+span.Length]...), nil
 }
 
 // buildEncodeBody builds one fanout sub-request. localIdx is the entry's
@@ -263,9 +262,13 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		if reqCtx.MMPayload != "" {
 			return s.buildEncodeContentPartsBody(reqCtx, entry, localIdx, partsByMod)
 		}
+		tokenIDs, err := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
+		if err != nil {
+			return nil, err
+		}
 		body := map[string]any{
 			"model":     reqCtx.Model,
-			"token_ids": s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry),
+			"token_ids": tokenIDs,
 			"features": map[string]any{
 				"mm_hashes":       map[reqcommon.Modality][]string{mod: {entry.Hash}},
 				"mm_placeholders": map[reqcommon.Modality][]any{mod: {map[string]any{"offset": 1, "length": entry.Placeholder.Length}}},
@@ -295,9 +298,13 @@ func (s *EncodeStep) buildEncodeContentPartsBody(reqCtx *pipeline.RequestContext
 	}
 	collapsed := entry
 	collapsed.Placeholder.Length = 1
+	tokenIDs, err := s.buildEncodeTokenIDs(reqCtx.TokenIDs, collapsed)
+	if err != nil {
+		return nil, err
+	}
 	body := map[string]any{
 		"model":         reqCtx.Model,
-		"token_ids":     s.buildEncodeTokenIDs(reqCtx.TokenIDs, collapsed),
+		"token_ids":     tokenIDs,
 		"content_parts": []map[string]any{part},
 	}
 	reqcommon.CapSingleToken(body, reqcommon.APITypeVLLMGenerate)

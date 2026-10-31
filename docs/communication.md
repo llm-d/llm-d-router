@@ -609,7 +609,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 
 **Common notes:**
 - `token_ids[0]` is always BOS (first token from render output)
-- The placeholder token ID is extracted from `reqCtx.TokenIDs[entry.Placeholder.Offset]` (model-specific, opaque)
+- The placeholder span is copied from `reqCtx.TokenIDs` as render produced it (model-specific, opaque)
 - `mm_placeholders` offset is always 1 in encode requests (right after BOS, since each request has only one media entry)
 
 ---
