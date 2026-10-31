@@ -95,10 +95,10 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}
 
-	result := &fwkrh.InferenceRequestBody{
-		Payload:         fwkrh.PayloadMap(bodyMap),
+	result := &request.InferenceRequestBody{
+		Payload:         request.PayloadMap(bodyMap),
 		RawBody:         body,
-		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
+		MaxOutputTokens: request.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		result.Model = model
@@ -111,7 +111,7 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: true}, nil
 	}
 
-	var messagesReq fwkrh.MessagesRequest
+	var messagesReq request.MessagesRequest
 	if err := json.Unmarshal(body, &messagesReq); err != nil {
 		var typeErr *json.UnmarshalTypeError
 		if errors.As(err, &typeErr) && typeErr.Field != "" {
@@ -131,8 +131,8 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *AnthropicParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -163,7 +163,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
 }
 
-func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
+func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	var responseBody map[string]any
 	if err := json.Unmarshal(responseBytes, &responseBody); err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 		return nil, nil //nolint:nilnil
 	}
 
-	usage := fwkrh.Usage{}
+	usage := request.Usage{}
 	applyInputTokens(&usage, usg)
 	usage.CompletionTokens = jsonInt(usg, "output_tokens")
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -190,7 +190,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 // A block reporting none of the three, or reporting them as zero before any count
 // is known, is left alone rather than zeroing what an earlier block set. A
 // zero-token prompt is unreachable on a path that requires at least one message.
-func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
+func applyInputTokens(usage *request.Usage, usg map[string]any) {
 	read := jsonInt(usg, "cache_read_input_tokens")
 	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
 	if total == 0 {
@@ -198,7 +198,7 @@ func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
 	}
 	usage.PromptTokens = total
 	if read != 0 {
-		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
+		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: read}
 	}
 }
 
@@ -235,8 +235,8 @@ func countStreamEvents(chunk []byte) int {
 	return count
 }
 
-func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
-	var result *fwkrh.Usage
+func extractUsageStreaming(responseBytes []byte) *request.Usage {
+	var result *request.Usage
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
@@ -261,14 +261,14 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 		case "message_start":
 			if event.Message.Usage != nil {
 				if result == nil {
-					result = &fwkrh.Usage{}
+					result = &request.Usage{}
 				}
 				applyInputTokens(result, event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
-					result = &fwkrh.Usage{}
+					result = &request.Usage{}
 				}
 				// The delta counts are cumulative and authoritative over message_start.
 				applyInputTokens(result, event.Usage)

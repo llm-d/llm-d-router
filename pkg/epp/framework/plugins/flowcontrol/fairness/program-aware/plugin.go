@@ -29,7 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -93,8 +93,8 @@ func (c Config) validate() error {
 
 var (
 	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
-	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
-	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
+	_ fwkrh.PreRequest            = &ProgramAwarePlugin{}
+	_ fwkrh.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
 )
@@ -280,7 +280,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are
 // no-ops.
-func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
+func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}

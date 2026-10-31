@@ -50,7 +50,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -98,12 +97,12 @@ func (s *StreamingServer) SetToolCallingTelemetryEnabled(enabled bool) {
 
 // SetResponders sets the plugins that may answer a request instead of routing it. They are
 // asked in the given order.
-func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+func (s *StreamingServer) SetResponders(responders []fwkrh.Responder) {
 	s.responders = responders
 }
 
 type Director interface {
-	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
+	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
@@ -128,7 +127,7 @@ type StreamingServer struct {
 	emitEndpointScores          bool
 	toolCallingTelemetryEnabled bool
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
-	responders []fwkrc.Responder
+	responders []fwkrh.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -148,7 +147,7 @@ type RequestContext struct {
 	Priority                 int
 	RequestReceivedTimestamp time.Time
 	RequestSize              int
-	Usage                    fwkrh.Usage
+	Usage                    fwkrequest.Usage
 	StreamedEvents           int
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
@@ -159,7 +158,7 @@ type RequestContext struct {
 
 	// TerminationCause is set only when the stream ends without completing; the end-of-stream
 	// response record defaults an unset cause to a natural completion.
-	TerminationCause fwkrc.TerminationCause
+	TerminationCause fwkrh.TerminationCause
 
 	// FlowControlAdmitted reports whether flow control processed this request. It gates emission of the
 	// FlowQueueDuration response header, distinguishing a genuine zero-wait dispatch from flow control
@@ -341,18 +340,18 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 
 // terminationCause classifies a stream that ended without completing. ctxErr is the request
 // context's error, which is non-nil once Envoy has torn the stream down under the EPP.
-func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCause {
 	switch {
 	case reqCtx.requestState == requestEvicted:
-		return fwkrc.TerminationCauseEvicted
+		return fwkrh.TerminationCauseEvicted
 	case ctxErr != nil:
-		return fwkrc.TerminationCauseClientDisconnect
+		return fwkrh.TerminationCauseClientDisconnect
 	default:
-		return fwkrc.TerminationCauseError
+		return fwkrh.TerminationCauseError
 	}
 }
 
-func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.TerminationCause {
+func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
 	if trailers == nil || trailers.GetTrailers() == nil {
 		return ""
 	}
@@ -360,7 +359,7 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 	for _, header := range trailers.GetTrailers().GetHeaders() {
 		if header.Key == "grpc-status" {
 			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
-				return fwkrc.TerminationCauseError
+				return fwkrh.TerminationCauseError
 			}
 			return ""
 		}

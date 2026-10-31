@@ -169,13 +169,13 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	body := &fwkrh.InferenceRequestBody{
-		Generate: &fwkrh.GenerateRequest{
+	body := &request.InferenceRequestBody{
+		Generate: &request.GenerateRequest{
 			TokenIDs:  tokenIDs,
 			Text:      text,
 			CacheSalt: cacheSalt,
 		},
-		Payload:         fwkrh.PayloadMap(bodyMap),
+		Payload:         request.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
 	}
@@ -186,8 +186,8 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *SGLangHTTPParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -199,7 +199,7 @@ func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mo
 // payload and writes the resolved EPP priority. The director only calls this when
 // priority propagation is enabled; see parsers.RewritePriority for the
 // cross-backend priority semantics.
-func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload request.MarshalablePayload, priority int) (request.MarshalablePayload, bool, error) {
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
@@ -230,7 +230,7 @@ func parseText(data json.RawMessage) (string, error) {
 }
 
 func parseInputIDs(data json.RawMessage) ([]uint32, error) {
-	if ids, ok := fwkrh.ParseCanonicalTokenIDs(data); ok {
+	if ids, ok := request.ParseCanonicalTokenIDs(data); ok {
 		return ids, nil
 	}
 
@@ -296,7 +296,7 @@ func isEventStream(headers map[string]string) bool {
 }
 
 // extractStreamingUsage reads usage from SGLang SSE data lines.
-func extractStreamingUsage(body []byte) *fwkrh.Usage {
+func extractStreamingUsage(body []byte) *request.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -322,7 +322,7 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	return nil
 }
 
-func parseMetaInfoUsage(data []byte) (*fwkrh.Usage, error) {
+func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
 	var resp sgLangResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
@@ -330,13 +330,13 @@ func parseMetaInfoUsage(data []byte) (*fwkrh.Usage, error) {
 	if resp.MetaInfo.PromptTokens == nil && resp.MetaInfo.CompletionTokens == nil {
 		return nil, nil //nolint:nilnil
 	}
-	u := &fwkrh.Usage{
+	u := &request.Usage{
 		PromptTokens:     intValue(resp.MetaInfo.PromptTokens),
 		CompletionTokens: intValue(resp.MetaInfo.CompletionTokens),
 	}
 	u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	if resp.MetaInfo.CachedTokens != nil {
-		u.PromptTokenDetails = &fwkrh.PromptTokenDetails{
+		u.PromptTokenDetails = &request.PromptTokenDetails{
 			CachedTokens: *resp.MetaInfo.CachedTokens,
 		}
 	}

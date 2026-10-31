@@ -142,19 +142,19 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 		return nil, fmt.Errorf("error extracting request body: %w", err)
 	}
 
-	var bodyMap fwkrh.PayloadMap
+	var bodyMap request.PayloadMap
 	if rawFields, ok := envelopeRawFields[apiType]; ok {
 		var payload map[string]any
 		payload, err = parserutil.UnmarshalEnvelope(body, rawFields...)
-		bodyMap = fwkrh.PayloadMap(payload)
+		bodyMap = request.PayloadMap(payload)
 		extractedBody.RawBody = body
 	} else if rawField := tokenInputField(extractedBody); rawField == "" {
-		bodyMap = make(fwkrh.PayloadMap)
+		bodyMap = make(request.PayloadMap)
 		err = parserutil.Unmarshal(body, &bodyMap)
 	} else {
 		var payload map[string]any
 		payload, err = parserutil.UnmarshalMapWithRawField(body, rawField)
-		bodyMap = fwkrh.PayloadMap(payload)
+		bodyMap = request.PayloadMap(payload)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling request bodyMap: %w", err)
@@ -189,7 +189,7 @@ func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
 	return streamFormat == "sse" || streamFormat == "audio"
 }
 
-func tokenInputField(body *fwkrh.InferenceRequestBody) string {
+func tokenInputField(body *request.InferenceRequestBody) string {
 	switch {
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
 		return "input"
@@ -199,8 +199,8 @@ func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *OpenAIParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -213,7 +213,7 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 // director only calls this when priority propagation is enabled; see
 // parsers.RewritePriority for the cross-backend priority semantics.
 // Decisions requests are left unchanged: the Decisions schema declares no priority and rejects unknown fields.
-func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload request.MarshalablePayload, priority int) (request.MarshalablePayload, bool, error) {
 	if determineAPITypeFromPath(ctx.RequestPath) == request.DecisionsPathSuffix {
 		return payload, false, nil
 	}
@@ -226,11 +226,11 @@ func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload
 func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
 	switch apiType {
 	case chatCompletionsAPI:
-		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
+		return request.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
 	case completionsAPI:
-		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
+		return request.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
 	case responsesAPI:
-		return fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
+		return request.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
 	default:
 		return nil
 	}
@@ -307,8 +307,8 @@ func headerValue(headers map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-func extractUsageHeaders(headers map[string]string) *fwkrh.Usage {
-	usage := &fwkrh.Usage{}
+func extractUsageHeaders(headers map[string]string) *request.Usage {
+	usage := &request.Usage{}
 	found := false
 
 	for header, target := range map[string]*int{
@@ -378,29 +378,29 @@ func determineAPITypeFromPath(path string) string {
 
 // extractRequestBody extracts the InferenceRequestBody from the given raw body
 // for the already-resolved API type.
-func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequestBody, error) {
+func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceRequestBody, error) {
 	switch apiType {
 	case conversationsAPI:
 		validationErr := errors.New("invalid conversations request: must have items field")
-		var conversations fwkrh.ConversationsRequest
+		var conversations request.ConversationsRequest
 		if err := json.Unmarshal(rawBody, &conversations); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if len(conversations.Items) == 0 {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
+		return &request.InferenceRequestBody{Conversations: &conversations}, nil
 
 	case responsesAPI:
 		validationErr := errors.New("invalid responses request: must have input field")
-		var responses fwkrh.ResponsesRequest
+		var responses request.ResponsesRequest
 		if err := json.Unmarshal(rawBody, &responses); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if responses.Input == nil {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+		return &request.InferenceRequestBody{Responses: &responses}, nil
 
 	case audioSpeechAPI:
 		validationErr := errors.New("invalid text to speech request: must have string input field")
@@ -413,8 +413,8 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 		if speechRequest.Input == nil {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{
-			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: *speechRequest.Input},
+		return &request.InferenceRequestBody{
+			TextToSpeech: &request.TextToSpeechRequest{Input: *speechRequest.Input},
 		}, nil
 
 	case audioGenerateAPI:
@@ -428,53 +428,53 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 		if generateRequest.Input == nil {
 			return nil, errors.New("invalid audio generate request: must have string input field")
 		}
-		return &fwkrh.InferenceRequestBody{
-			AudioGenerate: &fwkrh.AudioGenerateRequest{Input: *generateRequest.Input, NegativePrompt: generateRequest.NegativePrompt},
+		return &request.InferenceRequestBody{
+			AudioGenerate: &request.AudioGenerateRequest{Input: *generateRequest.Input, NegativePrompt: generateRequest.NegativePrompt},
 		}, nil
 
 	case chatCompletionsAPI:
 		validationErr := errors.New("invalid chat completions request: must have valid messages field")
-		var chatCompletions fwkrh.ChatCompletionsRequest
+		var chatCompletions request.ChatCompletionsRequest
 		if err := json.Unmarshal(rawBody, &chatCompletions); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if err := validateChatCompletionsMessages(chatCompletions.Messages); err != nil {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
+		return &request.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
 
 	case completionsAPI:
 		validationErr := errors.New("invalid completions request: must have prompt field")
-		var completions fwkrh.CompletionsRequest
+		var completions request.CompletionsRequest
 		if err := json.Unmarshal(rawBody, &completions); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if completions.Prompt.IsEmpty() {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
+		return &request.InferenceRequestBody{Completions: &completions}, nil
 
 	case embeddingsAPI:
 		validationErr := errors.New("invalid embeddings request: must have input field")
-		var embeddings fwkrh.EmbeddingsRequest
+		var embeddings request.EmbeddingsRequest
 		if err := json.Unmarshal(rawBody, &embeddings); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if embeddings.Input.IsEmpty() {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
+		return &request.InferenceRequestBody{Embeddings: &embeddings}, nil
 
 	case imagesGenerationsAPI:
 		validationErr := errors.New("invalid images generations request: must have prompt field")
-		var images fwkrh.ImagesGenerationsRequest
+		var images request.ImagesGenerationsRequest
 		if err := json.Unmarshal(rawBody, &images); err != nil {
 			return nil, requestBodyDecodeError(err, validationErr)
 		}
 		if images.Prompt == "" {
 			return nil, validationErr
 		}
-		return &fwkrh.InferenceRequestBody{Images: &images}, nil
+		return &request.InferenceRequestBody{Images: &images}, nil
 	default:
 		return nil, errors.New("unsupported API endpoint")
 	}
@@ -490,8 +490,8 @@ func parseDecisionsRequest(body []byte) (*fwkrh.ParseResult, error) {
 	if !ok || len(questions) == 0 || questions[0] != '[' {
 		return nil, errors.New("invalid decisions request: questions must be a JSON array")
 	}
-	result := &fwkrh.InferenceRequestBody{
-		Payload: fwkrh.PayloadMap(bodyMap),
+	result := &request.InferenceRequestBody{
+		Payload: request.PayloadMap(bodyMap),
 		RawBody: body,
 		// The engine renders one prompt per question, which the router cannot reproduce.
 		RenderRequest: true,
@@ -514,10 +514,10 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		return nil, errors.New("images edits request: content-type is missing the multipart boundary")
 	}
 
-	images := &fwkrh.ImagesGenerationsRequest{}
-	extractedBody := &fwkrh.InferenceRequestBody{
+	images := &request.ImagesGenerationsRequest{}
+	extractedBody := &request.InferenceRequestBody{
 		Images:  images,
-		Payload: fwkrh.RawPayload(body),
+		Payload: request.RawPayload(body),
 	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	for {
@@ -582,7 +582,7 @@ func requestBodyDecodeError(err, validationErr error) error {
 	return validationErr
 }
 
-func validateChatCompletionsMessages(messages []fwkrh.Message) error {
+func validateChatCompletionsMessages(messages []request.Message) error {
 	if len(messages) == 0 {
 		return errors.New("chat-completions request must have at least one message")
 	}
@@ -608,7 +608,7 @@ func toInt(v any) int {
 	return 0
 }
 
-func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
+func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	var responseBody struct {
 		Usage map[string]any `json:"usage"`
 	}
@@ -620,7 +620,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 		return nil, nil //nolint:nilnil
 	}
 
-	usage := fwkrh.Usage{}
+	usage := request.Usage{}
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
@@ -642,7 +642,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
 		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
-				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
+				usage.PromptTokenDetails = &request.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
 				}
 			}
@@ -677,10 +677,10 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 //	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
 //
 // It extracts usage from those three events and from "speech.audio.done".
-func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
+func extractUsageStreaming(responseBytes []byte) *request.Usage {
 	// Keep the last usage event: a stream with continuous usage stats reports cumulative usage
 	// on every chunk, so a later event in the same body supersedes an earlier one.
-	var result *fwkrh.Usage
+	var result *request.Usage
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
@@ -709,7 +709,7 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 				}
 				continue
 			}
-			var usage *fwkrh.Usage
+			var usage *request.Usage
 			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
 				result = usage
 			}
@@ -736,7 +736,7 @@ func isResponsesTerminalEvent(eventType string) bool {
 	}
 }
 
-func extractRawUsage(raw json.RawMessage) *fwkrh.Usage {
+func extractRawUsage(raw json.RawMessage) *request.Usage {
 	jsonBytes, _ := json.Marshal(map[string]any{"usage": raw})
 	usage, err := extractUsage(jsonBytes)
 	if err != nil {

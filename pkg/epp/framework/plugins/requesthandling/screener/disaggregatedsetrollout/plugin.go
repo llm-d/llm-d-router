@@ -1,0 +1,329 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package disaggregatedsetrollout
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
+)
+
+const (
+	// PluginType is the plugin type for revision gating, strict revision
+	// filtering, and revision response-header stamping.
+	PluginType       = "disaggregatedset-rollout-screener"
+	podExtractorType = "disaggregatedset-rollout-pod-extractor"
+)
+
+var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+
+// Screener gates revisions before scheduling. ResponseHeader stamps the
+// selected endpoint's revision.
+type Screener struct {
+	typedName                fwkplugin.TypedName
+	config                   Config
+	scope                    labels.Selector
+	revisionHeaderName       string
+	revisionLabelKey         string
+	roleLabelKey             string
+	revisionDecisionStateKey fwkdl.StateKey
+	handle                   fwkplugin.Handle
+	localRevisionDecisions   *fwkplugin.PluginState
+	overflowGuard            fwksched.Filter
+
+	mu           sync.RWMutex
+	pods         map[types.NamespacedName]podInfo
+	distribution revisionDistribution
+}
+
+type podInfo struct {
+	revision string
+	role     string
+	ready    bool
+}
+
+type revisionDistribution struct {
+	roleCounts        map[string]map[string]int
+	shares            map[string]float64
+	needsCoordination bool
+}
+
+var (
+	_ fwkplugin.Plugin              = (*Screener)(nil)
+	_ fwkrh.Screener                = (*Screener)(nil)
+	_ fwkrh.ResponseHeaderProcessor = (*Screener)(nil)
+	_ fwkdl.Registrant              = (*Screener)(nil)
+	_ fwkdl.NotificationExtractor   = (*podNotificationHandler)(nil)
+)
+
+// ConfigParser decodes the parameters for the config loader, which reads the
+// overflow guard's pluginRef to create the guard before the Screener.
+func ConfigParser(parameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	config := &Config{}
+	if parameters == nil {
+		return config, nil
+	}
+	if err := parameters.Decode(config); err != nil {
+		return nil, fmt.Errorf("decode disaggregatedset-rollout-screener parameters: %w", err)
+	}
+	return config, nil
+}
+
+// Factory creates a disaggregatedset-rollout-screener from normal plugin parameters.
+func Factory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	if name == "" {
+		name = PluginType
+	}
+	if parameters == nil {
+		return nil, errors.New("disaggregatedset-rollout-screener requires parameters")
+	}
+	parsed, err := ConfigParser(parameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	config := *parsed.(*Config)
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	scope, err := labels.Parse(config.Scope.LabelSelector)
+	if err != nil {
+		return nil, fmt.Errorf("parse scope.labelSelector: %w", err)
+	}
+	registerMetrics()
+	screener := newScreener(name, config, scope, handle)
+	if err := screener.resolveOverflowGuard(); err != nil {
+		return nil, err
+	}
+	return screener, nil
+}
+
+func newScreener(name string, config Config, scope labels.Selector, handle fwkplugin.Handle) *Screener {
+	revisionHeaderName := ""
+	revisionLabelKey := ""
+	roleLabelKey := ""
+	if config.RevisionGating != nil {
+		revisionHeaderName = config.RevisionGating.RevisionHeaderName
+		revisionLabelKey = config.RevisionGating.RevisionLabelKey
+		roleLabelKey = config.RevisionGating.RoleLabelKey
+	}
+	screener := &Screener{
+		typedName:                fwkplugin.TypedName{Type: PluginType, Name: name},
+		config:                   config,
+		scope:                    scope,
+		revisionHeaderName:       revisionHeaderName,
+		revisionLabelKey:         revisionLabelKey,
+		roleLabelKey:             roleLabelKey,
+		revisionDecisionStateKey: fwkdl.StateKey("disaggregatedset-rollout:" + name),
+		handle:                   handle,
+		localRevisionDecisions:   fwkplugin.NewPluginState(handle.Context()),
+		pods:                     make(map[types.NamespacedName]podInfo),
+	}
+	return screener
+}
+
+func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
+
+// RegisterDependencies requests the framework-owned core/v1 Pod notification
+// source. No controller-runtime Manager or Kubernetes client enters the plugin.
+func (c *Screener) RegisterDependencies(registrar fwkdl.Registrar) error {
+	if !c.config.RevisionGating.Active() {
+		return nil
+	}
+	handler := &podNotificationHandler{screener: c}
+	return registrar.Register(fwkdl.PendingRegistration{
+		Owner:      c.typedName,
+		SourceType: sourcenotifications.NotificationSourceType,
+		Extractor:  handler,
+		DefaultSource: sourcenotifications.NewK8sNotificationSource(
+			sourcenotifications.NotificationSourceType,
+			c.typedName.Name+"/pod",
+			podGVK,
+		),
+	})
+}
+
+// ResponseHeader stamps the selected revision after the upstream endpoint
+// begins responding.
+func (c *Screener) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, response *fwkrh.Response, endpoint *fwkdl.EndpointMetadata) {
+	if endpoint == nil || response == nil || response.Headers == nil {
+		return
+	}
+	if revision := endpoint.Labels[c.revisionLabelKey]; revision != "" {
+		response.Headers[c.revisionHeaderName] = revision
+	}
+}
+
+type podNotificationHandler struct {
+	screener *Screener
+}
+
+func (h *podNotificationHandler) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: podExtractorType, Name: h.screener.typedName.Name + "/pod"}
+}
+
+func (h *podNotificationHandler) GVK() schema.GroupVersionKind { return podGVK }
+
+func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.NotificationEvent) error {
+	if event.Object == nil {
+		return nil
+	}
+	key := types.NamespacedName{Name: event.Object.GetName(), Namespace: event.Object.GetNamespace()}
+	if event.Type == fwkdl.EventDelete {
+		h.screener.removePod(key)
+		return nil
+	}
+
+	pod := &corev1.Pod{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(event.Object.Object, pod); err != nil {
+		return fmt.Errorf("convert Pod notification %s: %w", key, err)
+	}
+	if !h.screener.tracksPod(pod) {
+		h.screener.removePod(key)
+		return nil
+	}
+
+	h.screener.mu.Lock()
+	h.screener.pods[key] = podInfo{
+		revision: pod.Labels[h.screener.revisionLabelKey],
+		role:     pod.Labels[h.screener.roleLabelKey],
+		ready:    podutil.IsPodReady(pod),
+	}
+	h.screener.rebuildDistributionLocked()
+	h.screener.mu.Unlock()
+	return nil
+}
+
+func (c *Screener) tracksPod(pod *corev1.Pod) bool {
+	if pod == nil || !c.config.RevisionGating.Active() {
+		return false
+	}
+	if !c.scope.Matches(labels.Set(pod.Labels)) {
+		return false
+	}
+	return pod.Labels[c.revisionLabelKey] != "" && pod.Labels[c.roleLabelKey] != ""
+}
+
+func (c *Screener) removePod(key types.NamespacedName) {
+	c.mu.Lock()
+	delete(c.pods, key)
+	c.rebuildDistributionLocked()
+	c.mu.Unlock()
+}
+
+func (c *Screener) rebuildDistributionLocked() {
+	var requiredRoles []string
+	var mode GatingMode
+	if c.config.RevisionGating.Active() {
+		requiredRoles = c.config.RevisionGating.RequiredRoles
+		mode = c.config.RevisionGating.Mode
+	}
+	roleCounts := make(map[string]map[string]int)
+	observedRevisions := make(map[string]struct{})
+	for _, pod := range c.pods {
+		// NotReady Pods announce a rollout before the new revision can receive traffic.
+		observedRevisions[pod.revision] = struct{}{}
+		if !pod.ready {
+			continue
+		}
+		incrementRoleCount(roleCounts, pod)
+	}
+	previous := c.distribution
+	next := newRevisionDistribution(roleCounts, requiredRoles, mode)
+	next.needsCoordination = c.config.RevisionGating.coordinationEnabled() && len(observedRevisions) > 1
+	c.distribution = next
+	recordRevisionGatingShares(c.typedName.Name, mode, previous, c.distribution)
+}
+
+func incrementRoleCount(counts map[string]map[string]int, pod podInfo) {
+	if counts[pod.revision] == nil {
+		counts[pod.revision] = make(map[string]int)
+	}
+	counts[pod.revision][pod.role]++
+}
+
+func newRevisionDistribution(roleCounts map[string]map[string]int, requiredRoles []string, mode GatingMode) revisionDistribution {
+	covered := make(map[string]map[string]int, len(roleCounts))
+	for revision, perRole := range roleCounts {
+		if _, ok := revisionSumWeight(perRole, requiredRoles); ok {
+			covered[revision] = perRole
+		}
+	}
+
+	weights := make(map[string]int, len(roleCounts))
+	if mode == GatingModeMaxRole {
+		role := dominantRole(covered, requiredRoles)
+		for revision, perRole := range covered {
+			weights[revision] = perRole[role]
+		}
+	} else {
+		for revision, perRole := range covered {
+			weight, _ := revisionSumWeight(perRole, requiredRoles)
+			weights[revision] = weight
+		}
+	}
+
+	total := 0
+	for _, weight := range weights {
+		total += weight
+	}
+
+	shares := make(map[string]float64, len(weights))
+	if total > 0 {
+		for revision, weight := range weights {
+			shares[revision] = float64(weight) / float64(total)
+		}
+	}
+	return revisionDistribution{roleCounts: roleCounts, shares: shares}
+}
+
+func dominantRole(covered map[string]map[string]int, requiredRoles []string) string {
+	dominant := ""
+	dominantCount := -1
+	for _, role := range requiredRoles {
+		total := 0
+		for _, perRole := range covered {
+			total += perRole[role]
+		}
+		// RequiredRoles order resolves ties deterministically.
+		if total > dominantCount {
+			dominant = role
+			dominantCount = total
+		}
+	}
+	return dominant
+}
+
+func (c *Screener) distributionSnapshot() revisionDistribution {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.distribution
+}

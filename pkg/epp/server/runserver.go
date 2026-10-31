@@ -45,7 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
@@ -87,7 +87,7 @@ type ExtProcServerRunner struct {
 	// Responders, when set, let EPP answer a request itself instead of routing it to a model
 	// server. Each is asked in turn before an endpoint is selected, and the first one to
 	// return a response ends the exchange.
-	Responders []fwkrc.Responder
+	Responders []fwkrh.Responder
 }
 
 // NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the

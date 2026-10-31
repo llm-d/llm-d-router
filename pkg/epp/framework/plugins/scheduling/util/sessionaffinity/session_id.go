@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -364,7 +364,7 @@ func (s *SessionIDHeader) pickedPodName(schedulingResult *scheduling.SchedulingR
 
 // ResponseHeader is a no-op: under session_id the client owns its
 // session identifier.
-func (s *SessionIDHeader) ResponseHeader(context.Context, *scheduling.InferenceRequest, *requestcontrol.Response, *datalayer.EndpointMetadata) {
+func (s *SessionIDHeader) ResponseHeader(context.Context, *scheduling.InferenceRequest, *fwkrh.Response, *datalayer.EndpointMetadata) {
 }
 
 // expired reports whether a binding last used at lastSeen has outlived the TTL.

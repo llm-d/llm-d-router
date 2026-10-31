@@ -1,0 +1,548 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package p2psource selects a peer within one block of the most cached prompt
+// prefix, publishes a request-wide reusable-prefix floor for scheduling, and
+// emits the selected peer in the KV cache source header after scheduling.
+package p2psource
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"math"
+	"net"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/constants"
+)
+
+const (
+	// PluginType is the registered type name of the p2p-source-producer.
+	PluginType = p2psourceconstants.P2PSourcePluginType
+
+	// defaultPrefillProfile is the disaggregation prefill profile name; when
+	// that profile's result carries an endpoint, that endpoint computes the
+	// prefix. Operators who rename it (disagg-profile-handler profiles.prefill)
+	// must set prefillProfileName to match.
+	defaultPrefillProfile = "prefill"
+
+	defaultMinCachedTokenDelta = 1
+)
+
+// Config configures the p2p-source-producer.
+type Config struct {
+	// PrefixMatchInfoProducerName is the name of the data producer that
+	// produces PrefixCacheMatchInfo. Empty selects the default producer.
+	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// MinCachedTokenDelta is the minimum number of cached prompt tokens the
+	// best peer must hold beyond the pod computing the prefix for the header
+	// to be set. Must be >= 1; defaults to 1.
+	MinCachedTokenDelta int `json:"minCachedTokenDelta,omitempty"`
+	// PrefillProfileName is the disaggregation prefill profile name, matching
+	// the disagg-profile-handler's profiles.prefill. Empty defaults to
+	// "prefill".
+	PrefillProfileName string `json:"prefillProfileName,omitempty"`
+	// CostModel, when set, decides the pull by comparing the prefill time the
+	// pull saves against the transfer and the waits a pull pays on busy pods,
+	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
+	CostModel *CostModelConfig `json:"costModel,omitempty"`
+}
+
+// CostModelConfig holds the calibrated constants of the pull cost model. The
+// pull is emitted when
+//
+//	delta*(prefill - transfer) + fleetWeight*running(d)*delta*prefill
+//	  > transferFixed + busy(s)*sourceWait + busy(d)*requeue
+//
+// with delta the cached-token advantage of the source over the computing
+// pod, running(d) the requests running on the computing pod, and busy(x)
+// true when pod x has at least BusyQueueThreshold requests waiting. The
+// fleet term credits the prefill a pull keeps off a loaded pod: a recompute
+// there delays every running request's decode steps, while a pull delays
+// only the pulled request. A busy destination re-admits the pulled request
+// through its waiting queue after the blocks arrive.
+type CostModelConfig struct {
+	// PrefillMicrosecondsPerToken is the destination's prefill cost per token.
+	PrefillMicrosecondsPerToken float64 `json:"prefillMicrosecondsPerToken"`
+	// TransferMicrosecondsPerToken is the P2P transfer cost per token. Must be
+	// below PrefillMicrosecondsPerToken.
+	TransferMicrosecondsPerToken float64 `json:"transferMicrosecondsPerToken"`
+	// TransferFixedMs is the fixed cost of a pull on idle pods.
+	TransferFixedMs float64 `json:"transferFixedMs,omitempty"`
+	// SourceWaitMs is added when the source is busy. Pulls are served from
+	// the source's CPU tier, not its scheduler; leave it 0 unless a busy
+	// source is measured to delay pulls.
+	SourceWaitMs float64 `json:"sourceWaitMs,omitempty"`
+	// RequeueMs is added when the computing pod is busy.
+	RequeueMs float64 `json:"requeueMs,omitempty"`
+	// FleetWeight credits a pull with the prefill time it frees for each
+	// request running on the computing pod, at this weight per running
+	// request. 0 decides on the pulled request's own latency only.
+	FleetWeight float64 `json:"fleetWeight,omitempty"`
+	// BusyQueueThreshold is the waiting-queue depth at or above which a pod
+	// counts as busy. Omitted or 0 defaults to 1; negative is rejected.
+	BusyQueueThreshold int `json:"busyQueueThreshold,omitempty"`
+}
+
+const defaultBusyQueueThreshold = 1
+
+func (c *CostModelConfig) validate() error {
+	if c.BusyQueueThreshold == 0 {
+		c.BusyQueueThreshold = defaultBusyQueueThreshold
+	}
+	switch {
+	case c.PrefillMicrosecondsPerToken <= 0:
+		return fmt.Errorf("costModel.prefillMicrosecondsPerToken must be > 0, got %v", c.PrefillMicrosecondsPerToken)
+	case c.TransferMicrosecondsPerToken < 0:
+		return fmt.Errorf("costModel.transferMicrosecondsPerToken must be >= 0, got %v", c.TransferMicrosecondsPerToken)
+	case c.TransferMicrosecondsPerToken >= c.PrefillMicrosecondsPerToken:
+		return fmt.Errorf("costModel.transferMicrosecondsPerToken (%v) must be below prefillMicrosecondsPerToken (%v)",
+			c.TransferMicrosecondsPerToken, c.PrefillMicrosecondsPerToken)
+	case c.TransferFixedMs < 0 || c.SourceWaitMs < 0 || c.RequeueMs < 0:
+		return errors.New("costModel wait constants must be >= 0")
+	case c.FleetWeight < 0:
+		return fmt.Errorf("costModel.fleetWeight must be >= 0, got %v", c.FleetWeight)
+	case c.BusyQueueThreshold < 1:
+		return fmt.Errorf("costModel.busyQueueThreshold must be >= 1, got %d", c.BusyQueueThreshold)
+	}
+	return nil
+}
+
+func (c *CostModelConfig) busy(waitingQueue int) bool {
+	return waitingQueue >= c.BusyQueueThreshold
+}
+
+// sourceCost ranks a pull source before the computing pod is known: the wait
+// a busy source adds, plus the recompute the destination pays for every
+// token this source holds short of the best-cached one. The computing pod's
+// own terms are equal across sources and drop out. The shortfall is priced
+// without the fleet credit, which depends on the computing pod: the credit
+// scales every source's shortfall by the same factor, so the ranking is
+// unchanged when SourceWaitMs is 0, and with a non-zero SourceWaitMs the
+// ranking undervalues cache for a loaded computing pod.
+func (c *CostModelConfig) sourceCost(cached, maxCached, waitingQueue int) float64 {
+	cost := float64(maxCached-cached) * (c.PrefillMicrosecondsPerToken - c.TransferMicrosecondsPerToken) / 1000
+	if c.busy(waitingQueue) {
+		cost += c.SourceWaitMs
+	}
+	return cost
+}
+
+// evaluate returns the pull's gain and cost in milliseconds for a
+// delta-token pull between a source and computing pod with the given
+// waiting-queue depths and running-request count on the computing pod.
+func (c *CostModelConfig) evaluate(delta, sourceWaiting, computingWaiting, computingRunning int) (gain, cost float64) {
+	tokens := float64(delta)
+	gain = tokens * (c.PrefillMicrosecondsPerToken - c.TransferMicrosecondsPerToken) / 1000
+	gain += c.FleetWeight * float64(computingRunning) * tokens * c.PrefillMicrosecondsPerToken / 1000
+	cost = c.TransferFixedMs
+	if c.busy(sourceWaiting) {
+		cost += c.SourceWaitMs
+	}
+	if c.busy(computingWaiting) {
+		cost += c.RequeueMs
+	}
+	return gain, cost
+}
+
+// compile-time type assertions
+var (
+	_ fwkrh.DataProducer = &Producer{}
+	_ fwkrh.PreRequest   = &Producer{}
+)
+
+// Producer stashes a pull-source candidate holding within one block of the
+// most cached prefix tokens and publishes a reusable-prefix floor during
+// Produce. In PreRequest it sets routing.KVCacheSourceHeader to that peer when
+// it out-caches the pod computing the prefix (the prefill endpoint under P/D
+// disaggregation, the primary endpoint otherwise) by at least
+// minCachedTokenDelta tokens.
+type Producer struct {
+	typedName                   plugin.TypedName
+	prefixMatchDataKey          plugin.DataKey
+	reusablePrefixTokensDataKey plugin.DataKey
+	minCachedTokenDelta         int
+	prefillProfile              string
+	attrKeyValue                plugin.DataKey
+	costModel                   *CostModelConfig
+}
+
+// PluginFactory parses the raw plugin configuration and returns a configured
+// Producer.
+func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
+	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta}
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
+		}
+	}
+	if cfg.MinCachedTokenDelta < 1 {
+		return nil, fmt.Errorf("%s: minCachedTokenDelta must be >= 1, got %d", PluginType, cfg.MinCachedTokenDelta)
+	}
+	if cfg.CostModel != nil {
+		if err := cfg.CostModel.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", PluginType, err)
+		}
+	}
+	return New(name, cfg), nil
+}
+
+// New constructs a p2p-source-producer bound to the configured
+// PrefixCacheMatchInfo producer name.
+func New(name string, cfg Config) *Producer {
+	prefillProfile := cfg.PrefillProfileName
+	if prefillProfile == "" {
+		prefillProfile = defaultPrefillProfile
+	}
+	minCachedTokenDelta := cfg.MinCachedTokenDelta
+	if minCachedTokenDelta < 1 {
+		minCachedTokenDelta = defaultMinCachedTokenDelta
+	}
+	costModel := cfg.CostModel
+	if costModel != nil && costModel.BusyQueueThreshold < 1 {
+		defaulted := *costModel
+		defaulted.BusyQueueThreshold = defaultBusyQueueThreshold
+		costModel = &defaulted
+	}
+	return &Producer{
+		typedName:                   plugin.TypedName{Type: PluginType, Name: name},
+		prefixMatchDataKey:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
+		reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(name),
+		minCachedTokenDelta:         minCachedTokenDelta,
+		prefillProfile:              prefillProfile,
+		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
+		costModel:                   costModel,
+	}
+}
+
+// TypedName returns the plugin's registered type and name.
+func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
+
+// Produces declares the request-wide reusable prefix token floor, and the
+// best-match peer this plugin stashes on the request for its own PreRequest to
+// read back. Both keys are name-bound to this instance, so two configured
+// p2p-source producers do not share them.
+func (p *Producer) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0),
+		p.attrKeyValue:                (*bestMatchPeer)(nil),
+	}
+}
+
+// Consumes declares the PrefixCacheMatchInfo dependency so the data-layer
+// DAG orders the producing plugin before this one.
+func (p *Producer) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{p.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}},
+	}
+}
+
+// bestMatchPeer is the pull-source candidate chosen during Produce, stashed
+// as a request attribute so PreRequest can compare it against the scheduled
+// endpoint. cachedTokens is the chosen peer's own count, which may be one
+// block below the pool maximum.
+type bestMatchPeer struct {
+	hostPort     string
+	cachedTokens int
+	hasTierData  bool
+	// waitingQueue is the source's waiting-queue depth at Produce time, read
+	// by the cost model in PreRequest.
+	waitingQueue int
+}
+
+// attrKey returns the request-attribute key carrying the best-match peer,
+// name-bound to this plugin instance.
+func (p *Producer) attrKey() plugin.DataKey {
+	return p.attrKeyValue
+}
+
+// Produce reads each candidate's PrefixCacheMatchInfo, stashes the chosen
+// source, and publishes its request-wide reusable-prefix floor. Among the
+// endpoints within one block of the most cached prompt tokens, one is sampled
+// with probability proportional to
+// 1/(1+waiting queue), using a request-ID hash as the sampling coordinate.
+// Load-blind argmax alone would send every consumer of a widely-replicated
+// prefix to the same peer (equal counts lose to iteration order),
+// concentrating pull traffic on one source. A hard minimum-queue rule would
+// too: metrics refresh once per scrape interval, so a stale one-request
+// difference would herd a whole window of requests onto the single "idle"
+// peer. The one-block band keeps exact-count argmax from re-concentrating
+// the moment one replica drifts a block ahead: a peer one block short costs
+// the destination a single block of recompute, noise next to a queue-depth
+// difference on the source. Proportional weights spread ties uniformly,
+// mildly prefer a one-request-shorter queue, and starve deeply-queued
+// sources. With a cost model, every source is ranked by the wait it adds
+// plus the recompute its cache shortfall costs (CostModelConfig.sourceCost),
+// and the sample is uniform among sources within one block's recompute of
+// the minimum, so an idle source beats a busy one unless the busy one's extra
+// cache outweighs the source wait. No-op when no candidate holds any cached
+// block.
+func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) error {
+	// Endpoints without metadata cannot serve as sources (no address to
+	// join), so they must not pin the pool maximum either: an inflated
+	// maximum would exclude every real endpoint below.
+	type sourceMatch struct {
+		ep          scheduling.Endpoint
+		cached      int
+		blockSize   int
+		hasTierData bool
+	}
+	maxCached := 0
+	matches := make([]sourceMatch, 0, len(endpoints))
+	for _, ep := range endpoints {
+		if ep.GetMetadata() == nil {
+			continue
+		}
+		cached, blockSize, hasTierData := p.sourceCachedTokens(ep)
+		if cached == 0 {
+			continue
+		}
+		matches = append(matches, sourceMatch{ep: ep, cached: cached, blockSize: blockSize, hasTierData: hasTierData})
+		if cached > maxCached {
+			maxCached = cached
+		}
+	}
+
+	best := bestMatchPeer{}
+	if maxCached > 0 {
+		var candidates []sourceMatch
+		var weights []float64
+		total := 0.0
+		if p.costModel != nil {
+			// Cost-aware pick: every source is ranked by sourceCost, so an idle
+			// source beats a busy one unless the busy one's extra cache is worth
+			// more than the source wait. Sources within one block's recompute of
+			// the minimum are sampled uniformly, keeping the anti-herding band.
+			costs := make([]float64, len(matches))
+			minCost := math.Inf(1)
+			for i, m := range matches {
+				costs[i] = p.costModel.sourceCost(m.cached, maxCached, waitingQueueSize(m.ep))
+				minCost = math.Min(minCost, costs[i])
+			}
+			for i, m := range matches {
+				if costs[i]-minCost > p.costModel.sourceCost(0, m.blockSize, 0) {
+					continue
+				}
+				candidates = append(candidates, m)
+				weights = append(weights, 1)
+				total++
+			}
+		} else {
+			for _, m := range matches {
+				if m.cached+m.blockSize < maxCached {
+					continue
+				}
+				w := 1.0 / (1.0 + float64(waitingQueueSize(m.ep)))
+				candidates = append(candidates, m)
+				weights = append(weights, w)
+				total += w
+			}
+		}
+		if len(candidates) > 0 {
+			target := requestSpreadFraction(request.RequestID) * total
+			chosen := len(candidates) - 1
+			for i, w := range weights {
+				if target < w {
+					chosen = i
+					break
+				}
+				target -= w
+			}
+			md := candidates[chosen].ep.GetMetadata()
+			best = bestMatchPeer{
+				hostPort:     net.JoinHostPort(md.Address, md.Port),
+				cachedTokens: candidates[chosen].cached,
+				hasTierData:  candidates[chosen].hasTierData,
+				waitingQueue: waitingQueueSize(candidates[chosen].ep),
+			}
+		}
+	}
+	if best.cachedTokens > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		request.PutAttribute(p.attrKey(), &best)
+		if best.hasTierData {
+			reusableTokens := best.cachedTokens - p.minCachedTokenDelta + 1
+			if reusableTokens > 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				request.PutAttribute(p.reusablePrefixTokensDataKey, attrprefix.ReusablePrefixTokens(reusableTokens))
+			}
+		}
+	}
+	log.FromContext(ctx).WithName(p.typedName.String()).V(logging.TRACE).Info("Produce completed",
+		"requestID", request.RequestID, "endpoints", len(endpoints),
+		"bestHostPort", best.hostPort, "bestCachedTokens", best.cachedTokens)
+	return nil
+}
+
+// waitingQueueSize returns the endpoint's waiting-queue depth, or 0 when
+// metrics are absent so metric-less endpoints keep the delta-only behavior.
+func waitingQueueSize(ep scheduling.Endpoint) int {
+	m := ep.GetMetrics()
+	if m == nil {
+		return 0
+	}
+	return m.WaitingQueueSize
+}
+
+func runningRequests(ep scheduling.Endpoint) int {
+	m := ep.GetMetrics()
+	if m == nil {
+		return 0
+	}
+	return m.RunningRequestsSize
+}
+
+// requestSpreadFraction maps a request ID onto [0, 1) so weighted source
+// sampling is uniform across requests while staying deterministic per
+// request.
+func requestSpreadFraction(requestID string) float64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(requestID))
+	return float64(h.Sum32()) / float64(1<<32)
+}
+
+// PreRequest sets routing.KVCacheSourceHeader to the best-match peer stashed
+// by Produce when it out-caches the pod computing the prefix by at least
+// minCachedTokenDelta tokens and, with a cost model configured, when the
+// pull's gain exceeds its cost. Any inbound value of the header is removed.
+func (p *Producer) PreRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) error {
+	routing.DeleteRoutingHeader(request.Headers, routing.KVCacheSourceHeader)
+
+	// One line per request with the decision and its inputs, so pull behavior
+	// can be joined to request latency without TRACE-level log volume. The
+	// inputs are collected only when the line is enabled.
+	dlog := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEFAULT)
+	logDecision := dlog.Enabled()
+	outcome := "no-best-match"
+	var kv []any
+	if logDecision {
+		kv = []any{"requestID", request.RequestID}
+		defer func() { dlog.Info("p2p decision", append(kv, "outcome", outcome)...) }()
+	}
+
+	best, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](request, p.attrKey())
+	if !ok {
+		return nil
+	}
+
+	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
+	if pr, exists := schedulingResult.ProfileResults[p.prefillProfile]; exists && pr != nil && len(pr.TargetEndpoints) > 0 {
+		computing = pr
+	}
+	if computing == nil || len(computing.TargetEndpoints) == 0 {
+		outcome = "no-endpoint"
+		return nil
+	}
+	endpoint := computing.TargetEndpoints[0]
+	md := endpoint.GetMetadata()
+	if md == nil {
+		outcome = "no-endpoint"
+		return nil
+	}
+	computingHostPort := net.JoinHostPort(md.Address, md.Port)
+	computingCached := p.cachedTokenCount(endpoint)
+	if logDecision {
+		kv = append(kv, "best", best.hostPort, "bestCachedTokens", best.cachedTokens, "sourceWaiting", best.waitingQueue,
+			"computing", computingHostPort, "computingCachedTokens", computingCached, "computingWaiting", waitingQueueSize(endpoint),
+			"computingRunning", runningRequests(endpoint), "deltaTokens", best.cachedTokens-computingCached)
+	}
+	// Never emit the header pointing at the computing pod itself. Redundant
+	// with the delta check below while minCachedTokenDelta >= 1 (a self-match
+	// is delta 0), but explicit against a future lower floor.
+	if best.hostPort == computingHostPort {
+		outcome = "self"
+		return nil
+	}
+	delta := best.cachedTokens - computingCached
+	if delta < p.minCachedTokenDelta {
+		outcome = "below-floor"
+		return nil
+	}
+	if p.costModel != nil {
+		gain, cost := p.costModel.evaluate(delta, best.waitingQueue, waitingQueueSize(endpoint), runningRequests(endpoint))
+		if logDecision {
+			kv = append(kv, "gainMs", gain, "costMs", cost)
+		}
+		if gain <= cost {
+			outcome = "declined"
+			return nil
+		}
+	}
+	outcome = "pulled"
+
+	if request.Headers == nil {
+		request.Headers = map[string]string{}
+	}
+	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, best.hostPort)
+	return nil
+}
+
+// cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers
+// are lowercased by the KV-event pipeline).
+const cpuDeviceTier = "cpu"
+
+// sourceCachedTokens returns the prompt tokens the endpoint can serve a P2P
+// pull from, and its block size. Pulls are served from the source's CPU tier,
+// so with per-tier data only the contiguous CPU-tier prefix counts; producers
+// without tier data are trusted as-is - the configured producer instance must
+// approximate the pull-servable (CPU) tier.
+func (p *Producer) sourceCachedTokens(ep scheduling.Endpoint) (tokens, blockSize int, hasTierData bool) {
+	info := p.matchInfo(ep)
+	if info == nil {
+		return 0, 0, false
+	}
+	if byTier := info.CachedBlocksByTier(); byTier != nil {
+		return byTier[cpuDeviceTier] * info.BlockSizeTokens(), info.BlockSizeTokens(), true
+	}
+	return info.CachedBlockCount() * info.BlockSizeTokens(), info.BlockSizeTokens(), false
+}
+
+// cachedTokenCount returns the endpoint's confirmed cached prompt tokens
+// across all tiers, or 0 when its PrefixCacheMatchInfo is absent.
+func (p *Producer) cachedTokenCount(ep scheduling.Endpoint) int {
+	info := p.matchInfo(ep)
+	if info == nil {
+		return 0
+	}
+	return info.ConfirmedCachedBlockCount() * info.BlockSizeTokens()
+}
+
+// matchInfo returns the endpoint's PrefixCacheMatchInfo, or nil when absent.
+func (p *Producer) matchInfo(ep scheduling.Endpoint) *attrprefix.PrefixCacheMatchInfo {
+	raw, ok := ep.Get(p.prefixMatchDataKey)
+	if !ok {
+		return nil
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok {
+		return nil
+	}
+	return info
+}

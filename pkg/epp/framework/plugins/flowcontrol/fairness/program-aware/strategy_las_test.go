@@ -26,7 +26,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -128,7 +128,7 @@ func TestLAS_Pick_DoesNotCreateStateForEmptyEntries(t *testing.T) {
 func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 	s := &LASStrategy{}
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
-	resp := &fwkrc.Response{EndOfStream: true}
+	resp := &fwkrh.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = 100
 	resp.Usage.CompletionTokens = 50
 
@@ -140,7 +140,7 @@ func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 
 func TestLAS_OnCompleted_NilSafe(t *testing.T) {
 	s := &LASStrategy{}
-	s.OnCompleted(nil, nil, &fwkrc.Response{EndOfStream: true})
+	s.OnCompleted(nil, nil, &fwkrh.Response{EndOfStream: true})
 	s.OnCompleted(nil, &fwksched.InferenceRequest{}, nil)
 }
 

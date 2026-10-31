@@ -27,10 +27,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 const (
@@ -154,7 +155,7 @@ func (p *ContextLengthAware) Produces() map[plugin.DataKey]any {
 // before this plugin runs.
 func (p *ContextLengthAware) Consumes() plugin.DataDependencies {
 	required := map[plugin.DataKey]any{
-		tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+		tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
 	}
 	if p.reusableTokensProducerName != "" {
 		required[p.reusableTokensDataKey] = attrprefix.ReusablePrefixTokens(0)

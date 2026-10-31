@@ -27,12 +27,12 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -64,9 +64,9 @@ func createRequest() *scheduling.InferenceRequest {
 func createHundredTokenRequest() *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		RequestID: "test-request",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 100)}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 100)}},
 			},
 		},
 	}
@@ -314,8 +314,8 @@ func TestReusableTokensFilter(t *testing.T) {
 		})
 		request := &scheduling.InferenceRequest{
 			RequestID: "unknown-token-count",
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{},
 			},
 		}
 		request.PutAttribute(
@@ -548,8 +548,8 @@ func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenIDs}}},
 		},
 	}
 
@@ -580,7 +580,7 @@ func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body:        &fwkrh.InferenceRequestBody{},
+		Body:        &fwkrequest.InferenceRequestBody{},
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)

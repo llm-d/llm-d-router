@@ -1,7 +1,7 @@
 # Program-Aware Fairness Policy
 
 **Type:** `program-aware-fairness`
-**Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
+**Interfaces:** `flowcontrol.FairnessPolicy`, `requesthandling.PreRequest`, `requesthandling.ResponseBodyProcessor`
 
 The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID header (`x-llm-d-inference-fairness-id`) on each request, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level.
 

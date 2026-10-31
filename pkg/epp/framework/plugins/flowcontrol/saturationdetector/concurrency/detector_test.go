@@ -28,9 +28,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
@@ -377,7 +377,7 @@ func TestDetector_Lifecycle(t *testing.T) {
 
 	// 3. Decrement (Available)
 	targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
+	simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6, "expected 0.0 after completion")
 
 	// 4. Increment again -> Delete -> Verify Reset
@@ -547,7 +547,7 @@ func TestDetector_TokenFilterIncomingTokens(t *testing.T) {
 	require.Len(t, kept, 1, "projected load above the limit is filtered")
 	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
 
-	untokenized := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+	untokenized := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}
 	require.Len(t, detector.Filter(ctx, untokenized, candidates), 1,
 		"the published cost is counted whether or not the prompt is tokenized")
 }
@@ -654,7 +654,7 @@ func TestDetector_TokenLifecycle(t *testing.T) {
 	simulatePreRequest(ctx, reg, req1, makeSchedulingResult(reg, endpointName))
 	require.InDelta(t, 0.1, detector.Saturation(ctx, candidates), 1e-6)
 
-	eos := &requestcontrol.Response{EndOfStream: true}
+	eos := &fwkrh.Response{EndOfStream: true}
 	simulateResponseBody(ctx, reg, req1, eos, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6)
 }
@@ -821,7 +821,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 	warmUpRes := makeSchedulingResult(reg, endpointName)
 	warmUpEndpoint := newStubSchedulingEndpoint(reg, endpointName)
 	simulatePreRequest(ctx, reg, nil, warmUpRes)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, warmUpEndpoint.metadata)
+	simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, warmUpEndpoint.metadata)
 
 	const numGoroutines = 50
 	const opsPerRoutine = 1000
@@ -844,7 +844,7 @@ func TestDetector_ConcurrencyStress(t *testing.T) {
 			defer wg.Done()
 			targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
 			for range opsPerRoutine {
-				simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
+				simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, targetEndpoint.metadata)
 			}
 		}()
 	}
@@ -894,7 +894,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	})
 }
 
-func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *requestcontrol.Response, metadata *datalayer.EndpointMetadata) {
+func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *fwkrh.Response, metadata *datalayer.EndpointMetadata) {
 	if metadata == nil || resp == nil || !resp.EndOfStream {
 		return
 	}
@@ -1035,8 +1035,8 @@ func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
 		},
 	}
 }

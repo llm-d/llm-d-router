@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -47,7 +47,7 @@ func TestSummary(t *testing.T) {
 		},
 		{
 			name:          "no tokenized prompt",
-			req:           &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}},
+			req:           &scheduling.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}},
 			wantModality:  ModalityNone,
 			wantHashCount: 0,
 		},
@@ -60,8 +60,8 @@ func TestSummary(t *testing.T) {
 		{
 			name: "image only",
 			req: requestWith(
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h2"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h2"},
 			),
 			wantModality:  "image",
 			wantHashCount: 2,
@@ -69,9 +69,9 @@ func TestSummary(t *testing.T) {
 		{
 			name: "mixed modalities sorted and comma-joined",
 			req: requestWith(
-				fwkrh.MultiModalFeature{Modality: "video", Hash: "v1"},
-				fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "i1"},
-				fwkrh.MultiModalFeature{Modality: "audio", Hash: "a1"},
+				fwkrequest.MultiModalFeature{Modality: "video", Hash: "v1"},
+				fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "i1"},
+				fwkrequest.MultiModalFeature{Modality: "audio", Hash: "a1"},
 			),
 			wantModality:  "audio,image,video",
 			wantHashCount: 3,
@@ -79,8 +79,8 @@ func TestSummary(t *testing.T) {
 		{
 			name: "missing modality strings still count toward hash_count",
 			req: requestWith(
-				fwkrh.MultiModalFeature{Hash: "h1"},
-				fwkrh.MultiModalFeature{Hash: "h2"},
+				fwkrequest.MultiModalFeature{Hash: "h1"},
+				fwkrequest.MultiModalFeature{Hash: "h2"},
 			),
 			wantModality:  ModalityNone,
 			wantHashCount: 2,
@@ -98,7 +98,7 @@ func TestSummary(t *testing.T) {
 
 func TestSpanAttributes(t *testing.T) {
 	attrs := SpanAttributes(requestWith(
-		fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
+		fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: "h1"},
 	))
 	assert.Len(t, attrs, 2)
 	assert.Equal(t, "mm.modality", string(attrs[0].Key))
@@ -107,11 +107,11 @@ func TestSpanAttributes(t *testing.T) {
 	assert.Equal(t, int64(1), attrs[1].Value.AsInt64())
 }
 
-func requestWith(features ...fwkrh.MultiModalFeature) *scheduling.InferenceRequest {
+func requestWith(features ...fwkrequest.MultiModalFeature) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
 					MultiModalFeatures: features,
 				}},
 			},

@@ -22,7 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -32,7 +32,7 @@ type Strategy interface {
 	Name() string
 	Pick(bandPriority int, queues map[string]QueueInfo) flowcontrol.FlowQueueAccessor
 	OnPreRequest(metrics *ProgramMetrics, request *fwksched.InferenceRequest)
-	OnCompleted(metrics *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response)
+	OnCompleted(metrics *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrh.Response)
 	EvictProgram(id string)
 	Collectors() []prometheus.Collector
 }

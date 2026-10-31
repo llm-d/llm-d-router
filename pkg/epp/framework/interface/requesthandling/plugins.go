@@ -19,115 +19,155 @@ package requesthandling
 
 import (
 	"context"
+	"time"
 
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 const (
-	RequestParsingExtensionPoint  = "RequestParsing"
-	ResponseParsingExtensionPoint = "ResponseParsing"
+	RequestHeaderExtensionPoint     = "RequestHeader"
+	ScreenerExtensionPoint          = "Screener"
+	AdmissionExtensionPoint         = "Admission"
+	DataProducerExtensionPoint      = "DataProducer"
+	PreRequestExtensionPoint        = "PreRequest"
+	ResponseReceivedExtensionPoint  = "ResponseReceived"
+	ResponseStreamingExtensionPoint = "ResponseStreaming"
+	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
 
-// Parser defines the interface for parsing payload(requests and responses).
-type Parser interface {
-	fwkplugin.Plugin
-	// ParseRequest parses the request body and headers and returns the parsed result.
-	// There are three outcomes based on the return values:
-	// 1. err != nil: The request is invalid or cannot be parsed. The framework will fail the request early.
-	// 2. err == nil and result.SkipResponseProcessing == true: The request is valid but EPP should stop intercepting the stream
-	//    after the request phase. The scheduling director will still route the request, but subsequent
-	//    response interception phases will be skipped.
-	// 3. err == nil and result.SkipResponseProcessing == false: The request is valid and will be processed by the scheduling framework.
-	ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*ParseResult, error)
+// ConditionalDecodeHandledAttributeKey is the request-attribute key a
+// PreRequest plugin sets when it has evaluated the "Prefer: if-available"
+// preference for a request. The director consults this after PreRequest
+// plugins run: a conditional-decode request that no plugin claimed is
+// rejected with 412 so misconfigurations (gate plugin forgotten) surface as a
+// fast fallback rather than a silent forward.
+var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
 
-	// ParseResponse parses the response payload.
-	// For streaming responses , this method is invoked multiple times (once per chunk),
-	// where 'endOfStream' is set to true only for the final chunk.
-	// For non-streaming responses, this method is invoked exactly once with the full
-	// buffered response body and 'endOfStream' set to true.
-	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*ParsedResponse, error)
-
-	// Claims returns the paths and protocols claimed by this parser.
-	Claims() Claims
+// Screener performs preliminary filtering of located endpoints before data
+// production, admission, and scheduling profiles run. Every screener sees the
+// same input set, and the framework intersects their results.
+type Screener interface {
+	plugin.Plugin
+	Screen(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint
 }
 
-// RequestFieldError identifies the JSON field path responsible for a parser failure.
-// Err preserves the client-facing error message.
-type RequestFieldError struct {
-	Field string
-	Err   error
+// PreRequest is called by the director after a getting result from scheduling layer and
+// before a request is sent to the selected model server.
+// A non-nil error indicates the plugin could not complete its work; the director runs
+// every registered PreRequest plugin and aggregates their errors before failing the request.
+//
+// Return a github.com/llm-d/llm-d-router/pkg/common/error.Error so the director can map
+// the failure to the intended HTTP status; any other error type is reported to the client
+// as an Internal error.
+//
+// Every registered plugin runs even when a peer has already failed the request, so any
+// side effect published here outlives the failure. Plugins must ensure such state is
+// cleaned up by HandleResponseBody, which the director invokes on abort for every
+// request that picked a pod but never marked the response complete. Otherwise the
+// plugin must not have side effects at this extension point.
+type PreRequest interface {
+	plugin.Plugin
+	PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error
 }
 
-func (e *RequestFieldError) Error() string {
-	return e.Err.Error()
+// ResponseHeaderProcessor is called by the director after the response headers are successfully received
+// which indicates the beginning of the response handling by the model server.
+// The given pod argument is the pod that served the request.
+type ResponseHeaderProcessor interface {
+	plugin.Plugin
+	ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
 }
 
-func (e *RequestFieldError) Unwrap() error {
-	return e.Err
+// ResponseBodyProcessor is the primary hook for processing response data.
+// It is called by the director for every data chunk in a streaming response, or exactly once
+// for non-streaming responses.
+//
+// Lifecycle & Termination:
+//   - For streams: Invoked multiple times. The final call will have response.EndOfStream set to true.
+//   - For non-streaming: Invoked once with response.EndOfStream set to true.
+//   - Plugins must treat the call where response.EndOfStream == true as the final lifecycle hook
+//     to perform cleanup or final logging.
+//   - The end-of-stream call carries response.TerminationCause; earlier calls leave it empty.
+//
+// TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2079):
+// Upstream proposes passing error/termination state through the signature. Response.TerminationCause
+// carries the termination state without a signature change; it does not distinguish success from
+// an error response.
+type ResponseBodyProcessor interface {
+	plugin.Plugin
+	ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
 }
 
-// ModelNameRewriter is implemented by parsers whose forwarded body can carry a model name.
-type ModelNameRewriter interface {
-	// RewriteModelName writes model into the payload and returns it. Taking and
-	// returning a MarshalablePayload guarantees the result is repackageable.
-	RewriteModelName(payload MarshalablePayload, model string) (MarshalablePayload, error)
+// DataProducer is implemented by data producers which produce data from different sources.
+// Produce is called by the director before scheduling requests.
+type DataProducer interface {
+	plugin.ProducerPlugin
+	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
 }
 
-// PriorityRewriteContext carries target-specific information a parser may need
-// when translating EPP priority semantics into backend wire fields.
-type PriorityRewriteContext struct {
-	TargetEndpoint *fwkdl.EndpointMetadata
-	// RequestPath is the request path without its query string.
-	RequestPath string
+// TimeoutAwareProducer is an optional interface a DataProducer may implement to
+// declare its own execution timeout, overriding the default. A non-positive
+// value selects the default.
+type TimeoutAwareProducer interface {
+	ProduceTimeout() time.Duration
 }
 
-// PriorityRewriter is implemented by parsers whose forwarded body can carry a
-// backend-native priority field.
-type PriorityRewriter interface {
-	// RewritePriority removes any client-supplied priority field and may write the
-	// EPP-resolved priority into the payload. Taking and returning a
-	// MarshalablePayload guarantees the result is repackageable. The returned bool
-	// reports whether the payload was changed, so callers can flag it for
-	// repackaging without re-inspecting the body.
-	RewritePriority(ctx PriorityRewriteContext, payload MarshalablePayload, priority int) (MarshalablePayload, bool, error)
+// RequestAbandoned is an optional interface for DataProducer implementations that
+// keep per-request state between Produce and PreRequest. The Director calls it when
+// a request leaves HandleRequest without reaching PreRequest, so the producer can
+// release that state immediately instead of waiting for the staleness janitor.
+type RequestAbandoned interface {
+	// RequestAbandoned releases any per-request state written by Produce for the
+	// given request. It must be safe to call when no state exists.
+	RequestAbandoned(ctx context.Context, request *fwksched.InferenceRequest)
 }
 
-// Claims defines the matching criteria for a parser.
-type Claims struct {
-	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
-	Protocols []v1.AppProtocol // protocols this parser supports (e.g., "h2c")
+// Admitter is called by the director after the data producer and before scheduling.
+// When a request has to go through multiple Admitter,
+// the request is admitted only if all plugins say that the request should be admitted.
+type Admitter interface {
+	plugin.Plugin
+	// Admit returns the denial reason, wrapped as error if the request is denied.
+	// If the request is allowed, it returns nil.
+	Admit(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
 }
 
-// ParseResult contains the result of parsing the request.
-type ParseResult struct {
-	// Body contains the parsed inference request body.
-	Body *InferenceRequestBody
-	// JSONValidated reports that the original input bytes passed JSON syntax validation.
-	// Parsers accepting unvalidated or non-JSON input must leave it false.
-	JSONValidated bool
-	// SkipResponseProcessing indicates whether to skip EPP stream interception for this request.
-	// When set to true, the request will still go through the scheduling director
-	// (allowing routing decisions, profiles, and admission control to run),
-	// but the EPP will stop intercepting the stream after the request phase completes
-	// (e.g., response headers and body will not be processed).
-	//
-	// This allows fallback or non-standard requests to be routed using the configured
-	// policies without paying the overhead of response-phase interception.
-	SkipResponseProcessing bool
+// RequestHeaderProcessor runs after InferenceRequest creation but before admission control.
+// It processes request metadata (headers, path, method) to attach attributes to the request
+// via request.PutAttribute().
+type RequestHeaderProcessor interface {
+	plugin.Plugin
+	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error
 }
 
-type ParsedResponse struct {
-	// Usage is only populate when the raw response has usage.
-	Usage *Usage
-	// StreamedEvents is how many stream data events this parse observed, zero for a non-streamed
-	// response or a parser that does not count. For servers that stream one content delta per
-	// token the count approximates the tokens in the parsed chunk, but protocol events (role
-	// deltas, finish reasons, usage-only events, Responses API lifecycle events) inflate it, a
-	// server that batches tokens into one event deflates it, and the scan recognizes only the
-	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
-	// and keep-alive data lines skew it further).
-	StreamedEvents int
+// RequestLine identifies a request before any endpoint has been selected. It carries what
+// the ext-proc request headers phase provides, which is all a Responder can rely on: a
+// request answered here may have no body.
+type RequestLine struct {
+	Method string
+	// Path excludes the query string.
+	Path string
+}
+
+// LocalResponse is a complete HTTP response produced by a Responder.
+type LocalResponse struct {
+	// StatusCode is the HTTP status code. Zero means http.StatusOK.
+	StatusCode int
+	Headers    map[string]string
+	Body       []byte
+}
+
+// Responder answers a request before it is matched to a model server. The first non-nil
+// response wins. Responders are asked in the order of the slice supplied to the handler.
+// The order in which plugins are discovered is not guaranteed. The handler offers only GET
+// requests to responders.
+type Responder interface {
+	plugin.Plugin
+	// Respond returns a non-nil LocalResponse to answer the request directly; the request
+	// is never routed and no endpoint is selected. Return nil to decline, deferring to the
+	// remaining Responders and to normal routing once all decline. A non-nil error fails
+	// the request through the standard error path.
+	Respond(ctx context.Context, request *RequestLine, endpoints []datalayer.Endpoint) (*LocalResponse, error)
 }
