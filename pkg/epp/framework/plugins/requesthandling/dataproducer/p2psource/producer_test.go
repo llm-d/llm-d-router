@@ -584,6 +584,33 @@ func TestPreRequest_P2PPortAddsRankIndex(t *testing.T) {
 	assertPrefillHeader(t, req, "10.0.0.2", 8002)
 }
 
+// A rank endpoint of a data-parallel group spanning pods binds its P2P tier at
+// the rank-0 port plus its global rank.
+func TestPreRequest_RankEndpointP2PPortAddsGlobalRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1, P2PConnectorPort: 8000})
+
+	source := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-src-rank-1"}, Address: "10.0.0.3", Port: "8081",
+		RankIndex: 1, RanksPerPort: 4, DataParallelRank: 5,
+	}, nil, nil)
+	source.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(4, 4, testBlockSize).WithCachedBlockCount(4))
+	prefill := scheduling.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID: k8stypes.NamespacedName{Name: "pod-p-rank-2"}, Address: "10.0.0.2", Port: "8082",
+		RankIndex: 2, RanksPerPort: 4, DataParallelRank: 6,
+	}, nil, nil)
+	prefill.Put(p.prefixMatchDataKey,
+		attrprefix.NewPrefixCacheMatchInfo(0, 4, testBlockSize).WithCachedBlockCount(0))
+
+	req := &scheduling.InferenceRequest{RequestID: "req-global-rank", Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source, prefill}))
+	require.NoError(t, p.PreRequest(ctx, req, prefillOnly(prefill)))
+
+	assertSource(t, req, "10.0.0.3", 8005)
+	assertPrefillHeader(t, req, "10.0.0.2", 8006)
+}
+
 // p2pConnectorPort plus the rank must stay a TCP port. A prefill endpoint
 // beyond it fails the request at the EPP with the misconfiguration named,
 // instead of a sidecar 500 on a malformed header.
