@@ -3251,7 +3251,7 @@ func TestPrepareRequest_DataParallelRankHeader(t *testing.T) {
 		wantRank     string
 	}{
 		{
-			name:         "rank endpoint sets its data-parallel rank and drops fallbacks",
+			name:         "rank endpoint sets its global rank and drops fallbacks",
 			result:       result(endpoint("pod1-rank-1", "10.0.0.1", 1, 2), endpoint("pod1-rank-0", "10.0.0.1", 0, 2), endpoint("pod2", "10.0.0.2", 0, 0)),
 			wantEndpoint: "10.0.0.1:8000",
 			wantRank:     "3",

@@ -461,7 +461,8 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "Failed to setup datastore")
 		return nil, nil, err
 	}
-	ds.WithDataParallelSizeLocal(opts.DataParallelSizeLocal)
+	ds.WithDataParallelSizeLocal(opts.DataParallelSizeLocal).
+		WithDataParallelStartRankLabel(opts.DataParallelStartRankLabel)
 	eppConfig, err := r.parseConfigurationPhaseTwo(servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")

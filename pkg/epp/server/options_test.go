@@ -873,3 +873,13 @@ func TestLeaderElectionOverride(t *testing.T) {
 		t.Errorf("override changed manager options with leader election disabled: %+v", disabled)
 	}
 }
+
+// The rank count can come from the per-pod annotation, so the start-rank
+// label does not require the flag.
+func TestDataParallelStartRankLabelWithoutSizeLocalFlag(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.DataParallelStartRankLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+	require.NoError(t, opts.Validate())
+}

@@ -60,7 +60,8 @@ type EndpointMetadata struct {
 	// its metrics series are labeled per rank.
 	RanksPerPort int
 	// DataParallelRank is the data-parallel rank the model server knows this
-	// endpoint by, set when RanksPerPort is above 1. It equals RankIndex.
+	// endpoint by, set when RanksPerPort is above 1: the pod's start rank plus
+	// RankIndex. The start rank is non-zero when a data-parallel group spans pods.
 	DataParallelRank int
 }
 
