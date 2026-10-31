@@ -194,16 +194,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
 
-	if stream {
-		// A streaming completion can outlast the server WriteTimeout, which
-		// would cut the response mid-stream with a TCP reset and no app-layer
-		// error. Clear the write deadline for streaming only; non-streaming
-		// requests keep it as a slow-client guard.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			logger.V(logutil.DEFAULT).Info("could not clear write deadline for streaming response", "error", err)
-		}
-	}
-
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		if pipeline.IsClientCancellation(ctx, err) {
 			logger.V(logutil.VERBOSE).Info("pipeline aborted: client cancelled", "error", err)
