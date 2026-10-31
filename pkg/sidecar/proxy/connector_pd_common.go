@@ -38,6 +38,17 @@ const (
 	requestFieldTransferID = "transfer_id"
 )
 
+// setPrefillDPRank sets the prefill request's data-parallel rank to the one the
+// EPP picked on the prefill worker, or removes it. The prefill request is
+// cloned from the decode request, whose rank names a decode engine.
+func setPrefillDPRank(preq *http.Request) {
+	if rank, _ := preq.Context().Value(prefillDPRankKey).(string); rank != "" {
+		preq.Header.Set(routing.DataParallelRankHeader, rank)
+		return
+	}
+	preq.Header.Del(routing.DataParallelRankHeader)
+}
+
 // concurrentPrefillGrace limits how long prefill may continue after a
 // successful decode returns. A variable so tests can shorten it.
 var concurrentPrefillGrace = 30 * time.Second
@@ -69,6 +80,7 @@ func (s *Server) runConcurrentPD(
 	// r.Context() once the handler finishes, which must not abort prefill.
 	defer context.AfterFunc(r.Context(), cancelPrefill)()
 	prefillReq := cloneRequestWithBody(prefillCtx, r, prefillBody)
+	setPrefillDPRank(prefillReq)
 	decodeReq := cloneRequestWithBody(ctx, r, decodeBody)
 	if prepareRequests != nil {
 		prepareRequests(prefillReq, decodeReq)

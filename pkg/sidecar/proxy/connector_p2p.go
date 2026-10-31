@@ -221,7 +221,9 @@ func (l *httpSequentialPDLeg) report(ctx context.Context) {
 
 func (l *httpSequentialPDLeg) runPrefill(prefillCtx context.Context, prefillHandler http.Handler, pw *bufferedResponseWriter, r *http.Request, prefillSpan trace.Span) error {
 	l.toolFields.compareDispatchedForSpan(l.prefillBody, prefillSpan)
-	return servePrefill(prefillHandler, pw, cloneRequestWithBody(prefillCtx, r, l.prefillBody))
+	prefillReq := cloneRequestWithBody(prefillCtx, r, l.prefillBody)
+	setPrefillDPRank(prefillReq)
+	return servePrefill(prefillHandler, pw, prefillReq)
 }
 
 func (l *httpSequentialPDLeg) completePrefill(prefillCtx context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, prefillErr error, prefillSpan trace.Span) bool {

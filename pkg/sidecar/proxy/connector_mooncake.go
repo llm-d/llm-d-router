@@ -113,10 +113,14 @@ func (s *Server) prepareMooncakeKVParams(ctx context.Context, prefillPodHostPort
 	if err != nil {
 		return "", nil, nil, err
 	}
-	// Go map iteration randomizes rank selection to spread prefill load across multi-rank pods.
-	var engineID string
-	for dpRank, engineID = range engineMap {
-		break
+	// Use the prefill rank the EPP picked; otherwise Go map iteration randomizes
+	// rank selection to spread prefill load across multi-rank pods.
+	dpRank, _ = ctx.Value(prefillDPRankKey).(string)
+	engineID, ok := engineMap[dpRank]
+	if !ok {
+		for dpRank, engineID = range engineMap {
+			break
+		}
 	}
 	transferID := "xfer-" + newUUID()
 	log.FromContext(ctx).V(logging.TRACE).Info("mooncake protocol info",
