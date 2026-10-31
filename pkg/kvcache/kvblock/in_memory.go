@@ -79,18 +79,21 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
 	}
 
-	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
+	index := &InMemoryIndex{
+		data:             cache,
+		oneToManyEntries: make(map[BlockHash]map[BlockHash]map[PodEntry]struct{}),
+		podCacheSize:     podCacheSize,
+		pods:             newInterner(maxInternedPods),
+		tiers:            newInterner(maxInternedTiers),
+	}
+	engineToRequestKeys, err := lru.NewWithEvict[BlockHash, []BlockHash](cfg.Size, func(engineKey BlockHash, requestKeys []BlockHash) {
+		index.removeOneToManyMapping(engineKey, requestKeys)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
 	}
-
-	return &InMemoryIndex{
-		data:                cache,
-		engineToRequestKeys: engineToRequestKeys,
-		podCacheSize:        podCacheSize,
-		pods:                newInterner(maxInternedPods),
-		tiers:               newInterner(maxInternedTiers),
-	}, nil
+	index.engineToRequestKeys = engineToRequestKeys
+	return index, nil
 }
 
 // cancellationCheckMask paces context-cancellation checks in loops over
@@ -109,13 +112,17 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 
 // InMemoryIndex is an in-memory implementation of the Index interface.
 type InMemoryIndex struct {
-	// mu protects engine-key-level check-and-act operations (Evict's allEmpty
-	// check + mapping removal vs Add's pod entry insertion) to prevent TOCTOU races.
+	// mu serializes engine-key mapping updates with Add and Evict so reference
+	// checks and pod entry changes observe one consistent mapping state.
 	mu sync.Mutex
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
 	// engineToRequestKeys holds the mapping of engineKeys to requestKeys.
 	engineToRequestKeys *lru.Cache[BlockHash, []BlockHash]
+	// oneToManyEntries indexes active one-to-many entries by request key and
+	// engine key, so an eviction only examines mappings that can share the
+	// entry being removed.
+	oneToManyEntries map[BlockHash]map[BlockHash]map[PodEntry]struct{}
 	// podCacheSize is the maximum number of pod entries per key.
 	podCacheSize int
 	// pods and tiers assign the ordinals EntryRef carries. Neither is
@@ -349,6 +356,11 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return err
 	}
 
+	// Store requestKey -> PodCache mappings for all request keys.
+	// Hold m.mu while updating both maps so Evict cannot inspect a partial Add.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
 	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
@@ -357,15 +369,31 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	if engineKeys != nil {
 		mappings := engineToRequestMapping(engineKeys, requestKeys)
 		for ek, rks := range mappings {
+			previous, found := m.engineToRequestKeys.Peek(ek)
+			mappingChanged := !found || !blockHashSlicesEqual(previous, rks)
+			if found && len(previous) > 1 && mappingChanged {
+				m.removeOneToManyMapping(ek, previous)
+			}
 			m.engineToRequestKeys.Add(ek, rks)
+			if len(rks) > 1 {
+				for _, requestKey := range rks {
+					engineEntries := m.oneToManyEntries[requestKey]
+					if engineEntries == nil {
+						engineEntries = make(map[BlockHash]map[PodEntry]struct{})
+						m.oneToManyEntries[requestKey] = engineEntries
+					}
+					activeEntries := engineEntries[ek]
+					if activeEntries == nil {
+						activeEntries = make(map[PodEntry]struct{})
+						engineEntries[ek] = activeEntries
+					}
+					for _, entry := range entries {
+						activeEntries[entry] = struct{}{}
+					}
+				}
+			}
 		}
 	}
-
-	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, requestKey := range requestKeys {
 		podCache, found := m.data.Get(requestKey)
@@ -411,8 +439,15 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 
 	switch keyType {
 	case EngineKey:
-		// Resolve each engine key's request keys and evict the pod entries
-		// without holding mu (engineToRequestKeys and data are thread-safe).
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		// Resolve all engine keys before removing entries so a batch eviction
+		// does not treat another key in the same batch as a live reference.
+		evicting := make(map[BlockHash]struct{}, len(keys))
+		for _, key := range keys {
+			evicting[key] = struct{}{}
+		}
 		groups := make([][]BlockHash, len(keys))
 		for i, key := range keys {
 			rks, found := m.engineToRequestKeys.Peek(key)
@@ -420,15 +455,27 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
 				continue
 			}
-			groups[i] = rks
+			groups[i] = append([]BlockHash(nil), rks...)
 			for _, rk := range rks {
-				m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
+				evictEntries := entries
+				if len(rks) > 1 {
+					filtered := make([]PodEntry, 0, len(entries))
+					for _, entry := range entries {
+						if !m.hasOtherActiveOneToManyReference(rk, entry, key, evicting) {
+							filtered = append(filtered, entry)
+						}
+					}
+					evictEntries = filtered
+				}
+				if len(evictEntries) > 0 {
+					m.evictPodsFromRequestKey(rk, key, evictEntries, traceLogger)
+				}
+			}
+			if len(rks) > 1 {
+				m.removeOneToManyEntries(key, rks, entries)
 			}
 		}
 
-		// One lock hold covers every engine key's allEmpty check and mapping
-		// removal, keeping the Add-vs-Evict TOCTOU protection while batching.
-		m.mu.Lock()
 		for i, key := range keys {
 			if groups[i] == nil {
 				continue
@@ -444,15 +491,120 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 				m.engineToRequestKeys.Remove(key)
 			}
 		}
-		m.mu.Unlock()
 		return nil
 	case RequestKey:
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		for _, key := range keys {
+			m.removeOneToManyEntriesForRequestKey(key, entries)
 			m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
 		}
 		return nil
 	default:
 		return fmt.Errorf("unknown key type: %d", keyType)
+	}
+}
+
+// hasOtherActiveOneToManyReference reports whether another live one-to-many
+// engine mapping still owns the request-key entry being evicted. Many-to-one
+// mappings intentionally keep their existing invalidation behavior because a
+// request key represents a complete canonical block assembled from those
+// engine blocks.
+func (m *InMemoryIndex) hasOtherActiveOneToManyReference(
+	requestKey BlockHash,
+	entry PodEntry,
+	engineKey BlockHash,
+	evicting map[BlockHash]struct{},
+) bool {
+	engineEntries := m.oneToManyEntries[requestKey]
+	for otherEngineKey, activeEntries := range engineEntries {
+		if otherEngineKey == engineKey {
+			continue
+		}
+		if _, isEvicting := evicting[otherEngineKey]; isEvicting {
+			continue
+		}
+		requestKeys, found := m.engineToRequestKeys.Peek(otherEngineKey)
+		if !found || len(requestKeys) <= 1 || !containsBlockHash(requestKeys, requestKey) {
+			delete(engineEntries, otherEngineKey)
+			continue
+		}
+		if _, active := activeEntries[entry]; !active {
+			continue
+		}
+		return true
+	}
+	if len(engineEntries) == 0 {
+		delete(m.oneToManyEntries, requestKey)
+	}
+	return false
+}
+
+func (m *InMemoryIndex) removeOneToManyMapping(engineKey BlockHash, requestKeys []BlockHash) {
+	for _, requestKey := range requestKeys {
+		engineEntries := m.oneToManyEntries[requestKey]
+		if engineEntries == nil {
+			continue
+		}
+		delete(engineEntries, engineKey)
+		if len(engineEntries) == 0 {
+			delete(m.oneToManyEntries, requestKey)
+		}
+	}
+}
+
+func containsBlockHash(keys []BlockHash, want BlockHash) bool {
+	for _, key := range keys {
+		if key == want {
+			return true
+		}
+	}
+	return false
+}
+
+func blockHashSlicesEqual(left, right []BlockHash) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *InMemoryIndex) removeOneToManyEntries(engineKey BlockHash, requestKeys []BlockHash, entries []PodEntry) {
+	for _, requestKey := range requestKeys {
+		engineEntries := m.oneToManyEntries[requestKey]
+		if engineEntries == nil {
+			continue
+		}
+		activeEntries := engineEntries[engineKey]
+		for _, entry := range entries {
+			delete(activeEntries, entry)
+		}
+		if len(activeEntries) == 0 {
+			delete(engineEntries, engineKey)
+		}
+		if len(engineEntries) == 0 {
+			delete(m.oneToManyEntries, requestKey)
+		}
+	}
+}
+
+func (m *InMemoryIndex) removeOneToManyEntriesForRequestKey(requestKey BlockHash, entries []PodEntry) {
+	engineEntries := m.oneToManyEntries[requestKey]
+	for engineKey, activeEntries := range engineEntries {
+		for _, entry := range entries {
+			delete(activeEntries, entry)
+		}
+		if len(activeEntries) == 0 {
+			delete(engineEntries, engineKey)
+		}
+	}
+	if len(engineEntries) == 0 {
+		delete(m.oneToManyEntries, requestKey)
 	}
 }
 
@@ -491,8 +643,8 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 // Clear removes every entry for the pod from the index, across all device tiers.
 // O(N) over the index for a pod it has held, and O(1) for a pod it never held,
 // such as one whose first snapshot is about to load. Reuses
-// evictPodsFromRequestKey for race-safe removal, and holds no global lock — only
-// each PodCache's mu, briefly — so it does not stall Lookup.
+// evictPodsFromRequestKey for race-safe removal and briefly synchronizes engine
+// entry state with Add and Evict.
 //
 // Context cancellation does not interrupt Clear.
 //
@@ -518,11 +670,13 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 			continue
 		}
 
+		m.mu.Lock()
 		matched := podCache.matching(podIdentifier)
-
 		if len(matched) > 0 {
+			m.removeOneToManyEntriesForRequestKey(requestKey, matched)
 			m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
 		}
+		m.mu.Unlock()
 	}
 
 	traceLogger.Info("cleared pod from index", "pod", podIdentifier)
