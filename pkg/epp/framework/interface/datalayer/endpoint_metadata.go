@@ -51,8 +51,9 @@ type EndpointMetadata struct {
 	// separate from Labels so request-shaping data never becomes a
 	// selector key — and selector labels are never stamped onto requests.
 	Attributes map[string]string
-	// RankIndex is the pod-local rank of this endpoint: its position in the
-	// pool's TargetPorts, or its data-parallel rank when RankByHeader is set.
+	// RankIndex is this endpoint's rank: its position in the pool's TargetPorts,
+	// or its data-parallel rank when RankByHeader is set (global when a
+	// data-parallel group spans pods).
 	RankIndex int
 	// RankByHeader reports that the model server serves several data-parallel
 	// ranks behind Port and runs a request on the rank that the

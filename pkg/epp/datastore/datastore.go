@@ -82,6 +82,10 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
+	// WithDataParallelStartRankLabel names the pod label holding the pod's index in a
+	// data-parallel group that spans pods. A rank endpoint's RankIndex is
+	// index*ranksPerPort + localRank. Empty means every pod starts at rank 0.
+	WithDataParallelStartRankLabel(label string) Datastore
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *apixv1.InferenceObjective)
@@ -162,6 +166,9 @@ type datastore struct {
 	// resync failure would compare the incoming pool against the already-stored identical pool
 	// and skip the resync. Guarded by mu.
 	needsResync bool
+	// startRankLabel names the pod label holding the pod's index in its data-parallel group.
+	// Set once at startup.
+	startRankLabel string
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
@@ -169,6 +176,27 @@ func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 	return ds
 }
 
+func (ds *datastore) WithDataParallelStartRankLabel(label string) Datastore {
+	ds.startRankLabel = label
+	return ds
+}
+
+// dataParallelStartRank returns the global data-parallel rank of the pod's first rank
+// endpoint, for a pod serving ranksPerPort ranks.
+func (ds *datastore) dataParallelStartRank(pod *corev1.Pod, ranksPerPort int) (int, error) {
+	if ds.startRankLabel == "" {
+		return 0, nil
+	}
+	value, ok := pod.GetLabels()[ds.startRankLabel]
+	if !ok {
+		return 0, fmt.Errorf("pod has no %q label", ds.startRankLabel)
+	}
+	index, err := strconv.Atoi(value)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("pod label %q is %q, not a non-negative integer", ds.startRankLabel, value)
+	}
+	return index * ranksPerPort, nil
+}
 func (ds *datastore) Clear() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
@@ -373,7 +401,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
-	ranksPerPort, err := podRanks(pod, pool)
+	ranksPerPort, startRank, err := ds.podRanks(pod, pool)
 	if err != nil {
 		// The pod's ranks cannot be addressed; drop all of its endpoints.
 		log.FromContext(ctx).Error(err, "Pod will not receive traffic", "pod", pod.Name, "namespace", pod.Namespace)
@@ -392,7 +420,7 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				Port:        strconv.Itoa(port),
 				MetricsHost: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:      labels,
-				RankIndex:   idx,
+				RankIndex:   startRank + idx,
 			}
 			meta.RankByHeader = ranksPerPort > 1
 			pods = append(pods, meta)
@@ -525,7 +553,7 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 			continue
 		}
 		// Calculate expected endpoint names based on current targetPorts.
-		ranksPerPort, err := podRanks(&pod, ds.pool)
+		ranksPerPort, _, err := ds.podRanks(&pod, ds.pool)
 		if err != nil {
 			ranksPerPort = 1
 		}
@@ -578,22 +606,27 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 }
 
 // podRanks returns the number of data-parallel ranks the pod serves behind its target port,
-// from dataParallelSizeLocalAnnotation. A pod without the annotation has one.
-func podRanks(pod *corev1.Pod, pool *datalayer.EndpointPool) (int, error) {
+// from dataParallelSizeLocalAnnotation, and the global data-parallel rank of its first rank.
+// A pod without the annotation has one rank starting at 0.
+func (ds *datastore) podRanks(pod *corev1.Pod, pool *datalayer.EndpointPool) (ranksPerPort, startRank int, err error) {
 	value, ok := pod.GetAnnotations()[dataParallelSizeLocalAnnotation]
 	if !ok {
-		return 1, nil
+		return 1, 0, nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || n < 1 || n > maxDataParallelSizeLocal {
-		return 0, fmt.Errorf("pod annotation %q is %q, not an integer from 1 to %d",
+		return 0, 0, fmt.Errorf("pod annotation %q is %q, not an integer from 1 to %d",
 			dataParallelSizeLocalAnnotation, value, maxDataParallelSizeLocal)
 	}
 	if n > 1 && len(pool.TargetPorts) != 1 {
-		return 0, fmt.Errorf("pod serves %d data-parallel ranks per port, which requires exactly one target port, got %d",
+		return 0, 0, fmt.Errorf("pod serves %d data-parallel ranks per port, which requires exactly one target port, got %d",
 			n, len(pool.TargetPorts))
 	}
-	return n, nil
+	if n == 1 {
+		return 1, 0, nil
+	}
+	startRank, err = ds.dataParallelStartRank(pod, n)
+	return n, startRank, err
 }
 
 // rankIndexes returns the RankIndex values of the endpoints served on the target port at portIdx.

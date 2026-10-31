@@ -99,6 +99,7 @@ type Options struct {
 	//
 	EndpointSelector            labels.Selector // Parsed selector to filter model server pods on. Set via --endpoint-selector flag and parsed in Complete().
 	EndpointTargetPorts         []int           // Target ports of model server pods.
+	DataParallelStartRankLabel  string          // Pod label holding the pod's index in a data-parallel group that spans pods.
 	DisableEndpointSubsetFilter bool            // Disables respecting destination endpoint subset metadata in EPP.
 	EmitEndpointScores          bool            // Enables emitting per-endpoint scheduler scores in the request-path dynamic metadata.
 	//
@@ -232,6 +233,12 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"set-based (e.g., 'env in (prod,staging),tier!=frontend'), and existence (e.g., 'key,!deprecated').")
 	fs.IntSliceVar(&opts.EndpointTargetPorts, "endpoint-target-ports", opts.EndpointTargetPorts, "Target ports of model server pods. "+
 		"Format: a comma-separated list of numbers without whitespace (e.g., '3000,3001,3002').")
+	fs.StringVar(&opts.DataParallelStartRankLabel, "data-parallel-start-rank-label", opts.DataParallelStartRankLabel,
+		"Pod label holding the pod's index in a data-parallel group that spans pods, such as "+
+			"leaderworkerset.sigs.k8s.io/worker-index. Pod k then serves global ranks k*N to k*N+N-1, where N is "+
+			"the pod's rank count, and requests and metrics use the global rank. A pod with more than one rank "+
+			"and no valid label gets no endpoints. vLLM's Python API server reads x-data-parallel-rank as a "+
+			"pod-local index under hybrid or external load balancing, so this label requires the vLLM Rust frontend.")
 	fs.BoolVar(&opts.DisableEndpointSubsetFilter, "disable-endpoint-subset-filter", opts.DisableEndpointSubsetFilter,
 		"Disables respecting the destination endpoint subset metadata for dispatching requests in EPP.")
 	fs.BoolVar(&opts.EmitEndpointScores, "emit-endpoint-scores", opts.EmitEndpointScores,
