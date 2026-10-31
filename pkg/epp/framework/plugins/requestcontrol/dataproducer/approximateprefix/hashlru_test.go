@@ -17,6 +17,7 @@ limitations under the License.
 package approximateprefix
 
 import (
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"strconv"
@@ -38,6 +39,18 @@ func TestHashLRUGrowsWithInserts(t *testing.T) {
 	c.Add(2)
 	if len(c.nodes) != 2 || c.Len() != 2 {
 		t.Fatalf("nodes %d len %d, want 2", len(c.nodes), c.Len())
+	}
+}
+
+func TestHashLRUCapsCapacityAtNodeIndexRange(t *testing.T) {
+	want := int(min(uint64(math.MaxInt), uint64(nodeNil)))
+	c := newHashLRU(math.MaxInt)
+	if c.capacity != want {
+		t.Fatalf("capacity %d, want %d", c.capacity, want)
+	}
+	c.Add(1)
+	if !c.Contains(1) {
+		t.Fatal("add into a capped cache missed")
 	}
 }
 

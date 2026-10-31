@@ -41,8 +41,9 @@ type hashLRU struct {
 
 func newHashLRU(capacity int) *hashLRU {
 	return &hashLRU{
-		index:    make(map[blockHash]uint32),
-		capacity: min(capacity, int(nodeNil)),
+		index: make(map[blockHash]uint32),
+		// The clamp runs in uint64 because nodeNil does not fit in a 32-bit int.
+		capacity: int(min(uint64(max(capacity, 0)), uint64(nodeNil))), // #nosec G115 -- bounded by capacity, an int.
 		head:     nodeNil,
 		tail:     nodeNil,
 	}
