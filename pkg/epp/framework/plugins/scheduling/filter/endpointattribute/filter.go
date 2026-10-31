@@ -63,19 +63,24 @@ type rangeParameters struct {
 }
 
 // topKParameters keeps the K endpoints with the highest (or lowest) attribute
-// value. When K exceeds the number of endpoints with the attribute, all of
-// them are kept.
+// value. Endpoints tied with the K-th value are all kept, so more than K
+// endpoints may survive a tie. When K exceeds the number of endpoints with
+// the attribute, all of them are kept.
 type topKParameters struct {
-	K              int  `json:"k"`
-	HigherIsBetter bool `json:"higherIsBetter"` // true keeps top K highest, false keeps bottom K lowest
+	K int `json:"k"`
+	// HigherIsBetter is required: a plain bool would decode an omitted field
+	// to false, silently keeping the K lowest instead of the K highest.
+	HigherIsBetter *bool `json:"higherIsBetter"` // true keeps top K highest, false keeps bottom K lowest
 }
 
 // percentileParameters keeps endpoints whose attribute value is at or above
 // (or at or below) the configured percentile of the values observed across
-// the candidate endpoints. Percentile is specified as an integer in [0, 100].
+// the candidate endpoints. Percentile is specified as a number in [0, 100].
 type percentileParameters struct {
-	Percentile     float64 `json:"percentile"`
-	HigherIsBetter bool    `json:"higherIsBetter"` // true keeps values >= percentile, false keeps values <= percentile
+	Percentile float64 `json:"percentile"`
+	// HigherIsBetter is required: a plain bool would decode an omitted field
+	// to false, silently keeping the lowest percentile instead of the highest.
+	HigherIsBetter *bool `json:"higherIsBetter"` // true keeps values >= percentile, false keeps values <= percentile
 }
 
 // algorithmParameters selects the filtering algorithm.
@@ -217,6 +222,9 @@ func validateTopK(t *topKParameters) error {
 		return fmt.Errorf("endpoint attribute filter topK.k must be a positive integer, got %d",
 			t.K)
 	}
+	if t.HigherIsBetter == nil {
+		return errors.New("endpoint attribute filter topK.higherIsBetter is required")
+	}
 	return nil
 }
 
@@ -228,6 +236,9 @@ func validatePercentile(p *percentileParameters) error {
 	if p.Percentile < 0 || p.Percentile > 100 {
 		return fmt.Errorf("endpoint attribute filter percentile.percentile must be in [0, 100], got %v",
 			p.Percentile)
+	}
+	if p.HigherIsBetter == nil {
+		return errors.New("endpoint attribute filter percentile.higherIsBetter is required")
 	}
 	return nil
 }
@@ -344,9 +355,10 @@ func (f *EndpointAttributeFilter) filterRange(endpoints []scheduling.Endpoint) [
 }
 
 // filterTopK keeps the K endpoints with the highest (or lowest) attribute
-// value. Endpoints missing the attribute are excluded from ranking but kept
-// or dropped according to the onMissing policy after the K selection is
-// applied.
+// value. Endpoints tied with the K-th value are all kept, so more than K
+// endpoints may survive a tie. Endpoints missing the attribute are excluded
+// from ranking but kept or dropped according to the onMissing policy after
+// the K selection is applied.
 func (f *EndpointAttributeFilter) filterTopK(endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	tk := f.algorithm.TopK
 
@@ -363,19 +375,30 @@ func (f *EndpointAttributeFilter) filterTopK(endpoints []scheduling.Endpoint) []
 
 	if len(ranked) <= tk.K {
 		// All ranked endpoints survive; apply onMissing to the rest.
-		return f.appendMissing(append([]scheduling.Endpoint{}, rankedToEndpoints(ranked)...), missing)
+		return f.appendMissing(rankedToEndpoints(ranked), missing)
 	}
 
+	higherIsBetter := *tk.HigherIsBetter
 	sort.Slice(ranked, func(i, j int) bool {
-		if tk.HigherIsBetter {
+		if higherIsBetter {
 			return ranked[i].value > ranked[j].value // descending: highest first
 		}
 		return ranked[i].value < ranked[j].value // ascending: lowest first
 	})
 
-	kept := make([]scheduling.Endpoint, 0, tk.K+len(missing))
-	for i := 0; i < tk.K; i++ {
-		kept = append(kept, ranked[i].ep)
+	// Keep every endpoint tied with the K-th value instead of cutting the tie
+	// group at exactly K: the attribute carries no information within a tie,
+	// and this cut runs before the scorers, so an exact-K cut would drop
+	// equally good endpoints based on sort order alone. Keeping the tie group
+	// also makes the result independent of the (unstable) sort order, matching
+	// how percentile treats values equal to its cutoff.
+	kept := make([]scheduling.Endpoint, 0, len(ranked)+len(missing))
+	cutoff := ranked[tk.K-1].value
+	for _, ev := range ranked {
+		if (higherIsBetter && ev.value < cutoff) || (!higherIsBetter && ev.value > cutoff) {
+			break
+		}
+		kept = append(kept, ev.ep)
 	}
 	return f.appendMissing(kept, missing)
 }
@@ -408,6 +431,14 @@ func (f *EndpointAttributeFilter) filterPercentile(endpoints []scheduling.Endpoi
 
 	// Nearest-rank percentile: the value at the ceil(P/100 * N)th position
 	// (1-based) in the ascending sorted array.
+	//
+	// The +0.999999 epsilon rounds a product that is mathematically an
+	// exact integer back down to that integer instead of up: P/100*N in
+	// floating point can land on either side of the true value (14% of 50
+	// computes to 7.0000000000000009), where a naive math.Ceil would already
+	// return 8. The epsilon absorbs both directions of that representation
+	// error (which stays orders of magnitude below 1e-6 for any realistic
+	// fleet size) while still rounding any true fraction up.
 	rank := int((p.Percentile/100.0)*float64(len(valued)) + 0.999999)
 	if rank < 1 {
 		rank = 1
@@ -417,9 +448,10 @@ func (f *EndpointAttributeFilter) filterPercentile(endpoints []scheduling.Endpoi
 	}
 	cutoff := valued[rank-1].value
 
+	higherIsBetter := *p.HigherIsBetter
 	kept := make([]scheduling.Endpoint, 0, len(valued)+len(missing))
 	for _, ev := range valued {
-		if p.HigherIsBetter {
+		if higherIsBetter {
 			if ev.value >= cutoff {
 				kept = append(kept, ev.ep)
 			}

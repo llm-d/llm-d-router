@@ -12,16 +12,14 @@ For each scheduling cycle, the plugin reads the configured attribute (`attribute
 |-----------|-------------|
 | `threshold` | Compare each endpoint against a fixed value using a comparison operator. |
 | `range` | Keep endpoints whose value falls within an inclusive `[min, max]` range. |
-| `topK` | Keep the K endpoints with the highest (or lowest) attribute value. |
+| `topK` | Keep the K best endpoints by attribute value; endpoints tied with the K-th value are all kept. |
 | `percentile` | Keep endpoints at or above (or at or below) a computed percentile of the candidate values. |
 
 ### `threshold`
 
 An endpoint is kept when
 
-\[
-\text{value(endpoint)} \ \langle op \rangle\ \text{threshold.value}
-\]
+$$\text{value(endpoint)} \; \langle op \rangle \; \text{threshold.value}$$
 
 is true for the configured `threshold.operator`.
 
@@ -29,15 +27,13 @@ is true for the configured `threshold.operator`.
 
 An endpoint is kept when
 
-\[
-\text{range.min} \leq \text{value(endpoint)} \leq \text{range.max}
-\]
+$$\text{range.min} \leq \text{value(endpoint)} \leq \text{range.max}$$
 
 This is more convenient than two separate `threshold` filters (`GreaterThan` + `LessThan`) and correctly expresses "within range" as a single condition. Useful for mixed-model deployments where a request must only be routed to endpoints whose context-length capacity is within a required window.
 
 ### `topK`
 
-Endpoints are ranked by their attribute value and the K highest (when `higherIsBetter: true`) or lowest (when `higherIsBetter: false`) are kept. When K exceeds the number of endpoints with the attribute, all of them are kept.
+Endpoints are ranked by their attribute value and the K highest (when `higherIsBetter: true`) or lowest (when `higherIsBetter: false`) are kept. Endpoints tied with the K-th value are all kept, so a tie can keep more than K endpoints — within a tie the attribute carries no information, so the choice is left to the downstream scorers. When K exceeds the number of endpoints with the attribute, all of them are kept.
 
 Useful at fleet scale to narrow the candidate set before expensive scorers run, reducing per-request scorer compute.
 
@@ -90,15 +86,15 @@ The plugin consumes:
 
 | Parameter                       | Required | Description                                                                              |
 |---------------------------------|----------|------------------------------------------------------------------------------------------|
-| `algorithm.topK.k`              | yes      | Number of endpoints to keep. Must be a positive integer.                                 |
-| `algorithm.topK.higherIsBetter` | no      | `true` (default) keeps the K highest values; `false` keeps the K lowest.                |
+| `algorithm.topK.k`              | yes      | Number of endpoints to keep. Must be a positive integer. Ties at the K-th value are all kept, so more than K may survive.   |
+| `algorithm.topK.higherIsBetter` | yes      | `true` keeps the K highest values; `false` keeps the K lowest. No default: omitted `true`-intent configs would silently invert under Go's bool zero value. |
 
 ### `percentile` parameters
 
 | Parameter                          | Required | Description                                                                              |
 |------------------------------------|----------|------------------------------------------------------------------------------------------|
 | `algorithm.percentile.percentile`   | yes      | Percentile cutoff in `[0, 100]`.                                                          |
-| `algorithm.percentile.higherIsBetter` | no     | `true` (default) keeps endpoints >= the percentile cutoff; `false` keeps those <= it.   |
+| `algorithm.percentile.higherIsBetter` | yes     | `true` keeps endpoints >= the percentile cutoff; `false` keeps those <= it. No default: omitted `true`-intent configs would silently invert under Go's bool zero value.   |
 
 **Configuration Example (threshold):**
 ```yaml
