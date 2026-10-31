@@ -80,6 +80,21 @@ func (k *kvSource) params() map[string]any {
 	return reqcommon.P2PPeerParams(k.kvRequestID, k.host, k.port)
 }
 
+// pullSource returns the source a prefill request pulls from: p.source, or nil
+// when it names the prefill pod's own P2P tier. EPP never names the prefill
+// endpoint as the source, so a match here is an EPP without that check. On
+// vLLM v0.32.0 the prefill pod would dial its own tier and wait out the NIXL
+// handshake timeout. Another rank of the prefill pod differs in port and is a
+// valid peer.
+func (p p2pRouting) pullSource(logger logr.Logger) *kvSource {
+	if p.source != nil && p.prefill != nil && p.source.p2pPeer == *p.prefill {
+		logger.Info("warning: KV cache source is the prefill pod's own P2P tier; proceeding without a pull",
+			"p2p_source", p.source.String())
+		return nil
+	}
+	return p.source
+}
+
 // requestBody returns the request body as raw bytes and as the parsed map:
 // the ones the dispatcher read for the pull source, or r's body read here
 // when the dispatcher left it unread.
@@ -111,16 +126,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
-	source := p2p.source
-	// EPP never names the prefill endpoint as the source, so a match here is
-	// an EPP without that check. On vLLM v0.32.0 the prefill pod would dial
-	// its own tier and wait out the NIXL handshake timeout. Another rank of
-	// the prefill pod differs in port and is a valid peer.
-	if source != nil && source.p2pPeer == *p2p.prefill {
-		logger.Info("warning: KV cache source is the prefill pod's own P2P tier; proceeding without a pull",
-			"p2p_source", source.String())
-		source = nil
-	}
+	source := p2p.pullSource(logger)
 
 	kvRequestID := newUUID()
 	kv := make([]any, 0, 8)

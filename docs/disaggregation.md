@@ -637,7 +637,8 @@ computes from the prefiller's data parallel rank. The sidecar connects to the
 prefiller at `x-llm-d-prefiller-host-port` as for every connector. A prefill
 request without the P2P address header, or with a value that is not a `host:port`
 with a TCP port, fails with 500 before any pod request is sent: the EPP must run
-`p2p-source-producer`.
+`p2p-source-producer`. The plugin has Alpha stability, so the EPP must also start
+with `--allow-experimental-plugins`.
 
 When the request carries the `x-llm-d-kv-cache-source-p2p-host-port` header and its body
 `kv_transfer_params.remote_kv_source` (both written by the EPP `p2p-source-producer`

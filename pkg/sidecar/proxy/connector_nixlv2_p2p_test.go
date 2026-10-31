@@ -23,8 +23,10 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -104,6 +106,48 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
 	})
 
+	// prefillSourceBody returns a body whose source names the prefill pod's
+	// host on port, next to the header values EPP sets for it.
+	prefillSourceBody := func(prefillHostPort string, port int) (string, map[string]string) {
+		source := map[string]any{
+			reqcommon.FieldKVRequestID: "k2-from-epp",
+			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemotePort:  port,
+		}
+		return sourceBody(source, nil), map[string]string{
+			routing.PrefillEndpointHeader: prefillHostPort,
+			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
+		}
+	}
+
+	It("drops a source that names the prefill pod's own P2P tier", func() {
+		testInfo.proxy.config.EnableP2PPull = true
+		var logged []string
+		testInfo.ctx = log.IntoContext(testInfo.ctx, funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{}))
+		proxyBaseAddr := startProxy()
+
+		body, headers := prefillSourceBody(testInfo.prefillBackend.URL[len("http://"):], p2pConnectorPort)
+		postChatCompletions(proxyBaseAddr, body, headers)
+
+		kv := prefillKV()
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+		Expect(kv).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
+		Expect(logged).To(ContainElement(ContainSubstring("prefill pod's own P2P tier")))
+	})
+
+	It("keeps a source on another rank of the prefill pod", func() {
+		testInfo.proxy.config.EnableP2PPull = true
+		proxyBaseAddr := startProxy()
+
+		body, headers := prefillSourceBody(testInfo.prefillBackend.URL[len("http://"):], p2pConnectorPort+1)
+		postChatCompletions(proxyBaseAddr, body, headers)
+
+		p2p, ok := prefillKV()[reqcommon.FieldRemoteKVSource].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort+1))
+	})
+
 	It("ignores the body source on the NIXL path without --enable-p2p-pull", func() {
 		proxyBaseAddr := startProxy()
 
@@ -155,5 +199,30 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 		Expect(ok).To(BeTrue())
 		Expect(p2p[reqcommon.FieldRemoteHost]).To(Equal("10.9.9.9"))
 		Expect(p2p[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort))
+	})
+
+	It("drops a source that names the prefill pod's own P2P tier in parallel-dispatch mode", func() {
+		env := startMoRIProxy(func(c *Config) {
+			c.MoRIIOParallelDispatch = true
+			c.EnableP2PPull = true
+		})
+
+		prefillHostPort := env.prefillBackend.URL[len("http://"):]
+		body, headers := prefillSourceBody(prefillHostPort, p2pConnectorPort)
+		req, err := http.NewRequest(http.MethodPost, env.baseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		for k, v := range headers {
+			req.Header.Add(k, v)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(respBody))
+
+		pkv := kvParams(env.prefillHandler, 0)
+		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+		Expect(pkv).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
 })

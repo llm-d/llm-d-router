@@ -49,8 +49,8 @@ func prefillP2PHostPort(prefillHostPort string) string {
 }
 
 // addPrefillRouting routes req to prefillHostPort with the P2P tier address the
-// offloading connector requires on a prefill request. The other connectors
-// strip the address header unread.
+// offloading connector requires on a prefill request. NIXLv2 compares the
+// source against it; the other connectors strip the address header unread.
 func addPrefillRouting(req *http.Request, prefillHostPort string) {
 	req.Header.Add(routing.PrefillEndpointHeader, prefillHostPort)
 	req.Header.Add(routing.KVCachePrefillHeader, prefillP2PHostPort(prefillHostPort))

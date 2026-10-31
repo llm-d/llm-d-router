@@ -71,6 +71,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	if !ok {
 		return
 	}
+	source := p2p.pullSource(logger)
 	// Telemetry failure must not change routing or reject an inference request.
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
@@ -90,7 +91,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		transferID := "tx" + uuidStr
 		// Reuse the client snapshot when the parallel helper creates its request state.
 		r = r.WithContext(context.WithValue(r.Context(), toolCallingBaselineKey, toolFields))
-		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, p2p.source, apiType)
+		s.runNIXLProtocolV2WriteParallel(w, r, original, body, uuidStr, transferID, prefillPodHostPort, source, apiType)
 		return
 	}
 
@@ -176,7 +177,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
-	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), p2p.source)
+	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), source)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
