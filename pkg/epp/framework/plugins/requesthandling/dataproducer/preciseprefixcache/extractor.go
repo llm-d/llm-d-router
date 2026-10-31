@@ -82,7 +82,7 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 }
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
-// endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
+// endpoint, dialing SocketPort plus a rank offset to match standard inference-engine port offsetting
 // (one ZMQ PUB socket per DP rank on the same pod IP), or the endpoint's
 // ZMQPort when discovery sets one. A ZMQPort endpoint receives live events
 // only, without replay or snapshot.
@@ -92,7 +92,7 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	}
 	endpointKey := meta.ID.String()
 	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
-	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
+	sourceEndpoint := p.indexPodIdentifier(meta)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
@@ -117,13 +117,14 @@ func (p *Producer) subscriberEndpoints(meta *fwkdl.EndpointMetadata) (zmqEndpoin
 	if meta.ZMQPort > 0 {
 		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(meta.ZMQPort)), "", ""
 	}
+	offset := meta.GetRankIndex()
 	cfg := p.kvEventsConfig.PodDiscoveryConfig
-	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+meta.GetRankIndex()))
+	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+offset))
 	if replayPort := cfg.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+offset))
 	}
 	if snapshotPort := cfg.SnapshotSocketPort; snapshotPort > 0 {
-		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
+		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+offset))
 	}
 	return zmqEndpoint, replayEndpoint, snapshotEndpoint
 }
