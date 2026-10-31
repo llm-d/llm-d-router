@@ -356,6 +356,23 @@ verify_pdb_validation_failure() {
     exit 1
   fi
 }
+verify_pdb_render() {
+  local chart="$1"
+  shift
+  local output
+  if ! output=$("${HELM}" template pdb-validation "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --namespace pdb-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.inferencePool.create=false --set router.epp.podDisruptionBudget.enabled=true \
+      --set router.epp.podDisruptionBudget.minAvailable=1 "$@" 2>&1); then
+    echo "${chart}: PDB rendering failed for $*: ${output}"
+    exit 1
+  fi
+  if ! grep -q "^kind: PodDisruptionBudget$" <<<"${output}" || \
+     ! grep -q "^  minAvailable: 1$" <<<"${output}"; then
+    echo "${chart}: PDB missing or incorrect minAvailable for $*: ${output}"
+    exit 1
+  fi
+}
 verify_pdb_validation_failure "minAvailable and maxUnavailable together" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true \
   --set router.epp.podDisruptionBudget.minAvailable=1 --set router.epp.podDisruptionBudget.maxUnavailable=1
@@ -363,6 +380,10 @@ verify_pdb_validation_failure "enabled without a disruption field" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true
 verify_pdb_validation_failure "minAvailable with a single replica" \
   --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1
+verify_pdb_render llm-d-router-gateway \
+  --set provider.name=gke --set provider.gke.preferredBackends.enabled=true
+verify_pdb_render llm-d-router-standalone \
+  --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true
 echo "PodDisruptionBudget validation checks passed."
 
 echo "Verifying leader-election RBAC..."

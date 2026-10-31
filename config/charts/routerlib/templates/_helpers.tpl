@@ -502,6 +502,13 @@ Helper to retrieve GKE preferredBackends configuration safely across chart conte
 {{- index $gke "preferredBackends" | default dict | toYaml -}}
 {{- end -}}
 
+{{- define "llm-d-router.gkePreferredBackends.totalReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- $preferred := $gkePB.preferredReplicas | default 1 | int -}}
+{{- $default := $gkePB.defaultReplicas | default 1 | int -}}
+{{- add $preferred $default -}}
+{{- end -}}
+
 {{/*
 EPP generic validations
 */}}
@@ -554,6 +561,15 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- $primary := include "llm-d-router.priorityRouting.primaryReplicas" . | int -}}
 {{- $standby := include "llm-d-router.priorityRouting.standbyReplicas" . | int -}}
 {{- add $primary $standby -}}
+{{- end -}}
+
+{{- define "llm-d-router.epp.statefulSetReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled -}}
+{{- include "llm-d-router.gkePreferredBackends.totalReplicas" . -}}
+{{- else if eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+{{- include "llm-d-router.priorityRouting.totalReplicas" . -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "llm-d-router.validations.epp.autoscaling" -}}

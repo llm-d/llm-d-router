@@ -63,10 +63,12 @@ epp:
   #     maxUnavailable: 1
   #     maxSurge: 0
 
-  # PodDisruptionBudget for the EPP Deployment. Disabled while unset; enabling it without a
+  # PodDisruptionBudget for EPP pods. Disabled while unset; enabling it without a
   # disruption field, or with both, fails the render, and minAvailable >= 1 with fewer than 2
-  # effective replicas (replicas, or autoscaling.minReplicas when autoscaled) also fails: a
-  # single-replica Deployment with minAvailable: 1 can never satisfy its budget, so every
+  # effective replicas (replicas, autoscaling.minReplicas when autoscaled,
+  # preferredReplicas + defaultReplicas with GKE preferredBackends, or
+  # primaryReplicas + standbyReplicas with priorityRouting) also fails: a
+  # single-replica workload with minAvailable: 1 can never satisfy its budget, so every
   # voluntary disruption -- node drains above all -- blocks until the timeout. The EPP pod in
   # sidecar proxy mode is governed by THIS budget alone; the proxy needs no separate one.
   #
