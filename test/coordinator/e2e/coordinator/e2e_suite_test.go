@@ -18,8 +18,9 @@ limitations under the License.
 // against the e-p-d-pools topology: a single InferencePool covering the
 // encode, prefill, and decode worker pods, served by one EPP that runs the
 // scheduling profile named by each request's x-llm-d-epp-profile header, behind a
-// hand-rolled standalone Envoy routing on that same header, and the
-// coordinator deployed as a pod. No Istio, no Gateway/HTTPRoute CRDs.
+// standalone gateway routing on that same header, and the coordinator deployed
+// as a pod. The gateway is a hand-rolled Envoy, or agentgateway with
+// E2E_GATEWAY=agentgateway. No Istio, no Gateway/HTTPRoute CRDs.
 package coordinate2e
 
 import (
@@ -67,7 +68,7 @@ const (
 
 	// EPP resources are the shared inference-gateway component's split files.
 	// Gateway/HTTPRoute manifests in that component are unused: the coordinator
-	// e2e fronts the EPP with a hand-rolled Envoy, matching the router e2e.
+	// e2e fronts the EPP with a standalone gateway (see gatewayKind).
 	eppManifest               = "../../../../deploy/components/inference-gateway/deployment.yaml"
 	poolManifest              = "../../../../deploy/components/inference-gateway/inference-pools.yaml"
 	eppRbacManifest           = "../../../../deploy/components/inference-gateway/rbac.yaml"
@@ -90,7 +91,15 @@ const (
 	envoy3EPPManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml"
 	pool3EPPManifest  = "../../../../deploy/environments/dev/coordinator-e2e-infra/inference-pools-3-epp.yaml"
 
+	// agentgatewayManifest holds the agentgateway ConfigMap, Deployment and
+	// Service used instead of the Envoy manifests when E2E_GATEWAY=agentgateway.
+	agentgatewayManifest = "../../../../deploy/environments/dev/coordinator-e2e-infra/agentgateway.yaml"
+
 	crdGIEPath = "../../../../deploy/components/crds-gie"
+
+	// E2E_GATEWAY values; each is also the gateway's Service name.
+	gatewayEnvoy        = "envoy"
+	gatewayAgentgateway = "agentgateway"
 )
 
 var (
@@ -105,6 +114,9 @@ var (
 	// phase) instead of the default single-EPP topology. See envoy3EPPManifest and
 	// the eppConfigLeastBusy (encode, decode) and eppConfigPrefill configs.
 	threeEPP = env.GetEnvString("E2E_EPP_TOPOLOGY", "single", ginkgo.GinkgoLogr) == "3epp"
+
+	// gatewayKind selects the gateway in front of the coordinator and EPP.
+	gatewayKind = env.GetEnvString("E2E_GATEWAY", gatewayEnvoy, ginkgo.GinkgoLogr)
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
@@ -169,6 +181,9 @@ func TestCoordinatorE2E(t *testing.T) {
 // the single renderer in baseNsName that each process's coordinator reaches
 // cross-namespace. Every other process only needs its own client.
 var _ = ginkgo.SynchronizedBeforeSuite(func() {
+	gomega.Expect(gatewayKind).To(gomega.BeElementOf(gatewayEnvoy, gatewayAgentgateway), "E2E_GATEWAY")
+	gomega.Expect(threeEPP && gatewayKind == gatewayAgentgateway).To(gomega.BeFalse(),
+		"the 3-EPP per-role check parses Envoy access logs; run E2E_EPP_TOPOLOGY=3epp with E2E_GATEWAY=envoy")
 	gomega.Expect(coordinatorImage).NotTo(gomega.BeEmpty(), "COORDINATOR_IMAGE must be set")
 
 	testutils.RequireParallelProcessesMatch(numProcesses)
@@ -322,7 +337,7 @@ func getGatewayPort() int {
 	return testutils.ProcessPort(baseGatewayPort)
 }
 
-// getGatewayNodePort returns the envoy Service's NodePort for this process. It
+// getGatewayNodePort returns the gateway Service's NodePort for this process. It
 // derives from defaultGatewayHostPort rather than baseGatewayPort because it is
 // the cluster-side port: it must match the containerPort BuildExtraPortMappings
 // maps to the host, and stay inside the Kubernetes NodePort range whatever host

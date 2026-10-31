@@ -78,7 +78,8 @@ func stopPortForward(session *gexec.Session) error {
 }
 
 // createEnvoy applies the active topology's Envoy routing ConfigMap plus the
-// shared Envoy Deployment and Service in nsName. Against an existing cluster
+// shared Envoy Deployment and Service in nsName, or the agentgateway manifest
+// when E2E_GATEWAY=agentgateway. Against an existing cluster
 // (K8S_CONTEXT set) the kind nodePort mapping is unavailable, so it also
 // forwards the gateway port and returns the session for the caller to terminate.
 // It appends to objects as it goes (see createTracked).
@@ -86,6 +87,12 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	infraSubs := map[string]string{
 		"${NAMESPACE}":       nsName,
 		"${ENVOY_NODE_PORT}": strconv.Itoa(getGatewayNodePort()),
+	}
+	if gatewayKind == gatewayAgentgateway {
+		infraSubs["${EPP_NAME}"] = eppName
+		ginkgo.By("Applying agentgateway from " + agentgatewayManifest)
+		applyManifest(nsName, agentgatewayManifest, infraSubs, objects)
+		return forwardGateway(nsName)
 	}
 	manifest := envoyManifest
 	if threeEPP {
@@ -101,12 +108,18 @@ func createEnvoy(nsName string, objects *[]string) *gexec.Session {
 	applyManifest(nsName, manifest, infraSubs, objects)
 	ginkgo.By("Applying shared Envoy Deployment and Service from " + sharedEnvoyManifest)
 	applyManifest(nsName, sharedEnvoyManifest, infraSubs, objects)
+	return forwardGateway(nsName)
+}
 
+// forwardGateway forwards the gateway port on an existing cluster, where the
+// kind nodePort mapping is unavailable, and returns the session. It returns
+// nil on a suite-owned kind cluster.
+func forwardGateway(nsName string) *gexec.Session {
 	if k8sContext == "" {
 		return nil
 	}
 	//nolint:gosec // G204: fixed kubectl executable; ports, context and namespace are separate argv, without a shell
-	command := exec.Command("kubectl", "port-forward", "service/envoy",
+	command := exec.Command("kubectl", "port-forward", "service/"+gatewayKind,
 		strconv.Itoa(getGatewayPort())+":8081",
 		"--context="+k8sContext, "--namespace="+nsName)
 	portForwardSession, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
@@ -240,6 +253,9 @@ func createOneEndPointPicker(nsName string, e roleEPP) {
 	if threeEPP {
 		docs = renameEPPConfigVolume(docs, cmName)
 	}
+	if gatewayKind == gatewayAgentgateway {
+		docs = disableEPPSecureServing(docs)
+	}
 	podsInDeploymentsReady(nsName, createTracked(nsName, docs, &specWorkload))
 }
 
@@ -260,6 +276,22 @@ func renameEPPConfigVolume(docs []string, cmName string) []string {
 	}
 	gomega.Expect(matches).To(gomega.Equal(3),
 		"expected 3 %q references (volume, volumeMount, configMap) in the EPP Deployment; the shared manifest format may have changed", oldRef)
+	return out
+}
+
+// disableEPPSecureServing adds --secure-serving=false to the EPP args:
+// agentgateway speaks plaintext gRPC to the EPP. The match count is asserted
+// for the same reason as in renameEPPConfigVolume.
+func disableEPPSecureServing(docs []string) []string {
+	const anchor = "        - --allow-experimental-plugins=true\n"
+	out := make([]string, len(docs))
+	matches := 0
+	for i, d := range docs {
+		matches += strings.Count(d, anchor)
+		out[i] = strings.ReplaceAll(d, anchor, anchor+"        - --secure-serving=false\n")
+	}
+	gomega.Expect(matches).To(gomega.Equal(1),
+		"expected 1 %q arg in the EPP Deployment; the shared manifest format may have changed", anchor)
 	return out
 }
 
@@ -333,6 +365,7 @@ func createCoordinator(nsName, config string) {
 		"${NAMESPACE}":        nsName,
 		"${RENDER_NAMESPACE}": baseNsName,
 		"${VLLM_RENDER_PORT}": vllmRenderPort,
+		"${GATEWAY_SERVICE}":  gatewayKind,
 	})[0]
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -356,7 +389,7 @@ func createCoordinator(nsName, config string) {
 	waitForCoordinatorReady()
 }
 
-// waitForCoordinatorReady polls /readyz through Envoy until it returns 200,
+// waitForCoordinatorReady polls /readyz through the gateway until it returns 200,
 // confirming the freshly recreated coordinator pod is reachable through the
 // gateway before the test sends its request. The gateway Service outlives the
 // coordinator Deployment (see createStableInfra), so this waits only for the

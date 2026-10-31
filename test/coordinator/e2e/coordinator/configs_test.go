@@ -19,21 +19,21 @@ package coordinate2e
 import "strings"
 
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
-// ${NAMESPACE}, ${RENDER_NAMESPACE}, and ${VLLM_RENDER_PORT} are substituted by
-// createCoordinator before the ConfigMap is built.
+// ${NAMESPACE}, ${RENDER_NAMESPACE}, ${VLLM_RENDER_PORT}, and ${GATEWAY_SERVICE} are
+// substituted by createCoordinator before the ConfigMap is built.
 const coordinatorConfigNIXL = `log_level: 5
 server:
   listen_addr: ":8080"
   read_timeout: 30s
   write_timeout: 120s
-  # Recreated per spec behind a group-lived Envoy; drain fast so a deleted
+  # Recreated per spec behind a group-lived gateway; drain fast so a deleted
   # coordinator stops serving immediately instead of lingering on a stale
   # endpoint the gateway may still route to. 0s is avoided: it makes the
   # server Shutdown context expire instantly and the process exit non-zero.
   shutdown_timeout: 1s
 
 gateway:
-  address: "http://envoy.${NAMESPACE}.svc:8081"
+  address: "http://${GATEWAY_SERVICE}.${NAMESPACE}.svc:8081"
   max_idle_conns_per_host: 100
   idle_conn_timeout: 90s
   timeout: 60s
