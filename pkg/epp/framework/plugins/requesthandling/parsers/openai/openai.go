@@ -396,18 +396,23 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 		return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
 
 	case audioSpeechAPI:
-		validationErr := errors.New("invalid text to speech request: must have string input field")
 		var speechRequest struct {
-			Input *string `json:"input"`
+			Input        *string `json:"input"`
+			Instructions string  `json:"instructions,omitempty"`
+			RefText      string  `json:"ref_text,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
-			return nil, requestBodyDecodeError(err, validationErr)
+			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, and ref_text must be strings"))
 		}
 		if speechRequest.Input == nil {
-			return nil, validationErr
+			return nil, errors.New("invalid text to speech request: must have string input field")
 		}
 		return &fwkrh.InferenceRequestBody{
-			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: *speechRequest.Input},
+			TextToSpeech: &fwkrh.TextToSpeechRequest{
+				Input:        *speechRequest.Input,
+				Instructions: speechRequest.Instructions,
+				RefText:      speechRequest.RefText,
+			},
 		}, nil
 
 	case chatCompletionsAPI:

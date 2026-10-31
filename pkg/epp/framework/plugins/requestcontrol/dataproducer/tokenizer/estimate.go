@@ -272,6 +272,8 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Generate.Text), nil
 	case body.Images != nil:
 		return []byte(imageGenerationText(body.Images)), nil
+	case body.TextToSpeech != nil:
+		return []byte(ttsText(body.TextToSpeech)), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
@@ -287,6 +289,20 @@ func imageGenerationText(r *fwkrh.ImagesGenerationsRequest) string {
 		return r.Prompt
 	}
 	return r.Prompt + "\n" + r.NegativePrompt
+}
+
+// ttsText joins a text-to-speech request's spoken text with its style
+// instructions and, for voice cloning, the reference-audio transcript: vLLM
+// Omni tokenizes all three as real engine prefill, not just metadata.
+func ttsText(r *fwkrh.TextToSpeechRequest) string {
+	text := r.Input
+	if strings.TrimSpace(r.Instructions) != "" {
+		text += "\n" + r.Instructions
+	}
+	if strings.TrimSpace(r.RefText) != "" {
+		text += "\n" + r.RefText
+	}
+	return text
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding

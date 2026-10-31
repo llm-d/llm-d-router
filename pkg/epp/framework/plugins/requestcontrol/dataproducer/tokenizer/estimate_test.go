@@ -117,6 +117,78 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
+// TestEstimateBackend_TextToSpeechEstimatesPseudoTokens asserts TTS input text
+// is byte-estimated into pseudo-tokens, like generate text.
+func TestEstimateBackend_TextToSpeechEstimatesPseudoTokens(t *testing.T) {
+	input := "hello world"
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: input},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte(input)), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIncludesInstructions asserts TTS
+// instructions are folded into the estimated text alongside input, matching
+// vLLM Omni's usage accounting.
+func TestEstimateBackend_TextToSpeechIncludesInstructions(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "hello", Instructions: "cheerful radio voice"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions asserts
+// whitespace-only instructions are treated as absent, matching vLLM Omni's
+// usage accounting, which only charges instructions tokens when the
+// instructions text is non-blank.
+func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "hello", Instructions: "   "},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIncludesRefText asserts a voice-cloning
+// reference-audio transcript is folded into the estimated text alongside
+// input, matching vLLM Omni's engine prefill, which tokenizes it as real
+// text, not just metadata.
+func TestEstimateBackend_TextToSpeechIncludesRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "hello", RefText: "this is the reference clip"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText asserts
+// instructions and ref_text are both folded in together, alongside input.
+func TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "hello", Instructions: "cheerful", RefText: "reference clip"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
+}
+
+// TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText asserts a
+// whitespace-only reference transcript is treated as absent.
+func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrh.InferenceRequestBody{
+		TextToSpeech: &fwkrh.TextToSpeechRequest{Input: "hello", RefText: "   "},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+}
+
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
 // input is passed through as real tokens, not byte-estimated.
 func TestEstimateBackend_CompletionsTokenIDsPassthrough(t *testing.T) {

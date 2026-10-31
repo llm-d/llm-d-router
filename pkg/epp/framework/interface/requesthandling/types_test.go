@@ -621,7 +621,9 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 }
 
 func TestTextToSpeechRequest_String(t *testing.T) {
-	assert.Equal(t, "{InputLength: 5}", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 8, RefTextLength: 0}", (&TextToSpeechRequest{Input: "hello", Instructions: "cheerful"}).String())
+	assert.Equal(t, "{InputLength: 5, InstructionsLength: 0, RefTextLength: 11}", (&TextToSpeechRequest{Input: "hello", RefText: "hello there"}).String())
 	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
 }
 
