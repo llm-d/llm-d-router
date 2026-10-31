@@ -392,6 +392,18 @@ type RequestHandlerConfig struct {
 	// listed runs on the screened endpoints before admission and scheduling,
 	// unless a screener or a listed producer consumes its data, directly or
 	// through other producers; such a producer runs before screeners too.
+	//
+	// Each producer instance runs once per request, in one of the two phases;
+	// producers do not run per scheduling profile. Data a producer writes
+	// during request handling stays on the request and its endpoints, so
+	// screeners, the remaining producers, admitters, and scheduling profile
+	// plugins such as filters and scorers all read it from that one run, on the
+	// endpoints the screeners keep. To also produce the data after screening,
+	// configure a second instance under another name. That instance stays in
+	// the later phase only if its data key differs from the listed instance's,
+	// for example a key scoped by producer name as approx-prefix-cache-producer
+	// uses, because every producer of a key that a screener or a listed
+	// producer consumes runs before screeners.
 	DataProducers []DataProducerConfig `json:"dataProducers,omitempty"`
 }
 
