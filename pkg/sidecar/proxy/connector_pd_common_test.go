@@ -145,6 +145,61 @@ func TestConcurrentPDCancellation(t *testing.T) {
 	}
 }
 
+// A prefill error response cancels decode and reaches the client in place of
+// the 502 the decoder proxy writes for a cancelled request.
+func TestRunConcurrentPDRelaysPrefillError(t *testing.T) {
+	tests := []struct {
+		status int
+		body   string
+	}{
+		{http.StatusBadRequest, `{"object":"error","message":"invalid image payload","type":"BadRequestError","param":null,"code":400}`},
+		{http.StatusServiceUnavailable, `{"object":"error","message":"prefill overloaded","type":"ServiceUnavailableError","param":null,"code":503}`},
+	}
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), concurrentPDTestWait)
+			defer cancel()
+
+			decodeStarted := make(chan struct{})
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				select {
+				case <-decodeStarted:
+				case <-r.Context().Done():
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer prefill.Close()
+			decode := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				close(decodeStarted)
+				<-r.Context().Done()
+			}))
+			defer decode.Close()
+
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+			decodeURL, err := url.Parse(decode.URL)
+			require.NoError(t, err)
+			s := NewProxy(Config{Port: "0", DecoderURL: decodeURL})
+			s.decoderProxy = s.createDecoderProxyHandler(decodeURL, false)
+
+			body := []byte(`{"input_ids":[1]}`)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathSGLangGenerate, bytes.NewReader(body)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			s.runConcurrentPD(rec, req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+
+			require.NoError(t, ctx.Err(), "decode must be cancelled before the client deadline")
+			assert.Equal(t, tt.status, rec.Code)
+			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			assert.JSONEq(t, tt.body, rec.Body.String())
+		})
+	}
+}
+
 const concurrentPDTestWait = 5 * time.Second
 
 // heldPrefill is a prefill backend that holds its request until the request

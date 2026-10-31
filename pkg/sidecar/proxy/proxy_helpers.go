@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -171,7 +172,15 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 			logger = s.logger
 		}
 		var writeError error
+		var prefillErr *prefillFailedError
 		switch {
+		case errors.As(context.Cause(r.Context()), &prefillErr):
+			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
+				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			maps.Copy(res.Header(), prefillErr.response.headers)
+			res.WriteHeader(prefillErr.response.statusCode)
+			_, writeError = res.Write(prefillErr.response.bodyBytes())
+
 		case errors.Is(err, syscall.ECONNREFUSED):
 			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
