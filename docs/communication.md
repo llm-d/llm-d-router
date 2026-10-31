@@ -893,7 +893,7 @@ x-llm-d-epp-profile: prefill
 
 #### Request when render omitted the tensors
 
-When the render step omits the tensors and prefill does not send `features` (see [2.A](#response-with-mm_payload-none)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. `ec_transfer_params` from the encode stage is sent as in the `features` form:
+When the render step omits the tensors and prefill does not send `features` (see [2.A](#response-with-mm_payload-none)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. The collapse relies on each span being a uniform run of one placeholder token, the shape the Qwen-VL family produces and the form validated here; a model whose parser interleaves other tokens inside a span (vLLM's `is_embed` mask, not yet carried by the render response; see vllm-project/vllm#54548) fails the request rather than sending a prompt the worker would expand differently. The `features` form keeps the expanded ids and is unaffected. `ec_transfer_params` from the encode stage is sent as in the `features` form:
 
 ```json
 {

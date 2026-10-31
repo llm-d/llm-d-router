@@ -217,6 +217,11 @@ func TestCollapsePlaceholders(t *testing.T) {
 		{Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 2}},
 	})
 	require.Error(t, err)
+
+	// A span that mixes tokens cannot be collapsed to its first token: the
+	// worker would expand a different prompt than render produced.
+	_, err = collapsePlaceholders([]int{1, 9, 8, 9}, []pipeline.MultimodalEntry{{Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}}})
+	require.Error(t, err)
 }
 
 // A renderer without the mm_payload field returns the tensors anyway, and the

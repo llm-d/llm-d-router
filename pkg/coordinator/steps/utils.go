@@ -466,7 +466,10 @@ func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMo
 // collapsePlaceholders shrinks every entry's placeholder span in tokenIDs to
 // its first token. A generate request that carries content_parts takes an
 // unexpanded prompt: the worker's multimodal processor expands each
-// placeholder itself.
+// placeholder itself. The span must be a uniform run of one token, the shape
+// the Qwen-VL family produces; a model whose parser interleaves other tokens
+// inside a range fails the request, since the worker would expand a different
+// prompt than render produced.
 func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([]int, error) {
 	ranges := make([]pipeline.PlaceholderRange, len(entries))
 	for i, entry := range entries {
@@ -479,6 +482,12 @@ func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([
 		if r.Offset < pos || r.Length < 1 || r.Length > len(tokenIDs)-r.Offset {
 			return nil, fmt.Errorf("placeholder (offset %d, length %d) overlaps another or exceeds %d token_ids",
 				r.Offset, r.Length, len(tokenIDs))
+		}
+		for i := r.Offset + 1; i < r.Offset+r.Length; i++ {
+			if tokenIDs[i] != tokenIDs[r.Offset] {
+				return nil, fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token",
+					r.Offset, r.Length)
+			}
 		}
 		collapsed = append(collapsed, tokenIDs[pos:r.Offset+1]...)
 		pos = r.Offset + r.Length
