@@ -471,6 +471,78 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 // When all entries are nil (text-only prompts), this simply produces a nil-filled
 // slice of the correct length.
 func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, numTokens int) []*kvblock.BlockExtraFeatures {
+	return realignExtraFeaturesWithContinuation(engineFeatures, nil, canonicalBlockSize, numTokens)
+}
+
+// mmContinuation reports whether an engine block's first MM entry continues
+// the item that ends the previous block, as read from vLLM's per-entry offset.
+type mmContinuation uint8
+
+const (
+	mmContinuationUnknown mmContinuation = iota // no offset (bare identifier)
+	mmContinuationNew
+	mmContinuationContinues
+)
+
+// firstMMContinuation reads, per engine block, whether the first MM entry
+// after an optional LoRA name has a negative offset relative to the block start.
+func firstMMContinuation(raw [][]any, loraName string) []mmContinuation {
+	out := make([]mmContinuation, len(raw))
+	for i, keys := range raw {
+		if loraName != "" && len(keys) > 0 && keys[0] == loraName {
+			keys = keys[1:]
+		}
+		for _, entry := range keys {
+			pair, ok := entry.([]any)
+			if !ok {
+				if _, isStr := entry.(string); isStr {
+					break
+				}
+				continue
+			}
+			if len(pair) >= 2 {
+				if off, ok := toInt64(pair[1]); ok {
+					if off < 0 {
+						out[i] = mmContinuationContinues
+					} else {
+						out[i] = mmContinuationNew
+					}
+				}
+			}
+			break
+		}
+	}
+	return out
+}
+
+func toInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint8:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint64:
+		return int64(n), true //#nosec G115 -- offsets are block-relative
+	default:
+		return 0, false
+	}
+}
+
+func realignExtraFeaturesWithContinuation(engineFeatures []*kvblock.BlockExtraFeatures, continuation []mmContinuation,
+	canonicalBlockSize, numTokens int,
+) []*kvblock.BlockExtraFeatures {
 	engineBlockCount := len(engineFeatures)
 	canonicalBlockCount := numTokens / canonicalBlockSize
 	if canonicalBlockCount == 0 {
@@ -510,7 +582,12 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 				// Placeholders don't overlap, so only the item ending engine block i-1
 				// can continue into block i, where it is the first entry. Block i-1 is
 				// searched whole because block 0 ends with the cache salt, if any.
-				if prev != nil && len(hashes) > 0 && slices.Contains(prev.MMHashes, hashes[0]) {
+				// The event offset, when present, tells a continuation from a new copy.
+				cont := mmContinuationUnknown
+				if i < len(continuation) {
+					cont = continuation[i]
+				}
+				if prev != nil && len(hashes) > 0 && cont != mmContinuationNew && slices.Contains(prev.MMHashes, hashes[0]) {
 					hashes = hashes[1:]
 				}
 				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
@@ -682,12 +759,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				parentRequestKey = key
 			}
 
+			var loraName string
+			if ev.LoraName != nil {
+				loraName = *ev.LoraName
+			}
 			var extraFeatures []*kvblock.BlockExtraFeatures
 			if ev.ExtraKeys != nil {
-				var loraName string
-				if ev.LoraName != nil {
-					loraName = *ev.LoraName
-				}
 				var err error
 				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys, loraName)
 				if err != nil {
@@ -707,7 +784,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// since TokensToKVBlockKeys will produce zero keys anyway.
 					extraFeatures = nil
 				} else if len(extraFeatures) != canonicalBlockCount {
-					extraFeatures = realignExtraFeatures(extraFeatures, p.tokenProcessor.BlockSize(), len(ev.Tokens))
+					extraFeatures = realignExtraFeaturesWithContinuation(extraFeatures,
+						firstMMContinuation(ev.ExtraKeys, loraName), p.tokenProcessor.BlockSize(), len(ev.Tokens))
 				}
 			}
 
