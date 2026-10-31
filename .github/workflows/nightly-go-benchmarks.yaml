@@ -1,0 +1,75 @@
+name: Nightly - Go Benchmarks
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+# One run at a time, so history artifacts are uploaded in commit order and the newest is the baseline.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # An artifact, because this repo's cache use is over quota and evicts entries within hours.
+      # The artifacts API, because a run with an alert has failed and still holds the newest history.
+      - name: Restore the previous results
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=go-benchmark-history" \
+            --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main" and .workflow_run.head_repository_id == .workflow_run.repository_id)] | sort_by(.created_at) | last | .workflow_run.id // empty')
+          if [[ -z "$run_id" ]]; then
+            echo "::warning::No stored benchmark history, so this run only seeds it."
+            exit 0
+          fi
+          gh run download "$run_id" --repo "${{ github.repository }}" --name go-benchmark-history --dir .
+
+      # ./pkg/... because the benchmarks under test/ need envtest or a live server.
+      - name: Run the benchmarks
+        shell: bash
+        run: go test -run='^$' -bench=. -benchmem -timeout=30m ./pkg/... | tee bench-raw.txt
+
+      # The go tool treats every unit as smaller-is-better, which inverts MB/s and the other rates.
+      - name: Keep ns/op only
+        shell: bash
+        run: |
+          grep -E '^pkg: |^Benchmark.* ns/op' bench-raw.txt | sed -E 's# ns/op.*# ns/op#' > bench.txt
+
+      - name: Compare with the previous results
+        id: compare
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          tool: go
+          output-file-path: bench.txt
+          external-data-json-path: benchmark-data.json
+          github-token: ${{ github.token }} # Reads the commit; schedule events do not carry one.
+          ref: ${{ github.sha }} # main may move during the run; store the commit that was tested.
+          alert-threshold: '120%'
+          fail-on-alert: true
+          summary-always: true
+          max-items-in-chart: 90
+
+      # Saved after an alert too, so a real regression becomes the baseline and does not fire every night.
+      - name: Save the results
+        if: ${{ !cancelled() && steps.compare.outcome != 'skipped' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-benchmark-history
+          path: |
+            benchmark-data.json
+            bench-raw.txt
