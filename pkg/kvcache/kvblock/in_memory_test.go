@@ -425,3 +425,126 @@ func TestInMemoryIndexRecencyPromotion(t *testing.T) {
 		})
 	}
 }
+
+func TestInMemoryIndexMappingCapacityInvalidatesResidency(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		engineKeys  []BlockHash
+		requestKeys []BlockHash
+		walk        bool
+	}{
+		{name: "lookup", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201}},
+		{name: "walk", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201}, walk: true},
+		{name: "one-to-many", engineKeys: []BlockHash{101}, requestKeys: []BlockHash{201, 202}},
+		{name: "oversized-many-to-one", engineKeys: []BlockHash{101, 102, 103}, requestKeys: []BlockHash{201}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 2, PodCacheSize: 4})
+			require.NoError(t, err)
+			entries := []PodEntry{
+				{PodIdentifier: "pod1", DeviceTier: "gpu"},
+				{PodIdentifier: "pod2", DeviceTier: "cpu"},
+			}
+			require.NoError(t, index.Add(ctx, tc.engineKeys, tc.requestKeys, entries))
+			if len(tc.engineKeys) == 1 {
+				require.NoError(t, index.Add(ctx, []BlockHash{104}, []BlockHash{203}, entries))
+				hotKey := tc.requestKeys[len(tc.requestKeys)-1]
+				if tc.walk {
+					require.NoError(t, index.WalkKeys(ctx, []BlockHash{hotKey}, func(_ int, found bool, records []EntryRef) bool {
+						require.True(t, found)
+						require.Len(t, records, len(entries))
+						return true
+					}))
+				} else {
+					hits, lookupErr := index.Lookup(ctx, []BlockHash{hotKey}, nil)
+					require.NoError(t, lookupErr)
+					require.Len(t, hits[hotKey], len(entries))
+				}
+				require.NoError(t, index.Add(ctx, []BlockHash{105}, []BlockHash{204}, entries))
+			}
+			// A missing engine mapping cannot support residency that later removes must resolve.
+			for _, key := range tc.requestKeys {
+				hits, lookupErr := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, lookupErr)
+				require.Empty(t, hits)
+			}
+			require.NoError(t, index.Evict(ctx, EngineKey, tc.engineKeys, entries))
+			for _, key := range tc.requestKeys {
+				hits, lookupErr := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, lookupErr)
+				require.Empty(t, hits)
+			}
+		})
+	}
+}
+
+func TestInMemoryIndexAddByEngineKeys(t *testing.T) {
+	for _, wrap := range []struct {
+		name  string
+		apply func(Index) Index
+	}{
+		{"direct", func(i Index) Index { return i }},
+		{"instrumented", NewInstrumentedIndex},
+		{"traced", NewTracedIndex},
+		{"both", func(i Index) Index { return NewTracedIndex(NewInstrumentedIndex(i)) }},
+	} {
+		t.Run(wrap.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 4, PodCacheSize: 4})
+			require.NoError(t, err)
+			gpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+			cpu := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "cpu"}}
+			require.NoError(t, index.Add(ctx, []BlockHash{101, 102}, []BlockHash{201}, gpu))
+			wrapped := wrap.apply(index)
+			count, err := AddByEngineKeys(ctx, wrapped, []BlockHash{101, 102, 999}, cpu)
+			require.NoError(t, err)
+			assert.Equal(t, 1, count)
+			hits, err := index.Lookup(ctx, []BlockHash{201}, nil)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, append(gpu, cpu...), hits[201])
+			require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{101, 102}, cpu))
+			hits, err = index.Lookup(ctx, []BlockHash{201}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, gpu, hits[201])
+			count, err = AddByEngineKeys(ctx, wrapped, []BlockHash{999}, cpu)
+			require.NoError(t, err)
+			assert.Zero(t, count)
+		})
+	}
+}
+
+func TestInMemoryIndexSharedEngineOwnership(t *testing.T) {
+	for _, capacity := range []bool{false, true} {
+		t.Run(fmt.Sprint(capacity), func(t *testing.T) {
+			ctx := t.Context()
+			idx, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 8, PodCacheSize: 4})
+			require.NoError(t, err)
+			pod := []PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}}
+			old := []BlockHash{11, 12, 13, 14}
+			live := []BlockHash{11, 12, 23, 24}
+			require.NoError(t, idx.Add(ctx, []BlockHash{1001}, old, pod))
+			require.NoError(t, idx.Add(ctx, []BlockHash{1002}, live, pod))
+			require.NoError(t, idx.Add(ctx, []BlockHash{1002}, live, pod))
+			if capacity {
+				for i := 0; i < 7; i++ {
+					require.NoError(t, idx.Add(ctx, []BlockHash{BlockHash(2001 + i)}, []BlockHash{900}, pod))
+				}
+			} else {
+				require.NoError(t, idx.Evict(ctx, EngineKey, []BlockHash{1001}, pod))
+			}
+			got, err := idx.Lookup(ctx, live, nil)
+			require.NoError(t, err)
+			require.Len(t, got, 4, "live sibling must retain its entire prefix")
+			for _, key := range []BlockHash{13, 14} {
+				hits, err := idx.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, err)
+				require.Empty(t, hits)
+			}
+			require.NoError(t, idx.Evict(ctx, EngineKey, []BlockHash{1002}, pod))
+			got, err = idx.Lookup(ctx, live, nil)
+			require.NoError(t, err)
+			require.Empty(t, got, "last owner removal must release shared entries")
+		})
+	}
+}

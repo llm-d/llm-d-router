@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -79,18 +80,21 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		return nil, fmt.Errorf("failed to initialize in-memory index: %w", err)
 	}
 
-	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
+	index := &InMemoryIndex{
+		data: cache, podCacheSize: podCacheSize,
+		pods: newInterner(maxInternedPods), tiers: newInterner(maxInternedTiers),
+		owners:        make(map[BlockHash]map[PodEntry]sets.Set[BlockHash]),
+		engineEntries: make(map[BlockHash]map[BlockHash]sets.Set[PodEntry]),
+		constituents:  make(map[BlockHash]sets.Set[BlockHash]),
+	}
+	cache.onEvict = index.forgetRequestOwners
+	engineToRequestKeys, err := lru.NewWithEvict[BlockHash, []BlockHash](cfg.Size,
+		func(engineKey BlockHash, _ []BlockHash) { index.releaseEngine(engineKey) })
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
 	}
-
-	return &InMemoryIndex{
-		data:                cache,
-		engineToRequestKeys: engineToRequestKeys,
-		podCacheSize:        podCacheSize,
-		pods:                newInterner(maxInternedPods),
-		tiers:               newInterner(maxInternedTiers),
-	}, nil
+	index.engineToRequestKeys = engineToRequestKeys
+	return index, nil
 }
 
 // cancellationCheckMask paces context-cancellation checks in loops over
@@ -112,6 +116,11 @@ type InMemoryIndex struct {
 	// mu protects engine-key-level check-and-act operations (Evict's allEmpty
 	// check + mapping removal vs Add's pod entry insertion) to prevent TOCTOU races.
 	mu sync.Mutex
+	// owners and engineEntries track distinct engine references to resident entries.
+	owners        map[BlockHash]map[PodEntry]sets.Set[BlockHash]
+	engineEntries map[BlockHash]map[BlockHash]sets.Set[PodEntry]
+	// constituents groups smaller engine blocks that jointly back one canonical key.
+	constituents map[BlockHash]sets.Set[BlockHash]
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
 	// engineToRequestKeys holds the mapping of engineKeys to requestKeys.
@@ -184,13 +193,6 @@ func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
 		}
 	}
 	return len(pc.entries) == 0
-}
-
-// size returns the number of entries.
-func (pc *PodCache) size() int {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-	return len(pc.entries)
 }
 
 // filteredEntries returns the entries whose PodIdentifier is in allowed (all
@@ -339,8 +341,6 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
 
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
-
 	// Intern once per call, before anything is written: a rejected batch
 	// leaves no mapping and no ordinal behind. The same records apply to
 	// every request key.
@@ -349,25 +349,123 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return err
 	}
 
+	// Serialize mapping invalidation with residency insertion.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.addLocked(ctx, engineKeys, requestKeys, records, nil)
+}
+
+// AddByEngineKeys holds the invalidation lock through mapping resolution and insertion.
+func (m *InMemoryIndex) AddByEngineKeys(ctx context.Context, engineKeys []BlockHash, entries []PodEntry) (int, error) {
+	if len(engineKeys) == 0 || len(entries) == 0 {
+		return 0, nil
+	}
+	records, err := m.internRecords(entries)
+	if err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := sets.New[BlockHash]()
+	var requestKeys []BlockHash
+	pending := make(map[BlockHash]sets.Set[BlockHash])
+	for _, key := range engineKeys {
+		complete := true
+		for peer := range m.constituents[key] {
+			if !m.engineToRequestKeys.Contains(peer) {
+				complete = false
+				break
+			}
+		}
+		if !complete {
+			continue
+		}
+		mappedKeys, found := m.engineToRequestKeys.Get(key)
+		if !found {
+			continue
+		}
+		for _, requestKey := range mappedKeys {
+			if pending[requestKey] == nil {
+				pending[requestKey] = sets.New[BlockHash]()
+			}
+			pending[requestKey].Insert(key)
+			if !seen.Has(requestKey) {
+				seen.Insert(requestKey)
+				requestKeys = append(requestKeys, requestKey)
+			}
+		}
+	}
+	if len(requestKeys) == 0 {
+		return 0, nil
+	}
+	if err := m.addLocked(ctx, nil, requestKeys, records, pending); err != nil {
+		return 0, err
+	}
+	return len(requestKeys), nil
+}
+
+func (m *InMemoryIndex) addLocked(ctx context.Context, engineKeys, requestKeys []BlockHash, records []EntryRef, pending map[BlockHash]sets.Set[BlockHash]) error {
+	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Add")
+	var unmappedRequestKeys map[BlockHash]struct{}
+
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
 	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
+		pending = make(map[BlockHash]sets.Set[BlockHash])
 		mappings := engineToRequestMapping(engineKeys, requestKeys)
+		evicted := false
 		for ek, rks := range mappings {
-			m.engineToRequestKeys.Add(ek, rks)
+			if previous, found := m.engineToRequestKeys.Peek(ek); found && !slices.Equal(previous, rks) {
+				m.releaseEngine(ek)
+			}
+			evicted = m.engineToRequestKeys.Add(ek, rks) || evicted
+			for _, rk := range rks {
+				if pending[rk] == nil {
+					pending[rk] = sets.New[BlockHash]()
+				}
+				pending[rk].Insert(ek)
+			}
+		}
+		if len(engineKeys) > len(requestKeys) {
+			groups := make(map[BlockHash]sets.Set[BlockHash])
+			for engine, keys := range mappings {
+				if groups[keys[0]] == nil {
+					groups[keys[0]] = sets.New[BlockHash]()
+				}
+				groups[keys[0]].Insert(engine)
+			}
+			for _, group := range groups {
+				for engine := range group {
+					if m.engineToRequestKeys.Contains(engine) {
+						m.constituents[engine] = group
+					}
+				}
+			}
+		}
+		// Do not reinsert residency whose mapping expired while admitting the batch.
+		if evicted {
+			for ek, rks := range mappings {
+				if m.engineToRequestKeys.Contains(ek) {
+					continue
+				}
+				if unmappedRequestKeys == nil {
+					unmappedRequestKeys = make(map[BlockHash]struct{})
+				}
+				for _, rk := range rks {
+					unmappedRequestKeys[rk] = struct{}{}
+				}
+			}
 		}
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, requestKey := range requestKeys {
+		if _, unmapped := unmappedRequestKeys[requestKey]; unmapped {
+			continue
+		}
 		podCache, found := m.data.Get(requestKey)
 		if !found {
 			newPodCache := &PodCache{capacity: m.podCacheSize}
@@ -389,9 +487,15 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		}
 
 		podCache.addAll(records)
+		for engine := range pending[requestKey] {
+			if m.engineToRequestKeys.Contains(engine) {
+				m.addOwners(engine, requestKey, records)
+			}
+		}
+		m.pruneOwners(requestKey, podCache)
 
 		if traceLogger.Enabled() {
-			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries)
+			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", records)
 		}
 	}
 
@@ -409,45 +513,49 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.InMemoryIndex.Evict")
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	switch keyType {
 	case EngineKey:
-		// Resolve each engine key's request keys and evict the pod entries
-		// without holding mu (engineToRequestKeys and data are thread-safe).
-		groups := make([][]BlockHash, len(keys))
-		for i, key := range keys {
-			rks, found := m.engineToRequestKeys.Peek(key)
+		for _, key := range keys {
+			requestKeys, found := m.engineToRequestKeys.Peek(key)
 			if !found {
-				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
 				continue
 			}
-			groups[i] = rks
-			for _, rk := range rks {
-				m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
+			for _, rk := range requestKeys {
+				var remove []PodEntry
+				for _, entry := range entries {
+					m.removeDependentOwners(key, rk, entry)
+					if len(m.owners[rk][entry]) == 0 {
+						remove = append(remove, entry)
+					}
+				}
+				m.evictPodsFromRequestKey(rk, key, remove, traceLogger)
 			}
-		}
-
-		// One lock hold covers every engine key's allEmpty check and mapping
-		// removal, keeping the Add-vs-Evict TOCTOU protection while batching.
-		m.mu.Lock()
-		for i, key := range keys {
-			if groups[i] == nil {
-				continue
-			}
-			allEmpty := true
-			for _, rk := range groups[i] {
-				if pc, found := m.data.Peek(rk); found && pc != nil && pc.size() > 0 {
-					allEmpty = false
-					break
+			keepMapping := len(m.engineEntries[key]) > 0
+			for _, rk := range requestKeys {
+				if pc, found := m.data.Peek(rk); found {
+					pc.mu.Lock()
+					for _, record := range pc.entries {
+						if len(m.owners[rk][record.PodEntry]) == 0 {
+							keepMapping = true
+						}
+					}
+					pc.mu.Unlock()
 				}
 			}
-			if allEmpty {
+			if !keepMapping {
 				m.engineToRequestKeys.Remove(key)
 			}
 		}
-		m.mu.Unlock()
 		return nil
 	case RequestKey:
 		for _, key := range keys {
+			for _, entry := range entries {
+				for engine := range m.owners[key][entry] {
+					m.removeOwner(engine, key, entry)
+				}
+			}
 			m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
 		}
 		return nil
@@ -489,10 +597,9 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 }
 
 // Clear removes every entry for the pod from the index, across all device tiers.
-// O(N) over the index for a pod it has held, and O(1) for a pod it never held,
-// such as one whose first snapshot is about to load. Reuses
-// evictPodsFromRequestKey for race-safe removal, and holds no global lock — only
-// each PodCache's mu, briefly — so it does not stall Lookup.
+// O(N) over the index for a pod it has held, and O(1) for a pod it never held.
+// Clear serializes ownership cleanup with Add and Evict; Lookup does not acquire
+// the ownership lock.
 //
 // Context cancellation does not interrupt Clear.
 //
@@ -511,6 +618,9 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 		return nil
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, requestKey := range m.data.Keys() {
 		// Peek so a clear does not promote LRU recency on keys it scans.
 		podCache, found := m.data.Peek(requestKey)
@@ -521,6 +631,11 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 		matched := podCache.matching(podIdentifier)
 
 		if len(matched) > 0 {
+			for _, entry := range matched {
+				for engine := range m.owners[requestKey][entry] {
+					m.removeOwner(engine, requestKey, entry)
+				}
+			}
 			m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
 		}
 	}
@@ -549,4 +664,107 @@ func podsPerKeyPrintHelper(ks map[BlockHash][]PodEntry) string {
 		}))
 	}
 	return b.String()
+}
+
+// addOwners records idempotent engine references. Callers hold mu.
+func (m *InMemoryIndex) addOwners(engine, request BlockHash, records []EntryRef) {
+	for _, record := range records {
+		if record.Speculative {
+			continue
+		}
+		entry := record.PodEntry
+		if m.owners[request] == nil {
+			m.owners[request] = make(map[PodEntry]sets.Set[BlockHash])
+		}
+		if m.owners[request][entry] == nil {
+			m.owners[request][entry] = sets.New[BlockHash]()
+		}
+		m.owners[request][entry].Insert(engine)
+		if m.engineEntries[engine] == nil {
+			m.engineEntries[engine] = make(map[BlockHash]sets.Set[PodEntry])
+		}
+		if m.engineEntries[engine][request] == nil {
+			m.engineEntries[engine][request] = sets.New[PodEntry]()
+		}
+		m.engineEntries[engine][request].Insert(entry)
+	}
+}
+
+func (m *InMemoryIndex) removeOwner(engine, request BlockHash, entry PodEntry) {
+	delete(m.owners[request][entry], engine)
+	if len(m.owners[request][entry]) == 0 {
+		delete(m.owners[request], entry)
+	}
+	if len(m.owners[request]) == 0 {
+		delete(m.owners, request)
+	}
+	delete(m.engineEntries[engine][request], entry)
+	if len(m.engineEntries[engine][request]) == 0 {
+		delete(m.engineEntries[engine], request)
+	}
+	if len(m.engineEntries[engine]) == 0 {
+		delete(m.engineEntries, engine)
+	}
+}
+
+func (m *InMemoryIndex) forgetRequestOwners(request BlockHash) {
+	for entry, engines := range m.owners[request] {
+		for engine := range engines {
+			m.removeOwner(engine, request, entry)
+		}
+	}
+}
+
+// releaseEngine removes only entries with no surviving engine owner.
+func (m *InMemoryIndex) releaseEngine(engine BlockHash) {
+	for request, entries := range m.engineEntries[engine] {
+		var remove []PodEntry
+		for entry := range entries {
+			m.removeDependentOwners(engine, request, entry)
+			if len(m.owners[request][entry]) == 0 {
+				remove = append(remove, entry)
+			}
+		}
+		if pc, found := m.data.Peek(request); found {
+			if pc.removeAll(remove) {
+				m.data.Remove(request)
+			}
+		}
+	}
+	if m.constituents[engine] != nil {
+		delete(m.constituents, engine)
+	}
+
+}
+
+// Per-key entry eviction must not leave ownership that can preserve a later insertion.
+func (m *InMemoryIndex) pruneOwners(request BlockHash, pc *PodCache) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for entry, engines := range m.owners[request] {
+		present := false
+		for _, record := range pc.entries {
+			if record.PodEntry == entry {
+				present = true
+				break
+			}
+		}
+		if !present {
+			for engine := range engines {
+				m.removeOwner(engine, request, entry)
+			}
+		}
+	}
+}
+
+// Losing any constituent invalidates its canonical entry; siblings in a 1:many
+// split remain independent owners.
+func (m *InMemoryIndex) removeDependentOwners(engine, request BlockHash, entry PodEntry) {
+	if group := m.constituents[engine]; group != nil {
+		for peer := range group {
+			m.removeOwner(peer, request, entry)
+		}
+	} else {
+		m.removeOwner(engine, request, entry)
+	}
 }

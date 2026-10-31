@@ -2072,3 +2072,92 @@ func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
 		})
 	}
 }
+
+type mappingEvictingIndex struct {
+	kvblock.Index
+	evictMapping func()
+}
+
+func (i *mappingEvictingIndex) GetRequestKey(ctx context.Context, key kvblock.BlockHash) (kvblock.BlockHash, error) {
+	requestKey, err := i.Index.GetRequestKey(ctx, key)
+	if err == nil {
+		i.evictMapping()
+	}
+	return requestKey, err
+}
+
+func (i *mappingEvictingIndex) AddByEngineKeys(ctx context.Context, keys []kvblock.BlockHash, entries []kvblock.PodEntry) (int, error) {
+	i.evictMapping()
+	return i.Index.(interface {
+		AddByEngineKeys(context.Context, []kvblock.BlockHash, []kvblock.PodEntry) (int, error)
+	}).AddByEngineKeys(ctx, keys, entries)
+}
+
+func TestPoolDeviceTierUpdateMappingEviction(t *testing.T) {
+	for _, wrap := range []struct {
+		name  string
+		apply func(kvblock.Index) kvblock.Index
+	}{
+		{"direct", func(i kvblock.Index) kvblock.Index { return i }},
+		{"instrumented", kvblock.NewInstrumentedIndex},
+		{"traced", kvblock.NewTracedIndex},
+		{"both", func(i kvblock.Index) kvblock.Index { return kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(i)) }},
+	} {
+		t.Run(wrap.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1, PodCacheSize: 4})
+			require.NoError(t, err)
+			gpu := []kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+			cpu := []kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "cpu"}}
+			require.NoError(t, index.Add(ctx, []kvblock.BlockHash{101}, []kvblock.BlockHash{201}, gpu))
+			wrapped := &mappingEvictingIndex{Index: wrap.apply(index), evictMapping: func() {
+				require.NoError(t, index.Add(ctx, []kvblock.BlockHash{102}, []kvblock.BlockHash{202}, gpu))
+			}}
+			pool := &Pool{index: wrapped}
+			stored := pool.handleDeviceTierUpdate(ctx, nil, []kvblock.BlockHash{101}, cpu, "pod1", "cpu")
+			assert.False(t, stored, "an evicted mapping must not register a confirmed tier store")
+			require.NoError(t, index.Evict(ctx, kvblock.EngineKey, []kvblock.BlockHash{101}, cpu))
+			hits, err := index.Lookup(ctx, []kvblock.BlockHash{201}, nil)
+			require.NoError(t, err)
+			assert.Empty(t, hits, "a delayed tier update must not recreate unmapped residency")
+			speculative := []kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu", Speculative: true}}
+			require.NoError(t, index.Add(ctx, nil, []kvblock.BlockHash{203}, speculative))
+			hits, err = index.Lookup(ctx, []kvblock.BlockHash{203}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, speculative, hits[203])
+		})
+	}
+}
+
+func TestPoolDeviceTierUpdateOneToMany(t *testing.T) {
+	ctx := t.Context()
+	index, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 4, PodCacheSize: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gpu := []kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "gpu"}}
+	cpu := []kvblock.PodEntry{{PodIdentifier: "pod1", DeviceTier: "cpu"}}
+	if err := index.Add(ctx, []kvblock.BlockHash{101}, []kvblock.BlockHash{201, 202}, gpu); err != nil {
+		t.Fatal(err)
+	}
+	pool := &Pool{index: index}
+	if !pool.handleDeviceTierUpdate(ctx, nil, []kvblock.BlockHash{101}, cpu, "pod1", "cpu") {
+		t.Fatal("tier store unexpectedly skipped")
+	}
+	hits, err := index.Lookup(ctx, []kvblock.BlockHash{201, 202}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("after actual pool tier update: %v", hits)
+	for _, key := range []kvblock.BlockHash{201, 202} {
+		found := false
+		for _, entry := range hits[key] {
+			if entry.DeviceTier == "cpu" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("CPU residency missing for canonical key %d", key)
+		}
+	}
+}

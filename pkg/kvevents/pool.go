@@ -522,30 +522,18 @@ func (p *Pool) handleDeviceTierUpdate(
 		return false
 	}
 
-	seen := make(map[kvblock.BlockHash]struct{})
-	var resolvedKeys []kvblock.BlockHash
-	for _, ek := range engineKeys {
-		rk, err := p.index.GetRequestKey(ctx, ek)
-		if err != nil {
-			continue
-		}
-		if _, ok := seen[rk]; !ok {
-			seen[rk] = struct{}{}
-			resolvedKeys = append(resolvedKeys, rk)
-		}
+	count, err := kvblock.AddByEngineKeys(ctx, p.index, engineKeys, podEntries)
+	if err != nil {
+		debugLogger.Error(err, "Failed to add device-tier update to index",
+			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
+		return false
 	}
-
-	if len(resolvedKeys) == 0 {
+	if count == 0 {
 		debugLogger.Info("no indexed engine keys found for device-tier update, skipping",
 			"podIdentifier", podIdentifier, "engineKeyCount", len(engineKeys))
 		return false
 	}
 
-	if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
-		debugLogger.Error(err, "Failed to add device-tier update to index",
-			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
-		return false
-	}
 	return true
 }
 
