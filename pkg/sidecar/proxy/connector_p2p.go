@@ -28,8 +28,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -56,6 +58,7 @@ const (
 // prefill request runs to completion before decode is dispatched, so the decoder's
 // fetch finds the blocks already stored, matching the NIXL path.
 func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort, kvCacheSource string, apiType reqcommon.APIType) {
+	logger := log.FromContext(r.Context())
 	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
@@ -63,14 +66,14 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	toolFields, _ := captureInferenceToolCallingRequest(r, apiType, original)
 
 	kvRequestID := newUUID()
-	prefillP2PPort := s.p2pPortFor(prefillPodHostPort)
+	prefillP2PPort := s.p2pPortFor(logger, prefillPodHostPort)
 	// vLLM binds each rank's P2P tier at the base plus its global data-parallel rank.
 	if rank, _ := r.Context().Value(prefillDPRankKey).(string); rank != "" {
 		if n, err := strconv.Atoi(rank); err == nil {
 			prefillP2PPort = s.config.P2PConnectorPort + n
 		}
 	}
-	s.logger.Info("running P2P protocol",
+	logger.Info("running P2P protocol",
 		"prefill_host", extractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
 		"p2p_connector_port", prefillP2PPort)
@@ -83,18 +86,18 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 			requestFieldKVRequestID: kvRequestID,
 		},
 	}
-	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
+	s.addP2PPullToPrefill(logger, prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("prefill request body", logBodyBytesKey, len(prefillBody))
 	}
 
@@ -112,11 +115,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("decode request body", logBodyBytesKey, len(decodeBody))
 	}
 
@@ -135,13 +138,14 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // the prefiller and waits for it to return before dispatching decode.
 func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
 	defer toolFields.report(r.Context())
+	logger := log.FromContext(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -175,7 +179,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
-	s.logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
+	logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
 
 	if prefillFailed {
 		// Return the prefill error verbatim; decode is never dispatched, so it
@@ -193,7 +197,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		}
 		w.WriteHeader(status)
 		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send prefill error to client")
+			logger.Error(writeErr, "failed to send prefill error to client")
 		}
 		return
 	}
@@ -263,11 +267,11 @@ func (s *Server) p2pPullAvailable() bool {
 // remote_kv_source key composes with NIXL params: vLLM's MultiConnector
 // routes it to the OffloadingConnector and the NIXL fields to the
 // NixlConnector.
-func (s *Server) addP2PPullToPrefill(prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
+func (s *Server) addP2PPullToPrefill(logger logr.Logger, prefillKVParams map[string]any, kvCacheSource, prefillPodHostPort string) {
 	source := normalizeEndpoint(kvCacheSource)
 	prefiller := normalizeEndpoint(prefillPodHostPort)
 	if source != "" && source != prefiller {
-		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(source)
+		prefillKVParams[requestFieldRemoteKVSource] = s.p2pSourceParams(logger, source)
 	}
 }
 
@@ -299,11 +303,11 @@ func normalizeEndpoint(s string) string {
 // p2pSourceParams builds the kv_transfer_params.remote_kv_source block for a
 // pull from sourceHostPort's OffloadingConnector P2P tier. The kv_request_id is its
 // own fresh UUID: in P2P mode it is consumer-side only.
-func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
+func (s *Server) p2pSourceParams(logger logr.Logger, sourceHostPort string) map[string]any {
 	return map[string]any{
 		requestFieldKVRequestID:   newUUID(),
 		reqcommon.FieldRemoteHost: extractHost(sourceHostPort),
-		reqcommon.FieldRemotePort: s.p2pPortFor(sourceHostPort),
+		reqcommon.FieldRemotePort: s.p2pPortFor(logger, sourceHostPort),
 	}
 }
 
@@ -318,7 +322,7 @@ func (s *Server) p2pSourceParams(sourceHostPort string) map[string]any {
 // r at <p2p-connector-port>+r and this pod-local derivation is the
 // contract there too. A port outside the rank range (or unparsable) falls
 // back to the base P2P port, which is rank 0's tier.
-func (s *Server) p2pPortFor(targetHostPort string) int {
+func (s *Server) p2pPortFor(logger logr.Logger, targetHostPort string) int {
 	base := s.config.P2PConnectorPort
 	if s.config.DataParallelSize <= 1 || s.dpBasePort == 0 {
 		return base
@@ -327,19 +331,19 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 	targetHostPort, _ = strings.CutPrefix(targetHostPort, "http://")
 	_, portStr, err := net.SplitHostPort(targetHostPort)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("P2P target has no parsable port, using base P2P port",
+		logger.V(logging.DEBUG).Info("P2P target has no parsable port, using base P2P port",
 			"target", targetHostPort, "error", err)
 		return base
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("P2P target port is not numeric, using base P2P port",
+		logger.V(logging.DEBUG).Info("P2P target port is not numeric, using base P2P port",
 			"target", targetHostPort, "error", err)
 		return base
 	}
 	rank := port - s.dpBasePort
 	if rank < 0 || rank >= s.config.DataParallelSize {
-		s.logger.V(logging.DEBUG).Info("P2P target port outside the DP rank range, using base P2P port",
+		logger.V(logging.DEBUG).Info("P2P target port outside the DP rank range, using base P2P port",
 			"target", targetHostPort, "dpBasePort", s.dpBasePort,
 			"dataParallelSize", s.config.DataParallelSize)
 		return base
@@ -357,6 +361,7 @@ func (s *Server) p2pPortFor(targetHostPort string) int {
 // computing, so it decodes normally; another rank on the same pod is a
 // valid peer and does get the injection.
 func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sourceHostPort string) {
+	logger := log.FromContext(r.Context())
 	raw, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
 		return
@@ -368,18 +373,18 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	source := normalizeEndpoint(sourceHostPort)
 	self := normalizeEndpoint(net.JoinHostPort(os.Getenv("POD_IP"), s.config.Port))
 	if source == self {
-		s.logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
+		logger.V(logging.DEBUG).Info("KV cache source is this rank's endpoint, skipping p2p injection",
 			"source", sourceHostPort, "self", self)
 		s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, raw), requestData, raw, toolFields)
 		return
 	}
 
-	p2pParams := s.p2pSourceParams(source)
+	p2pParams := s.p2pSourceParams(logger, source)
 	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
 	// client-supplied keys are dropped rather than forwarded to vLLM.
 	requestData[reqcommon.FieldKVTransferParams] = map[string]any{requestFieldRemoteKVSource: p2pParams}
 
-	s.logger.Info("running P2P source protocol",
+	logger.Info("running P2P source protocol",
 		"source_host", extractHost(source),
 		"kv_request_id", p2pParams[requestFieldKVRequestID],
 		"p2p_connector_port", p2pParams[reqcommon.FieldRemotePort])
@@ -387,11 +392,11 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 	newBody, err := json.Marshal(requestData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("decoder request body with p2p source", logBodyBytesKey, len(newBody))
 	}
 

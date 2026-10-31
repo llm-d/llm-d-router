@@ -243,6 +243,8 @@ test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferen
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
+test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
+test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
@@ -309,6 +311,26 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
       exit 1
     fi
   fi
+  if [ "${key}" == "lifecycle-override" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    for hook in /epp-drain /proxy-drain; do
+      if ! grep -q -- "${hook}" "${epp_yaml}"; then
+        echo "Validation failed: lifecycle hook ${hook} not found in rendered output for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -q "seconds: 5" "${epp_yaml}"; then
+      echo "Validation failed: default preStop sleep rendered alongside a lifecycle override for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "lifecycle-override-service" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q -- "/proxy-drain" "${epp_yaml}"; then
+      echo "Validation failed: proxy lifecycle override not found in service-mode render for test: ${key}"
+      exit 1
+    fi
+  fi
   if [ "${key}" == "proxy-autoscaling" ]; then
     if ! grep -q "name: release-name-proxy" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "kind: HorizontalPodAutoscaler" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: proxy HorizontalPodAutoscaler not found in rendered output for test: ${key}"
@@ -334,6 +356,23 @@ verify_pdb_validation_failure() {
     exit 1
   fi
 }
+verify_pdb_render() {
+  local chart="$1"
+  shift
+  local output
+  if ! output=$("${HELM}" template pdb-validation "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --namespace pdb-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.inferencePool.create=false --set router.epp.podDisruptionBudget.enabled=true \
+      --set router.epp.podDisruptionBudget.minAvailable=1 "$@" 2>&1); then
+    echo "${chart}: PDB rendering failed for $*: ${output}"
+    exit 1
+  fi
+  if ! grep -q "^kind: PodDisruptionBudget$" <<<"${output}" || \
+     ! grep -q "^  minAvailable: 1$" <<<"${output}"; then
+    echo "${chart}: PDB missing or incorrect minAvailable for $*: ${output}"
+    exit 1
+  fi
+}
 verify_pdb_validation_failure "minAvailable and maxUnavailable together" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true \
   --set router.epp.podDisruptionBudget.minAvailable=1 --set router.epp.podDisruptionBudget.maxUnavailable=1
@@ -341,6 +380,10 @@ verify_pdb_validation_failure "enabled without a disruption field" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true
 verify_pdb_validation_failure "minAvailable with a single replica" \
   --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1
+verify_pdb_render llm-d-router-gateway \
+  --set provider.name=gke --set provider.gke.preferredBackends.enabled=true
+verify_pdb_render llm-d-router-standalone \
+  --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true
 echo "PodDisruptionBudget validation checks passed."
 
 echo "Verifying leader-election RBAC..."
@@ -879,6 +922,42 @@ if ! grep -q -- 'agentgateway-config-template' "${agentgateway_service_mode_outp
   exit 1
 fi
 
+echo "Verifying llm-d-router-standalone Envoy tracing follows router.proxy.tracing..."
+for proxy_mode in sidecar service; do
+  envoy_tracing_off_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-off-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} > "${envoy_tracing_off_output}"
+  if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_off_output}"; then
+    echo "Envoy tracing rendered in ${proxy_mode} mode without router.proxy.tracing.enabled"
+    exit 1
+  fi
+  envoy_tracing_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint=http://otel-collector.obs.svc:4317 > "${envoy_tracing_output}"
+  for expected in 'name: envoy.tracers.opentelemetry' 'cluster_name: otel_collector' '- name: otel_collector' 'address: "otel-collector.obs.svc"' 'value: 10$' 'service_name: "envoy-proxy"'; do
+    if ! grep -q -- "${expected}" "${envoy_tracing_output}"; then
+      echo "Envoy tracing in ${proxy_mode} mode did not render '${expected}'"
+      exit 1
+    fi
+  done
+done
+envoy_tracing_override_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-override-render.yaml"
+${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.proxy.tracing.collectorEndpoint=collector.example:4318 --set router.proxy.tracing.serviceName=edge --set router.proxy.tracing.samplingPercentage=50 > "${envoy_tracing_override_output}"
+for expected in 'address: "collector.example"' 'port_value: 4318' 'service_name: "edge"' 'value: 50$'; do
+  if ! grep -q -- "${expected}" "${envoy_tracing_override_output}"; then
+    echo "Envoy tracing overrides did not render '${expected}'"
+    exit 1
+  fi
+done
+if ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint= >/dev/null 2>&1; then
+  echo "Helm template unexpectedly succeeded for Envoy tracing without a collector endpoint"
+  exit 1
+fi
+envoy_tracing_agentgateway_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-agentgateway-render.yaml"
+${HELM} template ag-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true > "${envoy_tracing_agentgateway_output}"
+if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_agentgateway_output}"; then
+  echo "Envoy tracing unexpectedly rendered for agentgateway"
+  exit 1
+fi
+
 echo "Verifying standalone proxy autoscaling (HPA) rendering and validations..."
 proxy_hpa_out="${TEMP_DIR}/proxy-hpa-render.yaml"
 proxy_hpa_deploy="${TEMP_DIR}/proxy-hpa-deployment.yaml"
@@ -938,3 +1017,22 @@ for v in 0 101; do
 done
 
 echo "Proxy autoscaling checks passed for llm-d-router-standalone."
+
+echo "Verifying llm-d-router-standalone proxy preset args..."
+arg_rendered() { if [ -z "$3" ]; then grep -q -- "- \"$2\"\$" "$1"; else grep -A1 -- "- \"$2\"\$" "$1" | grep -q -- "- \"$3\"\$"; fi; }
+envoy_default_output="${TEMP_DIR}/llm-d-router-standalone-envoy-default-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false > "${envoy_default_output}" || exit 1
+envoy_explicit_args_output="${TEMP_DIR}/llm-d-router-standalone-envoy-explicit-args-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.proxy.args={--concurrency,4,-c,/etc/envoy/envoy.yaml}' > "${envoy_explicit_args_output}" || exit 1
+# name:file:flag:value:want (1 = rendered, 0 = absent; empty value = flag alone)
+for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${envoy_default_output}:--cpuset-threads::0" \
+         "service:${proxy_service_render_output}:--concurrency:8:1" \
+         "agentgateway:${agentgateway_render_output}:--concurrency:8:0" "agentgateway-preset:${agentgateway_render_output}:-f:/config/config.yaml:1" \
+         "explicit:${envoy_explicit_args_output}:--concurrency:4:1" "explicit-preset:${envoy_explicit_args_output}:--concurrency:8:0"; do
+  IFS=: read -r name file flag value want <<< "${c}"
+  if arg_rendered "${file}" "${flag}" "${value}"; then got=1; else got=0; fi
+  if [ "${got}" != "${want}" ]; then
+    echo "Proxy args for ${name}: ${flag} ${value} rendered=${got}, want ${want}"
+    exit 1
+  fi
+done

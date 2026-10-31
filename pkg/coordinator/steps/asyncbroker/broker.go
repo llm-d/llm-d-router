@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,6 +56,12 @@ type asyncSubmitter interface {
 
 // waitPollInterval is the poll cadence when the multiplexed wake-up is
 // unavailable (Redis without keyspace notifications, or wakeup_mode: poll).
+// maxTimeoutSeconds is the largest timeout that fits in a time.Duration without
+// overflowing. Enqueue mode sets no MaxSeconds, so a client value above this
+// would wrap to a negative or tiny deadline that the producer rejects as a
+// transport failure.
+const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
+
 const waitPollInterval = 200 * time.Millisecond
 
 // waitBackupPollInterval is the slow safety poll under the notify wake-up:
@@ -239,6 +246,9 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	if bounds.MaxSeconds > 0 && timeoutSecs > bounds.MaxSeconds {
 		timeoutSecs = bounds.MaxSeconds
 	}
+	if timeoutSecs > maxTimeoutSeconds {
+		timeoutSecs = maxTimeoutSeconds
+	}
 	timeout := time.Duration(timeoutSecs) * time.Second
 
 	// A client-chosen id names a logical request, so a re-POST reattaches
@@ -304,10 +314,34 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 
 	if mode == asyncModeEnqueue {
+		// The 202 is the only place a client learns an id the coordinator
+		// generated. If the client disconnected while the submit was in
+		// flight, nobody can fetch, delete, or retry the request, so cancel
+		// it pre-dispatch (best effort, per the producer's cancellation
+		// contract) instead of leaving a worker to produce a result no one
+		// reads. A client-chosen id stays queued: the client can still act on
+		// that id even though this connection is gone.
+		if !clientHoldsID(reqCtx) && ctx.Err() != nil {
+			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelFn()
+			if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, reqCtx.RequestID)}); err != nil {
+				log.FromContext(ctx).WithName(StepName).Error(err,
+					"failed to cancel request abandoned before the pending response", "id", reqCtx.RequestID)
+			}
+			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
+		}
 		writePending(w, reqCtx.RequestID)
 		return pipeline.ErrPipelineDone
 	}
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
+}
+
+// clientHoldsID reports whether the client supplied the id this request uses.
+// A missing or malformed x-request-id is replaced with a generated UUID, so the
+// client only knows the id when the value it sent is the one the request
+// carries.
+func clientHoldsID(reqCtx *pipeline.RequestContext) bool {
+	return reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) == reqCtx.RequestID
 }
 
 // unCancelScript revives a cancelled request that is still queued. The

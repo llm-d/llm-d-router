@@ -32,6 +32,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Mooncake transfer fields
@@ -40,7 +41,8 @@ const requestFieldRemoteBootstrapAddr = "remote_bootstrap_addr"
 const mooncakeBootstrapTimeout = 5 * time.Second // set to same value as the other timeout on vllm
 
 func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running Mooncake protocol", "url", prefillPodHostPort)
 
 	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -52,9 +54,9 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {
-		s.logger.Error(jsonErrorForLog(err), "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
+		logger.Error(jsonErrorForLog(err), "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -68,7 +70,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		}
 	}
 	transferID := "xfer-" + newUUID()
-	s.logger.V(logging.TRACE).Info("mooncake protocol info",
+	logger.V(logging.TRACE).Info("mooncake protocol info",
 		"transfer_id", transferID,
 		"bootstrap_addr", bootstrapAddr,
 		"dp_rank", dpRank,
@@ -87,14 +89,14 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 
 	// Guarded: stringifying the body allocates a copy per request even when
 	// TRACE is disabled.
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
 		trace.Info("Prefill request", logBodyBytesKey, len(prefillBody))
 	}
 
@@ -111,12 +113,12 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 
-	if trace := s.logger.V(logging.TRACE); trace.Enabled() {
+	if trace := logger.V(logging.TRACE); trace.Enabled() {
 		trace.Info("Decode request", logBodyBytesKey, len(decodeBody))
 	}
 

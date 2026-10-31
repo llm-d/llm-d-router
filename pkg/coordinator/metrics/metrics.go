@@ -48,6 +48,10 @@ const (
 	ErrorCodeUpstream5xx       = "upstream_5xx"
 	ErrorCodeUpstreamTransport = "upstream_transport"
 	ErrorCodeInternal          = "internal"
+	// ErrorCodePromptTokenMismatch is recorded on step_errors_total by the
+	// decode step when prompt_token_parity is "error" and the decode worker
+	// reported a prompt token count different from the rendered one.
+	ErrorCodePromptTokenMismatch = "prompt_token_mismatch"
 )
 
 // Upstream label values for the upstream_request_* metrics. Step names come
@@ -121,6 +125,10 @@ var (
 	mediaTypeLabel = []string{"media_type"}
 	resultLabel    = []string{"result"}
 	streamLabel    = []string{"stream"}
+	// parityLabels are model_name, the client's api type and whether the
+	// decode leg carried the rendered token IDs (so a mismatch means the
+	// worker ignored them) or rendered the prompt itself (renderer drift).
+	parityLabels = []string{"model_name", "api_type", "ids_forwarded"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a
@@ -164,6 +172,7 @@ func allCollectors() []resettableCollector {
 		mediaItems,
 		mediaDownloadDuration,
 		responseSize,
+		promptTokenMismatchTotal,
 	}
 }
 

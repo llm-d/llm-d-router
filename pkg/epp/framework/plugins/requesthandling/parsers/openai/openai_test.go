@@ -149,6 +149,13 @@ func TestOpenAIParser_RewritePriority(t *testing.T) {
 			want:        map[string]any{"model": "test", "priority": 2},
 			wantMutated: true,
 		},
+		{
+			name:        "leaves decisions request unchanged",
+			payload:     fwkrh.PayloadMap{"model": "test", "priority": 100},
+			ctx:         fwkrh.PriorityRewriteContext{RequestPath: "/v1/decisions"},
+			want:        map[string]any{"model": "test", "priority": 100},
+			wantMutated: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1057,6 +1064,94 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "audio generate request body",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "stabilityai/stable-audio-open-1.0",
+				"input":           "a dog barking in the rain",
+				"audio_length":    5.0,
+				"response_format": "wav",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input: "a dog barking in the rain",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "stabilityai/stable-audio-open-1.0",
+					"input":           "a dog barking in the rain",
+					"audio_length":    json.Number("5"),
+					"response_format": "wav",
+				},
+			},
+		},
+		{
+			name:    "audio generate request with stream_format is not treated as streaming",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":         "stabilityai/stable-audio-open-1.0",
+				"input":         "a dog barking in the rain",
+				"stream_format": "audio",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input: "a dog barking in the rain",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":         "stabilityai/stable-audio-open-1.0",
+					"input":         "a dog barking in the rain",
+					"stream_format": "audio",
+				},
+				Stream: false,
+			},
+		},
+		{
+			name:    "audio generate request missing input",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model": "test",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "audio generate request with non-string input",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model": "test",
+				"input": []any{"not", "supported"},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "audio generate request with negative prompt",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "stabilityai/stable-audio-open-1.0",
+				"input":           "a dog barking in the rain",
+				"negative_prompt": "silence",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input:          "a dog barking in the rain",
+					NegativePrompt: "silence",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "stabilityai/stable-audio-open-1.0",
+					"input":           "a dog barking in the rain",
+					"negative_prompt": "silence",
+				},
+			},
+		},
+		{
+			name:    "audio generate request with non-string negative prompt",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "test",
+				"input":           "hello",
+				"negative_prompt": 42,
+			},
+			wantErr: true,
+		},
 		// Path-based detection tests
 		{
 			name:    "conversations API via path",
@@ -1269,6 +1364,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					N:                 ptr.To[int64](2),
 					Size:              "1024x1024",
 					NumInferenceSteps: ptr.To[int64](30),
+					NegativePrompt:    "blurry",
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":               "test-image-model",
@@ -1447,6 +1543,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"n":                   "2",
 				"size":                "1024x1024",
 				"num_inference_steps": "30",
+				"negative_prompt":     "blurry",
 			},
 			wantModel: "test-image-model",
 			wantImages: &fwkrh.ImagesGenerationsRequest{
@@ -1454,6 +1551,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				N:                 ptr.To[int64](2),
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
+				NegativePrompt:    "blurry",
 			},
 		},
 		{
@@ -1629,6 +1727,24 @@ func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
 	}
 	if string(got["seed"]) != seed.String() {
 		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
+	}
+}
+
+func TestOpenAIParser_ResponsesWirePayloadKeepsClientBytes(t *testing.T) {
+	// Tool parameters are rendered into the prompt as JSON, so a reordered key changes the tokens.
+	body := []byte(`{"model":"test","input":"hi","tools":[{"type":"function","name":"lookup",` +
+		`"parameters":{"type":"object","required":["zip"],"properties":{"zip":{"type":"string"},"city":{"type":"string"}}}}]}`)
+
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body, map[string]string{":path": "/v1/responses"})
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	got, err := benchWireBytes(result)
+	if err != nil {
+		t.Fatalf("wire bytes: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("WirePayload() =\n%s\nwant the client body\n%s", got, body)
 	}
 }
 
@@ -2092,6 +2208,8 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			imagesGenerationsAPI,
 			imagesEditsAPI,
 			audioSpeechAPI,
+			request.DecisionsPathSuffix,
+			audioGenerateAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -2317,5 +2435,108 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// A request with message-array input, ordered questions, and extra top-level fields.
+const decisionsRequest = `{"model":"Qwen/Qwen3-0.6B",` +
+	`"input":[{"role":"user","content":[{"type":"input_text","text":"Charged twice"}]}],` +
+	`"questions":[{"type":"predicate","name":"urgent","instructions":"Is it urgent?"},` +
+	`{"type":"choice","name":"team","instructions":"Which team?","choices":[{"value":"billing"},{"value":true}]},` +
+	`{"type":"score","name":"tone","instructions":"How upset?","levels":[{"label":"calm"},{"label":"furious"}]}],` +
+	`"safety_identifier":"user-9007199254740993","cache_salt":"tenant-a"}`
+
+var decisionsHeaders = map[string]string{":path": "/v1/decisions"}
+
+func TestOpenAIParser_ParseDecisionsRequest(t *testing.T) {
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(decisionsRequest), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	if result.SkipResponseProcessing || !result.JSONValidated {
+		t.Errorf("SkipResponseProcessing = %v, JSONValidated = %v, want false, true", result.SkipResponseProcessing, result.JSONValidated)
+	}
+	body := result.Body
+	if body.Model != "Qwen/Qwen3-0.6B" || !body.RenderRequest {
+		t.Errorf("body = {Model:%q RenderRequest:%v}, want model set and render request", body.Model, body.RenderRequest)
+	}
+	if !bytes.Equal(body.RawBody, []byte(decisionsRequest)) {
+		t.Errorf("RawBody = %s, want the request bytes", body.RawBody)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsRequest_StringInput(t *testing.T) {
+	body := `{"model":"m","input":"Charged \"twice\"","questions":[{"type":"predicate","instructions":"q"}]}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	if got := string(result.Body.Payload.(fwkrh.PayloadMap)[reqcommon.FieldInput].(json.RawMessage)); got != `"Charged \"twice\""` {
+		t.Errorf("input = %s, want it kept opaque", got)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsRequest_Errors(t *testing.T) {
+	for name, body := range map[string]string{
+		"invalid json":        `{"model":`,
+		"missing questions":   `{"model":"m","input":"s"}`,
+		"questions as object": `{"model":"m","input":"s","questions":{"q":{"type":"predicate"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body), decisionsHeaders); err == nil {
+				t.Error("ParseRequest() error = nil, want an error")
+			}
+		})
+	}
+}
+
+// The forwarded body keeps every field byte for byte when the router rewrites the model.
+func TestOpenAIParser_DecisionsRewriteModelNameRoundTrip(t *testing.T) {
+	parser := NewOpenAIParser()
+	result, err := parser.ParseRequest(context.Background(), []byte(decisionsRequest), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	rewritten, err := parser.RewriteModelName(result.Body.Payload.(fwkrh.MarshalablePayload), "served-model")
+	if err != nil {
+		t.Fatalf("RewriteModelName() error = %v", err)
+	}
+	out, err := rewritten.(fwkrh.Marshaler).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got, want map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(decisionsRequest), &want); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["model"]) != `"served-model"` {
+		t.Errorf("model = %s, want \"served-model\"", got["model"])
+	}
+	delete(got, "model")
+	delete(want, "model")
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("forwarded fields mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsResponse(t *testing.T) {
+	body := `{"model":"m","answers":[{"type":"predicate","name":"urgent","probability":0.1}],` +
+		`"usage":{"input_tokens":254,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":0},` +
+		`"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":257}}`
+	got, err := NewOpenAIParser().ParseResponse(context.Background(), []byte(body), map[string]string{"content-type": "application/json"}, true)
+	if err != nil {
+		t.Fatalf("ParseResponse() error = %v", err)
+	}
+	want := &fwkrh.Usage{
+		PromptTokens:       254,
+		CompletionTokens:   3,
+		TotalTokens:        257,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 200},
+	}
+	if diff := cmp.Diff(want, got.Usage); diff != "" {
+		t.Errorf("Usage mismatch (-want +got):\n%s", diff)
 	}
 }

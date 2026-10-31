@@ -25,12 +25,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -50,7 +52,8 @@ func init() {
 }
 
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
-	s.logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
 	original, requestData, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -63,7 +66,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	// Inject bootstrap info for both prefill and decode
-	bootstrapInfo := s.addSGLangBootstrapInfo(requestData, prefillPodHostPort, roomID)
+	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
 	// With data-parallel prefill ranks, SGLang's prefill otherwise requires rank
 	// bootstrap_room % dp_size, and decode would look the rank up.
 	if rank, _ := r.Context().Value(prefillDPRankKey).(string); rank != "" {
@@ -75,7 +78,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	body, err := json.Marshal(bootstrapInfo)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -84,7 +87,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
-func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
+func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {
 	modifiedRequest := maps.Clone(requestData)
 
 	// Generate bootstrap host from prefill host
@@ -95,7 +98,7 @@ func (s *Server) addSGLangBootstrapInfo(requestData map[string]interface{}, pref
 	modifiedRequest[reqcommon.FieldBootstrapPort] = sglangBootstrapPort
 	modifiedRequest[reqcommon.FieldBootstrapRoom] = roomID
 
-	s.logger.V(logging.TRACE).Info("bootstrap info added",
+	logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)

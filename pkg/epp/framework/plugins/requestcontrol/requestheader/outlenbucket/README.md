@@ -38,10 +38,13 @@ Classification (first match wins):
 7. Otherwise -> **UNKNOWN**.
 8. *(bin ceiling, applied last)* `max_output_tokens < 2000` downgrades a tentative **LONG** to **UNKNOWN** (a cap below the LONG floor makes a long generation physically impossible).
 
-The `enable_thinking` and `thinking_budget` signals are read from the
-chat-completions body (`chat_template_kwargs`). Tools are read from `tools` on
-the typed body for chat-completions and `/v1/responses`. The Responses API reads
-thinking activation from `reasoning.effort` on the raw request payload.
+The `enable_thinking` signal is read from `chat_template_kwargs` for both
+chat-completions and `/v1/responses`; `thinking_budget` and vendor aliases are
+chat-completions only. When no explicit thinking state is found, thinking
+activation falls back to `reasoning_effort` for chat-completions or
+`reasoning.effort` for `/v1/responses`: `"none"` disables thinking, and any other
+non-empty value enables it. Tools are read from `tools` on the typed body for
+chat-completions and `/v1/responses`.
 Claude `/v1/messages` is not inspected for these: its thinking signals are not
 surfaced, so a tool-call there could not be told apart from a reasoning request
 and is left UNKNOWN. Its `tool_choice` is read the same way as on
@@ -63,8 +66,9 @@ concurrent use.
 - `request.Body.ChatCompletions.ContinueFinalMessage` -- `continue_final_message`.
 - `request.Body.Payload["tool_choice"]` -- in the format of the request's API
   (chat-completions, `/v1/responses` or `/v1/messages`).
-- `request.Body.Payload["reasoning"]["effort"]` -- `reasoning.effort` on `/v1/responses`
-  (`"none"` disables thinking; any other non-empty value enables it).
+- `request.Body.Payload["chat_template_kwargs"]["enable_thinking"]` -- `/v1/responses`.
+- `request.Body.Payload["reasoning"]["effort"]` -- `/v1/responses`.
+- `request.Body.Payload["reasoning_effort"]` -- chat-completions.
 - `request.Body.MaxOutputTokens` -- normalized client output cap.
 
 Input length is intentionally *not* consumed -- it has no correlation with
