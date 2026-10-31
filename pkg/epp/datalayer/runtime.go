@@ -392,14 +392,32 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 	return matched.name, matched.src, nil
 }
 
+// startableSource is implemented by polling sources with background work (e.g. a
+// client certificate watcher) that runs until the Start context is done.
+type startableSource interface {
+	Start(ctx context.Context) error
+}
+
 // Start is called to enable the Runtime to start processing data collection. It wires
-// Kubernetes notifications into the manager and starts cross-replica syncing.
+// Kubernetes notifications into the manager, starts cross-replica syncing and starts
+// the background work of polling sources that have any.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	r.notificationSyncMu.Lock()
 	r.notificationSyncs = nil
 	r.notificationSyncMu.Unlock()
 
 	r.StartCrossReplicaSync(ctx)
+
+	for _, d := range r.dispatchers.Dispatchers() {
+		if id, ok := d.(*intervalDispatcher); ok {
+			d = id.PollingDispatcher
+		}
+		if s, ok := d.(startableSource); ok {
+			if err := s.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start polling source %s: %w", d.TypedName(), err)
+			}
+		}
+	}
 
 	notificationSyncs := make([]*notificationInitialSync, 0, r.notification.Count())
 	err := r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
