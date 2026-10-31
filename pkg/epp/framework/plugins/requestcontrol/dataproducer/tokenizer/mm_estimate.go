@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -163,7 +164,16 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 	// Image decoding is streamed to reduce memory overhead, since
 	// only headers are necessary.
 	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64))
-	cfg, _, err := image.DecodeConfig(r)
+	br := bufio.NewReader(r)
+	// webp has no registered decoder, so its size fields are read from the
+	// peeked header. Peek does not consume, so registered decoders still
+	// receive the full stream.
+	if hdr, _ := br.Peek(webpHeaderBytes); len(hdr) >= 12 {
+		if w, h, is := webpDimensions(hdr); is {
+			return w, h, true
+		}
+	}
+	cfg, _, err := image.DecodeConfig(br)
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 		return 0, 0, false
 	}
