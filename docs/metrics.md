@@ -622,7 +622,8 @@ replica that was removed before Prometheus scraped it. To check the rules after 
 
 These metrics are owned by the `program-aware-fairness` Flow Control policy. They require the
 `flowControl` feature gate and a Flow Control configuration that selects this policy. Enabling Flow
-Control alone does not emit them.
+Control alone does not emit them. `program_id` is the request's fairness ID and shares the
+`fairness_id` label cap. Programs past the cap are not reported on these gauges.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
