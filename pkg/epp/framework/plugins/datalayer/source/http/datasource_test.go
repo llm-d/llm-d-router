@@ -271,6 +271,22 @@ func TestGetEndpoint_PortOverride(t *testing.T) {
 	}
 }
 
+// A path may carry a query string, as for SGLang's /v1/loads?format=prometheus.
+func TestGetEndpoint_PathWithQuery(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	ep := &fwkdl.EndpointMetadata{Address: "10.0.0.1", MetricsHost: "10.0.0.1:8000"}
+	s, err := NewHTTPDataSource("http", "/v1/loads?format=prometheus&include=core", TLSOptions{}, "test", "test", parser)
+	require.NoError(t, err)
+	got := s.getEndpoint(ep)
+	assert.Equal(t, "http://10.0.0.1:8000/v1/loads?format=prometheus&include=core", got.String())
+}
+
+func TestNewHTTPDataSource_RejectsMalformedPath(t *testing.T) {
+	parser := func(r io.Reader) (int, error) { return 0, nil }
+	_, err := NewHTTPDataSource("http", "/v1/loads?%zz", TLSOptions{}, "test", "test", parser)
+	require.Error(t, err)
+}
+
 func TestNewHTTPDataSource_UseNodeAddressWithoutPortOverride(t *testing.T) {
 	parser := func(r io.Reader) (int, error) { return 0, nil }
 	_, err := NewHTTPDataSource("http", "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser,
