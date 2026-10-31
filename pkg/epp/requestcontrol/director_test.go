@@ -3177,3 +3177,27 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 		})
 	}
 }
+
+// TestDirector_HandleResponseBody_LifecycleTimestamps verifies that the end-of-stream response
+// record carries the request lifecycle timestamps and streaming mode.
+func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
+	ps := newTestResponseStreaming("ps")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+		NewConfig().WithResponseStreamingPlugins(ps))
+
+	reqCtx := newResponseBodyTestRequestContext("test-req-id")
+	received := time.Unix(100, 0)
+	reqCtx.RequestReceivedTimestamp = received
+
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	require.Len(t, ps.respsOnStreaming, 1)
+	resp := ps.respsOnStreaming[0]
+	assert.Equal(t, received, resp.ReceivedTimestamp)
+	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
+	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
+	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}
