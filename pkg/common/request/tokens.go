@@ -35,6 +35,13 @@ import (
 // min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
 // SamplingParams rejects min_tokens > max_tokens).
 //
+// A Messages body with thinking enabled loses its thinking object: the API
+// requires budget_tokens below max_tokens, so the budget cannot stand next to a
+// cap of 1, and the leg has no thinking to budget. vLLM applies an enabled
+// thinking only as a sampling budget, so the prompt the leg prefills is the one
+// the decode leg sends. A disabled thinking stays: it selects a reasoning effort
+// that can change the rendered prompt.
+//
 // A Responses body also pins store to false: the field defaults to true in the
 // Responses schema, so a synthetic leg would ask the worker to retain its
 // output. vLLM retains one only when VLLM_ENABLE_RESPONSES_API_STORE is set and
@@ -57,6 +64,11 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 		limits[field] = 1
 	}
 	delete(limits, FieldMinTokens)
+	if apiType == APITypeMessages {
+		if thinking, _ := fieldValue(body, FieldThinking); thinkingType(thinking) == ThinkingTypeEnabled {
+			delete(body, FieldThinking)
+		}
+	}
 
 	body[FieldStream] = false
 	delete(body, FieldStreamOptions)
@@ -64,6 +76,17 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 		body[FieldStore] = false
 	}
 	return limits
+}
+
+// thinkingType returns the type of a decoded thinking object, or "" when the
+// value is not an object or carries no string type.
+func thinkingType(thinking any) string {
+	obj, ok := thinking.(map[string]any)
+	if !ok {
+		return ""
+	}
+	t, _ := obj[FieldType].(string)
+	return t
 }
 
 // RejectStatefulResponsesFields reports an error naming the first field it

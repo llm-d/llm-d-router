@@ -1441,7 +1441,7 @@ Per stage:
 2. **render**: posts to `/v1/messages/render`; same response shape as chat completions (see [2.E](#2e-v1messagesrender))
 3. **conditional-decode**: forwards the body unchanged to `/v1/messages`
 4. **encode**: one `/v1/messages` sub-request per image, each carrying a single `image` block (see [Option D](#option-d-v1messages))
-5. **prefill**: the client body plus `ec_transfer_params` and `kv_transfer_params`, capped to one output token. The client's `thinking` setting stays: vLLM skips its `budget_tokens < max_tokens` check when `kv_transfer_params` sets `do_remote_decode`, which every KV connector does.
+5. **prefill**: the client body plus `ec_transfer_params` and `kv_transfer_params`, capped to one output token. A `thinking` of type `enabled` is dropped from the capped body, as on every single-token leg: its `budget_tokens` cannot sit below a cap of 1, and vLLM applies an enabled thinking only as a sampling budget, so the prefilled prompt is the one the decode leg sends. A `disabled` thinking stays.
 6. **decode**: the client body plus `kv_transfer_params`, uncapped. An Anthropic image block has no `uuid` field, so the decode worker hashes each image itself.
 
 `/v1/messages/count_tokens` is not a pipeline route; it passes through to the

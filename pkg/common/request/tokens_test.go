@@ -160,6 +160,56 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_tokens": 1, "stream": false},
 		},
 		{
+			name:    "messages drops an enabled thinking whose budget cannot sit below the cap",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+			want: map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+		},
+		{
+			name:    "messages drops an enabled thinking held as raw JSON",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   json.RawMessage(`{"type":"enabled","budget_tokens":10000}`),
+			},
+			want: map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+		},
+		{
+			name:    "messages keeps a disabled thinking",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   map[string]any{"type": "disabled"},
+			},
+			want: map[string]any{
+				"model":      "m",
+				"max_tokens": 1,
+				"stream":     false,
+				"thinking":   map[string]any{"type": "disabled"},
+			},
+		},
+		{
+			name:    "chat completions leaves a thinking field alone",
+			apiType: APITypeChatCompletions,
+			body: map[string]any{
+				"model":    "m",
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+			want: map[string]any{
+				"model":                 "m",
+				"max_tokens":            1,
+				"max_completion_tokens": 1,
+				"stream":                false,
+				"thinking":              map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+		},
+		{
 			name:    "streaming is forced false and stream_options stripped",
 			apiType: APITypeCompletions,
 			body:    map[string]any{"stream": true, "stream_options": map[string]any{"include_usage": true}},
