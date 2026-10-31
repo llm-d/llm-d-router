@@ -109,6 +109,38 @@ func TestRoleFilterPrefillRole(t *testing.T) {
 	}, names)
 }
 
+func TestRoleFiltersUseDynamicLayout(t *testing.T) {
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod-1"}, "10.0.0.1",
+			map[string]string{RoleLabel: RolePrefill, TensorParallelSizeLabel: "1", RoleTransferGroupLabel: "test-group", ModelIdentityLabel: "test-model-v1", AcceleratorClassLabel: "test-accelerator"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod-2"}, "10.0.0.2",
+			map[string]string{RoleLabel: RolePrefill, TensorParallelSizeLabel: "1", RoleTransferGroupLabel: "test-group", ModelIdentityLabel: "test-model-v1", AcceleratorClassLabel: "test-accelerator"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "decode-pod"}, "10.0.0.3",
+			map[string]string{RoleLabel: RoleDecode, TensorParallelSizeLabel: "1", RoleTransferGroupLabel: "test-group", ModelIdentityLabel: "test-model-v1", AcceleratorClassLabel: "test-accelerator"}),
+	}
+
+	manager := NewLayoutManager()
+	prefillFilter := NewPrefillRole().WithLayoutManager(manager)
+	decodeFilter := NewDecodeRole().WithLayoutManager(manager)
+	ctx := utils.NewTestContext(t)
+
+	// Observing either filter seeds the manager from the discovered Pod roles.
+	require.Len(t, prefillFilter.Filter(ctx, nil, endpoints), 2)
+	result, err := manager.Apply("p_1tp1_d_2tp1_m_none")
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Status)
+
+	prefill := prefillFilter.Filter(ctx, nil, endpoints)
+	decode := decodeFilter.Filter(ctx, nil, endpoints)
+	require.Len(t, prefill, 1)
+	require.Len(t, decode, 2)
+	assert.Equal(t, "prefill-pod-1", prefill[0].GetMetadata().ID.Name)
+	assert.ElementsMatch(t, []string{"prefill-pod-2", "decode-pod"}, []string{
+		decode[0].GetMetadata().ID.Name,
+		decode[1].GetMetadata().ID.Name,
+	})
+}
+
 func TestRoleFilterEncodeRole(t *testing.T) {
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Name: "decode-pod"}, "10.0.0.1",
