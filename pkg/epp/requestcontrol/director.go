@@ -309,7 +309,27 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 
+	// Producers may hold per-request state between Produce and PreRequest, where
+	// they normally release it. Release it here for every path that leaves
+	// HandleRequest without reaching PreRequest: screeners eliminating every
+	// candidate after PreScreen producers ran, an Admitter denial, a scheduler
+	// error, or a prepareRequest failure.
+	reachedPreRequest := false
+	defer func() {
+		if !reachedPreRequest {
+			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
+		}
+	}()
+
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	// A producer whose PreScreen run fails leaves its keys missing for the
+	// Scheduling phase too, so producers requiring them are skipped there.
+	missingKeys := map[string]struct{}{}
+	if err := d.runDataProducers(ctx, fwkrc.PreScreenDataProducerExtensionPoint, d.requestControlPlugins.preScreenDataProducers,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
+		// Don't fail the request if DataProducer plugins fail.
+		logger.Error(err, "failed to prepare pre-screen request data")
+	}
 	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if len(snapshotOfCandidatePods) == 0 {
 		return reqCtx, errcommon.Error{
@@ -319,22 +339,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
-	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if err != nil {
+	if err := d.runDataProducers(ctx, fwkrc.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
-
-	// Producers may hold per-request state between Produce and PreRequest, where
-	// they normally release it. Release it here for every path that leaves
-	// HandleRequest without reaching PreRequest: an Admitter denial, a scheduler
-	// error, or a prepareRequest failure.
-	reachedPreRequest := false
-	defer func() {
-		if !reachedPreRequest {
-			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
-		}
-	}()
 
 	// Run admit request plugins
 	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
@@ -790,9 +799,10 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 	return nil
 }
 
-func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	plugins := d.requestControlPlugins.dataProducerPlugins
+// runDataProducers runs one phase's producers. missing holds the keys of
+// producers that failed or were skipped, across phases.
+func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrc.DataProducer,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}) error {
 	if len(plugins) == 0 {
 		return nil
 	}
@@ -802,7 +812,6 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	// their own keys count as missing in turn. The errors are returned joined.
 	// Once the request's context is done, no further producer is started.
 	var errs []error
-	missing := map[string]struct{}{}
 	markMissing := func(p fwkrc.DataProducer) {
 		for key := range p.Produces() {
 			missing[key.String()] = struct{}{}
@@ -818,7 +827,7 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 			markMissing(p)
 			continue
 		}
-		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+		if err := dataProducerPluginsWithTimeout(ctx, extensionPoint, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			errs = append(errs, err)
 			if ctx.Err() != nil {
 				break
@@ -935,9 +944,11 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 }
 
 func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
-	for _, p := range d.requestControlPlugins.dataProducerPlugins {
-		if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
-			abandoner.RequestAbandoned(ctx, request)
+	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.preScreenDataProducers, d.requestControlPlugins.dataProducerPlugins} {
+		for _, p := range plugins {
+			if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
+				abandoner.RequestAbandoned(ctx, request)
+			}
 		}
 	}
 }

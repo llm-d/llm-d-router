@@ -65,6 +65,9 @@ func validateConfig(cfg *configapiv1.EndpointPickerConfig) error {
 	if err := validateParsers(cfg); err != nil {
 		return fmt.Errorf("parser validation failed: %w", err)
 	}
+	if err := validateDataProducers(cfg); err != nil {
+		return fmt.Errorf("data producer validation failed: %w", err)
+	}
 	if err := validateMetrics(cfg); err != nil {
 		return fmt.Errorf("metrics validation failed: %w", err)
 	}
@@ -109,6 +112,36 @@ func validateParsers(cfg *configapiv1.EndpointPickerConfig) error {
 	for _, pc := range cfg.RequestHandler.Parsers {
 		if !definedPlugins.Has(pc.PluginRef) {
 			return fmt.Errorf("parser references undefined plugin '%s'", pc.PluginRef)
+		}
+	}
+
+	return nil
+}
+
+func validateDataProducers(cfg *configapiv1.EndpointPickerConfig) error {
+	if cfg.RequestHandler == nil || len(cfg.RequestHandler.DataProducers) == 0 {
+		return nil
+	}
+
+	definedPlugins := sets.New[string]()
+	for _, p := range cfg.Plugins {
+		definedPlugins.Insert(p.Name)
+	}
+
+	seen := sets.New[string]()
+	for _, dp := range cfg.RequestHandler.DataProducers {
+		if !definedPlugins.Has(dp.PluginRef) {
+			return fmt.Errorf("data producer references undefined plugin '%s'", dp.PluginRef)
+		}
+		if seen.Has(dp.PluginRef) {
+			return fmt.Errorf("data producer '%s' is listed more than once", dp.PluginRef)
+		}
+		seen.Insert(dp.PluginRef)
+		switch dp.Phase {
+		case "", configapiv1.DataProducerPhaseAuto, configapiv1.DataProducerPhasePreScreen, configapiv1.DataProducerPhaseScheduling:
+		default:
+			return fmt.Errorf("data producer '%s' has invalid phase '%s': must be %s, %s or %s", dp.PluginRef, dp.Phase,
+				configapiv1.DataProducerPhaseAuto, configapiv1.DataProducerPhasePreScreen, configapiv1.DataProducerPhaseScheduling)
 		}
 	}
 

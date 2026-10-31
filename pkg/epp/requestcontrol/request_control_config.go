@@ -31,6 +31,7 @@ func NewConfig() *Config {
 		responders:               []fwkrc.Responder{},
 		screeners:                []fwkrc.Screener{},
 		admissionPlugins:         []fwkrc.Admitter{},
+		preScreenDataProducers:   []fwkrc.DataProducer{},
 		dataProducerPlugins:      []fwkrc.DataProducer{},
 		preRequestPlugins:        []fwkrc.PreRequest{},
 		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
@@ -44,6 +45,7 @@ type Config struct {
 	responders               []fwkrc.Responder
 	screeners                []fwkrc.Screener
 	admissionPlugins         []fwkrc.Admitter
+	preScreenDataProducers   []fwkrc.DataProducer
 	dataProducerPlugins      []fwkrc.DataProducer
 	preRequestPlugins        []fwkrc.PreRequest
 	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
@@ -79,8 +81,8 @@ func (c *Config) WithResponders(plugins ...fwkrc.Responder) *Config {
 	return c
 }
 
-// WithScreeners sets the screeners that narrow candidates before request data
-// production and scheduling.
+// WithScreeners sets the screeners that narrow candidates after PreScreen data
+// production and before Scheduling data production and scheduling.
 func (c *Config) WithScreeners(screeners ...fwkrc.Screener) *Config {
 	c.screeners = screeners
 	return c
@@ -107,10 +109,33 @@ func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrc.ResponseBodyProce
 	return c
 }
 
-// WithDataProducerPlugins sets the given plugins as the DataProducer plugins.
+// WithDataProducerPlugins sets the given plugins as the DataProducer plugins
+// that run in fwkrc.DataProducerPhaseScheduling.
 func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config {
 	c.dataProducerPlugins = plugins
 	return c
+}
+
+// WithPreScreenDataProducers sets the given plugins as the DataProducer
+// plugins that run in fwkrc.DataProducerPhasePreScreen.
+func (c *Config) WithPreScreenDataProducers(plugins ...fwkrc.DataProducer) *Config {
+	c.preScreenDataProducers = plugins
+	return c
+}
+
+// ApplyDataProducerPhases moves every DataProducer whose phase, keyed by
+// plugin name, is fwkrc.DataProducerPhasePreScreen from the Scheduling phase
+// to the PreScreen phase. Call it after AddPlugins and before OrderPlugins.
+func (c *Config) ApplyDataProducerPhases(phases map[string]fwkrc.DataProducerPhase) {
+	scheduling := make([]fwkrc.DataProducer, 0, len(c.dataProducerPlugins))
+	for _, p := range c.dataProducerPlugins {
+		if phases[p.TypedName().Name] == fwkrc.DataProducerPhasePreScreen {
+			c.preScreenDataProducers = append(c.preScreenDataProducers, p)
+			continue
+		}
+		scheduling = append(scheduling, p)
+	}
+	c.dataProducerPlugins = scheduling
 }
 
 // WithAdmissionPlugins sets the given plugins as the Admit plugins.
@@ -165,6 +190,7 @@ func (c *Config) OrderPlugins(sortedPluginNames []string) {
 	c.requestHeaderPlugins = orderByName(c.requestHeaderPlugins, rank)
 	c.screeners = orderByName(c.screeners, rank)
 	c.admissionPlugins = orderByName(c.admissionPlugins, rank)
+	c.preScreenDataProducers = orderByName(c.preScreenDataProducers, rank)
 	c.dataProducerPlugins = orderByName(c.dataProducerPlugins, rank)
 	c.preRequestPlugins = orderByName(c.preRequestPlugins, rank)
 	c.responders = orderByName(c.responders, rank)

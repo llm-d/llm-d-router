@@ -38,6 +38,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -166,6 +167,11 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
+	dataProducerPhases, err := buildDataProducerPhases(rawConfig.RequestHandler.DataProducers, handle)
+	if err != nil {
+		return nil, fmt.Errorf("data producer phases build failed: %w", err)
+	}
+
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
 	if !ok {
 		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.FlowControl.SaturationDetector.PluginRef)
@@ -182,6 +188,7 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
+		DataProducerPhases: dataProducerPhases,
 	}, nil
 }
 
@@ -401,6 +408,30 @@ func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) 
 		config[parts[0]] = value
 	}
 	return config, nil
+}
+
+// buildDataProducerPhases returns the explicitly configured phase of each
+// listed DataProducer, keyed by plugin name. Auto entries are left out so that
+// datalayer.ResolveDataProducerPhases decides them.
+func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrc.DataProducerPhase, error) {
+	phases := make(map[string]fwkrc.DataProducerPhase, len(rawConfigs))
+	allPlugins := handle.GetAllPluginsWithNames()
+	for _, dp := range rawConfigs {
+		plugin, ok := allPlugins[dp.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured data producer %q is not loaded", dp.PluginRef)
+		}
+		if _, ok := plugin.(fwkrc.DataProducer); !ok {
+			return nil, fmt.Errorf("the plugin %q is not a data producer plugin", dp.PluginRef)
+		}
+		switch dp.Phase {
+		case configapiv1.DataProducerPhasePreScreen:
+			phases[dp.PluginRef] = fwkrc.DataProducerPhasePreScreen
+		case configapiv1.DataProducerPhaseScheduling:
+			phases[dp.PluginRef] = fwkrc.DataProducerPhaseScheduling
+		}
+	}
+	return phases, nil
 }
 
 func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {

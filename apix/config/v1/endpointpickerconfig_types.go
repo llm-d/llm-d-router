@@ -385,6 +385,11 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// DataProducers sets the execution phase of DataProducer plugins. A
+	// DataProducer not listed here uses the Auto phase.
+	DataProducers []DataProducerConfig `json:"dataProducers,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -401,6 +406,13 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if len(rhc.DataProducers) > 0 {
+		producerStrs := make([]string, len(rhc.DataProducers))
+		for i := range rhc.DataProducers {
+			producerStrs[i] = rhc.DataProducers[i].String()
+		}
+		parts = append(parts, fmt.Sprintf("DataProducers: [%s]", strings.Join(producerStrs, ", ")))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -441,6 +453,47 @@ func (mc *MetricsConfig) String() string {
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
+
+// DataProducerConfig assigns a DataProducer plugin to an execution phase.
+type DataProducerConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance, by the name of an entry
+	// of the Plugins defined in the configuration's Plugins section. The plugin
+	// must implement DataProducer.
+	PluginRef string `json:"pluginRef"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=Auto;PreScreen;Scheduling
+	// Phase selects when the producer runs. PreScreen runs it on the located
+	// endpoints before screeners. Scheduling runs it on the screened endpoints
+	// before admission and scheduling. Auto, the default, selects PreScreen when
+	// a screener or a PreScreen producer consumes the producer's data, directly
+	// or through other producers, and Scheduling otherwise.
+	Phase DataProducerPhase `json:"phase,omitempty"`
+}
+
+func (dpc *DataProducerConfig) String() string {
+	if dpc == nil {
+		return nilString
+	}
+	if dpc.Phase == "" {
+		return fmt.Sprintf("{PluginRef: %s}", dpc.PluginRef)
+	}
+	return fmt.Sprintf("{PluginRef: %s, Phase: %s}", dpc.PluginRef, dpc.Phase)
+}
+
+// DataProducerPhase selects when a DataProducer runs.
+type DataProducerPhase string
+
+const (
+	// DataProducerPhaseAuto selects PreScreen or Scheduling from data dependencies.
+	DataProducerPhaseAuto DataProducerPhase = "Auto"
+	// DataProducerPhasePreScreen runs the producer before screeners.
+	DataProducerPhasePreScreen DataProducerPhase = "PreScreen"
+	// DataProducerPhaseScheduling runs the producer after screeners.
+	DataProducerPhaseScheduling DataProducerPhase = "Scheduling"
+)
 
 // ParserConfig contains the configuration for a parser.
 type ParserConfig struct {
