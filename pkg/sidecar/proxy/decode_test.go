@@ -389,6 +389,51 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("tool_choice required", `,"tool_choice":"required"`),
 	)
 
+	DescribeTable("forwards structured-output requests unchanged",
+		func(constraint string) {
+			raw := `{"messages":[{"role":"user","content":"City?"}],"max_tokens":20,` + constraint + `}`
+
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+			})
+
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+		},
+		Entry("response_format json_object", `"response_format":{"type":"json_object"}`),
+		Entry("response_format structural_tag", `"response_format":{"type":"structural_tag","format":{}}`),
+		Entry("structured_outputs", `"structured_outputs":{"regex":"[a-z]+"}`),
+		Entry("response_format that is not an object", `"response_format":"json"`),
+	)
+
+	DescribeTable("still chunks when the output is not constrained",
+		func(constraint string) {
+			ti := newChunkedTestSetup(5, []string{
+				chatResponse("hello ", "length", 8, 5),
+				chatResponse("world", "stop", 9, 5),
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr, `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,`+constraint+`}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]any
+			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+			content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
+			Expect(content).To(Equal("hello world"))
+		},
+		Entry("response_format text", `"response_format":{"type":"text"}`),
+		Entry("response_format null", `"response_format":null`),
+		Entry("structured_outputs null", `"structured_outputs":null`),
+	)
+
 	It("still chunks when tools are declared but tool_choice is none", func() {
 		ti := newChunkedTestSetup(5, []string{
 			chatResponse("hello ", "length", 8, 5),
