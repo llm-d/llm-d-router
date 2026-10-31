@@ -53,6 +53,10 @@ const (
 	// kv_transfer_params.remote_kv_source. It has no pre-convention alias.
 	KVCacheSourceHeader = "x-llm-d-kv-cache-source-p2p-host-port"
 
+	// DataParallelRankHeader names the vLLM data-parallel rank that serves the request,
+	// for a model server that runs several ranks behind one port.
+	DataParallelRankHeader = "x-data-parallel-rank"
+
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 
