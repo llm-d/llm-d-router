@@ -381,6 +381,98 @@ func TestServer_ResponsesDecoderOnlyPassthroughForwardsTheBody(t *testing.T) {
 	}
 }
 
+// TestServer_createRoutesDocumentedPaths covers the docs/api-routing.md sidecar
+// rows that TestServer_createRoutes does not: sub-resources, other APIs and
+// methods, path forms the ServeMux redirects, and the sidecar's own route.
+func TestServer_createRoutesDocumentedPaths(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		method       string
+		target       string
+		wantStatus   int
+		wantLocation string
+	}{
+		{http.MethodPost, "/v1/chat/completions/render", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/chat/completions/chatcmpl_123", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/chat/completions/chatcmpl_123", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/chat/completions/chatcmpl_123/messages", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/completions/render", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/messages/count_tokens", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/messages/batches", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/messages/batches/mb_123/results", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/input_tokens", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/compact", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/resp_123/cancel", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/responses/resp_123", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/responses/resp_123", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/responses/resp_123/input_items", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/conversations", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/conversations/conv_1", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/conversations/conv_1/items", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/conversations/conv_1/items/item_1", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/embeddings", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/files", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/files/file_1", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/models", http.StatusAccepted, ""},
+		{http.MethodGet, "/healthz", http.StatusAccepted, ""},
+		{http.MethodGet, "/readyz", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/requests/req_1", http.StatusAccepted, ""},
+		{http.MethodOptions, "/v1/chat/completions", http.StatusAccepted, ""},
+		{http.MethodHead, "/v1/messages", http.StatusAccepted, ""},
+		{http.MethodPut, "/generate", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/files/a%2Fb", http.StatusAccepted, ""},
+		{http.MethodPost, "//v1/responses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/chat//completions", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/./responses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/responses/..", http.StatusTemporaryRedirect, "/v1"},
+		{http.MethodPost, "/v1%2Fresponses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/responses%2F?x=1", http.StatusTemporaryRedirect, "/v1/responses?x=1"},
+		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
+		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodGet, "/v1%2Fresponses", http.StatusAccepted, ""},
+		{http.MethodOptions, "/v1%2Fchat%2Fcompletions", http.StatusAccepted, ""},
+		{http.MethodGet, "/health", http.StatusOK, ""},
+		{http.MethodHead, "/health", http.StatusOK, ""},
+	} {
+		t.Run(tt.method+" "+tt.target, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
+				t.Errorf("prefill connector called for %s %s", tt.method, tt.target)
+			}
+			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader("{}"))
+			req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("got status %d, want %d: %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			switch tt.wantStatus {
+			case http.StatusAccepted:
+				if got := recorder.Header().Get("X-Forwarded-URI"); got != tt.target {
+					t.Errorf("decoder received URI %q, want %q", got, tt.target)
+				}
+			case http.StatusTemporaryRedirect:
+				if got := recorder.Header().Get("Location"); got != tt.wantLocation {
+					t.Errorf("redirect to %q, want %q", got, tt.wantLocation)
+				}
+			}
+		})
+	}
+}
+
 // dataParallelHandler forwards straight to another rank and never reads the
 // body, so it depends entirely on the caller having refused the request.
 func TestServer_ResponsesDataParallelPassthroughRejectsStatefulFields(t *testing.T) {

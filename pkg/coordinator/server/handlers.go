@@ -144,9 +144,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	// DetectAPIType gates this so the check follows the same classification
 	// every pipeline step uses. Any other path it reads as Responses reaches
-	// the passthrough catch-all, which never parses a body. Which paths and
-	// methods each API serves is settled in
-	// https://github.com/llm-d/llm-d-router/issues/3091.
+	// the passthrough catch-all, which never parses a body.
+	// docs/api-routing.md lists the paths and methods each API serves.
 	if apiType == reqcommon.APITypeResponses {
 		// The router serves only stateless Responses requests, disaggregated
 		// or not; the rest is resolved upstream of it. err names a field from
