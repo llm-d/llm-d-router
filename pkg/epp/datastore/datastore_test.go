@@ -926,9 +926,9 @@ func TestDataParallelSizeLocal(t *testing.T) {
 // so prefill and decode pods in one pool can run different DP sizes.
 func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 	type rank struct{ rankIndex, ranksPerPort, dpRank int }
-	pod := func(name string, annotations map[string]string) *corev1.Pod {
+	pod := func(name string, annotations map[string]string, labels map[string]string) *corev1.Pod {
 		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Annotations: annotations, Labels: labels},
 			Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
 		}
 	}
@@ -940,10 +940,11 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 		}
 		return got
 	}
-	newDatastore := func(t *testing.T, flagRanks int, ports ...int32) Datastore {
+	newDatastore := func(t *testing.T, flagRanks int, startLabel string, ports ...int32) Datastore {
 		ctx := context.Background()
 		ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
-			WithDataParallelSizeLocal(flagRanks)
+			WithDataParallelSizeLocal(flagRanks).
+			WithDataParallelStartRankLabel(startLabel)
 		pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
 		pool.Spec.TargetPorts = nil
 		for _, p := range ports {
@@ -955,9 +956,9 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("pods with different rank counts in one pool", func(t *testing.T) {
-		ds := newDatastore(t, 1, 8000)
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("prefill", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("decode", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
+		ds := newDatastore(t, 1, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("prefill", map[string]string{dataParallelSizeLocalAnnotation: "2"}, nil)))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("decode", map[string]string{dataParallelSizeLocalAnnotation: "4"}, nil)))
 		assert.Equal(t, map[string]rank{
 			"prefill-rank-0": {0, 2, 0}, "prefill-rank-1": {1, 2, 1},
 			"decode-rank-0": {0, 4, 0}, "decode-rank-1": {1, 4, 1}, "decode-rank-2": {2, 4, 2}, "decode-rank-3": {3, 4, 3},
@@ -965,35 +966,119 @@ func TestDataParallelSizeLocalAnnotation(t *testing.T) {
 	})
 
 	t.Run("the annotation overrides the flag", func(t *testing.T) {
-		ds := newDatastore(t, 2, 8000)
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("one", map[string]string{dataParallelSizeLocalAnnotation: "1"})))
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("flag", nil)))
+		ds := newDatastore(t, 2, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("one", map[string]string{dataParallelSizeLocalAnnotation: "1"}, nil)))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("flag", nil, nil)))
 		assert.Equal(t, map[string]rank{
 			"one-rank-0":  {0, 0, 0},
 			"flag-rank-0": {0, 2, 0}, "flag-rank-1": {1, 2, 1},
 		}, endpoints(ds))
 	})
 
+	t.Run("start rank uses the pod's own rank count", func(t *testing.T) {
+		const indexLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+		ds := newDatastore(t, 1, indexLabel, 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx,
+			pod("w1", map[string]string{dataParallelSizeLocalAnnotation: "2"}, map[string]string{indexLabel: "1"})))
+		assert.Equal(t, map[string]rank{"w1-rank-0": {0, 2, 2}, "w1-rank-1": {1, 2, 3}}, endpoints(ds))
+	})
+
 	for _, value := range []string{"0", "-1", "two"} {
 		t.Run("malformed annotation "+value+" gets no endpoints", func(t *testing.T) {
-			ds := newDatastore(t, 1, 8000)
-			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("bad", map[string]string{dataParallelSizeLocalAnnotation: value})))
+			ds := newDatastore(t, 1, "", 8000)
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("bad", map[string]string{dataParallelSizeLocalAnnotation: value}, nil)))
 			assert.Empty(t, endpoints(ds))
 		})
 	}
 
 	t.Run("several ranks need exactly one target port", func(t *testing.T) {
-		ds := newDatastore(t, 1, 8000, 8001)
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("multi", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		ds := newDatastore(t, 1, "", 8000, 8001)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("multi", map[string]string{dataParallelSizeLocalAnnotation: "2"}, nil)))
 		assert.Empty(t, endpoints(ds))
 	})
 
 	t.Run("lowering the rank count removes the extra rank endpoints", func(t *testing.T) {
-		ds := newDatastore(t, 1, 8000)
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"})))
+		ds := newDatastore(t, 1, "", 8000)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "4"}, nil)))
 		require.Len(t, endpoints(ds), 4)
-		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"})))
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, pod("p", map[string]string{dataParallelSizeLocalAnnotation: "2"}, nil)))
 		assert.Equal(t, map[string]rank{"p-rank-0": {0, 2, 0}, "p-rank-1": {1, 2, 1}}, endpoints(ds))
+	})
+}
+
+// A data-parallel group spanning pods (for example an LWS group with one
+// frontend per pod) numbers ranks globally: pod k serves k*N..k*N+N-1.
+func TestDataParallelStartRankLabel(t *testing.T) {
+	const indexLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+	podWithLabels := func(labels map[string]string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: labels},
+			Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+		}
+	}
+	ranks := func(ds Datastore) map[string][2]int {
+		got := map[string][2]int{}
+		for _, ep := range ds.PodList(AllPodsPredicate) {
+			md := ep.GetMetadata()
+			got[md.ID.Name] = [2]int{md.RankIndex, md.DataParallelRank}
+		}
+		return got
+	}
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   map[string][2]int // endpoint name -> {RankIndex, DataParallelRank}
+	}{
+		{
+			name:   "pod index 1 serves global ranks 2 and 3",
+			labels: map[string]string{"app": "vllm", indexLabel: "1"},
+			want:   map[string][2]int{"pod1-rank-0": {0, 2}, "pod1-rank-1": {1, 3}},
+		},
+		{
+			name:   "pod index 0 serves global ranks 0 and 1",
+			labels: map[string]string{"app": "vllm", indexLabel: "0"},
+			want:   map[string][2]int{"pod1-rank-0": {0, 0}, "pod1-rank-1": {1, 1}},
+		},
+		{
+			name:   "a pod without the label gets no endpoints",
+			labels: map[string]string{"app": "vllm"},
+			want:   map[string][2]int{},
+		},
+		{
+			name:   "a pod with a malformed label gets no endpoints",
+			labels: map[string]string{"app": "vllm", indexLabel: "-1"},
+			want:   map[string][2]int{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
+				WithDataParallelSizeLocal(2).
+				WithDataParallelStartRankLabel(indexLabel)
+			pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+			pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
+			require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+			require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(test.labels)))
+			assert.Equal(t, test.want, ranks(ds))
+		})
+	}
+
+	t.Run("losing the label removes the pod's endpoints", func(t *testing.T) {
+		ctx := context.Background()
+		ds := NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second)).
+			WithDataParallelSizeLocal(2).
+			WithDataParallelStartRankLabel(indexLabel)
+		pool := testutil.MakeInferencePool("test-pool").Namespace("default").ObjRef()
+		pool.Spec.TargetPorts = []v1.Port{{Number: 8000}}
+		require.NoError(t, ds.PoolSet(ctx, fake.NewFakeClient(), poolutil.InferencePoolToEndpointPool(pool)))
+
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(map[string]string{indexLabel: "1"})))
+		require.Len(t, ds.PodList(AllPodsPredicate), 2)
+		require.NoError(t, ds.PodUpdateOrAddIfNotExist(ctx, podWithLabels(map[string]string{})))
+		assert.Empty(t, ds.PodList(AllPodsPredicate))
 	})
 }
 

@@ -729,6 +729,12 @@ With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
 compensated; `data_parallel_index` and the global rank carried in KV-event
 batches are unchanged.
 
+Pools of [rank endpoints](data-parallel-ranks.md), where one port serves
+several ranks and `--data-parallel-start-rank-label` gives the EPP each
+pod's global ranks, keep vLLM's default bases on every pod: the EPP's
+KV-event subscribers and the sidecar's P2P `remote_port` add the global
+rank to the configured base, as vLLM does.
+
 ### General Sidecar Flags
 
 The sidecar's serving TLS flags are shared with the EPP and the coordinator and are
