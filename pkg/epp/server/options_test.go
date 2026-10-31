@@ -573,6 +573,11 @@ func TestTLSMinVersionFlag(t *testing.T) {
 			wantErrContains: "unknown TLS version",
 		},
 		{
+			name:            "lowercase versiontls12",
+			args:            []string{"--tls-min-version", "versiontls12"},
+			wantErrContains: "unknown TLS version",
+		},
+		{
 			name:            "VersionTLS10",
 			args:            []string{"--tls-min-version", "VersionTLS10"},
 			wantErrContains: "below the TLS 1.2 minimum",
@@ -626,6 +631,30 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			},
 		},
 		{
+			name:       "leading space",
+			args:       []string{"--tls-cipher-suites", " TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name: "space after comma",
+			args: []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			wantSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:       "trailing comma",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			// Stays nil so tls.Config falls back to its defaults; a non-nil empty slice would disable every TLS 1.2 suite.
+			name:       "only empty elements",
+			args:       []string{"--tls-cipher-suites=,"},
+			wantSuites: nil,
+		},
+		{
 			name:       "not set",
 			args:       []string{},
 			wantSuites: nil,
@@ -633,6 +662,16 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 		{
 			name:    "unknown cipher",
 			args:    []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
+			wantErr: true,
+		},
+		{
+			name:    "insecure cipher",
+			args:    []string{"--tls-cipher-suites", "TLS_RSA_WITH_RC4_128_SHA"},
+			wantErr: true,
+		},
+		{
+			name:    "insecure cipher among secure ones",
+			args:    []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
 			wantErr: true,
 		},
 	}
@@ -654,31 +693,6 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			require.Equal(t, tt.wantSuites, opts.TLSCipherSuiteValues())
 		})
 	}
-}
-
-func TestParseTLSVersion(t *testing.T) {
-	for name, want := range tlsVersions {
-		got, err := parseTLSVersion(name)
-		require.NoError(t, err, name)
-		require.Equal(t, want, got, name)
-	}
-	_, err := parseTLSVersion("invalid")
-	require.Error(t, err)
-}
-
-func TestParseCipherSuites(t *testing.T) {
-	ids, err := parseCipherSuites([]string{
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint16{
-		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-	}, ids)
-
-	_, err = parseCipherSuites([]string{"BOGUS"})
-	require.Error(t, err)
 }
 
 func TestValidatePoolGroupFlag(t *testing.T) {

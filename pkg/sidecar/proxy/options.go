@@ -33,6 +33,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
+	cliflag "k8s.io/component-base/cli/flag"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -391,45 +392,6 @@ func validateStages(stages []string, supportedStages map[string]struct{}, flagNa
 	return nil
 }
 
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(version string) (uint16, error) {
-	value, ok := tlsVersions[version]
-	if !ok {
-		return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	if value < tls.VersionTLS12 {
-		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	return value, nil
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cipherSuite := range tls.CipherSuites() {
-		byName[cipherSuite.Name] = cipherSuite.ID
-	}
-
-	values := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		value, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		values = append(values, value)
-	}
-	return values, nil
-}
-
 // Complete performs post-processing of parsed command-line arguments.
 // It extracts YAML configuration (if provided), handles migration from deprecated flags,
 // parses the InferencePool field, computes boolean TLS fields, and builds Config.DecoderURL.
@@ -459,14 +421,30 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
 	if opts.tlsMinVersion != "" {
-		version, err := parseTLSVersion(opts.tlsMinVersion)
+		version, err := cliflag.TLSVersion(opts.tlsMinVersion)
 		if err != nil {
-			return fmt.Errorf("invalid %s %q: %w", tlsMinVersion, opts.tlsMinVersion, err)
+			return fmt.Errorf("invalid %s %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", tlsMinVersion, opts.tlsMinVersion, opts.tlsMinVersion)
+		}
+		if version < tls.VersionTLS12 {
+			return fmt.Errorf("invalid %s %q: tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", tlsMinVersion, opts.tlsMinVersion, opts.tlsMinVersion)
 		}
 		opts.TLSMinVersion = version
 	}
 	if len(opts.tlsCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.tlsCipherSuites)
+		// cliflag.TLSCipherSuites also resolves tls.InsecureCipherSuites(); reject those.
+		insecure := cliflag.InsecureTLSCiphers()
+		names := make([]string, 0, len(opts.tlsCipherSuites))
+		for _, name := range opts.tlsCipherSuites {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if _, ok := insecure[name]; ok {
+				return fmt.Errorf("invalid %s: insecure cipher suite %q is not supported", tlsCipherSuites, name)
+			}
+			names = append(names, name)
+		}
+		suites, err := cliflag.TLSCipherSuites(names)
 		if err != nil {
 			return fmt.Errorf("invalid %s: %w", tlsCipherSuites, err)
 		}
