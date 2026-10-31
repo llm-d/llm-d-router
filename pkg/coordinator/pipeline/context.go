@@ -171,6 +171,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMPayload is the render step's mm_payload when render returned no
+	// kwargs_data for the entries: MMPayloadNone. Empty when the entries
+	// carry kwargs_data or render did not populate them.
+	MMPayload string
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).
@@ -214,6 +218,17 @@ type RequestContext struct {
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
 }
+
+// Render step mm_payload values.
+const (
+	// MMPayloadTensors ships the processed tensors as kwargs_data.
+	MMPayloadTensors = "tensors"
+	// MMPayloadNone omits the tensors. Generate-format encode requests carry
+	// the client's media as content_parts, and prefill sends features with
+	// mm_metadata when it has metadata and EC coverage for every entry, else
+	// the client's media as content_parts.
+	MMPayloadNone = "none"
+)
 
 // MultimodalEntry describes one multimodal item in the request and where it
 // sits in the tokenized prompt. Modality comes from reqcommon.PartModality for

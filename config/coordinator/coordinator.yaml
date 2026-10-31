@@ -397,6 +397,21 @@ pipeline:
         # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 
+        # mm_payload selects what the rendering service returns for multimodal
+        # entries. tensors: the processed tensors (kwargs_data). none: only
+        # token ids, hashes and placeholders. Generate-format encode requests
+        # (use_openai_format: false) then carry the client's media as
+        # content_parts, and the prefill request carries features whose
+        # mm_metadata comes from the render response or is rebuilt from the
+        # encode response's EC descriptors when every entry has metadata and
+        # EC coverage, else the client's media as content_parts. A renderer
+        # that ignores the field returns the tensors, and the request takes
+        # the tensors path. A body that sets mm_processor_kwargs or
+        # media_io_kwargs is rendered with the tensors either way: the
+        # content_parts path preprocesses media at the deployment defaults.
+        # Default none.
+        # mm_payload: tensors
+
     # -------------------------------------------------------------------
     # conditional-decode: optional shortcut for text-only chats. When
     # the request has no multimodal entries, the coordinator probes the

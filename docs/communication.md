@@ -187,7 +187,7 @@ POST <rendering_service_address>/v1/chat/completions/render
 Content-Type: application/json
 ```
 
-Body is the full `reqCtx.Body` (with data: URIs from stage 1):
+Body is the full `reqCtx.Body` (with data: URIs from stage 1). Unless the render step sets `mm_payload: tensors`, the render copy also carries `"mm_payload": "none"` and its deprecated alias `"return_mm_kwargs": false`; both are added to the render copy only, and later stages see the client body without them. A body that sets `mm_processor_kwargs` or `media_io_kwargs` is rendered without them, so render returns the tensors: both fields change preprocessing and feed vLLM's multimodal hash, and the generate format's `content_parts` path preprocesses media at the deployment defaults (vLLM's `/v1/messages` accepts neither field for the same reason; see [Stage 5](#stage-5-prefill)).
 
 ```json
 {
@@ -304,6 +304,25 @@ For a multi-entry request the coordinator walks `reqCtx.MultimodalEntries` in or
 For an image-only request `k == i`, so this is the same positional pairing as `features.mm_hashes.image[i]`.
 
 The coordinator validates that the per-modality lengths of `mm_hashes`, `mm_placeholders`, and `kwargs_data` each **sum** to `len(reqCtx.MultimodalEntries)`, and that every entry finds an element at its per-modality position. Either failure fails the request, so a response with the right total split across the wrong modalities is rejected rather than silently mispaired.
+
+#### Response with `mm_payload: none`
+
+vLLM returns `token_ids`, `mm_hashes` and `mm_placeholders` unchanged and sets `kwargs_data` and `mm_metadata` to `null`:
+
+```json
+"features": {
+  "mm_hashes": {"image": ["2b622017706939546ca39ffbc7b610fe1fcbd4f9154d33b4ef13aaf5860c473e"]},
+  "mm_placeholders": {"image": [{"offset": 8, "length": 70}]},
+  "kwargs_data": null,
+  "mm_metadata": null
+}
+```
+
+The coordinator skips the `kwargs_data` length check, leaves every `KwargsData` empty, and records the configured `mm_payload` on the request context. Generate-format encode requests then carry the client's media as `content_parts` (see [Stage 4](#stage-4-encode-fan-out-one-per-media-entry)). The generate-format prefill request carries `features` with `mm_metadata` when every entry has metadata (from this response, or rebuilt from the encode response's EC descriptors) and EC coverage, and `content_parts` otherwise (see [Stage 5](#stage-5-prefill)). A renderer without the field ignores it and returns the tensors, and the request takes the `features` path.
+
+Once the tensors are omitted, the encode and prefill workers' `/inference/v1/generate` must accept `content_parts` (vllm-project/vllm#51478) and key `ec_transfer_params` by the supplied `uuid`. A worker without `content_parts` support rejects the request: unlike a renderer without `mm_payload`, there is no fallback once render omits the tensors, so the renderer and the workers must run versions that agree.
+
+Measured with Qwen3-VL-32B and one 640x448 JPEG, the render response is 575,449 bytes with `mm_payload: tensors` and 1,641 bytes with the tensors omitted.
 
 ---
 
@@ -590,7 +609,7 @@ Two request formats are supported (see [Request Format Configuration](#request-f
 
 **Common notes:**
 - `token_ids[0]` is always BOS (first token from render output)
-- The placeholder token ID is extracted from `reqCtx.TokenIDs[entry.Placeholder.Offset]` (model-specific, opaque)
+- The placeholder span is copied from `reqCtx.TokenIDs` as render produced it (model-specific, opaque)
 - `mm_placeholders` offset is always 1 in encode requests (right after BOS, since each request has only one media entry)
 
 ---
@@ -625,6 +644,23 @@ For image 0 (given `token_ids[0]=1` as BOS, `token_ids[1]=32000` as placeholder 
 > Each `kwargs_data.image[i]` may be `null` (and the whole `kwargs_data` field may be absent) when the image is already resident in the multimodal cache under `mm_hashes.image[i]`. A `null` item carries no pixel tensor: the worker resolves that image from the cache by hash instead of deserializing a tensor (`token_in_token_out/serving.py`, "None -> cache hit"). The coordinator emits `null` for any entry whose `KwargsData` is empty; a `null` still occupies a slot, so the per-image slice lengths still match. The example above shows the tensor-carrying (cache-miss) form.
 
 `model` is required by the `/inference/v1/generate` request validator and must match the served model name. Coordinator sources it from `reqCtx.Model` (populated from the inbound request body's `model` field).
+
+#### Request when render omitted the tensors
+
+When the render step omits the tensors (see [2.A](#response-with-mm_payload-none)), the request carries the entry's media from the client request as one `content_parts` item and no `features`. vLLM accepts `content_parts` or `features` but not both, and expands the placeholder of a `content_parts` prompt itself, so `token_ids` is BOS plus one placeholder token:
+
+```json
+{
+  "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000],
+  "content_parts": [
+    {"type": "image_url", "url": "data:image/jpeg;base64,/9j/4AAQ...", "uuid": "abc123hash"}
+  ],
+  "sampling_params": {"max_tokens": 1}
+}
+```
+
+The part type is `image_url`, `audio_url` or `video_url` by modality. `url` is the media URL from the client part; an inline `input_audio` part becomes a `data:` URL. `uuid` is the entry's render hash, so the encode response keys `ec_transfer_params` by the same hash prefill looks up.
 
 #### Response
 
@@ -855,6 +891,25 @@ x-llm-d-epp-profile: prefill
 
 `kwargs_data` carries the same per-image base64 tensors from the render step (same values sent to the encode stage). Each blob is a msgpack-serialized `MultiModalKwargsItem` containing both `pixel_values` and `image_grid_thw` (and any other model-specific keys). The prefill worker needs `image_grid_thw` to compute mRoPE (multimodal Rotary Position Embedding) positional encodings for the visual tokens.
 
+#### Request when render omitted the tensors
+
+When the render step omits the tensors and prefill does not send `features` (see [2.A](#response-with-mm_payload-none)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. The collapse relies on each span being a uniform run of one placeholder token, the shape the Qwen-VL family produces and the form validated here; a model whose parser interleaves other tokens inside a span (vLLM's `is_embed` mask, not yet carried by the render response; see vllm-project/vllm#54548) fails the request rather than sending a prompt the worker would expand differently. The `features` form keeps the expanded ids and is unaffected. `ec_transfer_params` from the encode stage is sent as in the `features` form:
+
+```json
+{
+  "request_id": "req-abc-123",
+  "model": "llava-v1.5-7b",
+  "token_ids": [1, 32000, 32000, 2345, 6789],
+  "content_parts": [
+    {"type": "image_url", "url": "data:image/jpeg;base64,/9j/4AAQ...", "uuid": "abc123hash"},
+    {"type": "image_url", "url": "data:image/png;base64,iVBORw0K...", "uuid": "def456hash"}
+  ],
+  "ec_transfer_params": {"abc123hash": {"...": "..."}, "def456hash": {"...": "..."}},
+  "kv_transfer_params": {"do_remote_decode": true, "do_remote_prefill": false},
+  "sampling_params": {"max_tokens": 1}
+}
+```
+
 #### Response
 
 ```json
@@ -1029,6 +1084,8 @@ Identical to Option B.
 With a renderer that emits `features.mm_metadata` (see vLLM
 [#54659](https://github.com/vllm-project/vllm/pull/54659)), the coordinator omits
 `kwargs_data` for an entry when `ec_transfer_params` covers that entry.
+
+It applies when render returns the tensors and when the render step omits them (`mm_payload: none`; see [2.A](#response-with-mm_payload-none)): the coordinator takes each entry's `mm_metadata` from the render response when it carries one and rebuilds the rest from the metadata the encode response publishes in its EC descriptor, so prefill carries `features` with `mm_metadata` and `null` `kwargs_data` when every entry is covered, and `content_parts` with the client's media otherwise.
 
 This applies to prefill legs that carry a `features` map: the completions and
 generate wire formats. A chat-completions client reaches those legs when
