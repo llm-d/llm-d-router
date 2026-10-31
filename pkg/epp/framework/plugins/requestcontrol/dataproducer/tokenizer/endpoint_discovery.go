@@ -310,10 +310,12 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 		if meta.RankIndex < 0 {
 			return "", fmt.Errorf("discovered endpoint %s has invalid rank index %d", meta.ID, meta.RankIndex)
 		}
-		if meta.RankIndex > 65535-rule.basePort {
+		// Ranks behind one port share that port's render listener.
+		portIndex := meta.RankIndex / max(meta.RanksPerPort, 1)
+		if portIndex > 65535-rule.basePort {
 			return "", fmt.Errorf("discovered endpoint %s resolved render port outside 1-65535", meta.ID)
 		}
-		return strconv.Itoa(rule.basePort + meta.RankIndex), nil
+		return strconv.Itoa(rule.basePort + portIndex), nil
 	}
 	return "", fmt.Errorf("discovered endpoint %s does not match any port rule", meta.ID)
 }
