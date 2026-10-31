@@ -81,6 +81,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		)
 
 		prefillHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.PrefillEndpointHeader)
+		r = r.WithContext(context.WithValue(r.Context(), selectedDPRanksKey{}, takeSelectedDPRanks(r.Header)))
 
 		if len(prefillHostPorts) == 1 {
 			prefillHostPorts = strings.Split(prefillHostPorts[0], ",")

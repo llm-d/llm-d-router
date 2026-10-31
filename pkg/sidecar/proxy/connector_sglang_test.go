@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"github.com/onsi/gomega/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -121,6 +122,56 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	DescribeTable("forwards the EPP-selected data-parallel ranks as SGLang body fields",
+		func(prefillRank, decodeRank string, wantPrefill, wantDecode, wantDecodePrefill any) {
+			go func() {
+				defer GinkgoRecover()
+				testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+				Expect(testInfo.proxy.Start(testInfo.ctx)).To(Succeed())
+				testInfo.stoppedCh <- struct{}{}
+			}()
+			<-testInfo.proxy.readyCh
+
+			body := `{"model": "Qwen", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
+			req, err := http.NewRequest(http.MethodPost, "http://"+testInfo.proxy.addr.String()+reqcommon.PathChatCompletions,
+				bytes.NewReader([]byte(body)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+			if prefillRank != "" {
+				req.Header.Add(routing.PrefillDataParallelRankHeader, prefillRank)
+			}
+			if decodeRank != "" {
+				req.Header.Add(routing.DecodeDataParallelRankHeader, decodeRank)
+			}
+
+			rp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(rp.StatusCode).To(Equal(http.StatusOK))
+			Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+
+			prefillReq := testInfo.prefillHandler.GetCompletionRequests()[0]
+			decodeReq := testInfo.decodeHandler.GetCompletionRequests()[0]
+			Expect(prefillReq).To(haveRankField(reqcommon.FieldRoutedDPRank, wantPrefill))
+			Expect(prefillReq).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+			Expect(decodeReq).To(haveRankField(reqcommon.FieldRoutedDPRank, wantDecode))
+			Expect(decodeReq).To(haveRankField(reqcommon.FieldDisaggPrefillDPRank, wantDecodePrefill))
+			Expect(decodeReq[reqcommon.FieldBootstrapRoom]).To(Equal(prefillReq[reqcommon.FieldBootstrapRoom]))
+
+			for _, h := range append(testInfo.prefillHandler.GetCompletionHeaders(), testInfo.decodeHandler.GetCompletionHeaders()...) {
+				Expect(h.Values(routing.PrefillDataParallelRankHeader)).To(BeEmpty())
+				Expect(h.Values(routing.DecodeDataParallelRankHeader)).To(BeEmpty())
+			}
+
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		},
+		Entry("both ranks", "1", "0", float64(1), float64(0), float64(1)),
+		Entry("prefill rank only", "2", "", float64(2), nil, float64(2)),
+		Entry("decode rank only", "", "3", nil, float64(3), nil),
+		Entry("no ranks", "", "", nil, nil, nil),
+		Entry("negative and non-integer ranks are dropped", "-1", "x", nil, nil, nil),
+	)
+
 	It("should not panic when prefill response is slower than decode response", func() {
 		// Stop previously injected servers
 		testInfo.decodeBackend.Close()
@@ -183,3 +234,12 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.stoppedCh
 	})
 })
+
+// haveRankField matches a request body whose field equals want, or that lacks
+// the field when want is nil.
+func haveRankField(field string, want any) types.GomegaMatcher {
+	if want == nil {
+		return Not(HaveKey(field))
+	}
+	return HaveKeyWithValue(field, want)
+}

@@ -100,6 +100,13 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+
+	// SGLang data-parallel steering fields. routed_dp_rank selects the rank,
+	// inside a frontend that serves several ranks, that runs the request.
+	// disagg_prefill_dp_rank tells the decode stage which prefill rank holds
+	// the KV cache.
+	FieldRoutedDPRank        = "routed_dp_rank"
+	FieldDisaggPrefillDPRank = "disagg_prefill_dp_rank"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report

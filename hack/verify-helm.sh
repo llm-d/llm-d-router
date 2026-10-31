@@ -828,7 +828,8 @@ fi
 # The fallback route skips EPP, so it removes the client routing and screening headers EPP would remove.
 fallback_route=$(grep -A30 -- 'cluster: inference_pool_fallback$' "${proxy_service_render_output}" | head -30)
 for header in x-llm-d-prefiller-host-port x-prefiller-host-port x-llm-d-encoder-hosts-ports x-encoder-hosts-ports \
-  x-data-parallel-host-port x-llm-d-kv-cache-source-host-port x-kv-cache-source-host-port x-llm-d-pin-host-port; do
+  x-data-parallel-host-port x-llm-d-kv-cache-source-host-port x-kv-cache-source-host-port \
+  x-llm-d-prefiller-dp-rank x-llm-d-decoder-dp-rank x-llm-d-pin-host-port; do
   if ! grep -q -- "- ${header}$" <<<"${fallback_route}"; then
     echo "Fail-open fallback route does not remove client-supplied ${header}"
     exit 1

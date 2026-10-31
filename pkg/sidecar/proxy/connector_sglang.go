@@ -66,9 +66,25 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	// Inject bootstrap info for both prefill and decode
-	bootstrapInfo := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
+	prefillData := s.addSGLangBootstrapInfo(logger, requestData, prefillPodHostPort, roomID)
+	decodeData := maps.Clone(prefillData)
+	ranks := selectedDPRanksFromContext(r.Context())
+	if ranks.prefill != nil {
+		prefillData[reqcommon.FieldRoutedDPRank] = *ranks.prefill
+		decodeData[reqcommon.FieldDisaggPrefillDPRank] = *ranks.prefill
+	}
+	if ranks.decode != nil {
+		decodeData[reqcommon.FieldRoutedDPRank] = *ranks.decode
+	}
 
-	body, err := json.Marshal(bootstrapInfo)
+	prefillBody, err := json.Marshal(prefillData)
+	if err != nil {
+		if err := errorJSONInvalid(err, w); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
+		return
+	}
+	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			logger.Error(err, "failed to send error response to client")
@@ -77,7 +93,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
+	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
 func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {

@@ -521,6 +521,8 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 		routing.KVCacheSourceHeader,
+		routing.PrefillDataParallelRankHeader,
+		routing.DecodeDataParallelRankHeader,
 		routing.EndpointPinHeader,
 	}
 	allRoutingHeaders := make([]string, 0, 2*len(canonical))
@@ -557,6 +559,8 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				routing.DataParallelEndpointHeader,
 				routing.KVCacheSourceHeader,
 				routing.LegacyKVCacheSourceHeader,
+				routing.PrefillDataParallelRankHeader,
+				routing.DecodeDataParallelRankHeader,
 				routing.EndpointPinHeader,
 			},
 		},
@@ -573,6 +577,8 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				routing.DataParallelEndpointHeader,
 				routing.KVCacheSourceHeader,
 				routing.LegacyKVCacheSourceHeader,
+				routing.PrefillDataParallelRankHeader,
+				routing.DecodeDataParallelRankHeader,
 				routing.EndpointPinHeader,
 			},
 		},

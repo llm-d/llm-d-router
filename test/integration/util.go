@@ -684,6 +684,8 @@ var unsetRoutingHeaders = slices.Concat(
 	routing.HeaderNames(routing.EncoderEndpointsHeader),
 	routing.HeaderNames(routing.DataParallelEndpointHeader),
 	routing.HeaderNames(routing.KVCacheSourceHeader),
+	routing.HeaderNames(routing.PrefillDataParallelRankHeader),
+	routing.HeaderNames(routing.DecodeDataParallelRankHeader),
 	[]string{routing.EndpointPinHeader},
 	[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
 )
