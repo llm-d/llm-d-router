@@ -373,7 +373,7 @@ func (s *Server) runPDPipeline(
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
 		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 	}) {
@@ -385,8 +385,8 @@ func (s *Server) runPDPipeline(
 		}
 	}
 	decodeReturned = true
-	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), metrics.StageDecode)
 	}
 }
