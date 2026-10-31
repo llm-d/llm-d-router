@@ -61,24 +61,30 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 }
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
-// endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
+// endpoint, dialing SocketPort plus a rank offset to match standard inference-engine port offsetting
 // (one ZMQ PUB socket per DP rank on the same pod IP).
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
-	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	// vLLM offsets each engine's publisher ports by its global data-parallel rank. A rank
+	// endpoint knows that rank; an endpoint with one rank per port relies on RankIndex.
+	offset := meta.GetRankIndex()
+	if meta.RanksPerPort > 1 {
+		offset = meta.DataParallelRank
+	}
+	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + offset
 	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
 	replayEndpoint := ""
 	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+offset))
 	}
 	snapshotEndpoint := ""
 	if snapshotPort := p.kvEventsConfig.PodDiscoveryConfig.SnapshotSocketPort; snapshotPort > 0 {
-		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
+		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+offset))
 	}
-	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
+	sourceEndpoint := p.indexPodIdentifier(meta)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers

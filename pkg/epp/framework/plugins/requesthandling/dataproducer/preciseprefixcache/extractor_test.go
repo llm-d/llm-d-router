@@ -536,3 +536,60 @@ func TestProducer_ExtractEndpoint_PodLabelSelectorCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestProducer_EnsureSubscriber_RankEndpointSourceIncludesRank(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
+		ID:               k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:          "10.0.0.1",
+		Port:             "8000",
+		RankIndex:        1,
+		RanksPerPort:     2,
+		DataParallelRank: 1,
+	}))
+
+	assert.Equal(t, []string{"10.0.0.1:8000/rank-1"}, subscribers.sourceEndpoints)
+	assert.Equal(t, []string{"tcp://10.0.0.1:5558"}, subscribers.endpoints)
+}
+
+// vLLM offsets each engine's publisher ports by its global data-parallel rank,
+// so a rank endpoint of a group spanning pods dials socketPort + global rank.
+func TestProducer_EnsureSubscriber_RankEndpointDialsGlobalRank(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.ReplaySocketPort = 5600
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(context.Background(), &fwkdl.EndpointMetadata{
+		ID:               k8stypes.NamespacedName{Namespace: "ns", Name: "pod-b-rank-3"},
+		Address:          "10.0.0.2",
+		Port:             "8000",
+		RankIndex:        3,
+		RanksPerPort:     8,
+		DataParallelRank: 11,
+	}))
+
+	assert.Equal(t, []string{"tcp://10.0.0.2:5568"}, subscribers.endpoints)
+	assert.Equal(t, []string{"tcp://10.0.0.2:5611"}, subscribers.replayEndpoints)
+}

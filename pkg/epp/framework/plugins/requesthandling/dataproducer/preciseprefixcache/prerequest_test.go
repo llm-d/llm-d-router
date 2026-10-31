@@ -25,6 +25,7 @@ import (
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1070,4 +1071,29 @@ func TestBlockKeysStateClone(t *testing.T) {
 	delete(state.perFormatKeys, bigram)
 	require.Equal(t, [][]kvblock.BlockHash{{1, 2}}, cloned.perFormatKeys[plain])
 	require.Equal(t, [][]kvblock.BlockHash{{3}}, cloned.perFormatKeys[bigram])
+}
+
+func TestPreRequest_RankEndpointSeedsItsOwnRank(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	var calls []addCall
+	idx := &fakeKVBlockIndex{
+		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+			calls = append(calls, addCall{keys: keys, entries: entries})
+			return nil
+		},
+	}
+	p := newProducerForPreRequest(ctx, true, idx)
+	p.kvEventsConfig = &kvevents.Config{DiscoverPods: true, PodDiscoveryConfig: kvevents.DefaultPodReconcilerConfig()}
+
+	req := &scheduling.InferenceRequest{RequestID: "req-pre-rank"}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{
+		{BlockSize: testBlockSize}: {{0xAA}},
+	}})
+
+	_ = p.PreRequest(ctx, req, primaryOnly("default", rankEndpoints()[1]))
+
+	require.Len(t, calls, 1)
+	require.Len(t, calls[0].entries, 1)
+	assert.Equal(t, "10.0.0.1:8000/rank-1", calls[0].entries[0].PodIdentifier)
 }

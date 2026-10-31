@@ -349,7 +349,7 @@ func (p *Producer) Produce(ctx context.Context,
 			return err
 		}
 		if md := endpoint.GetMetadata(); md != nil {
-			podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
+			podID := p.indexPodIdentifier(md)
 			format := p.kvCacheIndexer.CacheFormat(podID)
 			groups[format] = append(groups[format], endpointWithPodID{endpoint: endpoint, podID: podID})
 		}
