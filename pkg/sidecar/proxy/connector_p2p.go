@@ -159,7 +159,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
-	metrics.RecordPrefillDuration(prefillDuration)
+	observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
@@ -167,7 +167,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
-		metrics.RecordError(metrics.StagePrefill)
+		observeStageError(r.Context(), metrics.StagePrefill)
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
@@ -207,15 +207,15 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
 	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	metrics.RecordDecodeDuration(decodeDuration)
+	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(

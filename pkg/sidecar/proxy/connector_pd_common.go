@@ -120,11 +120,11 @@ func (s *Server) runConcurrentPD(
 		)
 		// A prefill the sidecar cancelled is not a prefill error.
 		if isHTTPError(pw.statusCode) && prefillCtx.Err() == nil {
-			metrics.RecordError(metrics.StagePrefill)
+			observeStageError(r.Context(), metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancelDecode()
 		}
-		metrics.RecordPrefillDuration(prefillDuration)
+		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
 
@@ -143,7 +143,7 @@ func (s *Server) runConcurrentPD(
 	decodeReq = decodeReq.WithContext(dCtx)
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	defer func() {
 		if prefillCtx.Err() != nil {
 			return
@@ -169,9 +169,9 @@ func (s *Server) runConcurrentPD(
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	metrics.RecordDecodeDuration(decodeDuration)
+	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(
@@ -206,9 +206,9 @@ func (s *Server) runConcurrentPD(
 // http.ErrAbortHandler when a stream breaks after headers were sent (client
 // disconnect, load balancer timeout), which skips the metrics recorded after
 // dispatch. Deferred without recover, so the panic still propagates.
-func recordDecodeAbort(returned *bool, start time.Time) {
+func recordDecodeAbort(ctx context.Context, returned *bool, start time.Time) {
 	if !*returned {
-		metrics.RecordDecodeDuration(time.Since(start))
-		metrics.RecordError(metrics.StageDecode)
+		observeStageDuration(ctx, metrics.StageDecode, time.Since(start))
+		observeStageError(ctx, metrics.StageDecode)
 	}
 }

@@ -388,7 +388,7 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 
 	if len(encodeEndPoints) > 0 {
 		fail := func(err error) {
-			metrics.RecordError(metrics.StageEncode)
+			observeStageError(r.Context(), metrics.StageEncode)
 			logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				logger.Error(err, "failed to send error response to client")
@@ -403,7 +403,7 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		}
 		// No items means there was no multimodal input, so no encoder ran.
 		if len(items) > 0 {
-			metrics.RecordEncodeDuration(time.Since(encodeStart))
+			observeStageDuration(r.Context(), metrics.StageEncode, time.Since(encodeStart))
 			rewritten, transfers, err := applyECMooncakeItems(body, items, apiType)
 			if err != nil {
 				fail(fmt.Errorf("failed to rewrite request after encoder: %w", err))
