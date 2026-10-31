@@ -183,6 +183,9 @@ type config struct {
 	// Aggregate does not re-apply this cap to the union of replicas. Unset or
 	// <= 0 defaults to defaultMaxSyncedTokens.
 	MaxSyncedTokens int `json:"maxSyncedTokens,omitempty"`
+	// ExcludeDecodeWhenDisaggregated records a disaggregated request on the prefill endpoint only,
+	// for decode endpoints that cannot reuse KV received over the P/D transfer.
+	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
