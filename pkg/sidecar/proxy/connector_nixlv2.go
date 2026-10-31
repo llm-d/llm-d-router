@@ -759,6 +759,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				if rec != http.ErrAbortHandler {
 					panic(rec)
 				}
+				if pCtx.Err() != nil {
+					return
+				}
 				prefillSpan.SetStatus(codes.Error, "prefill handler aborted")
 				cancel()
 				log.FromContext(pCtx).Error(nil, "concurrent-dispatch prefill handler aborted",
@@ -774,7 +777,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
-		if isHTTPError(pw.statusCode) {
+		if isHTTPError(pw.statusCode) && pCtx.Err() == nil {
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancel() // KV will never arrive -> abort decode instead of hanging
 			log.FromContext(pCtx).Error(nil, "concurrent-dispatch prefill returned error status",
@@ -836,60 +839,75 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Set when the KV-wait timer fired; decode then ran for the full timeout.
 	decodeTimedOut := false
 
-	select {
-	case <-prefillDone:
-		if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
-			// Prefill succeeded: commit decode's buffered response and stream on.
-			if !dcw.commit() {
-				logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
-					"request_id", uuidStr)
+	for decodeFinished := decodeDone; ; {
+		select {
+		case <-decodeFinished:
+			if dispatchCtx.Err() != nil || !decodeAborted.Load() && !dcw.failed() {
+				// Prefill can cancel decode before prefillDone closes.
+				// A successful decode also waits for prefill's outcome.
+				decodeFinished = nil
+				continue
 			}
-			break
-		}
-		// Prefill failed: abort decode and return the prefill error verbatim.
-		cancel()
-		dcw.abort()
-		metrics.RecordError(metrics.StagePrefill)
-		status := http.StatusBadGateway
-		if prefillResp != nil {
-			status = prefillResp.statusCode
-			for key, values := range prefillResp.Header() {
-				for _, v := range values {
-					w.Header().Add(key, v)
+			cancel()
+			if !decodeAborted.Load() {
+				dcw.commit()
+			}
+			<-prefillDone
+		case <-prefillDone:
+			if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
+				// Prefill succeeded: commit decode's buffered response and stream on.
+				if !dcw.commit() {
+					logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
+						"request_id", uuidStr)
+				}
+				break
+			}
+			// Prefill failed: abort decode and return the prefill error verbatim.
+			cancel()
+			dcw.abort()
+			metrics.RecordError(metrics.StagePrefill)
+			status := http.StatusBadGateway
+			if prefillResp != nil {
+				status = prefillResp.statusCode
+				for key, values := range prefillResp.Header() {
+					for _, v := range values {
+						w.Header().Add(key, v)
+					}
 				}
 			}
-		}
-		bodyBytes := 0
-		if prefillResp != nil {
-			bodyBytes = prefillResp.buffer.Len()
-		}
-		logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
-			"request_id", uuidStr, "p_status", status, logBodyBytesKey, bodyBytes)
-		clientResponded = true
-		w.WriteHeader(status)
-		if prefillResp != nil {
-			if _, writeErr := w.Write(prefillResp.bodyBytes()); writeErr != nil {
-				logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
+			bodyBytes := 0
+			if prefillResp != nil {
+				bodyBytes = prefillResp.buffer.Len()
 			}
+			logger.Info("concurrent-dispatch: prefill failed; returning prefill error and aborting decode",
+				"request_id", uuidStr, "p_status", status, logBodyBytesKey, bodyBytes)
+			clientResponded = true
+			w.WriteHeader(status)
+			if prefillResp != nil {
+				if _, writeErr := w.Write(prefillResp.bodyBytes()); writeErr != nil {
+					logger.Error(writeErr, "failed to send prefill error to client (concurrent-dispatch)")
+				}
+			}
+		case <-timer.C:
+			// Prefill did not resolve within the backstop window: cancel both requests
+			// and fail rather than hang waiting for KV that may never arrive.
+			cancel()
+			dcw.abort()
+			// Counted here rather than from prefill's own outcome: the cancelled
+			// prefill may still come back 2xx if it completed as the timer fired.
+			metrics.RecordError(metrics.StagePrefill)
+			decodeTimedOut = true
+			logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
+				"request_id", uuidStr, "timeout", waitTimeout.String())
+			clientResponded = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGatewayTimeout)
+			if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
+				logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
+			}
+			<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
 		}
-	case <-timer.C:
-		// Prefill did not resolve within the backstop window: cancel both requests
-		// and fail rather than hang waiting for KV that may never arrive.
-		cancel()
-		dcw.abort()
-		// Counted here rather than from prefill's own outcome: the cancelled
-		// prefill may still come back 2xx if it completed as the timer fired.
-		metrics.RecordError(metrics.StagePrefill)
-		decodeTimedOut = true
-		logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
-			"request_id", uuidStr, "timeout", waitTimeout.String())
-		clientResponded = true
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusGatewayTimeout)
-		if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
-			logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
-		}
-		<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
+		break
 	}
 
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
