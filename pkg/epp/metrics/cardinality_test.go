@@ -49,6 +49,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
 		IncRunningRequests("model", "target", surface, "", "0")
 		DecRunningRequests("model", "target", surface, "", "0")
+		RecordRequestOutcome("model", "target", surface, "", "0", "completed", "")
 		RecordRequestProcessingLatency(surface, time.Millisecond)
 		RecordResponseProcessingLatency(surface, time.Millisecond)
 	}
@@ -63,7 +64,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		record(reqcommon.APISurface(1000 + i))
 	}
 	for _, collector := range []prometheus.Collector{
-		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
+		llmdRequestCounter, llmdRequestErrCounter, llmdRequestOutcomeCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
 		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
 		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
 		llmdRequestProcessingLatency, llmdResponseProcessingLatency,

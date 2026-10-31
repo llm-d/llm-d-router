@@ -170,6 +170,8 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 				if assert.ErrorAs(t, err, &e, "error should be of type errcommon.Error") {
 					assert.Equal(t, tc.expectErrCode, e.Code, "incorrect error code for scenario: %s", tc.name)
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
+					assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), e.Headers[errcommon.RequestDroppedReasonHeaderKey],
+						"a shed request must tell the client why it was dropped")
 				}
 			}
 		})
