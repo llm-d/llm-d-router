@@ -105,6 +105,7 @@ type Producer struct {
 	pluginState *plugin.PluginState
 
 	speculativeCache   *ttlcache.Cache[string, *speculativeEntries]
+	speculativeLeases  *speculativeLeases
 	speculativeTTL     time.Duration
 	speculativeEnabled bool
 
@@ -198,7 +199,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		}
 	}
 
-	speculativeCache, speculativeTTL, err := buildSpeculativeCache(ctx, config, indexer.KVBlockIndex())
+	speculativeCache, speculativeLeases, speculativeTTL, err := buildSpeculativeCache(ctx, config, indexer.KVBlockIndex())
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +215,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		pluginState:        plugin.NewPluginState(ctx),
 		speculativeCache:   speculativeCache,
+		speculativeLeases:  speculativeLeases,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
 		blockSizeTokens:    tokenProcessor.BlockSize(),

@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"go.opentelemetry.io/otel/trace"
@@ -53,6 +55,76 @@ var _ requestcontrol.PreRequest = &Producer{}
 type speculativeEntries struct {
 	perPromptKeys [][]kvblock.BlockHash
 	podEntries    []kvblock.PodEntry
+	// released prevents a record from dropping its leases more than once.
+	// Guarded by speculativeLeases.mu.
+	released bool
+}
+
+// speculativeRow identifies one speculative index row: a block key held by a pod.
+type speculativeRow struct {
+	key kvblock.BlockHash
+	pod string
+}
+
+// speculativeLeases counts the live requests that seeded each speculative row.
+// Requests routing the same prefix to the same pod write the same row, so a
+// request's TTL expiry removes a row only when no later request still holds it.
+// mu also serializes seeding against eviction: TTL callbacks run on their own
+// goroutines, and an Evict must not land after another request's Add of the
+// rows it just released.
+type speculativeLeases struct {
+	mu     sync.Mutex
+	counts map[speculativeRow]int
+	index  kvblock.Index
+	logger logr.Logger
+}
+
+func newSpeculativeLeases(index kvblock.Index, logger logr.Logger) *speculativeLeases {
+	return &speculativeLeases{counts: make(map[speculativeRow]int), index: index, logger: logger}
+}
+
+// acquire takes one lease on every row of entries. The caller holds mu.
+func (l *speculativeLeases) acquire(entries *speculativeEntries) {
+	for _, pod := range entries.podEntries {
+		for _, promptKeys := range entries.perPromptKeys {
+			for _, key := range promptKeys {
+				l.counts[speculativeRow{key: key, pod: pod.PodIdentifier}]++
+			}
+		}
+	}
+}
+
+// release drops one lease on every row of entries, once. With evict set, it
+// evicts from the index the rows whose last lease it dropped; a row without a
+// lease counts as having dropped its last. The caller holds mu.
+func (l *speculativeLeases) release(ctx context.Context, requestID string, entries *speculativeEntries, evict bool) {
+	if entries.released {
+		return
+	}
+	entries.released = true
+	for _, pod := range entries.podEntries {
+		var keys []kvblock.BlockHash
+		for _, promptKeys := range entries.perPromptKeys {
+			for _, key := range promptKeys {
+				row := speculativeRow{key: key, pod: pod.PodIdentifier}
+				if n := l.counts[row]; n > 1 {
+					l.counts[row] = n - 1
+					continue
+				}
+				delete(l.counts, row)
+				keys = append(keys, key)
+			}
+		}
+		if !evict || len(keys) == 0 {
+			continue
+		}
+		// On failure the entries stay until the pod's next Clear, or until the same
+		// prefix is routed to the same pod again and that TTL expiry succeeds.
+		if err := l.index.Evict(ctx, kvblock.RequestKey, keys, []kvblock.PodEntry{pod}); err != nil {
+			l.logger.Error(err, "Failed to evict speculative entries",
+				"requestID", requestID, "keys", len(keys))
+		}
+	}
 }
 
 // blockKeysState carries the block keys computed in Produce to PreRequest
@@ -191,20 +263,21 @@ func (p *Producer) recordMMPrediction(ctx context.Context, request *scheduling.I
 }
 
 // buildSpeculativeCache constructs the TTL cache used to evict speculative
-// index entries. Returns (nil, 0, nil) when speculative indexing is disabled.
-// The cache and its background goroutine are bound to ctx.
+// index entries, and the leases that let requests share a row. Returns
+// (nil, nil, 0, nil) when speculative indexing is disabled. The cache and its
+// background goroutine are bound to ctx.
 func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	index kvblock.Index,
-) (*ttlcache.Cache[string, *speculativeEntries], time.Duration, error) {
+) (*ttlcache.Cache[string, *speculativeEntries], *speculativeLeases, time.Duration, error) {
 	if !config.SpeculativeIndexing {
-		return nil, 0, nil
+		return nil, nil, 0, nil
 	}
 
 	ttl := defaultSpeculativeTTL
 	if config.SpeculativeTTL != "" {
 		parsed, err := time.ParseDuration(config.SpeculativeTTL)
 		if err != nil {
-			return nil, 0, fmt.Errorf("invalid speculativeTTL %q: %w", config.SpeculativeTTL, err)
+			return nil, nil, 0, fmt.Errorf("invalid speculativeTTL %q: %w", config.SpeculativeTTL, err)
 		}
 		if parsed > 0 {
 			ttl = parsed
@@ -214,27 +287,14 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 	cache := ttlcache.New[string, *speculativeEntries](
 		ttlcache.WithTTL[string, *speculativeEntries](ttl),
 	)
-	logger := log.FromContext(ctx).WithName(PluginType)
+	leases := newSpeculativeLeases(index, log.FromContext(ctx).WithName(PluginType))
 	cache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
 		item *ttlcache.Item[string, *speculativeEntries],
 	) {
-		if reason != ttlcache.EvictionReasonExpired {
-			return
-		}
-		entries := item.Value()
-		keys := make([]kvblock.BlockHash, 0)
-		for _, promptKeys := range entries.perPromptKeys {
-			keys = append(keys, promptKeys...)
-		}
-		if len(keys) == 0 || len(entries.podEntries) == 0 {
-			return
-		}
-		// On failure the entries stay until the pod's next Clear, or until the same
-		// prefix is routed to the same pod again and that TTL expiry succeeds.
-		if err := index.Evict(ctx, kvblock.RequestKey, keys, entries.podEntries); err != nil {
-			logger.Error(err, "Failed to evict speculative entries on TTL expiry",
-				"requestID", item.Key(), "keys", len(keys))
-		}
+		leases.mu.Lock()
+		defer leases.mu.Unlock()
+		leases.release(ctx, item.Key(), item.Value(),
+			reason == ttlcache.EvictionReasonExpired || reason == ttlcache.EvictionReasonDeleted)
 	})
 	go cache.Start()
 	go func() {
@@ -242,7 +302,7 @@ func buildSpeculativeCache(ctx context.Context, config PluginConfig,
 		cache.Stop()
 	}()
 
-	return cache, ttl, nil
+	return cache, leases, ttl, nil
 }
 
 // PreRequest records the prefix-cache hit predicted for the selected endpoint,
@@ -304,6 +364,8 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 
 	index := p.kvCacheIndexer.KVBlockIndex()
+	p.speculativeLeases.mu.Lock()
+	defer p.speculativeLeases.mu.Unlock()
 	// Insert per-prompt keys separately to preserve correct block adjacency.
 	for _, promptKeys := range state.perPromptKeys {
 		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
@@ -331,10 +393,15 @@ func (p *Producer) PreRequest(ctx context.Context,
 		}
 	}
 
-	p.speculativeCache.Set(request.RequestID, &speculativeEntries{
+	entries := &speculativeEntries{
 		perPromptKeys: state.perPromptKeys,
 		podEntries:    allPodEntries,
-	}, p.speculativeTTL)
+	}
+	p.speculativeLeases.acquire(entries)
+	// Delete also finds expired records that Get skips. Its eviction callback
+	// releases the old leases after the new leases protect any shared rows.
+	p.speculativeCache.Delete(request.RequestID)
+	p.speculativeCache.Set(request.RequestID, entries, p.speculativeTTL)
 
 	logger.V(logging.TRACE).Info("Added speculative entries",
 		"requestID", request.RequestID,
