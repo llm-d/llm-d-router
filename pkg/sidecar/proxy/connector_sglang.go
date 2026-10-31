@@ -70,7 +70,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 	body, err := json.Marshal(bootstrapInfo)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return

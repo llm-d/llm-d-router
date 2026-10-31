@@ -54,7 +54,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	engineMap, err := s.getMooncakeEngineMap(r.Context(), prefillPodHostPort, bootstrapAddr)
 	if err != nil {
 		logger.Error(jsonErrorForLog(err), "failed to query mooncake engine ID", "bootstrap_addr", bootstrapAddr)
-		if err := errorBadGateway(err, w); err != nil {
+		if err := errorBadGateway(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -83,7 +83,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -107,7 +107,7 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return

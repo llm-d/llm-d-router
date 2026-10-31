@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -388,7 +389,7 @@ var _ = Describe("Non-object request body", func() {
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			respBody, err := io.ReadAll(resp.Body)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(string(respBody)).To(ContainSubstring("BadRequestError"))
+			expectErrorEnvelope(respBody)
 
 			By("verifying neither the prefill nor the decode request was dispatched")
 			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeZero())
@@ -407,10 +408,10 @@ var _ = Describe("Non-object request body", func() {
 
 // Every entry point reads the client body through readJSONBody before it does
 // anything else, so a client that drops the connection mid-body must get the
-// same vLLM error envelope whichever path the sidecar is configured for. The
+// same error envelope whichever path the sidecar is configured for. The
 // decoder-only paths are covered too: they write into the parsed body as well.
 var _ = Describe("Unreadable request body", func() {
-	DescribeTable("is refused with a vLLM error envelope",
+	DescribeTable("is refused with the OpenAI error envelope",
 		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request)) {
 			proxy := NewProxy(config)
 			w := httptest.NewRecorder()
@@ -460,6 +461,45 @@ var _ = Describe("Unreadable request body", func() {
 		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.runChunkedDecode(w, r)
+			}),
+	)
+})
+
+// The connectors that wait for prefill relay its error response to the client,
+// so a prefill pod that cannot be reached must still produce an error envelope.
+var _ = Describe("Unreachable prefill", func() {
+	DescribeTable("is answered with a 502 in the Anthropic envelope on the Messages path",
+		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request, string)) {
+			prefill := httptest.NewServer(http.NotFoundHandler())
+			prefillHostPort := prefill.Listener.Addr().String()
+			prefill.Close()
+
+			proxy := NewProxy(config)
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathMessages,
+				strings.NewReader(`{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`))
+
+			handle(proxy, w, r, prefillHostPort)
+
+			Expect(w.Code).To(Equal(http.StatusBadGateway))
+			Expect(w.Header().Get("Content-Type")).To(Equal("application/json"))
+			var got reqcommon.AnthropicErrorResponse
+			Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed(), "body=%q", w.Body.String())
+			Expect(got.Type).To(Equal("error"))
+			Expect(got.Error.Type).To(Equal("api_error"))
+			Expect(got.Error.Message).To(ContainSubstring("connection refused"))
+		},
+		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleNIXLV2(w, r, prefill, "", reqcommon.APITypeMessages)
+			}),
+		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleSharedStorage(w, r, prefill, reqcommon.APITypeMessages)
+			}),
+		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleP2P(w, r, prefill, "", reqcommon.APITypeMessages)
 			}),
 	)
 })
