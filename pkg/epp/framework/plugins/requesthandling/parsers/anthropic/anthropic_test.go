@@ -604,6 +604,51 @@ func TestAnthropicParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			// An explicit zero is a cache miss and has to reach the metrics layer
+			// as a zero observation, not as a missing count.
+			name: "usage with an explicit zero cache read tokens",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"usage": {
+					"input_tokens": 100,
+					"output_tokens": 50,
+					"cache_read_input_tokens": 0
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     100,
+					CompletionTokens: 50,
+					TotalTokens:      150,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+			},
+		},
+		{
+			// The cache fields are optional, so an absent field must stay absent
+			// rather than becoming a zero observation.
+			name: "usage without cache read tokens",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"usage": {
+					"input_tokens": 100,
+					"output_tokens": 50,
+					"cache_creation_input_tokens": 20
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     120,
+					CompletionTokens: 50,
+					TotalTokens:      170,
+				},
+			},
+		},
+		{
 			name: "missing usage field",
 			body: []byte(`{"id": "msg_123", "type": "message"}`),
 			want: &fwkrh.ParsedResponse{
