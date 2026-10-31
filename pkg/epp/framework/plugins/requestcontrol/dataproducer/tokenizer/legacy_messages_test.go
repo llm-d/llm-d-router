@@ -272,7 +272,7 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 			direct                      bool
 		}{
 			{"chat", "/v1/chat/completions", ` {"model":"adapter","messages":[{"role":"user","content":"hi"}],"unknown":{"z":1,"a":2}} `, chatRenderPath, openai.NewOpenAIParser(), false},
-			{"completions", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3],"truncate_prompt_tokens":3} `, completionsRenderPath, openai.NewOpenAIParser(), false},
+			{"completions", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3],"truncate_prompt_tokens":3} `, "", openai.NewOpenAIParser(), false},
 			{"vllm generate", "/inference/v1/generate", `{"model":"adapter","token_ids":[1,2,3],"sampling_params":{"max_tokens":1}}`, "", vllmhttp.NewVllmHTTPParser(), false},
 			{"sglang generate", "/generate", `{"input_ids":[1,2,3],"sampling_params":{"max_new_tokens":1}}`, "", sglanghttp.NewSGLangHTTPParser(), false},
 			{"direct messages", messagesRenderPath, `{"model":"adapter","unknown":{"z":1,"a":2}}`, "", anthropic.NewAnthropicParser(), true},
