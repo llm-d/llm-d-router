@@ -730,6 +730,40 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
 	})
 
+	t.Run("many:1 merge uses the event offset for repeated items", func(t *testing.T) {
+		// Engine BS 16, canonical BS 32. vLLM emits (identifier, offset) with the
+		// offset relative to the block start; a negative offset is a continuation.
+		cases := []struct {
+			name         string
+			raw          [][]any
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+		}{
+			{
+				name:         "same image in adjacent engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(6)}}},
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 3}, {Offset: 22, Length: 8}},
+			},
+			{
+				name:         "one image spanning both engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(-6)}}},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 20}},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
+				require.NoError(t, err)
+				got := realignExtraFeaturesWithContinuation(engine, firstMMContinuation(tc.raw, ""), 32, 32)
+				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
+					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 32, 32)
+				assert.Equal(t, want, got)
+			})
+		}
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
