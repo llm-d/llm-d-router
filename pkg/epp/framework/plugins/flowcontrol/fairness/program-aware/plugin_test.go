@@ -19,6 +19,7 @@ package programaware
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -337,6 +338,132 @@ func TestComputeFairnessIndex_SkewedWaits(t *testing.T) {
 	b.RecordDispatched(time.Now().Add(-1000 * time.Millisecond))
 	got := p.computeFairnessIndex()
 	assert.Less(t, got, 0.9, "skewed waits should produce sub-1.0 fairness")
+}
+
+// fullScanFairnessIndex recomputes the index from the program map, independently
+// of the incremental aggregates maintained by RecordDispatched and eviction.
+func fullScanFairnessIndex(p *ProgramAwarePlugin) float64 {
+	var sum, sumSq, n float64
+	p.programMetrics.Range(func(_, value any) bool {
+		m, ok := value.(*ProgramMetrics)
+		if !ok || m.WaitCount() == 0 {
+			return true
+		}
+		x := m.AverageWaitTime()
+		sum += x
+		sumSq += x * x
+		n++
+		return true
+	})
+	return jainFairnessIndex(sum, sumSq, n)
+}
+
+func TestComputeFairnessIndex_MatchesFullScanAfterUpdates(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	a := p.getOrCreateMetrics("a")
+	b := p.getOrCreateMetrics("b")
+	c := p.getOrCreateMetrics("c")
+	a.RecordDispatched(time.Now().Add(-10 * time.Millisecond))
+	a.RecordDispatched(time.Now().Add(-30 * time.Millisecond))
+	b.RecordDispatched(time.Now().Add(-200 * time.Millisecond))
+	c.RecordDispatched(time.Time{}) // no wait observation: must not contribute
+
+	assert.InDelta(t, fullScanFairnessIndex(p), p.computeFairnessIndex(), 1e-9)
+}
+
+func TestComputeFairnessIndex_EvictionDropsContribution(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	a := p.getOrCreateMetrics("a")
+	b := p.getOrCreateMetrics("b")
+	a.RecordDispatched(time.Now().Add(-10 * time.Millisecond))
+	b.RecordDispatched(time.Now().Add(-500 * time.Millisecond))
+	a.RecordCompletion(time.Now())
+	b.RecordCompletion(time.Now())
+
+	// Only "a" is stale enough to evict.
+	a.mu.Lock()
+	a.lastCompletionTime = time.Now().Add(-10 * time.Second)
+	a.mu.Unlock()
+	p.evictIdle(time.Second)
+
+	_, exists := p.programMetrics.Load("a")
+	require.False(t, exists)
+	assert.Equal(t, 1.0, p.computeFairnessIndex())
+	assert.InDelta(t, fullScanFairnessIndex(p), p.computeFairnessIndex(), 1e-9)
+}
+
+func TestComputeFairnessIndex_EvictedValueCannotRecontribute(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	a := p.getOrCreateMetrics("a")
+	a.RecordDispatched(time.Now().Add(-10 * time.Millisecond))
+	a.RecordCompletion(time.Now().Add(-10 * time.Second))
+	p.getOrCreateMetrics("b").RecordDispatched(time.Now().Add(-20 * time.Millisecond))
+
+	p.evictIdle(time.Second)
+	_, exists := p.programMetrics.Load("a")
+	require.False(t, exists)
+
+	// A dispatch racing the eviction can still hold the removed value.
+	a.RecordDispatched(time.Now().Add(-500 * time.Millisecond))
+	assert.Equal(t, 1.0, p.computeFairnessIndex())
+}
+
+// TestComputeFairnessIndex_ChurnThenZeroWaitMatchesFullScan guards against
+// floating-point drift in the incremental aggregates: after heavy program churn,
+// zero-wait programs must still report perfect fairness.
+func TestComputeFairnessIndex_ChurnThenZeroWaitMatchesFullScan(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	// Two live programs with observed waits that round to 0 ms.
+	p.getOrCreateMetrics("live-a").RecordDispatched(time.Now().Add(-100 * time.Microsecond))
+	p.getOrCreateMetrics("live-b").RecordDispatched(time.Now().Add(-100 * time.Microsecond))
+
+	for i := 0; i < 100_000; i++ {
+		m := p.getOrCreateMetrics(fmt.Sprintf("churn-%d", i))
+		// Successive observations make the deltas in the aggregates non-canceling;
+		// three of them give a non-dyadic mean.
+		m.RecordDispatched(time.Now().Add(-time.Duration(i%1000+1) * time.Millisecond))
+		m.RecordDispatched(time.Now().Add(-time.Duration(i%997+3) * time.Millisecond))
+		m.RecordDispatched(time.Now().Add(-time.Duration(i%991+7) * time.Millisecond))
+		m.RecordCompletion(time.Now().Add(-time.Hour))
+		m.RecordCompletion(time.Now().Add(-time.Hour))
+		m.RecordCompletion(time.Now().Add(-time.Hour))
+		p.evictIdle(time.Second)
+	}
+
+	// The live programs are in flight, so the sweeps keep them.
+	_, aExists := p.programMetrics.Load("live-a")
+	_, bExists := p.programMetrics.Load("live-b")
+	require.True(t, aExists)
+	require.True(t, bExists)
+
+	got := p.computeFairnessIndex()
+	assert.Equal(t, 1.0, got, "zero-wait programs must report perfect fairness after churn")
+	assert.InDelta(t, fullScanFairnessIndex(p), got, 1e-9)
+}
+
+// TestEvictIdle_RecomputesFairnessAggregates pins that the sweep rebuilds the
+// sums from the program map instead of trusting the drifted incremental ones.
+func TestEvictIdle_RecomputesFairnessAggregates(t *testing.T) {
+	p := &ProgramAwarePlugin{}
+	p.getOrCreateMetrics("a").RecordDispatched(time.Now().Add(-100 * time.Millisecond))
+	p.getOrCreateMetrics("b").RecordDispatched(time.Now().Add(-200 * time.Millisecond))
+	p.getOrCreateMetrics("a").RecordCompletion(time.Now())
+	p.getOrCreateMetrics("b").RecordCompletion(time.Now())
+	want := fullScanFairnessIndex(p)
+	require.NotEqual(t, 1.0, want)
+
+	// Replace the sums with a drifted state that stays inside the clamp range.
+	p.fairness.mu.Lock()
+	p.fairness.sum = 0
+	p.fairness.sumSq = 1
+	p.fairness.n = 2
+	p.fairness.mu.Unlock()
+	require.NotEqual(t, want, p.computeFairnessIndex())
+
+	p.evictIdle(time.Hour) // Both programs are recent, so the sweep keeps them.
+
+	got := p.computeFairnessIndex()
+	assert.InDelta(t, want, got, 1e-9)
 }
 
 func TestGetOrCreateMetrics_Idempotent(t *testing.T) {

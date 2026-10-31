@@ -137,6 +137,7 @@ type ProgramAwarePlugin struct {
 	strategy Strategy
 
 	programMetrics sync.Map // key: program ID (string), value: *ProgramMetrics
+	fairness       fairnessAggregates
 }
 
 func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
@@ -161,30 +162,22 @@ type fairnessDumpState struct {
 // DumpState reports aggregate fairness health: how many programs are tracked,
 // the total in-flight requests across them, and Jain's fairness index. Per-program
 // IDs are deliberately excluded because they are user-controlled and high-cardinality.
-// All three values come from a single pass over the program map.
+// The program counts come from one pass over the program map; the fairness index
+// is the maintained aggregate.
 func (p *ProgramAwarePlugin) DumpState() (json.RawMessage, error) {
 	var totalPrograms int
 	var totalInFlight int64
-	var sum, sumSq, n float64
 	p.programMetrics.Range(func(_, value any) bool {
 		totalPrograms++
-		m, ok := value.(*ProgramMetrics)
-		if !ok {
-			return true
-		}
-		totalInFlight += m.InFlight()
-		if m.WaitCount() > 0 {
-			x := m.AverageWaitTime()
-			sum += x
-			sumSq += x * x
-			n++
+		if m, ok := value.(*ProgramMetrics); ok {
+			totalInFlight += m.InFlight()
 		}
 		return true
 	})
 	return json.Marshal(fairnessDumpState{
 		TotalPrograms: totalPrograms,
 		TotalInFlight: totalInFlight,
-		FairnessIndex: jainFairnessIndex(sum, sumSq, n),
+		FairnessIndex: p.computeFairnessIndex(),
 	})
 }
 
@@ -206,7 +199,7 @@ func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetric
 	}
 	// Seed lastCompletionTime so a program seen but never completing still
 	// becomes evictable after ttl.
-	fresh := &ProgramMetrics{lastCompletionTime: time.Now()}
+	fresh := &ProgramMetrics{lastCompletionTime: time.Now(), aggregates: &p.fairness}
 	actual, _ := p.programMetrics.LoadOrStore(programID, fresh)
 	if m, ok := actual.(*ProgramMetrics); ok {
 		return m
@@ -320,9 +313,34 @@ func (p *ProgramAwarePlugin) evictIdle(ttl time.Duration) {
 		if now.Sub(m.LastCompletionTime()) <= ttl {
 			return true
 		}
+		m.forgetAggregates()
 		p.evictKey(key)
 		return true
 	})
+	p.recomputeFairness()
+}
+
+// recomputeFairness rebuilds the aggregates from the program map. Incremental
+// updates add and subtract floating-point deltas that leave a residual, so the
+// sweep discards the accumulated error.
+func (p *ProgramAwarePlugin) recomputeFairness() {
+	var sum, sumSq float64
+	var n int64
+	p.programMetrics.Range(func(_, value any) bool {
+		m, ok := value.(*ProgramMetrics)
+		if !ok {
+			return true
+		}
+		average, count := m.waitStats()
+		if count == 0 {
+			return true
+		}
+		sum += average
+		sumSq += average * average
+		n++
+		return true
+	})
+	p.fairness.reset(sum, sumSq, n)
 }
 
 func (p *ProgramAwarePlugin) evictKey(key any) {
@@ -346,20 +364,5 @@ func jainFairnessIndex(sum, sumSq, n float64) float64 {
 // computeFairnessIndex returns Jain's Fairness Index over the average wait
 // time per program. Programs with no wait observations are skipped.
 func (p *ProgramAwarePlugin) computeFairnessIndex() float64 {
-	var sum, sumSq, n float64
-	p.programMetrics.Range(func(_, value any) bool {
-		m, ok := value.(*ProgramMetrics)
-		if !ok {
-			return true
-		}
-		if m.WaitCount() == 0 {
-			return true
-		}
-		x := m.AverageWaitTime()
-		sum += x
-		sumSq += x * x
-		n++
-		return true
-	})
-	return jainFairnessIndex(sum, sumSq, n)
+	return p.fairness.index()
 }
