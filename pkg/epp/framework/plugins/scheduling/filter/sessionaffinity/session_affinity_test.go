@@ -28,7 +28,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/test/utils"
@@ -154,33 +154,33 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 		name            string
 		sessionHeader   string
 		profileName     string
-		initialResponse *requestcontrol.Response
+		initialResponse *fwkrh.Response
 		targetPod       *fwkdl.EndpointMetadata
 		request         *scheduling.InferenceRequest
 		wantHeaders     map[string]string
 	}{
 		{
 			name:            "standard case with existing headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-1", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-1", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "response with nil headers map",
-			initialResponse: &requestcontrol.Response{RequestID: "req-2", Headers: nil},
+			initialResponse: &fwkrh.Response{RequestID: "req-2", Headers: nil},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-session-token": wantToken},
 		},
 		{
 			name:            "custom header carries the token",
 			sessionHeader:   "x-custom-session",
-			initialResponse: &requestcontrol.Response{RequestID: "req-custom", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-custom", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			wantHeaders:     map[string]string{"x-custom-session": wantToken},
 		},
 		{
 			name:            "nil targetPod should do nothing",
-			initialResponse: &requestcontrol.Response{RequestID: "req-3", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-3", Headers: make(map[string]string)},
 			targetPod:       nil,
 			wantHeaders:     map[string]string{},
 		},
@@ -193,7 +193,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			name:            "prefill profile lookup",
 			sessionHeader:   "x-session-token-prefill",
 			profileName:     "prefill",
-			initialResponse: &requestcontrol.Response{RequestID: "req-prefill", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-prefill", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint, // passed targetPod is decode pod, should be ignored
 			request: &scheduling.InferenceRequest{
 				RequestID: "req-prefill",
@@ -217,7 +217,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			name:            "profile set but absent from results (decode-only) writes no header",
 			sessionHeader:   "x-session-token-prefill",
 			profileName:     "prefill",
-			initialResponse: &requestcontrol.Response{RequestID: "req-decode-only", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-decode-only", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			request: &scheduling.InferenceRequest{
 				RequestID: "req-decode-only",
@@ -231,7 +231,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			name:            "profile set but TargetEndpoints empty writes no header",
 			sessionHeader:   "x-session-token-prefill",
 			profileName:     "prefill",
-			initialResponse: &requestcontrol.Response{RequestID: "req-empty-ep", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-empty-ep", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			request: &scheduling.InferenceRequest{
 				RequestID: "req-empty-ep",
@@ -247,7 +247,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			name:            "profile set but nil SchedulingResult writes no header",
 			sessionHeader:   "x-session-token-prefill",
 			profileName:     "prefill",
-			initialResponse: &requestcontrol.Response{RequestID: "req-nil-sr", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-nil-sr", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			request:         &scheduling.InferenceRequest{RequestID: "req-nil-sr"},
 			wantHeaders:     map[string]string{},
@@ -256,7 +256,7 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 			name:            "profile set but nil request writes no header",
 			sessionHeader:   "x-session-token-prefill",
 			profileName:     "prefill",
-			initialResponse: &requestcontrol.Response{RequestID: "req-nil-req", Headers: make(map[string]string)},
+			initialResponse: &fwkrh.Response{RequestID: "req-nil-req", Headers: make(map[string]string)},
 			targetPod:       targetEndpoint,
 			request:         nil,
 			wantHeaders:     map[string]string{},

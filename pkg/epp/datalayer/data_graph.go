@@ -30,7 +30,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
@@ -39,13 +39,13 @@ import (
 type ValidateOption func(*validateOptions)
 
 type validateOptions struct {
-	producerPhases map[string]fwkrc.DataProducerPhase
+	producerPhases map[string]fwkrh.DataProducerPhase
 }
 
 // WithDataProducerPhases places each DataProducer, keyed by plugin name, in
 // its phase. A DataProducer absent from phases runs in
 // DataProducerPhaseScheduling.
-func WithDataProducerPhases(phases map[string]fwkrc.DataProducerPhase) ValidateOption {
+func WithDataProducerPhases(phases map[string]fwkrh.DataProducerPhase) ValidateOption {
 	return func(o *validateOptions) {
 		o.producerPhases = phases
 	}
@@ -282,7 +282,7 @@ const (
 	DefaultLayer        = -1 // For plugins that don't fit into a known layer
 )
 
-func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string]fwkrc.DataProducerPhase) int {
+func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string]fwkrh.DataProducerPhase) int {
 	// Flow control plugins
 	if _, ok := plugin.(fwkfc.FairnessPolicy); ok {
 		return FlowControlLayer
@@ -292,24 +292,24 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string
 	}
 
 	// Request control plugins
-	if _, ok := plugin.(fwkrc.DataProducer); ok {
-		if producerPhases[plugin.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+	if _, ok := plugin.(fwkrh.DataProducer); ok {
+		if producerPhases[plugin.TypedName().Name] == fwkrh.DataProducerPhaseRequestHandling {
 			return RequestHandlingProducerLayer
 		}
 		return RequestControlLayer
 	}
 	// A screener reads data in Screen, ahead of any other request control
 	// extension point it implements.
-	if _, ok := plugin.(fwkrc.Screener); ok {
+	if _, ok := plugin.(fwkrh.Screener); ok {
 		return ScreenerLayer
 	}
-	if _, ok := plugin.(fwkrc.Admitter); ok {
+	if _, ok := plugin.(fwkrh.Admitter); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.PreRequest); ok {
+	if _, ok := plugin.(fwkrh.PreRequest); ok {
 		return RequestControlLayer
 	}
-	if _, ok := plugin.(fwkrc.ResponseHeaderProcessor); ok {
+	if _, ok := plugin.(fwkrh.ResponseHeaderProcessor); ok {
 		return RequestControlLayer
 	}
 
@@ -334,7 +334,7 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string
 // buildDAG builds a dependency graph among data preparation plugins based on their
 // produced and consumed data keys.
 func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]plugin.ConsumerPlugin,
-	producerPhases map[string]fwkrc.DataProducerPhase) (map[string][]string, error) {
+	producerPhases map[string]fwkrh.DataProducerPhase) (map[string][]string, error) {
 	dag := make(map[string][]string)
 	// Create dependency graph as a DAG.
 	for _, producer := range producers {
@@ -368,8 +368,8 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 						consumerLayer := pluginToLayerExecutionOrder(consumer, producerPhases)
 						if producerLayer > consumerLayer {
 							msg := "invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName
-							if _, ok := producer.(fwkrc.DataProducer); ok && (consumerLayer == RequestHandlingProducerLayer || consumerLayer == ScreenerLayer) {
-								msg += "; run the producer in the " + string(fwkrc.DataProducerPhaseRequestHandling) + " phase"
+							if _, ok := producer.(fwkrh.DataProducer); ok && (consumerLayer == RequestHandlingProducerLayer || consumerLayer == ScreenerLayer) {
+								msg += "; run the producer in the " + string(fwkrh.DataProducerPhaseRequestHandling) + " phase"
 							}
 							return nil, errors.New(msg)
 						}

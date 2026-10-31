@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -40,12 +40,12 @@ func TestConfigApplyDataProducerPhases(t *testing.T) {
 	a, b, c := newMockDataProducerPlugin("a"), newMockDataProducerPlugin("b"), newMockDataProducerPlugin("c")
 	config := NewConfig()
 	config.AddPlugins(a, b, c)
-	config.ApplyDataProducerPhases(map[string]fwkrc.DataProducerPhase{
-		"a": fwkrc.DataProducerPhaseRequestHandling,
-		"b": fwkrc.DataProducerPhaseScheduling,
+	config.ApplyDataProducerPhases(map[string]fwkrh.DataProducerPhase{
+		"a": fwkrh.DataProducerPhaseRequestHandling,
+		"b": fwkrh.DataProducerPhaseScheduling,
 	})
-	assert.Equal(t, []fwkrc.DataProducer{a}, config.requestHandlingDataProducers)
-	assert.Equal(t, []fwkrc.DataProducer{b, c}, config.dataProducerPlugins)
+	assert.Equal(t, []fwkrh.DataProducer{a}, config.requestHandlingDataProducers)
+	assert.Equal(t, []fwkrh.DataProducer{b, c}, config.dataProducerPlugins)
 }
 
 // phaseRecorder records the order in which the director runs producers and

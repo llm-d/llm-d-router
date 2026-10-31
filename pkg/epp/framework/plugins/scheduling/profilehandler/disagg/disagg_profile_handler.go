@@ -33,11 +33,12 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
@@ -219,7 +220,7 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 // compile-time assertions
 var (
 	_ scheduling.ProfileHandler = &Handler{}
-	_ requestcontrol.PreRequest = &Handler{}
+	_ fwkrh.PreRequest          = &Handler{}
 	_ plugin.ProducerPlugin     = &Handler{}
 	_ plugin.ConsumerPlugin     = &Handler{}
 )
@@ -301,7 +302,7 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
 		},
 		Optional: map[plugin.DataKey]any{},
 	}

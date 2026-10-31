@@ -29,7 +29,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
@@ -73,11 +73,11 @@ func (p *declaringPlugin) Admit(_ context.Context, request *fwksched.InferenceRe
 	return nil
 }
 
-func (p *declaringPlugin) ResponseHeader(_ context.Context, request *fwksched.InferenceRequest, _ *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (p *declaringPlugin) ResponseHeader(_ context.Context, request *fwksched.InferenceRequest, _ *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 	p.visit(request, nil)
 }
 
-func (p *declaringPlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, _ *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (p *declaringPlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, _ *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 	p.visit(request, nil)
 }
 
@@ -135,7 +135,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 		withEndpoints bool
 	}{
 		{
-			name: fwkrc.RequestHeaderExtensionPoint,
+			name: fwkrh.RequestHeaderExtensionPoint,
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithRequestHeaderPlugins(p)
 			},
@@ -145,7 +145,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 			wantCalls: 1,
 		},
 		{
-			name: fwkrc.ScreenerExtensionPoint,
+			name: fwkrh.ScreenerExtensionPoint,
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithScreeners(p)
 			},
@@ -156,7 +156,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 			withEndpoints: true,
 		},
 		{
-			name: fwkrc.AdmissionExtensionPoint,
+			name: fwkrh.AdmissionExtensionPoint,
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithAdmissionPlugins(p)
 			},
@@ -168,7 +168,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 			withEndpoints: true,
 		},
 		{
-			name: fwkrc.ResponseReceivedExtensionPoint,
+			name: fwkrh.ResponseReceivedExtensionPoint,
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithResponseReceivedPlugins(p)
 			},
@@ -180,7 +180,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 			wantCalls: 1,
 		},
 		{
-			name: fwkrc.ResponseStreamingExtensionPoint + " streamed",
+			name: fwkrh.ResponseStreamingExtensionPoint + " streamed",
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithResponseStreamingPlugins(p)
 			},
@@ -193,7 +193,7 @@ func TestDirector_ScopesPluginsToTheirDeclarations(t *testing.T) {
 			wantCalls: 3,
 		},
 		{
-			name: fwkrc.ResponseStreamingExtensionPoint + " single body",
+			name: fwkrh.ResponseStreamingExtensionPoint + " single body",
 			configure: func(c *Config, p *declaringPlugin) *Config {
 				return c.WithResponseStreamingPlugins(p)
 			},

@@ -34,12 +34,12 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -95,9 +95,9 @@ func profileNames(m map[string]scheduling.SchedulerProfile) []string {
 // as the input token count.
 func completionsRequest(prompt string) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{
-			Completions:      &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			Completions:      &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{Raw: prompt}},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, len(prompt)/averageCharactersPerToken)}}},
 		},
 	}
 }
@@ -106,27 +106,27 @@ func completionsRequest(prompt string) *scheduling.InferenceRequest {
 // tokenized prompt with one multimodal feature per requested modality so
 // that multimodal detection (which reads TokenizedRequest) is exercised.
 func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest {
-	blocks := []fwkrh.ContentBlock{{Type: "text", Text: "describe this"}}
-	var features []fwkrh.MultiModalFeature
+	blocks := []fwkrequest.ContentBlock{{Type: "text", Text: "describe this"}}
+	var features []fwkrequest.MultiModalFeature
 	if hasImage {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "image_url", ImageURL: fwkrh.ImageBlock{URL: "https://example.com/img.jpg"}})
-		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
+		blocks = append(blocks, fwkrequest.ContentBlock{Type: "image_url", ImageURL: fwkrequest.ImageBlock{URL: "https://example.com/img.jpg"}})
+		features = append(features, fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasVideo {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "video_url"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
+		blocks = append(blocks, fwkrequest.ContentBlock{Type: "video_url"})
+		features = append(features, fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
 	if hasAudio {
-		blocks = append(blocks, fwkrh.ContentBlock{Type: "input_audio"})
-		features = append(features, fwkrh.MultiModalFeature{Modality: reqcommon.ModalityImage})
+		blocks = append(blocks, fwkrequest.ContentBlock{Type: "input_audio"})
+		features = append(features, fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage})
 	}
-	body := &fwkrh.InferenceRequestBody{
-		ChatCompletions: &fwkrh.ChatCompletionsRequest{
-			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Structured: blocks}}},
+	body := &fwkrequest.InferenceRequestBody{
+		ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Structured: blocks}}},
 		},
 	}
 	if len(features) > 0 {
-		body.TokenizedRequest = &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: features}}}
+		body.TokenizedRequest = &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{MultiModalFeatures: features}}}
 	}
 	return &scheduling.InferenceRequest{Body: body}
 }
@@ -135,15 +135,15 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 // count (len(prompt)/averageCharactersPerToken) on the tokenized prompt, preserving
 // any existing multimodal features.
 func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.InferenceRequest {
-	req.Body.Completions = &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}}
+	req.Body.Completions = &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{Raw: prompt}}
 	if req.Body.TokenizedRequest == nil {
-		req.Body.TokenizedRequest = &fwkrh.TokenizedRequest{}
+		req.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{}
 	}
 	tokenIDs := make([]uint32, len(prompt)/averageCharactersPerToken)
 	if len(req.Body.TokenizedRequest.Prompts) > 0 {
 		req.Body.TokenizedRequest.Prompts[0].TokenIDs = tokenIDs
 	} else {
-		req.Body.TokenizedRequest.Prompts = []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}
+		req.Body.TokenizedRequest.Prompts = []fwkrequest.PromptTokens{{TokenIDs: tokenIDs}}
 	}
 	return req
 }
@@ -216,18 +216,18 @@ func TestHasMultimodalContent(t *testing.T) {
 	}{
 		{"nil request", nil, false},
 		{"nil body", &scheduling.InferenceRequest{Body: nil}, false},
-		{"nil tokenized prompt", &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}, false},
+		{"nil tokenized prompt", &scheduling.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}, false},
 		{"empty multimodal features", &scheduling.InferenceRequest{
-			Body: &fwkrh.InferenceRequestBody{TokenizedRequest: &fwkrh.TokenizedRequest{}},
+			Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{}},
 		}, false},
 		{"text only", chatRequest(false, false, false), false},
 		{"image", chatRequest(true, false, false), true},
 		{"video", chatRequest(false, true, false), true},
 		{"audio", chatRequest(false, false, true), true},
 		{"feature present", &scheduling.InferenceRequest{
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{MultiModalFeatures: []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage}}}},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{MultiModalFeatures: []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage}}}},
 				},
 			},
 		}, true},
@@ -537,7 +537,7 @@ func TestHandler_Pick_PD_InputTokenError(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	// Request with neither Completions nor ChatCompletions → getUserInputLenInTokens fails.
 	req := &scheduling.InferenceRequest{
-		Body: &fwkrh.InferenceRequestBody{},
+		Body: &fwkrequest.InferenceRequestBody{},
 	}
 	profiles := map[string]scheduling.SchedulerProfile{
 		defaultDecodeProfile:  &mockProfile{},

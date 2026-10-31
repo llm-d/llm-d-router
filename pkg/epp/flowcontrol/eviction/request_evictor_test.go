@@ -30,7 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -86,7 +86,7 @@ func TestRequestEvictor_ResponseBody_DeregistersEvictChannel(t *testing.T) {
 	require.NoError(t, re.PreRequest(ctx, request, makeSchedulingResult()))
 	require.NotNil(t, re.EvictionRegistry().Get("req-1"))
 
-	re.ResponseBody(ctx, request, &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, request, &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Nil(t, re.EvictionRegistry().Get("req-1"), "EvictCh should be deregistered after completion")
 	assert.Equal(t, 0, re.queue.InFlightLen())
@@ -104,7 +104,7 @@ func TestRequestEvictor_SharedRequestIDHeaderTrackedIndependently(t *testing.T) 
 	require.NoError(t, re.PreRequest(ctx, second, makeSchedulingResult()))
 	require.Equal(t, 2, re.queue.InFlightLen())
 
-	re.ResponseBody(ctx, first, &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, first, &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Nil(t, re.EvictionRegistry().Get("req-1"))
 	assert.NotNil(t, re.EvictionRegistry().Get("req-2"), "completing one request must not untrack another")
@@ -177,7 +177,7 @@ func TestRequestEvictor_RaceBetweenEvictAndCompletion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for _, req := range requests {
-			re.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+			re.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -234,7 +234,7 @@ func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 
 	// The ResponseBody from the first eviction fires via defer in real code.
 	// Simulate it here.
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	// Re-track and evict again.
 	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
@@ -260,7 +260,7 @@ func TestRequestEvictor_CleanupWorksWithNoOpEvictor(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, re.PreRequest(ctx, makeInferenceRequest("req-1", -1), makeSchedulingResult()))
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	assert.Equal(t, 0, re.queue.InFlightLen())
 }
@@ -294,15 +294,15 @@ func TestRequestEvictor_EvictionTerminatedListener_NotifiedOncePerEvictedRequest
 	evictedID := evicted[0]
 
 	// Stream termination for the evicted request notifies; the idempotent second cleanup does not.
-	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
-	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &fwkrh.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(evictedID, -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	// A naturally completing request must not notify.
 	naturalID := "req-natural"
 	if evictedID == naturalID {
 		naturalID = "req-evicted"
 	}
-	re.ResponseBody(ctx, makeInferenceRequest(naturalID, -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest(naturalID, -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -330,7 +330,7 @@ func TestRequestEvictor_FailedEviction_DoesNotNotifyListener(t *testing.T) {
 	assert.Empty(t, evicted, "failed eviction should evict nothing")
 
 	// The request later completes naturally: still no notification.
-	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &requestcontrol.Response{EndOfStream: true}, nil)
+	re.ResponseBody(ctx, makeInferenceRequest("req-1", -1), &fwkrh.Response{EndOfStream: true}, nil)
 
 	mu.Lock()
 	defer mu.Unlock()

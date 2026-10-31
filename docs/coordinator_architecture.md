@@ -286,7 +286,7 @@ pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
 request. Client-provided values of the coordinator-owned headers are discarded: EPP
 routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 `x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
-(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)),
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requesthandling/screener/endpointpin/README.md)),
 and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.

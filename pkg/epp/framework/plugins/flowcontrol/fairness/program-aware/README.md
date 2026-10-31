@@ -1,7 +1,7 @@
 # Program-Aware Fairness Policy
 
 **Type:** `program-aware-fairness`
-**Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
+**Interfaces:** `flowcontrol.FairnessPolicy`, `requesthandling.PreRequest`, `requesthandling.ResponseBodyProcessor`
 
 The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID on each request, which the Director derives from the fairness ID header (`x-llm-d-inference-fairness-id`) and the agent-identity attribute resolved from session headers, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level. When `requestHandler.composeFairnessIDs` is enabled and a request carries both a tenant fairness ID and a session identity, the Director composes them into a `<tenant>/<session>` ID so each session gets its own queue; see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools).
 

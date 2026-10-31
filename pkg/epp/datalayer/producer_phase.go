@@ -18,7 +18,7 @@ package datalayer
 
 import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // ResolveDataProducerPhases assigns every DataProducer among plugins to a
@@ -30,11 +30,11 @@ import (
 //
 // An explicit DataProducerPhaseScheduling is never overridden; a screener that
 // consumes such a producer's key fails ValidateAndOrderDataDependencies.
-func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkrc.DataProducerPhase) map[string]fwkrc.DataProducerPhase {
-	producersByKey := map[plugin.DataKey][]fwkrc.DataProducer{}
-	var producers []fwkrc.DataProducer
+func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkrh.DataProducerPhase) map[string]fwkrh.DataProducerPhase {
+	producersByKey := map[plugin.DataKey][]fwkrh.DataProducer{}
+	var producers []fwkrh.DataProducer
 	for _, p := range plugins {
-		producer, ok := p.(fwkrc.DataProducer)
+		producer, ok := p.(fwkrh.DataProducer)
 		if !ok {
 			continue
 		}
@@ -44,7 +44,7 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 		}
 	}
 
-	phases := make(map[string]fwkrc.DataProducerPhase, len(producers))
+	phases := make(map[string]fwkrh.DataProducerPhase, len(producers))
 	for _, producer := range producers {
 		if phase, ok := explicit[producer.TypedName().Name]; ok {
 			phases[producer.TypedName().Name] = phase
@@ -53,12 +53,12 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 
 	var pending []plugin.Plugin
 	for _, p := range plugins {
-		if _, ok := p.(fwkrc.Screener); ok {
+		if _, ok := p.(fwkrh.Screener); ok {
 			pending = append(pending, p)
 		}
 	}
 	for _, producer := range producers {
-		if phases[producer.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+		if phases[producer.TypedName().Name] == fwkrh.DataProducerPhaseRequestHandling {
 			pending = append(pending, producer)
 		}
 	}
@@ -77,7 +77,7 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 					if _, assigned := phases[name]; assigned {
 						continue
 					}
-					phases[name] = fwkrc.DataProducerPhaseRequestHandling
+					phases[name] = fwkrh.DataProducerPhaseRequestHandling
 					pending = append(pending, producer)
 				}
 			}
@@ -86,7 +86,7 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 
 	for _, producer := range producers {
 		if _, assigned := phases[producer.TypedName().Name]; !assigned {
-			phases[producer.TypedName().Name] = fwkrc.DataProducerPhaseScheduling
+			phases[producer.TypedName().Name] = fwkrh.DataProducerPhaseScheduling
 		}
 	}
 	return phases
