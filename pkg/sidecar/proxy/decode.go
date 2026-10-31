@@ -146,6 +146,15 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// The decoder rejects an invalid min_tokens; an unchunked request returns that 400 to the client unchanged.
+	minTokens, hasMinTokens := toInt(body[reqcommon.FieldMinTokens])
+	if hasMinTokens && (minTokens < 0 || (originalMaxTokens > 0 && minTokens > originalMaxTokens)) {
+		logger.V(logging.DEBUG).Info("chunked decode: invalid min_tokens, using regular decode",
+			"minTokens", minTokens, "maxTokens", originalMaxTokens)
+		regularDecode()
+		return
+	}
+
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
@@ -228,10 +237,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// min_tokens would otherwise exceed the lowered per-chunk max_tokens.
 		// Once the floor has been met, drop it so a later chunk is not forced
 		// to suppress EOS and does not get min_tokens > max_tokens.
-		// An invalid client value is forwarded unchanged so the first chunk
-		// fails with the same 400 as an unchunked request.
-		if minTokens, ok := toInt(body[reqcommon.FieldMinTokens]); ok &&
-			minTokens >= 0 && (originalMaxTokens < 0 || minTokens <= originalMaxTokens) {
+		if hasMinTokens {
 			if remainingMin := minTokens - totalTokens; remainingMin > 0 {
 				chunkReq[reqcommon.FieldMinTokens] = min(remainingMin, chunkBudget)
 			} else {
