@@ -4,8 +4,9 @@
 
 Routes inference requests based on a token count, with optional filtering.
 Scoring is always applied; filtering is off by default. The routing length is
-the longest prompt's token count unless `reusableTokensProducerName` enables P2P
-cache subtraction.
+the total prompt length unless `reusableTokensProducerName` enables P2P cache
+subtraction. With the default label, a multi-prompt request routes on its
+longest prompt, as described in [Token Counting](#token-counting).
 
 **Use Cases:**
 - Route short prompts to pods with smaller GPU memory.
@@ -63,8 +64,11 @@ Reads per-prompt tokens from `request.Body.TokenizedRequest`. A
 tokenizer-free `estimate` backend when none is configured.
 
 A request can carry several prompts, for example a `/v1/completions` prompt
-array. The model server checks each prompt against its maximum model length
-separately, so the routing length is the token count of the longest prompt.
+array. The default label `llm-d.ai/context-length-range` describes the context
+length a pod supports, and the model server checks each prompt against its
+maximum model length separately, so with that label the routing length is the
+token count of the longest prompt. Any other label, such as a prefill work
+range or an accelerator capability range, routes on the total across prompts.
 
 When `reusableTokensProducerName` is configured, the plugin requires the
 name-bound attribute from that `p2p-source-producer`. Missing request data at
