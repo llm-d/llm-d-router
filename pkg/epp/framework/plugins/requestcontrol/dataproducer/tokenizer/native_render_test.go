@@ -61,15 +61,17 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 	for _, tt := range []struct {
 		name, path, body string
 		parser           fwkrh.Parser
+		renders          bool
+		wantPrompts      [][]uint32
 	}{
-		{"chat", "/v1/chat/completions", ` {"model":"adapter","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"z":9007199254740993,"a":1e0}}}],"extra":{"z":1,"a":2}} `, openai.NewOpenAIParser()},
-		{"messages", "/v1/messages", ` {"model":"adapter","max_tokens":10,"system":[{"type":"text","text":"x-anthropic-billing-header: unchanged"}],"messages":[{"role":"user","content":[{"type":"future","payload":{"z":1,"a":2}}]}],"tools":[{"name":"f","input_schema":{"properties":{"z":{},"a":{}}}}],"output_config":{"effort":"high"},"chat_template_kwargs":{"enable_thinking":false}} `, anthropic.NewAnthropicParser()},
-		{"agentic messages", "/v1/messages", `{"model":"adapter","max_tokens":8,"system":"x-anthropic-billing-header: keep","messages":[{"role":"user","content":"run"},{"role":"system","content":"inline"},{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"tool_use","id":"call_1","name":"run","input":{"z":9007199254740993,"a":1e0}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"ok"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}],"tools":[{"name":"run","input_schema":{"properties":{"z":{"type":"number"},"a":{"type":"number"}}}}],"output_config":{"effort":"high"},"chat_template_kwargs":{"z":1,"enable_thinking":false}}`, anthropic.NewAnthropicParser()},
-		{"completions", "/v1/completions", ` {"model":"adapter","prompt":"hi","extra":{"z":9007199254740993,"a":1e0}} `, openai.NewOpenAIParser()},
-		{"completion tokens", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3,4],"truncate_prompt_tokens":2,"add_special_tokens":false} `, openai.NewOpenAIParser()},
-		{"nested completion tokens", "/v1/completions", ` {"model":"adapter","prompt":[[1,2],[3,4]],"max_tokens":4,"truncate_prompt_tokens":-1} `, openai.NewOpenAIParser()},
-		{"one string array", "/v1/completions", ` {"model":"adapter","prompt":["hello"]} `, openai.NewOpenAIParser()},
-		{"string array", "/v1/completions", ` {"model":"adapter","prompt":["hello","world"]} `, openai.NewOpenAIParser()},
+		{"chat", "/v1/chat/completions", ` {"model":"adapter","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"z":9007199254740993,"a":1e0}}}],"extra":{"z":1,"a":2}} `, openai.NewOpenAIParser(), true, [][]uint32{{3, 4}}},
+		{"messages", "/v1/messages", ` {"model":"adapter","max_tokens":10,"system":[{"type":"text","text":"x-anthropic-billing-header: unchanged"}],"messages":[{"role":"user","content":[{"type":"future","payload":{"z":1,"a":2}}]}],"tools":[{"name":"f","input_schema":{"properties":{"z":{},"a":{}}}}],"output_config":{"effort":"high"},"chat_template_kwargs":{"enable_thinking":false}} `, anthropic.NewAnthropicParser(), true, [][]uint32{{3, 4}}},
+		{"agentic messages", "/v1/messages", `{"model":"adapter","max_tokens":8,"system":"x-anthropic-billing-header: keep","messages":[{"role":"user","content":"run"},{"role":"system","content":"inline"},{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"sig"},{"type":"tool_use","id":"call_1","name":"run","input":{"z":9007199254740993,"a":1e0}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"ok"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}],"tools":[{"name":"run","input_schema":{"properties":{"z":{"type":"number"},"a":{"type":"number"}}}}],"output_config":{"effort":"high"},"chat_template_kwargs":{"z":1,"enable_thinking":false}}`, anthropic.NewAnthropicParser(), true, [][]uint32{{3, 4}}},
+		{"completions", "/v1/completions", ` {"model":"adapter","prompt":"hi","extra":{"z":9007199254740993,"a":1e0}} `, openai.NewOpenAIParser(), true, [][]uint32{{3, 4}}},
+		{"completion tokens", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3,4],"truncate_prompt_tokens":2,"add_special_tokens":false} `, openai.NewOpenAIParser(), false, [][]uint32{{1, 2, 3, 4}}},
+		{"nested completion tokens", "/v1/completions", ` {"model":"adapter","prompt":[[1,2],[3,4]],"max_tokens":4,"truncate_prompt_tokens":-1} `, openai.NewOpenAIParser(), false, [][]uint32{{1, 2}, {3, 4}}},
+		{"one string array", "/v1/completions", ` {"model":"adapter","prompt":["hello"]} `, openai.NewOpenAIParser(), true, [][]uint32{{3, 4}}},
+		{"string array", "/v1/completions", ` {"model":"adapter","prompt":["hello","world"]} `, openai.NewOpenAIParser(), true, [][]uint32{{3, 4}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []byte
@@ -94,9 +96,17 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 			p.backend = renderBackend{tk: renderer, modelName: "probe-model"}
 			req := &scheduling.InferenceRequest{Body: parsed.Body, TargetModel: "adapter", Headers: map[string]string{"authorization": "Bearer native-render"}}
 			require.NoError(t, p.Produce(context.Background(), req, nil))
-			require.Equal(t, tt.path+"/render", path)
-			require.Equal(t, tt.body, string(got))
-			require.Equal(t, [][]uint32{{3, 4}}, [][]uint32{req.Body.TokenizedRequest.Prompts[0].TokenIDs})
+			ids := make([][]uint32, len(req.Body.TokenizedRequest.Prompts))
+			for i, prompt := range req.Body.TokenizedRequest.Prompts {
+				ids[i] = prompt.TokenIDs
+			}
+			require.Equal(t, tt.wantPrompts, ids)
+			if tt.renders {
+				require.Equal(t, tt.path+"/render", path)
+				require.Equal(t, tt.body, string(got))
+			} else {
+				require.Empty(t, path)
+			}
 
 			unrewritten, err := tt.parser.ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": tt.path})
 			require.NoError(t, err)
@@ -107,6 +117,9 @@ func TestNativeRenderPreservesRequest(t *testing.T) {
 			require.NoError(t, err)
 			assertNativeFieldsUnchanged(t, []byte(tt.body), lateBody)
 
+			if !tt.renders {
+				return
+			}
 			// A resolved model and late routing metadata must not reorder content.
 			parsed.Body.TokenizedRequest = nil
 			rewriter := tt.parser.(fwkrh.ModelNameRewriter)

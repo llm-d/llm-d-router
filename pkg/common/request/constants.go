@@ -55,7 +55,11 @@ const (
 	PseudoHeaderStatus = ":status"
 	HeaderStatus       = "status"
 
-	FieldKVTransferParams     = "kv_transfer_params"
+	FieldKVTransferParams = "kv_transfer_params"
+	// FieldPromptTokenIDs is the kv_transfer_params field carrying
+	// pre-tokenized prompt token IDs. vLLM's chat path consumes it in place of
+	// templating and tokenizing the request's messages.
+	FieldPromptTokenIDs       = "prompt_token_ids"
 	FieldECTransferParams     = "ec_transfer_params"
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
