@@ -13,12 +13,16 @@ the SBOM enumerates what the image contains.
 | `ghcr.io/llm-d/llm-d-router-disagg-sidecar` | yes | yes |
 | `ghcr.io/llm-d/llm-d-router-coordinator` | yes | yes |
 | Helm charts under `ghcr.io/llm-d/charts/` | no | no |
+| SBOM files attached to a GitHub Release | yes | n/a |
 
 Development images built from `main` use the same names with a `-dev` suffix
 (`llm-d-router-endpoint-picker-dev`) and are covered identically.
 
 Release images tagged `v0.10.0` and earlier carry neither an attestation nor
 an SBOM. The commands below report a missing attestation for them.
+
+The SBOM files attached to GitHub Releases are signed from the first release
+after this change. Earlier releases have the files but no attestation for them.
 
 ## Prerequisites
 
@@ -186,6 +190,27 @@ $ docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .SBOM }}' 
     | jq '.["linux/amd64"].SPDX' > epp-sbom.spdx.json
 ```
 
+## Verify the SBOM files attached to a release
+
+Each GitHub Release carries one SPDX file per image and platform plus
+`sbom-digests.txt`, which maps every file to the image digest it describes. The
+release workflow signs these files before uploading them, so a downloaded copy
+can be checked without pulling the image.
+
+These attestations are made by `ci-release.yaml` itself, not by the reusable
+build workflow, so that is the signer identity to name:
+
+```console
+$ TAG=<release tag>
+$ gh release download "$TAG" --repo llm-d/llm-d-router --pattern '*.spdx.json' --pattern 'sbom-digests.txt'
+$ gh attestation verify "llm-d-router-endpoint-picker-$TAG-linux-amd64.spdx.json" \
+    --repo llm-d/llm-d-router \
+    --signer-workflow llm-d/llm-d-router/.github/workflows/ci-release.yaml
+```
+
+A file that was edited after upload no longer matches the signed digest and
+fails with `no attestations found`.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -195,6 +220,7 @@ $ docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{ json .SBOM }}' 
 | `Sigstore verification failed` (`gh`) or `failed to verify certificate identity` (`cosign`) | The signer identity names a calling workflow. Use `ci-build-images.yaml`. |
 | `gh` prints nothing and exits 0 | Output is redirected. The report goes to standard error. Test the exit status. |
 | `.SBOM` returns `{}` | The artifact carries no SBOM. See Coverage. |
+| `no attestations found` for a release SBOM file | The file was changed after download, or the release predates SBOM file signing. See Coverage. |
 
 ## Related
 
