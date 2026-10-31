@@ -34,7 +34,7 @@ import (
 
 // makeEndpoint creates a test endpoint with the given prefix cache match ratio
 // (prefixMatch out of 100 total blocks), predicted TTFT, and in-flight tokens.
-func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwksched.Endpoint {
+func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64, uncached int64) fwksched.Endpoint {
 	meta := &fwkdl.EndpointMetadata{
 		ID: types.NamespacedName{Name: name, Namespace: "default"},
 	}
@@ -48,6 +48,9 @@ func makeEndpoint(name string, prefixMatch int, ttft float64, tokens int64) fwks
 	if tokens >= 0 {
 		ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens})
 	}
+	if uncached >= 0 {
+		ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: uncached})
+	}
 	return ep
 }
 
@@ -58,14 +61,15 @@ func newTestPlugin(config Config) *Plugin {
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		uncachedRequestDataKey:       attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}
 }
 
 func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 0, 10, 0),
-		makeEndpoint("b", 90, 20, 0),
+		makeEndpoint("a", 0, 10, 0, -1),
+		makeEndpoint("b", 90, 20, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "affinityThreshold=0 should return all")
@@ -73,7 +77,7 @@ func TestFilter_AffinityThresholdDisabled(t *testing.T) {
 
 func TestFilter_SingleEndpoint(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80})
-	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0)}
+	endpoints := []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0, -1)}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "single endpoint should always pass")
 }
@@ -81,9 +85,9 @@ func TestFilter_SingleEndpoint(t *testing.T) {
 func TestFilter_NoStickyEndpoints(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 10, 10, 0),
-		makeEndpoint("b", 20, 20, 0),
-		makeEndpoint("c", 50, 30, 0),
+		makeEndpoint("a", 10, 10, 0, -1),
+		makeEndpoint("b", 20, 20, 0, -1),
+		makeEndpoint("c", 50, 30, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 3, len(result), "no sticky endpoints should return all")
@@ -92,9 +96,9 @@ func TestFilter_NoStickyEndpoints(t *testing.T) {
 func TestFilter_NarrowToSticky(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 100, 0),
-		makeEndpoint("b", 85, 120, 0),
-		makeEndpoint("c", 10, 50, 0),
+		makeEndpoint("a", 90, 100, 0, -1),
+		makeEndpoint("b", 85, 120, 0, -1),
+		makeEndpoint("c", 10, 50, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "should narrow to sticky endpoints")
@@ -103,8 +107,8 @@ func TestFilter_NarrowToSticky(t *testing.T) {
 func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 500, 0),
-		makeEndpoint("b", 10, 50, 0),
+		makeEndpoint("a", 90, 500, 0, -1),
+		makeEndpoint("b", 10, 50, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "TTFT penalty should break stickiness")
@@ -115,8 +119,8 @@ func TestFilter_TTFTPenaltyBreaksStickiness(t *testing.T) {
 func TestFilter_ThroughputTTFTBreaksStickiness(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 10, 500),
-		makeEndpoint("b", 10, 10, 50),
+		makeEndpoint("a", 90, 10, 500, -1),
+		makeEndpoint("b", 10, 10, 50, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "throughput-derived TTFT penalty should break stickiness")
@@ -125,8 +129,8 @@ func TestFilter_ThroughputTTFTBreaksStickiness(t *testing.T) {
 func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 1000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 10, 500),
-		makeEndpoint("b", 10, 10, 50),
+		makeEndpoint("a", 90, 10, 500, -1),
+		makeEndpoint("b", 10, 10, 50, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "throughput-derived TTFT within threshold should NOT break stickiness")
@@ -136,8 +140,8 @@ func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
 func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 0, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 10, 5000), // Huge load
-		makeEndpoint("b", 10, 10, 50),
+		makeEndpoint("a", 90, 10, 5000, -1), // Huge load
+		makeEndpoint("b", 10, 10, 50, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 1, len(result), "maxTTFTPenaltyMs=0 should NOT break stickiness")
@@ -147,8 +151,8 @@ func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
 func TestFilter_ExplorationProbability(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 100, 0),
-		makeEndpoint("b", 10, 50, 0),
+		makeEndpoint("a", 90, 100, 0, -1),
+		makeEndpoint("b", 10, 50, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, 2, len(result), "epsilon=1.0 should always skip gate")
@@ -157,8 +161,8 @@ func TestFilter_ExplorationProbability(t *testing.T) {
 func TestFilter_StickyMissingSignalPredictor(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, -1, 0),
-		makeEndpoint("b", 10, 50, 0),
+		makeEndpoint("a", 90, -1, 0, -1),
+		makeEndpoint("b", 10, 50, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, endpoints, result, "missing sticky signal should return all endpoints")
@@ -167,8 +171,8 @@ func TestFilter_StickyMissingSignalPredictor(t *testing.T) {
 func TestFilter_NonStickyMissingSignalPredictor(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, 5000, 0),
-		makeEndpoint("b", 10, -1, 0),
+		makeEndpoint("a", 90, 5000, 0, -1),
+		makeEndpoint("b", 10, -1, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, endpoints, result, "missing non-sticky signal should return all endpoints")
@@ -177,8 +181,8 @@ func TestFilter_NonStickyMissingSignalPredictor(t *testing.T) {
 func TestFilter_NonStickyMissingSignalThroughput(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, -1, 500),
-		makeEndpoint("b", 10, -1, -1),
+		makeEndpoint("a", 90, -1, 500, -1),
+		makeEndpoint("b", 10, -1, -1, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, endpoints, result, "missing non-sticky signal should return all endpoints")
@@ -187,8 +191,8 @@ func TestFilter_NonStickyMissingSignalThroughput(t *testing.T) {
 func TestFilter_StickyMissingSignalThroughput(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, -1, -1),
-		makeEndpoint("b", 10, -1, 50),
+		makeEndpoint("a", 90, -1, -1, -1),
+		makeEndpoint("b", 10, -1, 50, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, endpoints, result, "missing sticky signal should return all endpoints")
@@ -197,11 +201,56 @@ func TestFilter_StickyMissingSignalThroughput(t *testing.T) {
 func TestFilter_MissingSignalBothPredictor(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor})
 	endpoints := []fwksched.Endpoint{
-		makeEndpoint("a", 90, -1, 0),
-		makeEndpoint("b", 10, -1, 0),
+		makeEndpoint("a", 90, -1, 0, -1),
+		makeEndpoint("b", 10, -1, 0, -1),
 	}
 	result := p.Filter(context.Background(), nil, endpoints)
 	assert.Equal(t, endpoints, result, "missing signals should return all endpoints")
+}
+
+func TestFilter_BusyWarmEndpointPreservesStickiness(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, PeakPrefillThroughput: 1000, TTFTSource: TTFTSourcePrefillThroughput, TTFTEstimate: TTFTEstimateFull})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 10000, 100),
+		makeEndpoint("b", 90, -1, 7000, 2000),
+		makeEndpoint("c", 10, -1, 1000, 8000),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 2, len(result), "uncached tokens should keep sticky set within penalty threshold")
+}
+
+func TestFilter_FlagOffIgnoresUncachedTokens(t *testing.T) {
+	// Same endpoints as BusyWarmEndpointPreservesStickiness but with
+	// TTFTEstimate: TTFTEstimateBackLog.
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, PeakPrefillThroughput: 1000, TTFTSource: TTFTSourcePrefillThroughput, TTFTEstimate: TTFTEstimateBackLog})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 10000, 100),
+		makeEndpoint("b", 90, -1, 7000, 2000),
+		makeEndpoint("c", 10, -1, 1000, 8000),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 3, len(result), "without the flag, uncached tokens are ignored and stickiness breaks")
+}
+
+func TestFilter_StickyLoadExceedsPenaltyThreshold(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, PeakPrefillThroughput: 1000, TTFTSource: TTFTSourcePrefillThroughput, TTFTEstimate: TTFTEstimateFull})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 10000, 100),
+		makeEndpoint("b", 90, -1, 7000, 2000),
+		makeEndpoint("c", 10, -1, 100, 3000),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 3, len(result), "sticky load exceeds penalty threshold")
+}
+
+func TestFilter_MissingUncachedTokensReturnAll(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, PeakPrefillThroughput: 1000, TTFTSource: TTFTSourcePrefillThroughput, TTFTEstimate: TTFTEstimateFull})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("a", 90, -1, 500, -1),
+		makeEndpoint("b", 10, -1, 100, 200),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, endpoints, result, "missing uncached tokens signal should return all endpoints")
 }
 
 func TestConsumes_ConditionalAttributes(t *testing.T) {
@@ -228,6 +277,16 @@ func TestConsumes_ConditionalAttributes(t *testing.T) {
 	assert.True(t, ok)
 	_, ok = consumed.Required[p.latencyPredictionInfoDataKey]
 	assert.False(t, ok)
+	_, ok = consumed.Required[p.uncachedRequestDataKey]
+	assert.False(t, ok)
+
+	// Gate using peak prefill throughput with uncached tokens.
+	p = newTestPlugin(Config{MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000, TTFTEstimate: TTFTEstimateFull})
+	consumed = p.Consumes()
+	_, ok = consumed.Required[p.inFlightLoadDataKey]
+	assert.True(t, ok)
+	_, ok = consumed.Required[p.uncachedRequestDataKey]
+	assert.True(t, ok)
 }
 
 func TestFactory_ValidConfig(t *testing.T) {
@@ -245,6 +304,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, 0.95, p.config.AffinityThreshold)
 	assert.Equal(t, DefaultConfig.ExplorationProbability, p.config.ExplorationProbability)
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
+	assert.Equal(t, DefaultConfig.TTFTEstimate, p.config.TTFTEstimate)
 
 	// Setting only explorationProbability should preserve defaults for other params.
 	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"explorationProbability": 0.05}`)), nil)
@@ -253,6 +313,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConfig.AffinityThreshold, p.config.AffinityThreshold)
 	assert.Equal(t, 0.05, p.config.ExplorationProbability)
 	assert.Equal(t, DefaultConfig.MaxTTFTPenaltyMs, p.config.MaxTTFTPenaltyMs)
+	assert.Equal(t, DefaultConfig.TTFTEstimate, p.config.TTFTEstimate)
 
 	// Setting only maxTTFTPenaltyMs should preserve defaults for other params.
 	plugin, err = Factory("test", fwkplugin.StrictDecoder([]byte(`{"maxTTFTPenaltyMs": 10000}`)), nil)
@@ -263,6 +324,7 @@ func TestFactory_PartialConfigPreservesDefaults(t *testing.T) {
 	assert.Equal(t, float64(10000), p.config.MaxTTFTPenaltyMs)
 	assert.Equal(t, DefaultConfig.TTFTSource, p.config.TTFTSource)
 	assert.Equal(t, DefaultConfig.PeakPrefillThroughput, p.config.PeakPrefillThroughput)
+	assert.Equal(t, DefaultConfig.TTFTEstimate, p.config.TTFTEstimate)
 }
 
 func TestFactory_InvalidAffinityThreshold(t *testing.T) {
@@ -322,6 +384,14 @@ func TestFactory_InvalidTTFTSource(t *testing.T) {
 	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftSource": "bogus"}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ttftSource must be")
+}
+
+// An unrecognized ttftEstimate value is rejected rather than silently treated as
+// the default.
+func TestFactory_InvalidTTFTEstimate(t *testing.T) {
+	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"ttftEstimate": "bogus"}`)), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ttftEstimate must be")
 }
 
 // An empty ttftSource is rejected rather than silently defaulted: the default is

@@ -54,6 +54,10 @@ var _ fwksched.Filter = &Plugin{}
 // choice also determines which producer attribute the filter consumes.
 type TTFTSource string
 
+// TTFTEstimate selects the method of estimation for the TTFT per-endpoint with
+// the prefillThroughput source.
+type TTFTEstimate string
+
 const (
 	// TTFTSourceLatencyPredictor reads predicted TTFT from LatencyPredictionInfo
 	// (produced by the predicted-latency-producer).
@@ -62,6 +66,14 @@ const (
 	// PeakPrefillThroughput, reading InFlightLoad (produced by the
 	// in-flight-load-producer).
 	TTFTSourcePrefillThroughput TTFTSource = "prefillThroughput"
+)
+
+const (
+	// TTFTEstimateBackLog estimates TTFT only from the endpoint's current load (InFlightLoad).
+	TTFTEstimateBackLog TTFTEstimate = "backlog"
+	// TTFTEstimateFull estimates TTFT from the endpoint's current load (InFlightLoad) plus the
+	// request impact (uncachedRequestTokens).
+	TTFTEstimateFull TTFTEstimate = "full"
 )
 
 type Config struct {
@@ -91,6 +103,11 @@ type Config struct {
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
 
+	// TTFTEstimate selects how to compute the TTFT when the source is set to prefillThroughput.
+	// TTFTEstimateBackLog (default) only accounts inFlightTokens and TTFTEstimateFull also handles
+	// the request's uncached tokens.
+	TTFTEstimate TTFTEstimate `json:"ttftEstimate,omitempty"`
+
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
@@ -104,6 +121,7 @@ var DefaultConfig = Config{
 
 	// Calibrated for Qwen 32B on 2x H100 80GB (TP=2), vLLM 0.19; see README.
 	PeakPrefillThroughput: 15928,
+	TTFTEstimate:          TTFTEstimateBackLog,
 }
 
 type Plugin struct {
@@ -112,6 +130,7 @@ type Plugin struct {
 	prefixMatchDataKey           fwkplugin.DataKey
 	latencyPredictionInfoDataKey fwkplugin.DataKey
 	inFlightLoadDataKey          fwkplugin.DataKey
+	uncachedRequestDataKey       fwkplugin.DataKey
 }
 
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -135,6 +154,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		uncachedRequestDataKey:       attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 	}, nil
 }
 
@@ -156,6 +176,11 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("ttftSource must be %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, c.TTFTSource)
 	}
+	switch c.TTFTEstimate {
+	case TTFTEstimateBackLog, TTFTEstimateFull:
+	default:
+		return fmt.Errorf("ttftEstimate must be %q or %q, got %q", TTFTEstimateBackLog, TTFTEstimateFull, c.TTFTEstimate)
+	}
 	if !c.usesLatencyPredictor() && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
 		return errors.New("peakPrefillThroughput must be > 0 when ttftSource is prefillThroughput")
 	}
@@ -167,6 +192,10 @@ func (c *Config) validate() error {
 // latencyPredictor selects the predictor.
 func (c *Config) usesLatencyPredictor() bool {
 	return c.TTFTSource == TTFTSourceLatencyPredictor
+}
+
+func (c *Config) usesFullEstimate() bool {
+	return c.TTFTEstimate == TTFTEstimateFull
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {
@@ -269,6 +298,9 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 			required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
 		} else {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+			if p.config.usesFullEstimate() {
+				required[p.uncachedRequestDataKey] = attrconcurrency.UncachedRequestTokens{}
+			}
 		}
 	}
 	return fwkplugin.DataDependencies{Required: required}
@@ -316,6 +348,13 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
+	if p.config.usesFullEstimate() {
+		uncachedTokens, ok := p.uncachedRequestTokens(ep)
+		if !ok {
+			return 0, false
+		}
+		tokens += uncachedTokens
+	}
 	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
@@ -325,6 +364,18 @@ func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Tokens, true
+		}
+	}
+	return 0, false
+}
+
+// uncachedRequestTokens returns the number of tokens from the current request
+// that this endpoint would need to prefill from scratch. If the attribute is
+// absent, it returns ok=false so the caller can treat the signal as missing.
+func (p *Plugin) uncachedRequestTokens(ep fwksched.Endpoint) (int64, bool) {
+	if raw, ok := ep.Get(p.uncachedRequestDataKey); ok {
+		if uncached, ok := raw.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
+			return uncached.Tokens, true
 		}
 	}
 	return 0, false
