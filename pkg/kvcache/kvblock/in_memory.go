@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -109,8 +110,9 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 
 // InMemoryIndex is an in-memory implementation of the Index interface.
 type InMemoryIndex struct {
-	// mu protects engine-key-level check-and-act operations (Evict's allEmpty
-	// check + mapping removal vs Add's pod entry insertion) to prevent TOCTOU races.
+	// mu orders Add's pod entry inserts against the removal of an emptied request
+	// key and of an engine key mapping whose request keys are all empty. Add takes
+	// it also when engineKeys is nil. Lookup does not take it.
 	mu sync.Mutex
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
@@ -362,8 +364,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
+	// Hold m.mu, also when engineKeys is nil: Evict and Clear re-check emptiness
+	// under m.mu before removing a request key or an engine key mapping, so they
+	// cannot remove one while these entries are being inserted.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -411,8 +414,9 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 
 	switch keyType {
 	case EngineKey:
-		// Resolve each engine key's request keys and evict the pod entries
-		// without holding mu (engineToRequestKeys and data are thread-safe).
+		// Resolve each engine key's request keys and evict the pod entries.
+		// Do not hold mu here: evictPodsFromRequestKey takes it to remove an
+		// emptied request key.
 		groups := make([][]BlockHash, len(keys))
 		for i, key := range keys {
 			rks, found := m.engineToRequestKeys.Peek(key)
@@ -473,29 +477,37 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 		return
 	}
 
-	// Remove key from main cache if empty.
-	// Hold m.mu as Add does, so an Add that already fetched this cache finishes
-	// its write before the emptiness re-check below.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	currentCache, stillExists := m.data.Peek(requestKey)
-	if !stillExists || currentCache == nil {
-		return
-	}
-
-	currentCache.mu.Lock()
-	if len(currentCache.entries) == 0 {
-		m.data.Remove(requestKey)
+	removed := m.removeIfEmptyLocked(requestKey)
+	m.mu.Unlock()
+	if removed && traceLogger.Enabled() {
 		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
 	}
-	currentCache.mu.Unlock()
+}
+
+// removeIfEmptyLocked removes requestKey from the index if its cache holds no
+// entries, and reports whether it did. The caller holds m.mu, so an Add that
+// already fetched this cache has finished its write before the check.
+func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash) bool {
+	podCache, found := m.data.Peek(requestKey)
+	if !found || podCache == nil {
+		return false
+	}
+
+	podCache.mu.Lock()
+	defer podCache.mu.Unlock()
+	if len(podCache.entries) != 0 {
+		return false
+	}
+	m.data.Remove(requestKey)
+	return true
 }
 
 // Clear removes every entry for the pod from the index, across all device tiers.
 // O(N) over the index for a pod it has held, and O(1) for a pod it never held,
-// such as one whose first snapshot is about to load. Reuses
-// evictPodsFromRequestKey for race-safe removal. It takes m.mu only briefly, to
-// remove an emptied key, and Lookup does not take m.mu, so Clear does not stall Lookup.
+// such as one whose first snapshot is about to load. It removes the request keys
+// it empties under one m.mu hold per chunk of keys, re-checking each key's
+// emptiness under the lock. Lookup does not take m.mu, so Clear does not stall Lookup.
 //
 // Context cancellation does not interrupt Clear.
 //
@@ -514,6 +526,7 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 		return nil
 	}
 
+	var emptied []BlockHash
 	for _, requestKey := range m.data.Keys() {
 		// Peek so a clear does not promote LRU recency on keys it scans.
 		podCache, found := m.data.Peek(requestKey)
@@ -521,11 +534,19 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 			continue
 		}
 
-		matched := podCache.matching(podIdentifier)
-
-		if len(matched) > 0 {
-			m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
+		if matched := podCache.matching(podIdentifier); len(matched) > 0 && podCache.removeAll(matched) {
+			emptied = append(emptied, requestKey)
 		}
+	}
+
+	// One m.mu hold per chunk bounds how long Clear blocks Add.
+	const clearChunkSize = 1024
+	for chunk := range slices.Chunk(emptied, clearChunkSize) {
+		m.mu.Lock()
+		for _, requestKey := range chunk {
+			m.removeIfEmptyLocked(requestKey)
+		}
+		m.mu.Unlock()
 	}
 
 	traceLogger.Info("cleared pod from index", "pod", podIdentifier)
