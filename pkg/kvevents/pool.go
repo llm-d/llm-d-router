@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -39,7 +40,24 @@ import (
 const (
 	defaultEventSourceDeviceTier = kvcache.GPUTier
 	defaultPodSelector           = ""
+	maxPendingBlockStores        = 4096
+	pendingBlockStoreTTL         = time.Minute
 )
+
+type pendingStoreKey struct {
+	podIdentifier    string
+	deviceTier       string
+	groupIdx         int
+	dataParallelRank int
+	parentEngineKey  kvblock.BlockHash
+}
+
+type pendingBlockStore struct {
+	event            *BlockStoredEvent
+	modelName        string
+	dataParallelRank *int
+	enqueuedAt       time.Time
+}
 
 // normalizeDeviceTier lowercases an event's device tier and defaults an empty
 // value to the GPU source tier. Store and remove events that mean the same tier
@@ -196,8 +214,11 @@ type Pool struct {
 	// options on every call, which is not free on the per-message event path.
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
 	// span construction on the default path.
-	tracer trace.Tracer
-	wg     sync.WaitGroup
+	tracer        trace.Tracer
+	pendingMu     sync.Mutex
+	pendingStores map[pendingStoreKey][]pendingBlockStore
+	pendingCount  int
+	wg            sync.WaitGroup
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -230,6 +251,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
+		pendingStores:  make(map[pendingStoreKey][]pendingBlockStore),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -452,9 +474,162 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 			"podIdentifier", podIdentifier)
 	}
 	p.dedup.clear(podIdentifier)
+	p.clearPendingStores(podIdentifier)
 	if retire {
 		p.groupCatalog.Clear(podIdentifier)
 	}
+}
+
+func pendingRank(rank *int) int {
+	if rank == nil {
+		return noDataParallelRank
+	}
+	return *rank
+}
+
+func (p *Pool) purgeExpiredPendingStores(now time.Time) {
+	for key, stores := range p.pendingStores {
+		kept := stores[:0]
+		for _, store := range stores {
+			if now.Sub(store.enqueuedAt) >= pendingBlockStoreTTL {
+				p.pendingCount--
+				continue
+			}
+			kept = append(kept, store)
+		}
+		if len(kept) == 0 {
+			delete(p.pendingStores, key)
+		} else {
+			p.pendingStores[key] = kept
+		}
+	}
+	metrics.KVEventStoresPending.Set(float64(p.pendingCount))
+}
+
+func (p *Pool) enqueuePendingStore(
+	event *BlockStoredEvent, podIdentifier, modelName string, rank *int,
+) {
+	now := time.Now()
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	p.purgeExpiredPendingStores(now)
+	if p.pendingCount >= maxPendingBlockStores {
+		return
+	}
+	key := pendingStoreKey{
+		podIdentifier:    podIdentifier,
+		deviceTier:       normalizeDeviceTier(event.DeviceTier),
+		groupIdx:         groupIdxOrNoGroup(event.GroupIdx),
+		dataParallelRank: pendingRank(rank),
+		parentEngineKey:  kvblock.BlockHash(event.ParentHash),
+	}
+	copyEvent := *event
+	var rankCopy *int
+	if rank != nil {
+		rankValue := *rank
+		rankCopy = &rankValue
+	}
+	p.pendingStores[key] = append(p.pendingStores[key], pendingBlockStore{
+		event: &copyEvent, modelName: modelName, dataParallelRank: rankCopy, enqueuedAt: now,
+	})
+	p.pendingCount++
+	metrics.KVEventStoresPending.Set(float64(p.pendingCount))
+	metrics.KVEventStoresPendingEnqueued.Inc()
+}
+
+func (p *Pool) replayPendingStores(
+	ctx context.Context, podIdentifier string, groupIdx int,
+	rank *int, engineKeys []kvblock.BlockHash,
+) {
+	if len(engineKeys) == 0 {
+		return
+	}
+	var stores []pendingBlockStore
+	p.pendingMu.Lock()
+	p.purgeExpiredPendingStores(time.Now())
+	seen := make(map[pendingStoreKey]struct{}, len(engineKeys))
+	for key, waiting := range p.pendingStores {
+		if key.podIdentifier != podIdentifier || key.groupIdx != groupIdx ||
+			key.dataParallelRank != pendingRank(rank) {
+			continue
+		}
+		for _, engineKey := range engineKeys {
+			if key.parentEngineKey != engineKey {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				break
+			}
+			seen[key] = struct{}{}
+			stores = append(stores, waiting...)
+			delete(p.pendingStores, key)
+			break
+		}
+	}
+	p.pendingCount -= len(stores)
+	metrics.KVEventStoresPending.Set(float64(p.pendingCount))
+	p.pendingMu.Unlock()
+
+	for _, store := range stores {
+		metrics.KVEventStoresPendingReplayed.Inc()
+		p.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{store.event}, DataParallelRank: store.dataParallelRank,
+		}, podIdentifier, store.modelName)
+	}
+}
+
+func (p *Pool) clearPendingStores(podIdentifier string) {
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	for key, stores := range p.pendingStores {
+		if key.podIdentifier != podIdentifier {
+			continue
+		}
+		p.pendingCount -= len(stores)
+		delete(p.pendingStores, key)
+	}
+	metrics.KVEventStoresPending.Set(float64(p.pendingCount))
+}
+
+func (p *Pool) discardPendingStores(
+	podIdentifier, deviceTier string, groupIdx int, rank *int, blockHashes []uint64,
+) {
+	if len(blockHashes) == 0 {
+		return
+	}
+	hashes := make(map[uint64]struct{}, len(blockHashes))
+	for _, hash := range blockHashes {
+		hashes[hash] = struct{}{}
+	}
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	for key, stores := range p.pendingStores {
+		if key.podIdentifier != podIdentifier ||
+			key.deviceTier != normalizeDeviceTier(deviceTier) ||
+			key.groupIdx != groupIdx || key.dataParallelRank != pendingRank(rank) {
+			continue
+		}
+		for i, store := range stores {
+			removed := false
+			for _, hash := range store.event.BlockHashes {
+				if _, ok := hashes[hash]; ok {
+					removed = true
+					break
+				}
+			}
+			if removed {
+				p.pendingCount--
+				stores = append(stores[:i], stores[i+1:]...)
+				break
+			}
+		}
+		if len(stores) == 0 {
+			delete(p.pendingStores, key)
+		} else {
+			p.pendingStores[key] = stores
+		}
+	}
+	metrics.KVEventStoresPending.Set(float64(p.pendingCount))
 }
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
@@ -551,6 +726,9 @@ func (p *Pool) handleDeviceTierUpdate(
 
 // processEventBatch processes a batch of events using type switches.
 func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
+	p.pendingMu.Lock()
+	p.purgeExpiredPendingStores(time.Now())
+	p.pendingMu.Unlock()
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 	debugLogger.V(logging.TRACE).Info("Processing event batch",
 		"podID", podIdentifier,
@@ -562,6 +740,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			dataParallelRank := batch.DataParallelRank
 
 			// Scope for reference-counting this store against duplicate removes.
 			// Mirrors the index eviction identity (pod, tier, group); DP rank is
@@ -650,7 +829,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 							"blockSize", ev.BlockSize)
 						continue
 					}
-					debugLogger.Error(err, "Failed to get request key for parent block",
+					debugLogger.Info("Parent block mapping is pending",
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
 						"groupIdx", ev.GroupIdx,
@@ -658,6 +837,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)
+					p.enqueuePendingStore(ev, podIdentifier, modelName, dataParallelRank)
 					continue
 				}
 				parentRequestKey = key
@@ -729,6 +909,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			if len(requestKeys) == 0 {
 				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
 					p.dedup.trackStore(storeScope, ev.BlockHashes)
+					p.replayPendingStores(ctx, podIdentifier,
+						groupIdxOrNoGroup(ev.GroupIdx), dataParallelRank, engineKeys)
 				}
 				continue
 			}
@@ -741,9 +923,13 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				continue
 			}
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
+			p.replayPendingStores(ctx, podIdentifier,
+				groupIdxOrNoGroup(ev.GroupIdx), dataParallelRank, engineKeys)
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			p.discardPendingStores(podIdentifier, deviceTier,
+				groupIdxOrNoGroup(ev.GroupIdx), batch.DataParallelRank, ev.BlockHashes)
 			if ev.GroupIdx != nil {
 				groupIdx := kvblock.GroupID(*ev.GroupIdx)
 				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)

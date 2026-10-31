@@ -333,6 +333,69 @@ func TestCanonicalWritePath_FallbackLegacy(t *testing.T) {
 	}
 }
 
+func TestBlockStoredOutOfOrderParentReplay(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+	pod := "pod-out-of-order"
+
+	store := func(engineHash, parentHash uint64) {
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{engineHash},
+				Tokens:      makeTokens(16),
+				ParentHash:  parentHash,
+			},
+		}}, pod, "test-model")
+	}
+
+	// The child events arrive before their parent mappings. P2 waits for P1,
+	// and P1 waits for P0.
+	store(102, 101)
+	store(100, 0)
+	store(101, 100)
+
+	pool.pendingMu.Lock()
+	assert.Zero(t, pool.pendingCount)
+	pool.pendingMu.Unlock()
+
+	parent := kvblock.EmptyBlockHash
+	for _, engineHash := range []uint64{100, 101, 102} {
+		requestKeys, err := tp.TokensToKVBlockKeys(parent, makeTokens(16), "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, requestKeys, 1)
+		result, err := idx.Lookup(ctx, requestKeys, nil)
+		require.NoError(t, err)
+		require.Len(t, result[requestKeys[0]], 1)
+		assert.Equal(t, pod, result[requestKeys[0]][0].PodIdentifier)
+		parent = requestKeys[0]
+		mapped, err := idx.GetRequestKey(ctx, kvblock.BlockHash(engineHash))
+		require.NoError(t, err)
+		assert.Equal(t, parent, mapped)
+	}
+}
+
+func TestBlockRemovedCancelsOnePendingStore(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pod := "pod-pending-remove"
+	pool, _, _ := newTestPool(t, 16)
+
+	child := &BlockStoredEvent{
+		BlockHashes: []uint64{202},
+		Tokens:      makeTokens(16),
+		ParentHash:  201,
+		DeviceTier:  "CPU",
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{child, child}}, pod, "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{BlockHashes: []uint64{202}, DeviceTier: "CPU"},
+	}}, pod, "test-model")
+
+	pool.pendingMu.Lock()
+	assert.Equal(t, 1, pool.pendingCount)
+	pool.pendingMu.Unlock()
+}
+
 // TestCanonicalWritePath_ManyToOne verifies the many:1 mapping when engine block size (16)
 // is smaller than canonical (64): 4 engine keys map to 1 canonical request key.
 func TestCanonicalWritePath_ManyToOne(t *testing.T) {
