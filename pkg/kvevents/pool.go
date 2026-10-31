@@ -582,6 +582,7 @@ func realignExtraFeaturesWithContinuation(engineFeatures []*kvblock.BlockExtraFe
 				// Placeholders don't overlap, so only the item ending engine block i-1
 				// can continue into block i, where it is the first entry. Block i-1 is
 				// searched whole because block 0 ends with the cache salt, if any.
+				// The event offset, when present, tells a continuation from a new copy.
 				cont := mmContinuationUnknown
 				if i < len(continuation) {
 					cont = continuation[i]
@@ -758,12 +759,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				parentRequestKey = key
 			}
 
+			var loraName string
+			if ev.LoraName != nil {
+				loraName = *ev.LoraName
+			}
 			var extraFeatures []*kvblock.BlockExtraFeatures
 			if ev.ExtraKeys != nil {
-				var loraName string
-				if ev.LoraName != nil {
-					loraName = *ev.LoraName
-				}
 				var err error
 				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys, loraName)
 				if err != nil {
@@ -783,10 +784,6 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// since TokensToKVBlockKeys will produce zero keys anyway.
 					extraFeatures = nil
 				} else if len(extraFeatures) != canonicalBlockCount {
-					var loraName string
-					if ev.LoraName != nil {
-						loraName = *ev.LoraName
-					}
 					extraFeatures = realignExtraFeaturesWithContinuation(extraFeatures,
 						firstMMContinuation(ev.ExtraKeys, loraName), p.tokenProcessor.BlockSize(), len(ev.Tokens))
 				}
