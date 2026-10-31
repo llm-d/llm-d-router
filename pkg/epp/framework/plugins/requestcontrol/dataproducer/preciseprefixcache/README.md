@@ -60,9 +60,10 @@ rank's events reach the index under `<address>:<port>/rank-<RankIndex>`, so the
 ranks of one pod are scored separately. Without pod discovery, the index learns
 a pod's identity from the event topic, and all ranks of a pod share one score.
 
-A rank endpoint's subscriber dials `socketPort` plus the endpoint's
+A rank endpoint's subscriber dials `socketPort` plus the endpoint's global
 data-parallel rank, as vLLM offsets each engine's publisher, replay and snapshot
-ports.
+ports. For the base ports to configure on each pod, see the wide-EP notes in
+[docs/disaggregation.md](../../../../../../../docs/disaggregation.md#kv-connector---kv-connector).
 
 A subscriber that joins mid-stream, or sees the engine restart, loads the
 snapshot instead of replaying buffered events, then follows live events after
