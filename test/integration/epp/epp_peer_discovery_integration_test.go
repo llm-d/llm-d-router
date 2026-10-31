@@ -100,6 +100,10 @@ func TestIntegrationPeerPlugin(t *testing.T) {
 	require.NoError(t, runtime.Start(ctx, mgr))
 
 	store := statesync.NewMemoryPeerStore()
+	// Wired the way the runner wires it: the syncer takes the source before
+	// discovery starts, so it reads whatever discovery delivers later.
+	syncer := &peerConsumingSyncer{}
+	syncer.SetPeerSource(store)
 	require.NoError(t, mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
 		return peerDisc.Start(ctx, fwkdl.NewPeerNotifier(store))
 	}))))
@@ -135,4 +139,20 @@ func TestIntegrationPeerPlugin(t *testing.T) {
 		peers := store.Peers()
 		return len(peers) == 1 && peers[0].Address == peer1IP
 	}, eventWaitTimeout, eventPollInterval, "expected epp-2 to be removed")
+
+	// The syncer sees the same set, so discovery reaches a consumer rather
+	// than stopping at the store.
+	peers := syncer.source.Peers()
+	require.Len(t, peers, 1)
+	require.Equal(t, peer1IP, peers[0].Address)
 }
+
+// peerConsumingSyncer stands in for a peer-to-peer syncer with no external
+// store: it holds the source and reads the live set through it.
+type peerConsumingSyncer struct {
+	source fwkdl.PeerSource
+}
+
+func (s *peerConsumingSyncer) SetPeerSource(source fwkdl.PeerSource) { s.source = source }
+
+var _ fwkdl.PeerConsumer = (*peerConsumingSyncer)(nil)

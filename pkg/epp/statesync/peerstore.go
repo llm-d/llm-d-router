@@ -34,7 +34,10 @@ type MemoryPeerStore struct {
 	peers map[types.NamespacedName]fwkdl.PeerMetadata
 }
 
-var _ fwkdl.PeerStore = (*MemoryPeerStore)(nil)
+var (
+	_ fwkdl.PeerStore  = (*MemoryPeerStore)(nil)
+	_ fwkdl.PeerSource = (*MemoryPeerStore)(nil)
+)
 
 // NewMemoryPeerStore returns an empty MemoryPeerStore.
 func NewMemoryPeerStore() *MemoryPeerStore {

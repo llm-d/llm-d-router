@@ -47,6 +47,28 @@ type PeerStore interface {
 	PeerDelete(id types.NamespacedName)
 }
 
+// PeerSource reads the live peer set. It is the consuming half of PeerStore:
+// discovery writes through PeerUpsert and PeerDelete, a consumer reads through
+// Peers. MemoryPeerStore implements both.
+type PeerSource interface {
+	// Peers returns a snapshot of the current peer set, ordered by ID. The set
+	// may be incomplete while discovery converges and changes as replicas come
+	// and go, so callers must tolerate a partial set. A missing peer degrades
+	// sync accuracy; it does not block serving.
+	Peers() []PeerMetadata
+}
+
+// PeerConsumer is an optional interface for a CrossReplicaSyncer that needs the
+// discovered peer set, such as a peer-to-peer syncer with no external store. A
+// syncer backed by its own store, such as Redis, does not implement it.
+type PeerConsumer interface {
+	// SetPeerSource supplies the source of the live peer set. The runtime calls
+	// it once during startup, before serving begins, and only when peer
+	// discovery is configured. A syncer that is never given a source has no
+	// peers and must still serve.
+	SetPeerSource(source PeerSource)
+}
+
 // NewPeerNotifier wraps a PeerStore as a PeerNotifier.
 func NewPeerNotifier(store PeerStore) PeerNotifier {
 	return &peerNotifier{store: store}

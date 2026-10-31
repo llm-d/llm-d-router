@@ -105,6 +105,39 @@ The in-tree `MemoryPeerStore` (`pkg/epp/statesync/peerstore.go`) is a
 goroutine-safe, in-memory implementation that also exposes a `Peers()` method
 returning a deterministically ordered snapshot of the current peer set.
 
+### Consuming the peer set
+
+`PeerSource` is the reading half of the same store:
+
+```go
+type PeerSource interface {
+    Peers() []PeerMetadata
+}
+```
+
+A `CrossReplicaSyncer` that needs the peer set, such as a peer-to-peer syncer
+with no external store, opts in by implementing `PeerConsumer`:
+
+```go
+type PeerConsumer interface {
+    SetPeerSource(source PeerSource)
+}
+```
+
+When `dataLayer.discovery.peers` is configured, the runner creates the store,
+hands it to the configured syncer if that syncer implements `PeerConsumer`, and
+starts discovery against the same store. The syncer holds the source rather than
+a snapshot, so peers discovered after startup are visible without re-wiring and
+departing replicas drop out of its view.
+
+A syncer backed by its own store, such as `redis-syncer`, does not implement
+`PeerConsumer`. Peer discovery then still runs and the set is left unread; the
+runner logs that nothing consumes it.
+
+The peer set may be incomplete while discovery converges and changes as replicas
+come and go, so a consumer must tolerate a partial set. A missing peer degrades
+sync accuracy; it does not block serving.
+
 ---
 
 ## In-tree plugin: k8s-peer-discovery
