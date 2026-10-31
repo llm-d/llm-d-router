@@ -62,8 +62,8 @@ func (s *Server) runConcurrentPD(
 ) {
 	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
-	ctx, cancelDecode := context.WithCancel(r.Context())
-	defer cancelDecode()
+	ctx, cancelDecode := context.WithCancelCause(r.Context())
+	defer cancelDecode(nil)
 
 	// WithoutCancel for prefill so it isn't aborted when the decode response finishes first.
 	prefillCtx, cancelPrefill := context.WithCancel(context.WithoutCancel(ctx))
@@ -122,7 +122,7 @@ func (s *Server) runConcurrentPD(
 		if isHTTPError(pw.statusCode) && prefillCtx.Err() == nil {
 			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-			cancelDecode()
+			cancelDecode(&prefillFailedError{response: pw})
 		}
 		metrics.RecordPrefillDuration(prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
@@ -199,6 +199,16 @@ func (s *Server) runConcurrentPD(
 			semconv.LLMDPDProxyConcurrentPD(true),
 		)
 	}
+}
+
+// prefillFailedError is the cause a concurrent decode request is cancelled
+// with when prefill fails. The decoder proxy returns its response to the client.
+type prefillFailedError struct {
+	response *bufferedResponseWriter
+}
+
+func (e *prefillFailedError) Error() string {
+	return fmt.Sprintf("prefill returned %d", e.response.statusCode)
 }
 
 // recordDecodeAbort records decode duration and a decode error when decode
