@@ -91,8 +91,8 @@ func TestResolveDataProducerPhases(t *testing.T) {
 			plugins: []fwkplugin.Plugin{tokenizer, prefixCache, inflight, predictor,
 				&mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{prefix: nil}}},
 			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhasePreScreen,
-				"prefix":    fwkrc.DataProducerPhasePreScreen,
+				"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
+				"prefix":    fwkrc.DataProducerPhaseRequestHandling,
 				"inflight":  fwkrc.DataProducerPhaseScheduling,
 				"predictor": fwkrc.DataProducerPhaseScheduling,
 			},
@@ -101,28 +101,28 @@ func TestResolveDataProducerPhases(t *testing.T) {
 			name: "optional screener dependency promotes",
 			plugins: []fwkplugin.Plugin{inflight,
 				&mockScreener{name: "s", optional: map[fwkplugin.DataKey]any{load: nil}}},
-			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhasePreScreen},
+			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
 		},
 		{
 			name: "screener implementing ResponseHeaderProcessor promotes",
 			plugins: []fwkplugin.Plugin{inflight,
 				&mockResponseHeaderScreener{mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{load: nil}}}},
-			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhasePreScreen},
+			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
 		},
 		{
-			name:     "explicit PreScreen producer promotes its inputs",
+			name:     "explicit RequestHandling producer promotes its inputs",
 			plugins:  []fwkplugin.Plugin{tokenizer, prefixCache},
-			explicit: map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhasePreScreen},
+			explicit: map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhaseRequestHandling},
 			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhasePreScreen,
-				"prefix":    fwkrc.DataProducerPhasePreScreen,
+				"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
+				"prefix":    fwkrc.DataProducerPhaseRequestHandling,
 			},
 		},
 		{
-			name:     "explicit PreScreen without consumers",
+			name:     "explicit RequestHandling without consumers",
 			plugins:  []fwkplugin.Plugin{inflight},
-			explicit: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhasePreScreen},
-			want:     map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhasePreScreen},
+			explicit: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
+			want:     map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
 		},
 		{
 			name: "explicit Scheduling is not overridden",
@@ -137,7 +137,7 @@ func TestResolveDataProducerPhases(t *testing.T) {
 		{
 			name:     "explicit entry for a non-producer is ignored",
 			plugins:  []fwkplugin.Plugin{inflight, &mockScreener{name: "s"}},
-			explicit: map[string]fwkrc.DataProducerPhase{"s": fwkrc.DataProducerPhasePreScreen},
+			explicit: map[string]fwkrc.DataProducerPhase{"s": fwkrc.DataProducerPhaseRequestHandling},
 			want:     map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseScheduling},
 		},
 	}
@@ -156,14 +156,14 @@ func TestValidateAndOrderDataDependenciesProducerPhases(t *testing.T) {
 		consumes: map[fwkplugin.DataKey]any{tokens: nil}}
 	screener := &mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{prefix: nil}}
 	responseHeaderScreener := &mockResponseHeaderScreener{mockScreener{name: "rh", consumes: map[fwkplugin.DataKey]any{prefix: nil}}}
-	preScreen := map[string]fwkrc.DataProducerPhase{
-		"tokenizer": fwkrc.DataProducerPhasePreScreen,
-		"prefix":    fwkrc.DataProducerPhasePreScreen,
+	requestHandling := map[string]fwkrc.DataProducerPhase{
+		"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
+		"prefix":    fwkrc.DataProducerPhaseRequestHandling,
 	}
 
-	t.Run("screener consumes PreScreen producers", func(t *testing.T) {
+	t.Run("screener consumes RequestHandling producers", func(t *testing.T) {
 		ordered, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{screener, prefixCache, tokenizer},
-			WithDataProducerPhases(preScreen))
+			WithDataProducerPhases(requestHandling))
 		require.NoError(t, err)
 		assert.Equal(t, []string{"tokenizer/mock", "prefix/mock", "s/screener"}, ordered)
 	})
@@ -171,7 +171,7 @@ func TestValidateAndOrderDataDependenciesProducerPhases(t *testing.T) {
 	t.Run("screener consuming a Scheduling producer fails with a hint", func(t *testing.T) {
 		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{screener, prefixCache, tokenizer})
 		assert.ErrorContains(t, err, "producer prefix/mock needs to be executed before consumer s/screener")
-		assert.ErrorContains(t, err, "run the producer in the PreScreen phase")
+		assert.ErrorContains(t, err, "run the producer in the RequestHandling phase")
 	})
 
 	t.Run("screener implementing ResponseHeaderProcessor is ordered as a screener", func(t *testing.T) {
@@ -179,15 +179,15 @@ func TestValidateAndOrderDataDependenciesProducerPhases(t *testing.T) {
 		assert.ErrorContains(t, err, "needs to be executed before consumer rh/screener")
 
 		_, err = ValidateAndOrderDataDependencies([]fwkplugin.Plugin{responseHeaderScreener, prefixCache, tokenizer},
-			WithDataProducerPhases(preScreen))
+			WithDataProducerPhases(requestHandling))
 		assert.NoError(t, err)
 	})
 
-	t.Run("PreScreen producer consuming a Scheduling producer fails", func(t *testing.T) {
+	t.Run("RequestHandling producer consuming a Scheduling producer fails", func(t *testing.T) {
 		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{prefixCache, tokenizer},
-			WithDataProducerPhases(map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhasePreScreen}))
+			WithDataProducerPhases(map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhaseRequestHandling}))
 		assert.ErrorContains(t, err, "producer tokenizer/mock needs to be executed before consumer prefix/mock")
-		assert.ErrorContains(t, err, "run the producer in the PreScreen phase")
+		assert.ErrorContains(t, err, "run the producer in the RequestHandling phase")
 	})
 
 	t.Run("resolved phases validate", func(t *testing.T) {

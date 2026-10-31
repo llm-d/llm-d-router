@@ -52,16 +52,12 @@ schedulingProfiles:
 requestHandler:
   dataProducers:
   - pluginRef: tokenizer
-    phase: PreScreen
   - pluginRef: other
 `), logging.NewTestLogger())
 	require.NoError(t, err)
 	require.NotNil(t, cfg.RequestHandler)
-	assert.Equal(t, []configapiv1.DataProducerConfig{
-		{PluginRef: "tokenizer", Phase: configapiv1.DataProducerPhasePreScreen},
-		{PluginRef: "other"},
-	}, cfg.RequestHandler.DataProducers)
-	assert.Contains(t, cfg.RequestHandler.String(), "DataProducers: [{PluginRef: tokenizer, Phase: PreScreen}, {PluginRef: other}]")
+	assert.Equal(t, []configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "other"}}, cfg.RequestHandler.DataProducers)
+	assert.Contains(t, cfg.RequestHandler.String(), "DataProducers: [{PluginRef: tokenizer}, {PluginRef: other}]")
 }
 
 func TestValidateDataProducers(t *testing.T) {
@@ -73,15 +69,8 @@ func TestValidateDataProducers(t *testing.T) {
 	}{
 		{name: "no entries"},
 		{
-			name: "every phase",
-			entries: []configapiv1.DataProducerConfig{
-				{PluginRef: "tokenizer", Phase: configapiv1.DataProducerPhasePreScreen},
-				{PluginRef: "prefix", Phase: configapiv1.DataProducerPhaseAuto},
-			},
-		},
-		{
-			name:    "omitted phase",
-			entries: []configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}},
+			name:    "listed producers",
+			entries: []configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "prefix"}},
 		},
 		{
 			name:    "undefined plugin",
@@ -90,13 +79,8 @@ func TestValidateDataProducers(t *testing.T) {
 		},
 		{
 			name:    "duplicate entry",
-			entries: []configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "tokenizer", Phase: configapiv1.DataProducerPhaseScheduling}},
+			entries: []configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "tokenizer"}},
 			wantErr: "data producer 'tokenizer' is listed more than once",
-		},
-		{
-			name:    "invalid phase",
-			entries: []configapiv1.DataProducerConfig{{PluginRef: "tokenizer", Phase: "BeforeScreen"}},
-			wantErr: "data producer 'tokenizer' has invalid phase 'BeforeScreen'",
 		},
 	}
 	for _, tt := range tests {
@@ -117,20 +101,16 @@ func TestValidateDataProducers(t *testing.T) {
 
 func TestBuildDataProducerPhases(t *testing.T) {
 	handle := testutils.NewTestHandle(context.Background())
-	for _, name := range []string{"tokenizer", "prefix", "auto"} {
+	for _, name := range []string{"tokenizer", "prefix", "unlisted"} {
 		handle.AddPlugin(name, &mockDataProducer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: "producer"}}})
 	}
 	handle.AddPlugin("scorer", &mockScorer{mockPlugin{t: fwkplugin.TypedName{Name: "scorer", Type: testScorerType}}})
 
-	phases, err := buildDataProducerPhases([]configapiv1.DataProducerConfig{
-		{PluginRef: "tokenizer", Phase: configapiv1.DataProducerPhasePreScreen},
-		{PluginRef: "prefix", Phase: configapiv1.DataProducerPhaseScheduling},
-		{PluginRef: "auto", Phase: configapiv1.DataProducerPhaseAuto},
-	}, handle)
+	phases, err := buildDataProducerPhases([]configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "prefix"}}, handle)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]fwkrc.DataProducerPhase{
-		"tokenizer": fwkrc.DataProducerPhasePreScreen,
-		"prefix":    fwkrc.DataProducerPhaseScheduling,
+		"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
+		"prefix":    fwkrc.DataProducerPhaseRequestHandling,
 	}, phases)
 
 	_, err = buildDataProducerPhases([]configapiv1.DataProducerConfig{{PluginRef: "scorer"}}, handle)

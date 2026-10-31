@@ -41,10 +41,10 @@ func TestConfigApplyDataProducerPhases(t *testing.T) {
 	config := NewConfig()
 	config.AddPlugins(a, b, c)
 	config.ApplyDataProducerPhases(map[string]fwkrc.DataProducerPhase{
-		"a": fwkrc.DataProducerPhasePreScreen,
+		"a": fwkrc.DataProducerPhaseRequestHandling,
 		"b": fwkrc.DataProducerPhaseScheduling,
 	})
-	assert.Equal(t, []fwkrc.DataProducer{a}, config.preScreenDataProducers)
+	assert.Equal(t, []fwkrc.DataProducer{a}, config.requestHandlingDataProducers)
 	assert.Equal(t, []fwkrc.DataProducer{b, c}, config.dataProducerPlugins)
 }
 
@@ -93,7 +93,7 @@ func (p *recordingProducer) Produce(_ context.Context, _ *fwksched.InferenceRequ
 	return nil
 }
 
-func preScreenTestRequest(t *testing.T, id string) (*handlers.RequestContext, *handlers.Request) {
+func requestHandlingTestRequest(t *testing.T, id string) (*handlers.RequestContext, *handlers.Request) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
 	require.NoError(t, err)
@@ -122,11 +122,11 @@ func singlePodSchedulingResult() *fwksched.SchedulingResult {
 	}
 }
 
-// TestDirector_RunsPreScreenProducersBeforeScreeners verifies that PreScreen
+// TestDirector_RunsRequestHandlingProducersBeforeScreeners verifies that RequestHandling
 // producers run on the located endpoints before screeners, that screeners and
 // Scheduling producers see their data, and that Scheduling producers run on
 // the screened endpoints.
-func TestDirector_RunsPreScreenProducersBeforeScreeners(t *testing.T) {
+func TestDirector_RunsRequestHandlingProducersBeforeScreeners(t *testing.T) {
 	preKey := fwkplugin.NewDataKey("pre", "recording")
 	schedKey := fwkplugin.NewDataKey("sched", "recording")
 	recorder := &phaseRecorder{}
@@ -143,25 +143,25 @@ func TestDirector_RunsPreScreenProducersBeforeScreeners(t *testing.T) {
 	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
 	dir.requestControlPlugins = *NewConfig().
 		WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
-		WithPreScreenDataProducers(pre).
+		WithRequestHandlingDataProducers(pre).
 		WithScreeners(screener).
 		WithDataProducerPlugins(sched)
 
-	reqCtx, request := preScreenTestRequest(t, "prescreen-order")
+	reqCtx, request := requestHandlingTestRequest(t, "request-handling-order")
 	parseResult, err := reqCtx.Parser.ParseRequest(ctx, request.RawBody, request.Headers)
 	require.NoError(t, err)
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"pre", "screener", "sched"}, recorder.order)
-	assert.True(t, sawPreData, "screener must see PreScreen producer data")
+	assert.True(t, sawPreData, "screener must see RequestHandling producer data")
 	assert.Equal(t, 1, pre.endpoints)
 	assert.Equal(t, 1, sched.endpoints)
 }
 
-// TestDirector_PreScreenProducerFailureSkipsDependents verifies that a failed
-// PreScreen producer leaves its keys missing for the Scheduling phase.
-func TestDirector_PreScreenProducerFailureSkipsDependents(t *testing.T) {
+// TestDirector_RequestHandlingProducerFailureSkipsDependents verifies that a failed
+// RequestHandling producer leaves its keys missing for the Scheduling phase.
+func TestDirector_RequestHandlingProducerFailureSkipsDependents(t *testing.T) {
 	preKey := fwkplugin.NewDataKey("pre", "recording")
 	schedKey := fwkplugin.NewDataKey("sched", "recording")
 	recorder := &phaseRecorder{}
@@ -172,10 +172,10 @@ func TestDirector_PreScreenProducerFailureSkipsDependents(t *testing.T) {
 	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
 	dir.requestControlPlugins = *NewConfig().
 		WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
-		WithPreScreenDataProducers(pre).
+		WithRequestHandlingDataProducers(pre).
 		WithDataProducerPlugins(sched)
 
-	reqCtx, request := preScreenTestRequest(t, "prescreen-failure")
+	reqCtx, request := requestHandlingTestRequest(t, "request-handling-failure")
 	parseResult, err := reqCtx.Parser.ParseRequest(ctx, request.RawBody, request.Headers)
 	require.NoError(t, err)
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
@@ -184,10 +184,10 @@ func TestDirector_PreScreenProducerFailureSkipsDependents(t *testing.T) {
 	assert.Equal(t, []string{"pre"}, recorder.order)
 }
 
-// TestDirector_ReleasesPreScreenProducerStateWhenScreenersEliminateAll
-// verifies that per-request state a PreScreen producer holds is released when
+// TestDirector_ReleasesRequestHandlingProducerStateWhenScreenersEliminateAll
+// verifies that per-request state a RequestHandling producer holds is released when
 // screeners remove every candidate.
-func TestDirector_ReleasesPreScreenProducerStateWhenScreenersEliminateAll(t *testing.T) {
+func TestDirector_ReleasesRequestHandlingProducerStateWhenScreenersEliminateAll(t *testing.T) {
 	producer := newRequestStateProducer("state")
 	screener := &mockScreener{name: "drop-all", screen: func([]fwksched.Endpoint) []fwksched.Endpoint { return nil }}
 	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{producer})
@@ -195,11 +195,11 @@ func TestDirector_ReleasesPreScreenProducerStateWhenScreenersEliminateAll(t *tes
 	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
 	dir.requestControlPlugins = *NewConfig().
 		WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
-		WithPreScreenDataProducers(producer).
+		WithRequestHandlingDataProducers(producer).
 		WithScreeners(screener).
 		WithPreRequestPlugins(producer)
 
-	reqCtx, request := preScreenTestRequest(t, "prescreen-eliminated")
+	reqCtx, request := requestHandlingTestRequest(t, "request-handling-eliminated")
 	parseResult, err := reqCtx.Parser.ParseRequest(ctx, request.RawBody, request.Headers)
 	require.NoError(t, err)
 	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)

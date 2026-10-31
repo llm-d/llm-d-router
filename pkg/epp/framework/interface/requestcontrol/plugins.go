@@ -37,9 +37,9 @@ const (
 	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
 
-// PreScreenDataProducerExtensionPoint names DataProducers that run in
-// DataProducerPhasePreScreen.
-const PreScreenDataProducerExtensionPoint = "PreScreenDataProducer"
+// RequestHandlingDataProducerExtensionPoint names DataProducers that run in
+// DataProducerPhaseRequestHandling.
+const RequestHandlingDataProducerExtensionPoint = "RequestHandlingDataProducer"
 
 // ConditionalDecodeHandledAttributeKey is the request-attribute key a
 // PreRequest plugin sets when it has evaluated the "Prefer: if-available"
@@ -50,7 +50,7 @@ const PreScreenDataProducerExtensionPoint = "PreScreenDataProducer"
 var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
 
 // Screener performs preliminary filtering of located endpoints after
-// DataProducerPhasePreScreen producers and before DataProducerPhaseScheduling
+// DataProducerPhaseRequestHandling producers and before DataProducerPhaseScheduling
 // producers, admission, and scheduling profiles run. Every screener sees the
 // same input set, and the framework intersects their results.
 type Screener interface {
@@ -117,9 +117,10 @@ type DataProducer interface {
 type DataProducerPhase string
 
 const (
-	// DataProducerPhasePreScreen runs the producer on the located endpoints
-	// before screeners, so screeners can consume its data.
-	DataProducerPhasePreScreen DataProducerPhase = "PreScreen"
+	// DataProducerPhaseRequestHandling runs the producer during request
+	// handling, on the located endpoints before screeners, so screeners can
+	// consume its data.
+	DataProducerPhaseRequestHandling DataProducerPhase = "RequestHandling"
 	// DataProducerPhaseScheduling runs the producer on the screened endpoints
 	// before admission and scheduling.
 	DataProducerPhaseScheduling DataProducerPhase = "Scheduling"

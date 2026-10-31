@@ -27,29 +27,29 @@ import (
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
-		requestHeaderPlugins:     []fwkrc.RequestHeaderProcessor{},
-		responders:               []fwkrc.Responder{},
-		screeners:                []fwkrc.Screener{},
-		admissionPlugins:         []fwkrc.Admitter{},
-		preScreenDataProducers:   []fwkrc.DataProducer{},
-		dataProducerPlugins:      []fwkrc.DataProducer{},
-		preRequestPlugins:        []fwkrc.PreRequest{},
-		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
-		responseStreamingPlugins: []fwkrc.ResponseBodyProcessor{},
+		requestHeaderPlugins:         []fwkrc.RequestHeaderProcessor{},
+		responders:                   []fwkrc.Responder{},
+		screeners:                    []fwkrc.Screener{},
+		admissionPlugins:             []fwkrc.Admitter{},
+		requestHandlingDataProducers: []fwkrc.DataProducer{},
+		dataProducerPlugins:          []fwkrc.DataProducer{},
+		preRequestPlugins:            []fwkrc.PreRequest{},
+		responseReceivedPlugins:      []fwkrc.ResponseHeaderProcessor{},
+		responseStreamingPlugins:     []fwkrc.ResponseBodyProcessor{},
 	}
 }
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
-	requestHeaderPlugins     []fwkrc.RequestHeaderProcessor
-	responders               []fwkrc.Responder
-	screeners                []fwkrc.Screener
-	admissionPlugins         []fwkrc.Admitter
-	preScreenDataProducers   []fwkrc.DataProducer
-	dataProducerPlugins      []fwkrc.DataProducer
-	preRequestPlugins        []fwkrc.PreRequest
-	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
-	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+	requestHeaderPlugins         []fwkrc.RequestHeaderProcessor
+	responders                   []fwkrc.Responder
+	screeners                    []fwkrc.Screener
+	admissionPlugins             []fwkrc.Admitter
+	requestHandlingDataProducers []fwkrc.DataProducer
+	dataProducerPlugins          []fwkrc.DataProducer
+	preRequestPlugins            []fwkrc.PreRequest
+	responseReceivedPlugins      []fwkrc.ResponseHeaderProcessor
+	responseStreamingPlugins     []fwkrc.ResponseBodyProcessor
 
 	// propagatePriority gates whether the director injects the resolved priority
 	// into the outbound request body. Off by default so the body is untouched.
@@ -81,7 +81,7 @@ func (c *Config) WithResponders(plugins ...fwkrc.Responder) *Config {
 	return c
 }
 
-// WithScreeners sets the screeners that narrow candidates after PreScreen data
+// WithScreeners sets the screeners that narrow candidates after RequestHandling data
 // production and before Scheduling data production and scheduling.
 func (c *Config) WithScreeners(screeners ...fwkrc.Screener) *Config {
 	c.screeners = screeners
@@ -116,21 +116,21 @@ func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config 
 	return c
 }
 
-// WithPreScreenDataProducers sets the given plugins as the DataProducer
-// plugins that run in fwkrc.DataProducerPhasePreScreen.
-func (c *Config) WithPreScreenDataProducers(plugins ...fwkrc.DataProducer) *Config {
-	c.preScreenDataProducers = plugins
+// WithRequestHandlingDataProducers sets the given plugins as the DataProducer
+// plugins that run in fwkrc.DataProducerPhaseRequestHandling.
+func (c *Config) WithRequestHandlingDataProducers(plugins ...fwkrc.DataProducer) *Config {
+	c.requestHandlingDataProducers = plugins
 	return c
 }
 
 // ApplyDataProducerPhases moves every DataProducer whose phase, keyed by
-// plugin name, is fwkrc.DataProducerPhasePreScreen from the Scheduling phase
-// to the PreScreen phase. Call it after AddPlugins and before OrderPlugins.
+// plugin name, is fwkrc.DataProducerPhaseRequestHandling from the Scheduling phase
+// to the RequestHandling phase. Call it after AddPlugins and before OrderPlugins.
 func (c *Config) ApplyDataProducerPhases(phases map[string]fwkrc.DataProducerPhase) {
 	scheduling := make([]fwkrc.DataProducer, 0, len(c.dataProducerPlugins))
 	for _, p := range c.dataProducerPlugins {
-		if phases[p.TypedName().Name] == fwkrc.DataProducerPhasePreScreen {
-			c.preScreenDataProducers = append(c.preScreenDataProducers, p)
+		if phases[p.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+			c.requestHandlingDataProducers = append(c.requestHandlingDataProducers, p)
 			continue
 		}
 		scheduling = append(scheduling, p)
@@ -190,7 +190,7 @@ func (c *Config) OrderPlugins(sortedPluginNames []string) {
 	c.requestHeaderPlugins = orderByName(c.requestHeaderPlugins, rank)
 	c.screeners = orderByName(c.screeners, rank)
 	c.admissionPlugins = orderByName(c.admissionPlugins, rank)
-	c.preScreenDataProducers = orderByName(c.preScreenDataProducers, rank)
+	c.requestHandlingDataProducers = orderByName(c.requestHandlingDataProducers, rank)
 	c.dataProducerPlugins = orderByName(c.dataProducerPlugins, rank)
 	c.preRequestPlugins = orderByName(c.preRequestPlugins, rank)
 	c.responders = orderByName(c.responders, rank)

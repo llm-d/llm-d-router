@@ -938,11 +938,11 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	// Add requestControl plugins
 	r.requestControlConfig.AddPlugins(handle.GetAllPlugins()...)
 	// Resolve producer phases after auto-created producers are added, so they
-	// follow the screeners and PreScreen producers that consume their data.
+	// follow the screeners and RequestHandling producers that consume their data.
 	producerPhases := datalayer.ResolveDataProducerPhases(handle.GetAllPlugins(), cfg.DataProducerPhases)
 	r.requestControlConfig.ApplyDataProducerPhases(producerPhases)
 	for name, phase := range producerPhases {
-		if phase == fwkrc.DataProducerPhasePreScreen {
+		if phase == fwkrc.DataProducerPhaseRequestHandling {
 			logger.Info("DataProducer runs before screeners", "plugin", name, "phase", phase)
 		}
 	}

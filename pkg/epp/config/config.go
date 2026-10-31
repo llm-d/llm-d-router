@@ -38,8 +38,9 @@ type Config struct {
 	// PropagatePriority mirrors requestHandler.propagatePriority: when true the
 	// director injects the resolved priority into the outbound request body.
 	PropagatePriority bool
-	// DataProducerPhases holds the phases set in requestHandler.dataProducers,
-	// keyed by plugin name. Producers set to Auto, or not listed, are absent.
+	// DataProducerPhases places the producers listed in
+	// requestHandler.dataProducers, keyed by plugin name, in
+	// DataProducerPhaseRequestHandling. Producers not listed are absent.
 	DataProducerPhases map[string]fwkrc.DataProducerPhase
 }
 

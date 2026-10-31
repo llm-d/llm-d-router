@@ -221,8 +221,8 @@ func producedKeySet(handle plugin.Handle) map[string]bool {
 // Define constants for layer execution order. Lower value means earlier execution.
 const (
 	FlowControlLayer = 0
-	// PreScreenLayer holds DataProducers in DataProducerPhasePreScreen.
-	PreScreenLayer = 1
+	// RequestHandlingProducerLayer holds DataProducers in DataProducerPhaseRequestHandling.
+	RequestHandlingProducerLayer = 1
 	// ScreenerLayer holds screeners, which run between the two DataProducer phases.
 	ScreenerLayer       = 2
 	RequestControlLayer = 3
@@ -241,8 +241,8 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string
 
 	// Request control plugins
 	if _, ok := plugin.(fwkrc.DataProducer); ok {
-		if producerPhases[plugin.TypedName().Name] == fwkrc.DataProducerPhasePreScreen {
-			return PreScreenLayer
+		if producerPhases[plugin.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+			return RequestHandlingProducerLayer
 		}
 		return RequestControlLayer
 	}
@@ -316,8 +316,8 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 						consumerLayer := pluginToLayerExecutionOrder(consumer, producerPhases)
 						if producerLayer > consumerLayer {
 							msg := "invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName
-							if _, ok := producer.(fwkrc.DataProducer); ok && (consumerLayer == PreScreenLayer || consumerLayer == ScreenerLayer) {
-								msg += "; run the producer in the " + string(fwkrc.DataProducerPhasePreScreen) + " phase"
+							if _, ok := producer.(fwkrc.DataProducer); ok && (consumerLayer == RequestHandlingProducerLayer || consumerLayer == ScreenerLayer) {
+								msg += "; run the producer in the " + string(fwkrc.DataProducerPhaseRequestHandling) + " phase"
 							}
 							return nil, errors.New(msg)
 						}

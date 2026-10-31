@@ -312,7 +312,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// Producers may hold per-request state between Produce and PreRequest, where
 	// they normally release it. Release it here for every path that leaves
 	// HandleRequest without reaching PreRequest: screeners eliminating every
-	// candidate after PreScreen producers ran, an Admitter denial, a scheduler
+	// candidate after RequestHandling producers ran, an Admitter denial, a scheduler
 	// error, or a prepareRequest failure.
 	reachedPreRequest := false
 	defer func() {
@@ -322,13 +322,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}()
 
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
-	// A producer whose PreScreen run fails leaves its keys missing for the
+	// A producer whose RequestHandling run fails leaves its keys missing for the
 	// Scheduling phase too, so producers requiring them are skipped there.
 	missingKeys := map[string]struct{}{}
-	if err := d.runDataProducers(ctx, fwkrc.PreScreenDataProducerExtensionPoint, d.requestControlPlugins.preScreenDataProducers,
+	if err := d.runDataProducers(ctx, fwkrc.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
 		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
-		logger.Error(err, "failed to prepare pre-screen request data")
+		logger.Error(err, "failed to prepare request handling data")
 	}
 	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if len(snapshotOfCandidatePods) == 0 {
@@ -944,7 +944,7 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 }
 
 func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
-	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.preScreenDataProducers, d.requestControlPlugins.dataProducerPlugins} {
+	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
 		for _, p := range plugins {
 			if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
 				abandoner.RequestAbandoned(ctx, request)

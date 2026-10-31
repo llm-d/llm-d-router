@@ -137,12 +137,6 @@ func validateDataProducers(cfg *configapiv1.EndpointPickerConfig) error {
 			return fmt.Errorf("data producer '%s' is listed more than once", dp.PluginRef)
 		}
 		seen.Insert(dp.PluginRef)
-		switch dp.Phase {
-		case "", configapiv1.DataProducerPhaseAuto, configapiv1.DataProducerPhasePreScreen, configapiv1.DataProducerPhaseScheduling:
-		default:
-			return fmt.Errorf("data producer '%s' has invalid phase '%s': must be %s, %s or %s", dp.PluginRef, dp.Phase,
-				configapiv1.DataProducerPhaseAuto, configapiv1.DataProducerPhasePreScreen, configapiv1.DataProducerPhaseScheduling)
-		}
 	}
 
 	return nil

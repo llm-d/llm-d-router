@@ -24,9 +24,9 @@ import (
 // ResolveDataProducerPhases assigns every DataProducer among plugins to a
 // phase and returns the phases keyed by plugin name. A producer listed in
 // explicit keeps that phase. Any other producer runs in
-// DataProducerPhasePreScreen when a screener or a PreScreen producer consumes
-// a key it produces, Required or Optional, directly or through other
-// producers, and in DataProducerPhaseScheduling otherwise.
+// DataProducerPhaseRequestHandling when a screener or a RequestHandling
+// producer consumes a key it produces, Required or Optional, directly or
+// through other producers, and in DataProducerPhaseScheduling otherwise.
 //
 // An explicit DataProducerPhaseScheduling is never overridden; a screener that
 // consumes such a producer's key fails ValidateAndOrderDataDependencies.
@@ -58,7 +58,7 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 		}
 	}
 	for _, producer := range producers {
-		if phases[producer.TypedName().Name] == fwkrc.DataProducerPhasePreScreen {
+		if phases[producer.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
 			pending = append(pending, producer)
 		}
 	}
@@ -77,7 +77,7 @@ func ResolveDataProducerPhases(plugins []plugin.Plugin, explicit map[string]fwkr
 					if _, assigned := phases[name]; assigned {
 						continue
 					}
-					phases[name] = fwkrc.DataProducerPhasePreScreen
+					phases[name] = fwkrc.DataProducerPhaseRequestHandling
 					pending = append(pending, producer)
 				}
 			}

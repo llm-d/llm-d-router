@@ -410,9 +410,9 @@ func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) 
 	return config, nil
 }
 
-// buildDataProducerPhases returns the explicitly configured phase of each
-// listed DataProducer, keyed by plugin name. Auto entries are left out so that
-// datalayer.ResolveDataProducerPhases decides them.
+// buildDataProducerPhases places each DataProducer listed in
+// requestHandler.dataProducers in fwkrc.DataProducerPhaseRequestHandling,
+// keyed by plugin name. datalayer.ResolveDataProducerPhases places the rest.
 func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrc.DataProducerPhase, error) {
 	phases := make(map[string]fwkrc.DataProducerPhase, len(rawConfigs))
 	allPlugins := handle.GetAllPluginsWithNames()
@@ -424,12 +424,7 @@ func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle
 		if _, ok := plugin.(fwkrc.DataProducer); !ok {
 			return nil, fmt.Errorf("the plugin %q is not a data producer plugin", dp.PluginRef)
 		}
-		switch dp.Phase {
-		case configapiv1.DataProducerPhasePreScreen:
-			phases[dp.PluginRef] = fwkrc.DataProducerPhasePreScreen
-		case configapiv1.DataProducerPhaseScheduling:
-			phases[dp.PluginRef] = fwkrc.DataProducerPhaseScheduling
-		}
+		phases[dp.PluginRef] = fwkrc.DataProducerPhaseRequestHandling
 	}
 	return phases, nil
 }
