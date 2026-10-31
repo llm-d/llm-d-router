@@ -74,9 +74,16 @@ not consume this attribute and always uses total prompt length.
 
 #### Output Token Reservation
 
-A model server rejects a request whose prompt plus requested output exceeds
-its maximum model length. Under P/D the prefill leg runs with a one-token
-output budget, so such a request completes prefill and then fails on decode.
+vLLM before v0.32, and SGLang unless started with `--allow-auto-truncate`,
+reject a request whose prompt plus requested output exceeds the maximum model
+length. Under P/D the prefill leg runs with a one-token output budget, so such
+a request completes prefill and then fails on decode.
+
+vLLM v0.32 and later shorten the output budget to the room left after the
+prompt and serve the request. They reject only a prompt or an output cap that
+alone exceeds the maximum model length. With these servers the reservation
+rejects requests that the pod would serve with fewer output tokens, so enable
+it only for servers that reject the overflow.
 
 With `includeMaxOutputTokens: true`, the routing length is the total prompt
 length plus the output cap that the request parser normalizes across APIs
@@ -90,13 +97,14 @@ also moves requests into higher ranges for scoring.
 
 A request without a cap reserves nothing. vLLM `/v1/completions` defaults
 `max_tokens` to 16, so such a request within 16 tokens of the limit still
-reaches a pod and is rejected there.
+reaches a pod, and vLLM before v0.32 rejects it there.
 
 Configure the reservation in the decode profile, or in the only profile when
 P/D is not used. Prefill pods need room for the prompt and one output token.
-Without P/D a pod rejects such a request with 400 before doing any work, so
-the reservation there only adds routing to a pod with room. When no pod has
-room the EPP returns 503, which clients that retry 5xx responses will retry.
+Without P/D a server that rejects the overflow returns 400 before doing any
+work, so the reservation there only adds routing to a pod with room. When no
+pod has room the EPP returns 503, which clients that retry 5xx responses will
+retry.
 
 Sidecar chunked decode (`--decode-chunk-size`) sends each chunk with a smaller
 output budget, so it can complete a Chat Completions request whose prompt plus
@@ -107,9 +115,9 @@ The prompt length comes from the `token-producer`, and filtering against the
 maximum model length needs an exact count. When no `token-producer` is
 configured, the auto-created `estimate` backend approximates 4 bytes per
 token, so the filter can reject a request that fits. With the `vllm` backend,
-set `vllm.prefillOnly: true`; otherwise a renderer with the same maximum model
-length rejects the requests this filter should catch, no token count is
-published, and the routing length is the output cap alone.
+set `vllm.prefillOnly: true`; otherwise a renderer before vLLM v0.32 with the
+same maximum model length rejects the requests this filter should catch, no
+token count is published, and the routing length is the output cap alone.
 
 ```yaml
 plugins:
