@@ -48,6 +48,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -991,6 +992,118 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInstantiateAndConfigureDefaultConfig(t *testing.T) {
+	// Not parallel because it temporarily replaces entries in the global plugin registry.
+	registerTestPlugins(t)
+
+	// registerTestPlugins installs a mock utilization detector, and the loader
+	// package registers no real scorers. Swap in the production factories for the
+	// plugins the default profile depends on so the test exercises the same
+	// implementations the EPP runs, then restore the registry for the other tests.
+	realFactories := []struct {
+		pluginType string
+		factory    fwkplugin.FactoryFunc
+	}{
+		{utilization.UtilizationDetectorType, utilization.UtilizationDetectorFactory},
+		{queuedepth.QueueScorerType, queuedepth.QueueScorerFactory},
+		{kvcacheutilization.KvCacheUtilizationScorerType, kvcacheutilization.KvCacheUtilizationScorerFactory},
+	}
+	for _, rf := range realFactories {
+		previousFactory, hadFactory := fwkplugin.Registry[rf.pluginType]
+		previousMetadata, hadMetadata := fwkplugin.RegistryMetadata[rf.pluginType]
+		fwkplugin.Register(rf.pluginType, fwkplugin.StabilityBeta, rf.factory)
+		t.Cleanup(func() {
+			if hadFactory {
+				fwkplugin.Registry[rf.pluginType] = previousFactory
+			} else {
+				delete(fwkplugin.Registry, rf.pluginType)
+			}
+			if hadMetadata {
+				fwkplugin.RegistryMetadata[rf.pluginType] = previousMetadata
+			} else {
+				delete(fwkplugin.RegistryMetadata, rf.pluginType)
+			}
+		})
+	}
+
+	logger := logging.NewTestLogger()
+
+	// No configuration text: this is the path the EPP takes when it starts
+	// without a config file, and it must produce the documented defaults.
+	rawConfig, _, err := LoadRawConfig(nil, logger)
+	require.NoError(t, err, "the built-in default configuration must load")
+
+	handle := testutils.NewTestHandle(context.Background())
+	cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
+	require.NoError(t, err, "the built-in default configuration must instantiate")
+
+	// The default saturation detector must implement Filter. If it stops doing
+	// so, ensureSaturationDetector stops injecting it into every profile and
+	// nothing else in this package would notice.
+	require.NotNil(t, cfg.SaturationDetector, "a saturation detector should be defaulted")
+	detector := handle.Plugin(utilization.UtilizationDetectorType)
+	require.NotNil(t, detector, "the default utilization detector should be instantiated")
+	_, isFilter := detector.(fwksched.Filter)
+	require.True(t, isFilter,
+		"the default utilization detector must implement Filter, or the loader stops adding it to every default profile")
+	require.Equal(t, utilization.UtilizationDetectorType,
+		rawConfig.FlowControl.SaturationDetector.PluginRef, "the utilization detector should be the configured saturation detector")
+
+	// The effective default profile: three weighted scorers, the max-score
+	// picker, and the utilization filter that the saturation detector injection
+	// appends.
+	require.Len(t, rawConfig.SchedulingProfiles, 1, "default configuration should have a single profile")
+	profile := rawConfig.SchedulingProfiles[0]
+	require.Equal(t, "default", profile.Name)
+	wantProfilePlugins := []configapiv1.SchedulingPlugin{
+		{PluginRef: queuedepth.QueueScorerType, Weight: ptr.To(2.0)},
+		{PluginRef: kvcacheutilization.KvCacheUtilizationScorerType, Weight: ptr.To(2.0)},
+		{PluginRef: prefix.PrefixCacheScorerPluginType, Weight: ptr.To(3.0)},
+		{PluginRef: maxscore.MaxScorePickerType},
+		{PluginRef: utilization.UtilizationDetectorType},
+	}
+	if diff := cmp.Diff(wantProfilePlugins, profile.Plugins); diff != "" {
+		t.Errorf("unexpected default profile plugins (-want +got):\n%s", diff)
+	}
+	require.True(t, hasPluginType(handle, single.SingleProfileHandlerType),
+		"the single profile handler should be defaulted for a single-profile configuration")
+
+	// The scheduler is built from those weights, and the filter and picker are
+	// classified into their roles.
+	schedulerConfig := cfg.SchedulerConfig.String()
+	for _, want := range []string{
+		queuedepth.QueueScorerType,
+		kvcacheutilization.KvCacheUtilizationScorerType,
+		prefix.PrefixCacheScorerPluginType,
+		maxscore.MaxScorePickerType,
+		utilization.UtilizationDetectorType,
+	} {
+		require.Contains(t, schedulerConfig, want, "the scheduler config should include %q", want)
+	}
+
+	// The default parsers keep their order: passthrough claims no path and is
+	// last so it does not shadow the specific parsers.
+	require.NotNil(t, cfg.ParserRegistry, "a parser registry should be defaulted")
+	parsers := cfg.ParserRegistry.Parsers()
+	require.Len(t, parsers, 4, "the four default parsers should be configured")
+	require.Equal(t, []string{
+		openai.OpenAIParserType,
+		anthropic.AnthropicParserType,
+		vllmhttp.VllmHTTPParserType,
+		passthrough.PassthroughParserType,
+	}, []string{
+		parsers[0].TypedName().Type,
+		parsers[1].TypedName().Type,
+		parsers[2].TypedName().Type,
+		parsers[3].TypedName().Type,
+	})
+
+	// The data layer defaults to scraping the metrics endpoint.
+	require.NotNil(t, cfg.DataConfig, "a data layer config should be defaulted")
+	require.Len(t, cfg.DataConfig.Sources, 1, "the metrics source should be the only default data source")
+	require.Equal(t, sourcemetrics.MetricsDataSourceType, cfg.DataConfig.Sources[0].Plugin.TypedName().Type)
 }
 
 func TestInstantiateAndConfigureRejectsNonSchedulingPlugins(t *testing.T) {
