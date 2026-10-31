@@ -355,7 +355,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	perPromptKeys [][]kvblock.BlockHash, perPromptMMContent []*mmPromptContent,
 ) error {
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	endpointSet := extractEndpointSet(endpoints)
+	endpointSet := p.extractEndpointSet(endpoints)
 
 	// A multi-prompt request scores as the sum of its prompts' matches. The
 	// first prompt's result is the aggregate, so single-prompt requests copy
@@ -411,7 +411,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		if md == nil {
 			continue
 		}
-		podKey := fmt.Sprintf("%s:%s", md.Address, md.Port)
+		podKey := p.indexPodIdentifier(md)
 		match := matches[podKey]
 		if mmTracked {
 			maxMMMatch = max(maxMMMatch, mmMatches[podKey])
