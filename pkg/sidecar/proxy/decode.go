@@ -42,9 +42,12 @@ const (
 
 	requestFieldN = "n"
 
-	responseFieldMessage = "message"
-	responseFieldIndex   = "index"
-	responseFieldDelta   = "delta"
+	responseFieldMessage          = "message"
+	responseFieldIndex            = "index"
+	responseFieldDelta            = "delta"
+	responseFieldLogprobs         = "logprobs"
+	responseFieldReasoning        = "reasoning"
+	responseFieldReasoningContent = "reasoning_content"
 
 	roleAssistant = "assistant"
 )
@@ -456,7 +459,9 @@ func extractFinishReason(response map[string]any) string {
 }
 
 // emitSSEChunk writes one SSE data event to w, converting a buffered
-// non-streaming response into a streaming delta event (chat or legacy).
+// non-streaming response into a streaming delta event (chat or legacy). The
+// delta carries the message's content and reasoning, and the choice's logprobs
+// pass through, so a streaming client receives what the decoder returned.
 // Unless last is set, finish_reason is null: the decoder stopped that chunk at
 // its chunk budget, and the next chunk continues the response.
 func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
@@ -469,15 +474,17 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 			if !ok {
 				continue
 			}
-			text := extractChoiceText(choice)
 			streamChoice := map[string]any{
 				responseFieldIndex:        choice[responseFieldIndex],
 				responseFieldFinishReason: nil,
+				responseFieldDelta:        deltaFromChoice(choice),
 			}
 			if last {
 				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
 			}
-			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
+			if logprobs, ok := choice[responseFieldLogprobs]; ok && logprobs != nil {
+				streamChoice[responseFieldLogprobs] = logprobs
+			}
 			streamChoices = append(streamChoices, streamChoice)
 		}
 		streamChunk[responseFieldChoices] = streamChoices
@@ -491,6 +498,19 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 	}
 	_, err = fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
 	return err
+}
+
+// deltaFromChoice builds the streaming delta of a choice from its message:
+// the content, and the reasoning under whichever key the decoder used.
+func deltaFromChoice(choice map[string]any) map[string]any {
+	delta := map[string]any{reqcommon.FieldContent: extractChoiceText(choice), reqcommon.FieldRole: roleAssistant}
+	msg, _ := choice[responseFieldMessage].(map[string]any)
+	for _, field := range []string{responseFieldReasoning, responseFieldReasoningContent} {
+		if v, ok := msg[field]; ok && v != nil {
+			delta[field] = v
+		}
+	}
+	return delta
 }
 
 // firstChoice returns choices[0] from a response map, or nil.
