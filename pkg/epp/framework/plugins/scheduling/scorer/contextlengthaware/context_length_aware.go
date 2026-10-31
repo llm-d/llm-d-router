@@ -55,8 +55,8 @@ type contextLengthAwareParameters struct {
 	EnableFiltering bool `json:"enableFiltering"`
 
 	// ReusableTokensProducerName is the name of the p2p-source-producer whose
-	// reusable prefix token count is subtracted from the request length. Empty
-	// disables cache subtraction.
+	// reusable prefix token count is subtracted from the total token count
+	// across all prompts. Empty disables cache subtraction.
 	ReusableTokensProducerName string `json:"reusableTokensProducerName,omitempty"`
 }
 
@@ -112,10 +112,13 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // If filtering is enabled, endpoints that don't support the request's context length are filtered out.
 // Additionally, it scores endpoints based on how well their context length ranges match the request.
 //
-// The context length is the token count from InferenceRequestBody.TokenizedRequest.
-// When reusableTokensProducerName is configured, the request-wide reusable
-// prefix token floor is subtracted from that count. Missing tokens are treated
-// as 0 (unknown).
+// The context length is the total token count across all prompts in
+// InferenceRequestBody.TokenizedRequest. With DefaultContextLengthLabel it is
+// the token count of the longest prompt, because a model server checks each
+// prompt against its maximum model length separately. When
+// reusableTokensProducerName is configured, the request-wide reusable prefix
+// token floor is subtracted from the total. Missing tokens are treated as 0
+// (unknown).
 type ContextLengthAware struct {
 	// typedName defines the plugin typed name
 	typedName plugin.TypedName
@@ -251,10 +254,10 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
 }
 
-// getContextLength returns the token count after subtracting the configured
-// producer's reusable prefix token floor. Positive token counts have at least
-// one token of prefill work. Missing reusable-token data leaves the total token
-// count unchanged. When tokens are unavailable it returns 0. With cache
+// getContextLength returns the context length described on ContextLengthAware.
+// With cache subtraction enabled, positive token counts have at least one
+// token of prefill work, and missing reusable-token data leaves the total
+// token count unchanged. When tokens are unavailable it returns 0. With cache
 // subtraction enabled, the result is stored per request and plugin instance so
 // Filter and Score use the same value.
 func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
@@ -262,8 +265,11 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 		return 0
 	}
 	if p.reusableTokensProducerName == "" {
-		if request.Body == nil || request.Body.TokenizedRequest == nil {
+		if request.Body == nil {
 			return 0
+		}
+		if p.labelName == DefaultContextLengthLabel {
+			return longestPromptTokens(request.Body.TokenizedRequest)
 		}
 		return request.Body.TokenizedRequest.TokenCount()
 	}
@@ -283,6 +289,18 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 	}
 	request.PutAttribute(p.routingLengthDataKey, routingLength)
 	return routingLength
+}
+
+// longestPromptTokens returns 0 for nil, as TokenizedRequest.TokenCount does.
+func longestPromptTokens(tp *scheduling.TokenizedRequest) int {
+	if tp == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range tp.Prompts {
+		n = max(n, len(p.TokenIDs))
+	}
+	return n
 }
 
 // parseContextRange parses a label value into a single context range.
