@@ -106,6 +106,9 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 	// same producer created on every round.
 	attempted := make(map[string]bool)
 
+	configured := handle.GetAllPlugins()
+	defaulted := make(map[string]defaultedKey)
+
 	for {
 		producedKeys := producedKeySet(handle)
 
@@ -130,6 +133,7 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 			if !ok {
 				return fmt.Errorf("%w %v, consumed by %v", ErrNoDefaultProducer, key, consumerName)
 			}
+			defaulted[key] = defaultedKey{producer: defaultProducerNameOrType, consumer: consumerName}
 			if handle.Plugin(defaultProducerNameOrType) != nil || attempted[defaultProducerNameOrType] {
 				// Already created. This can happen when a producer produces multiple data keys.
 				continue
@@ -181,7 +185,55 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		}
 	}
 
+	// Warn about configured producers whose key no other plugin reads while a consumer of
+	// the same data type reads an auto-created default. A default key's producer name is
+	// its registry type, so the configured key with that producer name equals the default
+	// key only when the data types match.
+	for _, p := range configured {
+		producer, ok := p.(plugin.ProducerPlugin)
+		if !ok {
+			continue
+		}
+		for key := range producer.Produces() {
+			if consumedByOther(handle, p, key) {
+				continue
+			}
+			for defaultKey, d := range defaulted {
+				if key.WithNonEmptyProducerName(d.producer).String() == defaultKey {
+					logger.Info("Warning: configured producer's data key has no consumer, a consumer of the same data type reads an auto-created default producer",
+						"producer", p.TypedName().String(), "dataKey", key.String(),
+						"defaultProducer", d.producer, "consumer", d.consumer)
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+// defaultedKey records the default producer that serves a missing data key and a consumer of that key.
+type defaultedKey struct {
+	producer string
+	consumer string
+}
+
+// consumedByOther reports whether a plugin other than p declares key as Required or Optional.
+func consumedByOther(handle plugin.Handle, p plugin.Plugin, key plugin.DataKey) bool {
+	for _, other := range handle.GetAllPlugins() {
+		if other.TypedName() == p.TypedName() {
+			continue
+		}
+		if consumer, ok := other.(plugin.ConsumerPlugin); ok {
+			deps := consumer.Consumes()
+			if _, ok := deps.Required[key]; ok {
+				return true
+			}
+			if _, ok := deps.Optional[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // producedKeySet returns the set of data-key strings produced by the plugins
