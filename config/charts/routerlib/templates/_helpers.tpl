@@ -20,9 +20,15 @@ Router deployment name
 Cluster RBAC unique name
 */}}
 {{- define "llm-d-router.cluster-rbac-name" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 }}
-{{- $ns := .Release.Namespace | default "default" | lower | trim | trunc 40 }}
-{{- printf "%s-%s-epp" $base $ns | quote | trunc 84 }}
+{{- $release := .Release.Name | default "default-pool" | lower | trim }}
+{{- $ns := .Release.Namespace | default "default" | lower | trim }}
+{{- if and (le (len $release) 40) (le (len $ns) 40) }}
+{{- printf "%s-%s-epp" $release $ns | quote }}
+{{- else }}
+{{- /* Truncating alone would let two namespaces share one cluster-scoped name. */ -}}
+{{- $hash := printf "%s/%s" $release $ns | sha256sum | trunc 8 }}
+{{- printf "%s-%s-%s-epp" ($release | trunc 40) ($ns | trunc 40) $hash | quote }}
+{{- end }}
 {{- end -}}
 
 {{/*
