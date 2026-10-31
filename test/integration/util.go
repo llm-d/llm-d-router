@@ -681,6 +681,7 @@ func WaitExtProcReady(ctx context.Context, conn *grpc.ClientConn, mgrErr <-chan 
 // sends on sampled traces.
 var unsetRoutingHeaders = slices.Concat(
 	routing.HeaderNames(routing.PrefillEndpointHeader),
+	routing.HeaderNames(routing.PrefillDataParallelRankHeader),
 	routing.HeaderNames(routing.EncoderEndpointsHeader),
 	routing.HeaderNames(routing.DataParallelEndpointHeader),
 	routing.HeaderNames(routing.KVCacheSourceHeader),

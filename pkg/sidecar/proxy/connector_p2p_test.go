@@ -114,6 +114,30 @@ var _ = Describe("P2P Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	It("should point decode at the P2P port of the EPP's prefill rank", func() {
+		proxyBaseAddr := testInfo.startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBodyWithMaxCompletionCap)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		req.Header.Add(routing.PrefillDataParallelRankHeader, "3")
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
+		Expect(decodeReqs).To(HaveLen(1))
+		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		decodePrefill, ok := decodeKVParams[requestFieldRemotePrefiller].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(decodePrefill[reqcommon.FieldRemotePort]).To(BeNumerically("==", p2pConnectorPort+3))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
 	It("should strip min_tokens from the prefill request and restore it in decode", func() {
 		proxyBaseAddr := testInfo.startProxy()
 
