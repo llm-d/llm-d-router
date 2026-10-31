@@ -20,24 +20,9 @@ on:
         default: 'us-central1'
         required: true
         type: string
-      sim_replicas:
-        description: 'Number of simulator replicas'
-        default: '10'
-        required: true
-        type: string
-      router_config:
-        description: 'Path to consolidated router Helm values configuration'
-        default: 'test/perf/config/router-configs/optimized-baseline.yaml'
-        required: true
-        type: string
-      test_name:
-        description: 'Test identifier name'
-        default: 'optimized-baseline-job1'
-        required: true
-        type: string
-      perf_job:
-        description: 'Performance job configuration path'
-        default: 'test/perf/config/shared_prefix_job1.yaml'
+      target:
+        description: 'Benchmark target manifest'
+        default: 'test/perf/config/targets/optimized-baseline-job1.yaml'
         required: true
         type: string
       gcs_bucket:
@@ -59,10 +44,7 @@ jobs:
       GCP_PROJECT_ID: ${{ inputs.gcp_project_id || 'llm-d-scale' }}
       GKE_CLUSTER_NAME: ${{ inputs.gke_cluster_name || 'llm-d-ap-usc1-router-perf' }}
       GKE_CLUSTER_ZONE: ${{ inputs.gke_cluster_zone || 'us-central1' }}
-      SIM_REPLICAS: ${{ inputs.sim_replicas || '10' }}
-      ROUTER_CONFIG: ${{ inputs.router_config || 'test/perf/config/router-configs/optimized-baseline.yaml' }}
-      TEST_NAME: ${{ inputs.test_name || 'optimized-baseline-job1' }}
-      PERF_JOB: ${{ inputs.perf_job || 'test/perf/config/shared_prefix_job1.yaml' }}
+      TARGET: ${{ inputs.target || 'test/perf/config/targets/optimized-baseline-job1.yaml' }}
       GCS_BUCKET: ${{ inputs.gcs_bucket || 'llm-d-router-perf-results' }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
@@ -73,6 +55,8 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: kubernetes-sigs/inference-perf
+          # Pinned so the load generator's chart changes only with a reviewed bump.
+          ref: 29ec1d4f7cf3f8e640081091f819418eb195d135
           path: inference-perf
 
       - name: Authenticate to Google Cloud
@@ -113,16 +97,26 @@ jobs:
       - name: Run Performance Test Script
         run: |
           python3 test/perf/run_nightly_perf.py \
-            --router-config ${{ env.ROUTER_CONFIG }} \
-            --test-name ${{ env.TEST_NAME }} \
+            --target ${{ env.TARGET }} \
             --perf-chart ${{ github.workspace }}/inference-perf/deploy/inference-perf \
-            --perf-job ${{ env.PERF_JOB }} \
-            --sim-replicas ${{ env.SIM_REPLICAS }} \
             --results-dir test/perf/results/optimized-baseline \
-            --router-machine-family e2 \
             --gcp-project ${{ env.GCP_PROJECT_ID }} \
             --collect-pprof-profiles \
             --gcs-bucket ${{ env.GCS_BUCKET }}
+
+      - name: Compare with the trailing 7-day median
+        run: |
+          python3 test/perf/trend.py \
+            --results-dir test/perf/results/optimized-baseline \
+            --target ${{ env.TARGET }} \
+            --output-dir trend-output \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Upload trend verdict
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-trend
+          path: trend-output/
 
       - name: Upload Performance Results Artifact
         uses: actions/upload-artifact@v7
@@ -130,3 +124,35 @@ jobs:
         with:
           name: epp-perf-results
           path: test/perf/results/optimized-baseline/
+
+  # Kept apart from the benchmark job so the token that can write issues never
+  # shares a job with the cloud and Hugging Face secrets.
+  report-perf-trend:
+    needs: run-perf-benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Download trend verdict
+        uses: actions/download-artifact@v8
+        with:
+          name: perf-trend
+          path: trend-output
+
+      - name: Open or update the trend issue
+        if: hashFiles('trend-output/trend-issue.md') != ''
+        run: |
+          # trend.py writes the issue marker as the first line of the body.
+          marker=$(head -n 1 trend-output/trend-issue.md)
+          number=$(gh issue list --repo "$REPO" --state open --label kind/performance --limit 200 --json number,body |
+            jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker))][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$REPO" --body-file trend-output/trend-issue.md
+          else
+            target_id=$(jq -r .test_name trend-output/trend-verdict.json)
+            gh issue create --repo "$REPO" --title "Nightly perf trend: ${target_id} regressed" \
+              --label kind/performance --body-file trend-output/trend-issue.md
+          fi

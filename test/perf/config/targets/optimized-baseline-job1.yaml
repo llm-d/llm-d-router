@@ -1,0 +1,34 @@
+# Benchmark target for the nightly perf run. The file name is the target ID.
+setup:
+  router_config: test/perf/config/router-configs/optimized-baseline.yaml
+  perf_job: test/perf/config/shared_prefix_job1.yaml
+  sim_deploy: test/perf/config/llm-d-sim-deployment.yaml
+  sim_svc: test/perf/config/llm-d-sim-service.yaml
+  sim_replicas: 10
+  epp_replicas: 1
+  epp_cpu: "2"
+  epp_memory: 4Gi
+  router_machine_family: e2
+  epp_log_verbosity: 4
+
+# Settings for test/perf/trend.py. They are not part of the target digest, so tuning them keeps the baseline.
+trend:
+  window_days: 7
+  min_baseline_runs: 4
+  metrics:
+    - {name: epp idle CPU (m), path: containers.epp.idle_cpu_m, direction: lower, threshold: 0.10, alerts: false}
+    - {name: epp peak CPU (m), path: containers.epp.peak_cpu_m, direction: lower, threshold: 0.10, alerts: true}
+    - {name: epp idle memory (MiB), path: containers.epp.idle_mem_mib, direction: lower, threshold: 0.10, alerts: true}
+    - {name: epp peak memory (MiB), path: containers.epp.peak_mem_mib, direction: lower, threshold: 0.10, alerts: true}
+    - {name: scheduler p50 latency (ms), path: scheduler_latency_ms.p50, direction: lower, threshold: 0.25, alerts: true}
+    - {name: scheduler p95 latency (ms), path: scheduler_latency_ms.p95, direction: lower, threshold: 0.25, alerts: true}
+    - {name: scheduler p99 latency (ms), path: scheduler_latency_ms.p99, direction: lower, threshold: 0.25, alerts: true}
+    - {name: scheduler mean latency (ms), path: scheduler_latency_ms.mean, direction: lower, threshold: 0.25, alerts: true}
+    - {name: envoy-proxy idle CPU (m), path: containers.envoy-proxy.idle_cpu_m, direction: lower, threshold: 0.10, alerts: false}
+    - {name: envoy-proxy peak CPU (m), path: containers.envoy-proxy.peak_cpu_m, direction: lower, threshold: 0.10, alerts: false}
+    - {name: envoy-proxy idle memory (MiB), path: containers.envoy-proxy.idle_mem_mib, direction: lower, threshold: 0.10, alerts: false}
+    - {name: envoy-proxy peak memory (MiB), path: containers.envoy-proxy.peak_mem_mib, direction: lower, threshold: 0.10, alerts: false}
+    - {name: TOTAL idle CPU (m), path: containers.TOTAL.idle_cpu_m, direction: lower, threshold: 0.10, alerts: false}
+    - {name: TOTAL peak CPU (m), path: containers.TOTAL.peak_cpu_m, direction: lower, threshold: 0.10, alerts: false}
+    - {name: TOTAL idle memory (MiB), path: containers.TOTAL.idle_mem_mib, direction: lower, threshold: 0.10, alerts: false}
+    - {name: TOTAL peak memory (MiB), path: containers.TOTAL.peak_mem_mib, direction: lower, threshold: 0.10, alerts: false}
