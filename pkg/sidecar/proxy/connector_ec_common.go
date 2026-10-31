@@ -105,9 +105,9 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if !ok {
 				continue
 			}
-			partType, ok := partMap[reqcommon.FieldType].(string)
-			if !ok {
-				continue
+			partType, _ := partMap[reqcommon.FieldType].(string)
+			if apiType == reqcommon.APITypeChatCompletions {
+				partType = reqcommon.NormalizeChatPart(partMap)
 			}
 
 			if apiType == reqcommon.APITypeMessages {
