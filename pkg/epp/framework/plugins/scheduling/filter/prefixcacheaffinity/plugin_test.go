@@ -133,6 +133,52 @@ func TestFilter_ThroughputTTFTWithinThreshold(t *testing.T) {
 	assert.Equal(t, "a", result[0].GetMetadata().ID.Name)
 }
 
+// makeQueuedEndpoint creates a test endpoint whose model server reports waiting
+// queued requests and whose in-flight load carries completionsPerSecond.
+func makeQueuedEndpoint(name string, prefixMatch int, tokens int64, waiting int, completionsPerSecond float64) fwksched.Endpoint {
+	meta := &fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{Name: name, Namespace: "default"},
+	}
+	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{WaitingQueueSize: waiting}, fwkdl.NewAttributes())
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(prefixMatch, 100, 16))
+	ep.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Tokens: tokens, CompletionsPerSecond: completionsPerSecond})
+	return ep
+}
+
+// With PeakPrefillThroughput=1000 tokens/sec, 1000 in-flight tokens map to 1000ms;
+// the queue wait adds waiting / completionsPerSecond seconds.
+func TestEndpointTTFT_QueueWait(t *testing.T) {
+	p := newTestPlugin(Config{TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
+	for _, tc := range []struct {
+		name                 string
+		waiting              int
+		completionsPerSecond float64
+		want                 float64
+	}{
+		{name: "queue and completions", waiting: 61, completionsPerSecond: 1.6, want: 1000 + 61/1.6*1000},
+		{name: "queue without completions", waiting: 61, completionsPerSecond: 0, want: 1000},
+		{name: "completions without queue", waiting: 0, completionsPerSecond: 1.6, want: 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ttft, ok := p.endpointTTFT(makeQueuedEndpoint("a", 90, 1000, tc.waiting, tc.completionsPerSecond))
+			assert.True(t, ok)
+			assert.InDelta(t, tc.want, ttft, 1e-6)
+		})
+	}
+}
+
+// A sticky endpoint with little prefill work but a long queue breaks stickiness
+// through the queue wait alone.
+func TestFilter_QueueWaitBreaksStickiness(t *testing.T) {
+	p := newTestPlugin(Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 2000, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
+	endpoints := []fwksched.Endpoint{
+		makeQueuedEndpoint("a", 90, 100, 61, 1.6),
+		makeQueuedEndpoint("b", 10, 0, 0, 0),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 2, len(result), "queue wait should break stickiness")
+}
+
 func TestFilter_TTFTPenaltyDisabled(t *testing.T) {
 	p := newTestPlugin(Config{AffinityThreshold: 0.80, ExplorationProbability: 0, MaxTTFTPenaltyMs: 0, TTFTSource: TTFTSourcePrefillThroughput, PeakPrefillThroughput: 1000})
 	endpoints := []fwksched.Endpoint{
