@@ -51,12 +51,20 @@ type EndpointMetadata struct {
 	// separate from Labels so request-shaping data never becomes a
 	// selector key — and selector labels are never stamped onto requests.
 	Attributes map[string]string
-	// RankIndex is this endpoint's position in the pool's TargetPorts,
-	// identifying the pod-local rank in multi-port deployments.
+	// RankIndex is the pod-local rank of this endpoint. With one rank per
+	// port it is the position in the pool's TargetPorts; with RanksPerPort
+	// ranks per port it is portPosition*RanksPerPort + rank.
 	RankIndex int
 	// ZMQPort is the exact KV-events socket port, overriding the
 	// configured socket port plus RankIndex. Zero means unset.
 	ZMQPort int
+	// RanksPerPort is the number of data-parallel ranks served behind Port.
+	// Above 1, the model server picks the rank from a request header, and
+	// its metrics series are labeled per rank.
+	RanksPerPort int
+	// DataParallelRank is the data-parallel rank the model server knows this
+	// endpoint by, set when RanksPerPort is above 1. It equals RankIndex.
+	DataParallelRank int
 }
 
 // String returns a string representation of the endpoint.
@@ -82,15 +90,17 @@ func (epm *EndpointMetadata) Clone() *EndpointMetadata {
 			Name:      epm.ID.Name,
 			Namespace: epm.ID.Namespace,
 		},
-		Name:        epm.Name,
-		Address:     epm.Address,
-		NodeAddress: epm.NodeAddress,
-		Port:        epm.Port,
-		MetricsHost: epm.MetricsHost,
-		Labels:      clonedLabels,
-		Attributes:  clonedAttributes,
-		RankIndex:   epm.RankIndex,
-		ZMQPort:     epm.ZMQPort,
+		Name:             epm.Name,
+		Address:          epm.Address,
+		NodeAddress:      epm.NodeAddress,
+		Port:             epm.Port,
+		MetricsHost:      epm.MetricsHost,
+		Labels:           clonedLabels,
+		Attributes:       clonedAttributes,
+		RankIndex:        epm.RankIndex,
+		ZMQPort:          epm.ZMQPort,
+		RanksPerPort:     epm.RanksPerPort,
+		DataParallelRank: epm.DataParallelRank,
 	}
 }
 
@@ -108,12 +118,13 @@ func (epm *EndpointMetadata) Equal(other *EndpointMetadata) bool {
 		epm.MetricsHost == other.MetricsHost &&
 		epm.RankIndex == other.RankIndex &&
 		epm.ZMQPort == other.ZMQPort &&
+		epm.RanksPerPort == other.RanksPerPort &&
+		epm.DataParallelRank == other.DataParallelRank &&
 		maps.Equal(epm.Labels, other.Labels) &&
 		maps.Equal(epm.Attributes, other.Attributes)
 }
 
-// GetRankIndex returns the rank index of this endpoint within the pool's
-// TargetPorts list.
+// GetRankIndex returns the pod-local rank of this endpoint.
 func (epm *EndpointMetadata) GetRankIndex() int {
 	if epm == nil {
 		return 0
