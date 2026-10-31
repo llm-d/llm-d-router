@@ -411,6 +411,14 @@ default for any `Prefer: if-available` request so a missing gate surfaces as the
 cache-miss fallback rather than a silent forward. See
 [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
 
+`conditional-decode` is not supported with `kv-sglang`. The step sends the decode
+request without bootstrap fields, and an SGLang decode server rejects such a request
+with HTTP 400 instead of serving it. When the router forwards the request (the gate
+does not answer 412), the client gets that error. The coordinator does not reject the
+combination at startup. When `kv_connector` is `kv-sglang`, leave the step out and keep
+the `prefill` step. Every request then runs remote prefill and a KV transfer, including
+short or already-cached prompts.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must

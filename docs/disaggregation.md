@@ -433,6 +433,8 @@ The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on
 
 Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
+**SGLang is not supported.** An SGLang decode server cannot prefill locally: it rejects a request that carries no bootstrap room id with HTTP 400. Every request this plugin keeps local, and every `Prefer: if-available` request its gate forwards, reaches the decode server alone and fails. With the default `nonCachedTokens: 0` the decider never selects prefill, so every request fails. Use `always-disagg-pd-decider` with SGLang. The cost is that SGLang deployments run remote prefill and a KV transfer for every request, including short prompts and prompts already cached on the decode worker, which adds latency that a local prefill would avoid.
+
 **How It Works**
 - Once a decode pod is selected, the decider checks how many tokens from the incoming prompt have already been sent to this pod
 
