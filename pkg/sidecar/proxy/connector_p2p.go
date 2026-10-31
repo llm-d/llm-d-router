@@ -67,6 +67,12 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 
 	kvRequestID := newUUID()
 	prefillP2PPort := s.p2pPortFor(logger, prefillPodHostPort)
+	// vLLM binds each rank's P2P tier at the base plus its global data-parallel rank.
+	if rank, _ := r.Context().Value(prefillDPRankKey).(string); rank != "" {
+		if n, err := strconv.Atoi(rank); err == nil {
+			prefillP2PPort = s.config.P2PConnectorPort + n
+		}
+	}
 	logger.Info("running P2P protocol",
 		"prefill_host", extractHost(prefillPodHostPort),
 		"kv_request_id", kvRequestID,
@@ -157,7 +163,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	pw := &bufferedResponseWriter{}
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
-	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
+	prefillReq := cloneRequestWithBody(prefillCtx, r, prefillBody)
+	setPrefillDPRank(prefillReq)
+	prefillHandler.ServeHTTP(pw, prefillReq)
 	prefillDuration := time.Since(prefillStart)
 	metrics.RecordPrefillDuration(prefillDuration)
 

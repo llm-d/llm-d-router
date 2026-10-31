@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
@@ -114,6 +115,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// 1. Prepare prefill request
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 
 	preq.Header.Add(reqcommon.RequestIDHeaderKey, uuidStr)
 
@@ -124,7 +126,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		s.config.MoRIIODPSizeLocal,
 	)
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(localDPRank))
+		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(localDPRank))
 	}
 
 	// Keeps the client's body intact for the decode request below.
@@ -388,7 +390,7 @@ retryLoop:
 				s.config.MoRIIODPSize,
 				s.config.MoRIIODPSizeLocal,
 			)
-			dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(decodeLocalDPRank))
+			dreq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(decodeLocalDPRank))
 		}
 	}
 
@@ -708,9 +710,10 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		semconv.LLMDPDProxyParallelDispatch(true),
 	)
 	preq := r.Clone(pCtx)
+	setPrefillDPRank(preq)
 	preq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
-		preq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		preq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))
 	}
 	preq.Body = io.NopCloser(bytes.NewReader(pbody))
 	preq.ContentLength = int64(len(pbody))
@@ -727,7 +730,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	dreq := r.Clone(dCtx)
 	dreq.Header.Set(reqcommon.RequestIDHeaderKey, uuidStr)
 	if s.config.MoRIIODPSize > 1 {
-		dreq.Header.Set(requestHeaderDataParallelRank, strconv.Itoa(dpRank))
+		dreq.Header.Set(routing.DataParallelRankHeader, strconv.Itoa(dpRank))
 	}
 	dreq.Body = io.NopCloser(bytes.NewReader(dbody))
 	dreq.ContentLength = int64(len(dbody))

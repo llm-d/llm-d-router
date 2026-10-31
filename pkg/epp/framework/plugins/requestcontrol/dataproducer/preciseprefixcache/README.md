@@ -53,6 +53,18 @@ requires a vLLM build with
 [vllm-project/vllm#57789](https://github.com/vllm-project/vllm/pull/57789),
 whose wire format can still change.
 
+When a pod serves several data-parallel ranks behind its port (see
+[Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)), each rank of the pod
+is its own endpoint on the pod's address and port. With pod discovery, each
+rank's events reach the index under `<address>:<port>/rank-<RankIndex>`, so the
+ranks of one pod are scored separately. Without pod discovery, the index learns
+a pod's identity from the event topic, and all ranks of a pod share one score.
+
+A rank endpoint's subscriber dials `socketPort` plus the endpoint's global
+data-parallel rank, as vLLM offsets each engine's publisher, replay and snapshot
+ports. For the base ports to configure on each pod, see the wide-EP notes in
+[docs/disaggregation.md](../../../../../../../docs/disaggregation.md#kv-connector---kv-connector).
+
 A subscriber that joins mid-stream, or sees the engine restart, loads the
 snapshot instead of replaying buffered events, then follows live events after
 the snapshot's sequence number. A restart shows as a sequence that moves

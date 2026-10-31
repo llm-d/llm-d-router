@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
@@ -450,6 +451,47 @@ func TestDrainTimeoutFlag(t *testing.T) {
 	}
 }
 
+func TestDataParallelSizeLocalFlag(t *testing.T) {
+	def := NewOptions()
+	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
+	if def.DataParallelSizeLocal != 1 {
+		t.Errorf("DataParallelSizeLocal default = %d, want 1", def.DataParallelSizeLocal)
+	}
+
+	opts := NewOptions()
+	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	if err := fs.Parse([]string{"--data-parallel-size-local=4"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	if opts.DataParallelSizeLocal != 4 {
+		t.Errorf("DataParallelSizeLocal = %d, want 4", opts.DataParallelSizeLocal)
+	}
+
+	opts.PoolName = testPoolName
+	opts.DataParallelSizeLocal = 0
+	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "data-parallel-size-local") {
+		t.Errorf("Expected Validate() to reject zero data-parallel-size-local, got: %v", err)
+	}
+}
+
+func TestDataParallelSizeLocalRequiresOneTargetPort(t *testing.T) {
+	selector, err := labels.Parse("app=vllm")
+	require.NoError(t, err)
+
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
+	opts.EndpointSelector = selector
+	opts.DataParallelSizeLocal = 2
+	opts.EndpointTargetPorts = []int{8000, 8001}
+	if err := opts.Validate(); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("Expected Validate() to reject several target ports with data-parallel-size-local=2, got: %v", err)
+	}
+
+	opts.EndpointTargetPorts = []int{8000}
+	require.NoError(t, opts.Validate())
+}
+
 func TestValidateConfigFlagsMutuallyExclusive(t *testing.T) {
 	opts := NewOptions()
 	opts.PoolName = "config-flags-pool" // bypass the pool/selector validation
@@ -830,4 +872,14 @@ func TestLeaderElectionOverride(t *testing.T) {
 	if disabled.LeaseDuration != nil || disabled.LeaderElectionID != "" {
 		t.Errorf("override changed manager options with leader election disabled: %+v", disabled)
 	}
+}
+
+// The rank count can come from the per-pod annotation, so the start-rank
+// label does not require the flag.
+func TestDataParallelStartRankLabelWithoutSizeLocalFlag(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet(t.Name(), pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.DataParallelStartRankLabel = "leaderworkerset.sigs.k8s.io/worker-index"
+	require.NoError(t, opts.Validate())
 }

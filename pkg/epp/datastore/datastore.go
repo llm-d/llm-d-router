@@ -59,6 +59,11 @@ const (
 	// as active for inference traffic. The value should be a comma-separated list of port numbers.
 	// Example: "8000,8001,8002"
 	activePortsAnnotation = "llm-d.ai/active-ports"
+
+	// dataParallelSizeLocalAnnotation sets the number of data-parallel ranks a pod serves
+	// behind its target port, overriding --data-parallel-size-local for that pod.
+	// Example: "4"
+	dataParallelSizeLocalAnnotation = "llm-d.ai/data-parallel-size-local"
 )
 
 // The datastore is a local cache of relevant data for the given InferencePool (currently all pulled from k8s-api)
@@ -72,6 +77,14 @@ type Datastore interface {
 	PoolHasSynced() bool
 	PoolLabelsMatch(podLabels map[string]string) bool
 	WithEndpointPool(pool *datalayer.EndpointPool) Datastore
+	// WithDataParallelSizeLocal expands the single target port of a pod into n rank endpoints
+	// sharing that port. Values below 2 keep one endpoint per port. Above 1, PoolSet rejects a
+	// pool with more than one target port.
+	WithDataParallelSizeLocal(n int) Datastore
+	// WithDataParallelStartRankLabel names the pod label holding the pod's index in a
+	// data-parallel group that spans pods. A rank endpoint's DataParallelRank is
+	// index*ranksPerPort + RankIndex. Empty means every pod starts at rank 0.
+	WithDataParallelStartRankLabel(label string) Datastore
 
 	// InferenceObjective operations
 	ObjectiveSet(infObjective *apixv1.InferenceObjective)
@@ -123,6 +136,7 @@ func NewDatastore(parentCtx context.Context, epFactory datalayer.EndpointFactory
 		modelRewrites: newModelRewriteStore(),
 		pods:          &sync.Map{},
 		epf:           epFactory,
+		ranksPerPort:  1,
 	}
 }
 
@@ -152,11 +166,57 @@ type datastore struct {
 	// resync failure would compare the incoming pool against the already-stored identical pool
 	// and skip the resync. Guarded by mu.
 	needsResync bool
+	// ranksPerPort is the number of rank endpoints per pod target port. Set once at startup.
+	ranksPerPort int
+	// startRankLabel names the pod label holding the pod's index in its data-parallel group.
+	// Set once at startup.
+	startRankLabel string
 }
 
 func (ds *datastore) WithEndpointPool(pool *datalayer.EndpointPool) Datastore {
 	ds.pool = pool
 	return ds
+}
+
+func (ds *datastore) WithDataParallelSizeLocal(n int) Datastore {
+	ds.ranksPerPort = max(n, 1)
+	return ds
+}
+
+func (ds *datastore) WithDataParallelStartRankLabel(label string) Datastore {
+	ds.startRankLabel = label
+	return ds
+}
+
+// podRanksPerPort returns the number of data-parallel ranks the pod serves behind its
+// target port: the pod's dataParallelSizeLocalAnnotation, or the configured default.
+func (ds *datastore) podRanksPerPort(pod *corev1.Pod) (int, error) {
+	value, ok := pod.GetAnnotations()[dataParallelSizeLocalAnnotation]
+	if !ok {
+		return ds.ranksPerPort, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("pod annotation %q is %q, not a positive integer", dataParallelSizeLocalAnnotation, value)
+	}
+	return n, nil
+}
+
+// dataParallelStartRank returns the global data-parallel rank of the pod's first rank
+// endpoint, for a pod serving ranksPerPort ranks.
+func (ds *datastore) dataParallelStartRank(pod *corev1.Pod, ranksPerPort int) (int, error) {
+	if ds.startRankLabel == "" {
+		return 0, nil
+	}
+	value, ok := pod.GetLabels()[ds.startRankLabel]
+	if !ok {
+		return 0, fmt.Errorf("pod has no %q label", ds.startRankLabel)
+	}
+	index, err := strconv.Atoi(value)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("pod label %q is %q, not a non-negative integer", ds.startRankLabel, value)
+	}
+	return index * ranksPerPort, nil
 }
 
 func (ds *datastore) Clear() {
@@ -179,6 +239,10 @@ func (ds *datastore) PoolSet(ctx context.Context, reader client.Reader, endpoint
 	if endpointPool == nil {
 		ds.Clear()
 		return nil
+	}
+	if ds.ranksPerPort > 1 && len(endpointPool.TargetPorts) != 1 {
+		return fmt.Errorf("data-parallel-size-local is %d, which requires exactly one target port, got %d",
+			ds.ranksPerPort, len(endpointPool.TargetPorts))
 	}
 	logger := log.FromContext(ctx)
 	ds.mu.Lock()
@@ -364,12 +428,18 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 
 	pods := []*fwkdl.EndpointMetadata{}
 	activePorts := extractActivePorts(pod, pool.TargetPorts)
-	for idx, port := range pool.TargetPorts {
+	ranksPerPort, startRank, err := ds.podRanks(pod, pool)
+	if err != nil {
+		// The pod's ranks cannot be addressed; drop all of its endpoints.
+		log.FromContext(ctx).Error(err, "Pod will not receive traffic", "pod", pod.Name, "namespace", pod.Namespace)
+		activePorts = sets.New[int]()
+	}
+	for portIdx, port := range pool.TargetPorts {
 		if !activePorts.Has(port) {
 			continue
 		}
-		pods = append(pods,
-			&fwkdl.EndpointMetadata{
+		for _, idx := range rankIndexes(portIdx, ranksPerPort) {
+			meta := &fwkdl.EndpointMetadata{
 				ID:          createEndpointNamespacedName(pod, idx),
 				Name:        pod.Name,
 				Address:     pod.Status.PodIP,
@@ -378,7 +448,13 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				MetricsHost: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 				Labels:      labels,
 				RankIndex:   idx,
-			})
+			}
+			if ranksPerPort > 1 {
+				meta.RanksPerPort = ranksPerPort
+				meta.DataParallelRank = startRank + idx
+			}
+			pods = append(pods, meta)
+		}
 	}
 
 	if len(pods) == 0 {
@@ -410,19 +486,18 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 		}
 	}
 
-	// remove endpoints that are no longer active in the pool
-	for idx, port := range pool.TargetPorts {
-		if activePorts.Has(port) {
-			continue
-		}
-
-		namespacedName := createEndpointNamespacedName(pod, idx)
-		if ep, ok := ds.pods.Load(namespacedName); ok {
-			ds.pods.Delete(namespacedName)
+	// Remove the pod's endpoints that were not created above: inactive ports, and ranks
+	// beyond a lowered rank count.
+	ds.pods.Range(func(k, v any) bool {
+		ep := v.(fwkdl.Endpoint)
+		md := ep.GetMetadata()
+		if md.Name == pod.Name && md.ID.Namespace == pod.Namespace && !existingEpSet.Has(md.ID) {
+			ds.pods.Delete(k)
 			ds.podsVersion.Add(1)
-			ds.epf.ReleaseEndpoint(ep.(fwkdl.Endpoint))
+			ds.epf.ReleaseEndpoint(ep)
 		}
-	}
+		return true
+	})
 
 	return errors.Join(errs...)
 }
@@ -507,8 +582,14 @@ func (ds *datastore) podResyncAll(ctx context.Context, reader client.Reader) err
 			continue
 		}
 		// Calculate expected endpoint names based on current targetPorts.
-		for idx := range ds.pool.TargetPorts {
-			activeEndpoints.Insert(createEndpointNamespacedName(&pod, idx))
+		ranksPerPort, _, err := ds.podRanks(&pod, ds.pool)
+		if err != nil {
+			ranksPerPort = 1
+		}
+		for portIdx := range ds.pool.TargetPorts {
+			for _, idx := range rankIndexes(portIdx, ranksPerPort) {
+				activeEndpoints.Insert(createEndpointNamespacedName(&pod, idx))
+			}
 		}
 		if err := ds.podUpdateOrAddIfNotExist(ctx, &pod, ds.pool); err != nil {
 			// Propagate so PoolSet fails; needsResync makes the retried PoolSet resync again.
@@ -551,6 +632,32 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 		}
 	}
 	return activePorts
+}
+
+// podRanks returns the pod's rank count and the global data-parallel rank of its first rank.
+func (ds *datastore) podRanks(pod *corev1.Pod, pool *datalayer.EndpointPool) (ranksPerPort, startRank int, err error) {
+	ranksPerPort, err = ds.podRanksPerPort(pod)
+	if err != nil {
+		return 0, 0, err
+	}
+	if ranksPerPort > 1 && len(pool.TargetPorts) != 1 {
+		return 0, 0, fmt.Errorf("pod serves %d data-parallel ranks per port, which requires exactly one target port, got %d",
+			ranksPerPort, len(pool.TargetPorts))
+	}
+	if ranksPerPort == 1 {
+		return 1, 0, nil
+	}
+	startRank, err = ds.dataParallelStartRank(pod, ranksPerPort)
+	return ranksPerPort, startRank, err
+}
+
+// rankIndexes returns the RankIndex values of the endpoints served on the target port at portIdx.
+func rankIndexes(portIdx, ranksPerPort int) []int {
+	idxs := make([]int, ranksPerPort)
+	for rank := range idxs {
+		idxs[rank] = portIdx*ranksPerPort + rank
+	}
+	return idxs
 }
 
 // createEndpointNamespacedName creates a namespaced name for an endpoint based on pod and rank index.

@@ -126,7 +126,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// Prefill must be pinned to the dp rank whose engine_id is sent to decode
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		Expect(prefillHeaders[0].Get(requestHeaderDataParallelRank)).To(Equal("0"))
+		Expect(prefillHeaders[0].Get(routing.DataParallelRankHeader)).To(Equal("0"))
 
 		// Decode should preserve original max_tokens and max_completion_tokens from request
 		Expect(dreq[reqcommon.FieldMaxTokens]).To(BeNumerically("==", 50))
@@ -262,7 +262,7 @@ var _ = Describe("Mooncake Connector", func() {
 		// header includes rank_id
 		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()
 		Expect(prefillHeaders).To(HaveLen(1))
-		pinnedRank := prefillHeaders[0].Get(requestHeaderDataParallelRank)
+		pinnedRank := prefillHeaders[0].Get(routing.DataParallelRankHeader)
 		Expect(engineByRank).To(HaveKey(pinnedRank))
 
 		// decode payload body has rank_id's engine_id
@@ -271,6 +271,43 @@ var _ = Describe("Mooncake Connector", func() {
 		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(decodeKVParams[reqcommon.FieldRemoteEngineID]).To(Equal(engineByRank[pinnedRank]))
+
+		testInfo.cancelFn()
+		<-testInfo.stoppedCh
+	})
+
+	It("should pin prefill to the dp rank the EPP picked and send its engine_id to decode", func() {
+		bootstrapResponse = `{
+			"0": {"engine_id": "engine-dp0", "worker_addr": {"0": {"0": "10.0.0.1:5000"}}},
+			"1": {"engine_id": "engine-dp1", "worker_addr": {"0": {"0": "10.0.0.2:5000"}}}
+		}`
+
+		proxyBaseAddr := testInfo.startProxy()
+
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		req.Header.Set(routing.PrefillDataParallelRankHeader, "1")
+		req.Header.Set(routing.DataParallelRankHeader, "0")
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		if resp.StatusCode != 200 {
+			bp, _ := io.ReadAll(resp.Body)
+			Fail(string(bp))
+		}
+
+		Eventually(func() int {
+			return len(testInfo.prefillHandler.GetCompletionRequests())
+		}).Should(Equal(1))
+
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("1"))
+		decodeReqs := testInfo.decodeHandler.GetCompletionRequests()
+		Expect(decodeReqs).To(HaveLen(1))
+		decodeKVParams, ok := decodeReqs[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(decodeKVParams[reqcommon.FieldRemoteEngineID]).To(Equal("engine-dp1"))
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("0"))
 
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh

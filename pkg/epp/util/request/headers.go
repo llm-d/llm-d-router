@@ -67,6 +67,7 @@ var (
 	// aliases are included, so neither spelling can be supplied by a client.
 	InternalRoutingHeaders = routingHeaderNames(
 		routing.PrefillEndpointHeader,
+		routing.PrefillDataParallelRankHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 		routing.KVCacheSourceHeader,

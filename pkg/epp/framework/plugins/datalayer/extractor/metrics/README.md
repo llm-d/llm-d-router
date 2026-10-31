@@ -29,6 +29,8 @@ A model server that runs several engines in one Pod exposes one series per engin
 -   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
 -   The tiered offloading attributes are the sum over the matching series, so they cover every engine rank of the Pod. Series of the primary tier (`tier="0:primary"`) are never included.
 
+An endpoint that is one of several data-parallel ranks behind its Pod's port (see [Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)) reads only its own rank's series. The extractor drops every series whose rank label names a different rank than the endpoint's data-parallel rank (global when `--data-parallel-start-rank-label` is set, as vLLM's `engine` label is), then applies the rules above to the series left, which is the rank's own value for each per-engine family. Series without the rank label are kept. The engine config's `rankLabelName` sets the rank label; the built-in `vllm` config uses `engine` and the `sglang` config uses `dp_rank`, and the other built-in configs set none, so their rank endpoints read the combined Pod values.
+
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration, and `customMetrics` entries without `aggregation` read one series. A `customMetrics` entry with `aggregation: sum` adds every matching series.
 
 ## Attributes produced
@@ -75,6 +77,7 @@ The plugin config supports:
 -   `engineLabelKey`: The Pod label key used to identify the engine type. Defaults to `llm-d.ai/engine-type`.
 -   `defaultEngine`: The engine type to use if the label is missing. Defaults to `vllm`.
 -   `engineConfigs`: A list of engine-specific metric specifications.
+    Each engineConfig can set `rankLabelName`, the label naming the data-parallel rank of a series (see [Families with several series](#families-with-several-series)).
     Each engineConfig can include `customMetrics` entries.
     Each entry maps a scalar metric selector to an endpoint attribute key.
     A source metric missing from the scrape is an extraction error unless its
