@@ -191,13 +191,18 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 // is known, is left alone rather than zeroing what an earlier block set. A
 // zero-token prompt is unreachable on a path that requires at least one message.
 func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
-	read := jsonInt(usg, "cache_read_input_tokens")
+	read, hasRead := jsonIntPresent(usg, "cache_read_input_tokens")
 	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
 	if total == 0 {
 		return
 	}
 	usage.PromptTokens = total
-	if read != 0 {
+	// An explicit zero is a cache miss, not a missing count: the metrics layer
+	// only records request_cached_tokens when PromptTokenDetails is set, so
+	// dropping the zero leaves the misses out of the histogram and inflates the
+	// reported hit rate. Only a block that carries the field sets it, so a later
+	// frame without it does not overwrite an earlier count.
+	if hasRead {
 		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
 	}
 }
@@ -205,6 +210,13 @@ func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
 func jsonInt(m map[string]any, key string) int {
 	v, _ := m[key].(float64)
 	return int(v)
+}
+
+// jsonIntPresent reports the integer stored under key and whether the key was
+// present, so a caller can tell an explicit zero from a missing field.
+func jsonIntPresent(m map[string]any, key string) (int, bool) {
+	v, ok := m[key].(float64)
+	return int(v), ok
 }
 
 // Anthropic SSE streaming format:
