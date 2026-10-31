@@ -1444,8 +1444,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(pkv).ToNot(HaveKey("remote_dp_size"))
 		Expect(pkv).ToNot(HaveKey("remote_hosts"))
 
-		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
-		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
 	})
 
 	// Standard READ-mode parity: DP-rank propagation is a MoRI-IO WRITE-mode
@@ -1461,7 +1461,53 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRank))
 		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRankOverride))
 
-		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
+	})
+
+	sendWithRankHeaders := func(proxyBaseAddr string, headers map[string]string) {
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(chatCompletionsRequestBody)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		responseBody, err := io.ReadAll(rp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(rp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+	}
+
+	It("sends the EPP's prefill rank to the prefill worker and keeps the decode rank for decode", func() {
+		proxyBaseAddr := startProxy()
+		sendWithRankHeaders(proxyBaseAddr, map[string]string{
+			routing.DataParallelRankHeader:        "0",
+			routing.PrefillDataParallelRankHeader: "1",
+		})
+
+		prefillHeaders := testInfo.prefillHandler.GetCompletionHeaders()[0]
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("1"))
+		Expect(prefillHeaders.Get(routing.PrefillDataParallelRankHeader)).To(BeEmpty())
+		decodeHeaders := testInfo.decodeHandler.GetCompletionHeaders()[0]
+		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(Equal("0"))
+		Expect(decodeHeaders.Get(routing.PrefillDataParallelRankHeader)).To(BeEmpty())
+	})
+
+	It("does not send the decode rank to the prefill worker when the EPP picked no prefill rank", func() {
+		proxyBaseAddr := startProxy()
+		sendWithRankHeaders(proxyBaseAddr, map[string]string{routing.DataParallelRankHeader: "1"})
+
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(Equal("1"))
+	})
+
+	It("ignores a prefill rank that is not a non-negative integer", func() {
+		proxyBaseAddr := startProxy()
+		sendWithRankHeaders(proxyBaseAddr, map[string]string{routing.PrefillDataParallelRankHeader: "one"})
+
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
 	})
 })
 
@@ -1577,5 +1623,5 @@ func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any { //nolint:un
 func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unparam // i kept for future multi-request tests
 	hdrs := h.GetCompletionHeaders()
 	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
-	return hdrs[i].Get(requestHeaderDataParallelRank)
+	return hdrs[i].Get(routing.DataParallelRankHeader)
 }

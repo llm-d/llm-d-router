@@ -100,6 +100,9 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+	// FieldDisaggPrefillDPRank is the SGLang request field naming the data-parallel
+	// rank of the prefill worker in a P/D pair.
+	FieldDisaggPrefillDPRank = "disagg_prefill_dp_rank"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report
