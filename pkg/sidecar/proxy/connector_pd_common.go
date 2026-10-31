@@ -24,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -95,7 +96,7 @@ func (s *Server) runConcurrentPD(
 		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
 		prefillSpan.End()
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			log.FromContext(r.Context()).Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -107,7 +108,7 @@ func (s *Server) runConcurrentPD(
 		defer prefillSpan.End()
 		defer func() {
 			if rec := recover(); rec != nil && rec != http.ErrAbortHandler {
-				s.logger.Error(fmt.Errorf("prefill handler panicked (%T)", rec), "panic in prefill request")
+				log.FromContext(prefillCtx).Error(fmt.Errorf("prefill handler panicked (%T)", rec), "panic in prefill request")
 			}
 		}()
 		pw := &bufferedResponseWriter{}
@@ -124,7 +125,7 @@ func (s *Server) runConcurrentPD(
 			cancelDecode()
 		}
 		metrics.RecordPrefillDuration(prefillDuration)
-		s.logger.V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
+		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
 
 	// Decode Stage
@@ -157,7 +158,7 @@ func (s *Server) runConcurrentPD(
 		// hold the goroutine and connection indefinitely.
 		// Not awaited: the client's response must not wait on the prefill response.
 		graceTimer := time.AfterFunc(concurrentPrefillGrace, func() {
-			s.logger.Error(nil, "concurrent-dispatch prefill did not complete within the grace period after decode; cancelled",
+			log.FromContext(prefillCtx).Error(nil, "concurrent-dispatch prefill did not complete within the grace period after decode; cancelled",
 				"connector", connector)
 			cancelPrefill()
 		})

@@ -731,7 +731,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdEncoders []string
 			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ *p2pPeer, _ reqcommon.APIType) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ p2pRouting, _ reqcommon.APIType) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders
@@ -817,10 +817,10 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 	}
 }
 
-// An accepted body source travels in p2pRouting, so the body forwarded to
-// a path that passes an empty routing, such as the encoder path, must not
-// carry it: vLLM would pull without the sidecar having composed the pull.
-func TestServer_EncoderPathForwardsBodyWithoutSource(t *testing.T) {
+// An accepted body source travels in p2pRouting through the encoder stage,
+// so the decoder-only request built after the encoder carries the block the
+// sidecar composes, not the client's bytes.
+func TestServer_EncoderPathForwardsSource(t *testing.T) {
 	encoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":""}}]}`))
@@ -830,7 +830,6 @@ func TestServer_EncoderPathForwardsBodyWithoutSource(t *testing.T) {
 	s := NewProxy(Config{Port: "8000", KVConnector: constants.KVConnectorOffloading, ECConnector: constants.ECExampleConnector})
 	s.allowlistValidator = &AllowlistValidator{}
 	s.dataParallelProxies = make(map[string]http.Handler)
-	logged := captureLogs(s, 0)
 
 	var forwarded map[string]any
 	s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -856,12 +855,13 @@ func TestServer_EncoderPathForwardsBodyWithoutSource(t *testing.T) {
 	if forwarded == nil {
 		t.Fatal("decoder not reached")
 	}
-	if _, ok := forwarded[reqcommon.FieldKVTransferParams]; ok {
-		t.Errorf("forwarded body carries kv_transfer_params: %v", forwarded[reqcommon.FieldKVTransferParams])
+	got, err := json.Marshal(forwarded[reqcommon.FieldKVTransferParams])
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The dropped pull is visible to the operator.
-	if !slices.ContainsFunc(*logged, func(line string) bool { return strings.Contains(line, "not wired through encoder disaggregation") }) {
-		t.Errorf("no warning for the dropped source: %v", *logged)
+	const want = `{"remote_kv_source":{"kv_request_id":"k","remote_host":"10.0.0.5","remote_port":7777}}`
+	if string(got) != want {
+		t.Errorf("kv_transfer_params = %s, want %s", got, want)
 	}
 }
 
@@ -900,8 +900,8 @@ func TestServer_EncoderPathCarriesPrefillP2PPort(t *testing.T) {
 	s.allowlistValidator = &AllowlistValidator{}
 
 	var got *p2pPeer
-	s.handleECConnector = func(_ http.ResponseWriter, _ *http.Request, _ string, _ []string, prefill *p2pPeer, _ reqcommon.APIType) {
-		got = prefill
+	s.handleECConnector = func(_ http.ResponseWriter, _ *http.Request, _ string, _ []string, p2p p2pRouting, _ reqcommon.APIType) {
+		got = p2p.prefill
 	}
 
 	req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","messages":[]}`))

@@ -585,14 +585,14 @@ func TestCanonicalEviction_UnknownEngineKey(t *testing.T) {
 func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("1:1 passthrough", func(t *testing.T) {
 		features := []*kvblock.BlockExtraFeatures{nil, nil, nil, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		assert.Equal(t, features, result)
 	})
 
 	t.Run("1:many replication (all nil, text-only)", func(t *testing.T) {
 		// 2 engine blocks → 8 canonical blocks (ratio 4)
 		features := []*kvblock.BlockExtraFeatures{nil, nil}
-		result := realignExtraFeatures(features, 8)
+		result := realignExtraFeatures(features, 16, 128)
 		require.Len(t, result, 8)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -603,7 +603,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 		// 2 engine blocks → 4 canonical blocks (ratio 2)
 		feat0 := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img0"}}}
 		features := []*kvblock.BlockExtraFeatures{feat0, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		require.Len(t, result, 4)
 		// Engine block 0 → canonical blocks 0, 1
 		assert.Equal(t, feat0, result[0])
@@ -616,7 +616,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("many:1 merge (all nil, text-only)", func(t *testing.T) {
 		// 8 engine blocks → 2 canonical blocks (ratio 4)
 		features := make([]*kvblock.BlockExtraFeatures, 8)
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -632,7 +632,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			nil,
 			{MMHashes: []kvblock.MMHash{{Hash: "c"}}},
 		}
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		// Canonical 0 should merge features from engine blocks 0 and 1
 		require.NotNil(t, result[0])
@@ -645,13 +645,98 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
 
+	t.Run("many:1 merge (MM item spans several engine blocks)", func(t *testing.T) {
+		// 4 engine blocks → 1 canonical block (ratio 4). The engine tags every
+		// block an item overlaps, so "img" appears on blocks 0-2 and "vid" on 2-3.
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img, vid}},
+			{MMHashes: []kvblock.MMHash{vid}},
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, vid}, result[0].MMHashes)
+
+		// The request side lists each overlapping item once for the same layout.
+		want := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img"}, "video": {"vid"}},
+			map[string][]kvblock.PlaceholderRange{
+				"image": {{Offset: 0, Length: 40}},
+				"video": {{Offset: 40, Length: 24}},
+			},
+			64, 64)
+		require.Len(t, want, 1)
+		assert.Equal(t, want[0].MMHashes, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge matches the request side", func(t *testing.T) {
+		// Engine BS 16, canonical BS 64. The engine tags each 16-token block the
+		// way ComputeBlockExtraFeatures does, so realigning its features must give
+		// what the request side computes at the canonical block size.
+		cases := []struct {
+			name         string
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+			numTokens    int
+		}{
+			{
+				name:         "same image twice in one canonical block",
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 0, Length: 20}, {Offset: 20, Length: 20}},
+				numTokens:    64,
+			},
+			{
+				name:         "item crosses a canonical boundary",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 40, Length: 50}},
+				numTokens:    128,
+			},
+			{
+				name:         "tokens not a multiple of the canonical block size",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 70, Length: 70}},
+				numTokens:    368,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mmHashes := map[string][]string{"image": tc.hashes}
+				mmPlaceholders := map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}
+				engine := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 16, tc.numTokens)
+				want := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 64, tc.numTokens)
+				assert.Equal(t, want, realignExtraFeatures(engine, 64, tc.numTokens))
+			})
+		}
+	})
+
+	t.Run("many:1 merge keeps the cache salt after the item", func(t *testing.T) {
+		// vLLM appends cache_salt to block 0's extra keys, after its MM hashes,
+		// so the item continuing into block 1 is not block 0's last entry.
+		img := kvblock.MMHash{Hash: "img"}
+		salt := kvblock.MMHash{Hash: "salt"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img, salt}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			nil,
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
 		features := []*kvblock.BlockExtraFeatures{
 			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
 		}
-		result := realignExtraFeatures(features, 0)
+		result := realignExtraFeatures(features, 64, 16)
 		assert.Empty(t, result)
 	})
 }

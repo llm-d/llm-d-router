@@ -62,9 +62,8 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		ctx = context.WithValue(ctx, toolCallingTelemetryEnabledKey{}, s.config.EnableToolCallingTelemetry)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
-		// logger is process-scoped, so seed it into the context first. Connectors
-		// reached from here still log through s.logger and stay uncorrelated;
-		// the request context carries the correlated logger for them to adopt.
+		// logger is process-scoped, so seed it into the context, where the
+		// connectors this handler dispatches to read it.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 
@@ -131,10 +130,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 		// The source header is the signal to read the body: reading every body
 		// to learn that most carry no source would buffer every request. The
-		// P/D connectors and decodeWithP2PSource take the source from p2p. The
-		// other paths forward r, rebuilt over the body without the source when
-		// one was present, so a rejected source never reaches vLLM. The header
-		// value duplicates the body block, which is what is validated.
+		// P/D and EC connectors and decodeWithP2PSource take the source from
+		// p2p. The other paths forward r, rebuilt over the body without the
+		// source when one was present, so a rejected source never reaches vLLM.
+		// The header value duplicates the body block, which is what is validated.
 		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))
 		switch {
 		case kvCacheSource == "":
@@ -205,13 +204,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			} else {
 				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
 			}
-			if p2p.source != nil {
-				// The P/D stage rebuilds the body after the encoder stage and
-				// carries no source, so EPP's pull decision is not honored here.
-				logger.Info("warning: ignoring KV cache source: a cached-prefix pull is not wired through encoder disaggregation",
-					"source", p2p.source.String())
-			}
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p.prefill, apiType)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p, apiType)
 			return
 		}
 

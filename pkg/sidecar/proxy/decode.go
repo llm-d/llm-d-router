@@ -29,6 +29,7 @@ import (
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -82,7 +83,8 @@ func (s *Server) runChunkedDecode(w http.ResponseWriter, r *http.Request) {
 // Streaming: each chunk is re-emitted as an SSE event; [DONE] closes the stream.
 // The caller owns aggregate reporting across prefill and decode chunks.
 func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request, body map[string]any, raw []byte, toolFields *toolCallingRequest) {
-	s.logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running chunked decode", "chunkSize", s.config.DecodeChunkSize)
 
 	ctx, span := tracing.Tracer(tracerScope).Start(r.Context(), "chunked_decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -122,14 +124,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	// The decoder echoes the final assistant message, which under chunking is the text of all earlier chunks.
 	if echo, _ := body[reqcommon.FieldEcho].(bool); echo {
-		s.logger.V(logging.DEBUG).Info("chunked decode: echo enabled, using regular decode")
+		logger.V(logging.DEBUG).Info("chunked decode: echo enabled, using regular decode")
 		regularDecode()
 		return
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
 	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
-		s.logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
+		logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
 		regularDecode()
 		return
 	}
@@ -140,14 +142,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// tool_choice stay raw (not in inspectedRequestFields), so inspect their bytes
 	// without re-encoding them.
 	if requestMayCallTools(body) {
-		s.logger.V(logging.DEBUG).Info("chunked decode: tools requested, using regular decode")
+		logger.V(logging.DEBUG).Info("chunked decode: tools requested, using regular decode")
 		regularDecode()
 		return
 	}
 
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
-		s.logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
+		logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
 			"maxTokens", originalMaxTokens, "chunkSize", s.config.DecodeChunkSize)
 		regularDecode()
 		return
@@ -208,7 +210,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		remaining := remainingTokens(originalMaxTokens, totalTokens)
 		if remaining == 0 {
-			s.logger.V(logging.DEBUG).Info("chunked decode: token budget exhausted", "totalTokens", totalTokens)
+			logger.V(logging.DEBUG).Info("chunked decode: token budget exhausted", "totalTokens", totalTokens)
 			break
 		}
 
@@ -223,6 +225,21 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		chunkReq[reqcommon.FieldStream] = false
 		delete(chunkReq, reqcommon.FieldStreamOptions)
 
+		// Carry over only the minimum still owed for this chunk; the cloned
+		// min_tokens would otherwise exceed the lowered per-chunk max_tokens.
+		// Once the floor has been met, drop it so a later chunk is not forced
+		// to suppress EOS and does not get min_tokens > max_tokens.
+		// An invalid client value is forwarded unchanged so the first chunk
+		// fails with the same 400 as an unchunked request.
+		if minTokens, ok := toInt(body[reqcommon.FieldMinTokens]); ok &&
+			minTokens >= 0 && (originalMaxTokens < 0 || minTokens <= originalMaxTokens) {
+			if remainingMin := minTokens - totalTokens; remainingMin > 0 {
+				chunkReq[reqcommon.FieldMinTokens] = min(remainingMin, chunkBudget)
+			} else {
+				delete(chunkReq, reqcommon.FieldMinTokens)
+			}
+		}
+
 		// From the second chunk onward: remove KV transfer params and instruct
 		// to continue the last assistant message rather than start a new one.
 		if chunkIndex > 0 {
@@ -234,7 +251,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			message, err := json.Marshal(finalMessage)
 			if err != nil {
 				if writeErr := errorInternalServerError(err, w); writeErr != nil {
-					s.logger.Error(writeErr, "failed to send error response to client")
+					logger.Error(writeErr, "failed to send error response to client")
 				}
 				return
 			}
@@ -244,12 +261,12 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		chunkBody, err := json.Marshal(chunkReq)
 		if err != nil {
 			if err := errorJSONInvalid(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+				logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
 
-		s.logger.V(logging.DEBUG).Info("chunked decode: dispatching chunk",
+		logger.V(logging.DEBUG).Info("chunked decode: dispatching chunk",
 			"chunk", chunkIndex, "chunkBudget", chunkBudget, "totalTokensSoFar", totalTokens)
 
 		bw := &bufferedResponseWriter{}
@@ -257,20 +274,26 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		s.decoderProxy.ServeHTTP(bw, cloneRequestWithBody(ctx, r, chunkBody))
 
 		if isHTTPError(bw.statusCode) {
-			s.logger.Error(fmt.Errorf("chunk %d failed with status %d", chunkIndex, bw.statusCode),
+			logger.Error(fmt.Errorf("chunk %d failed with status %d", chunkIndex, bw.statusCode),
 				"chunked decode chunk error", "statusCode", bw.statusCode)
 			span.SetStatus(codes.Error, "chunk decode failed")
 			maps.Copy(w.Header(), bw.headers)
 			w.WriteHeader(bw.statusCode)
+			if streamingEnabled && chunkIndex > 0 {
+				// The status went out with the first chunk, so the error is sent the
+				// way vLLM reports a failure in a stream: as a data event before [DONE].
+				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, bw.bodyBytes(), reqcommon.SSEDone)
+				return
+			}
 			WriteAll(w, bw.bodyBytes())
 			return
 		}
 
 		var chunkResponse map[string]any
 		if err := json.Unmarshal(bw.bodyBytes(), &chunkResponse); err != nil {
-			s.logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
+			logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
 			if err := errorInternalServerError(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+				logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
@@ -283,16 +306,22 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		}
 		chunkIndex++
 
-		s.logger.V(logging.DEBUG).Info("chunked decode: chunk complete", "chunkTokens", chunkTokens, "totalTokens", totalTokens)
+		logger.V(logging.DEBUG).Info("chunked decode: chunk complete", "chunkTokens", chunkTokens, "totalTokens", totalTokens)
 
 		finishReason := extractFinishReason(chunkResponse)
 		chunkText := extractChoiceText(firstChoice(chunkResponse))
 		// Accumulated text forms the assistant message for the next chunk.
 		textAccum.WriteString(chunkText)
 
+		terminal := finishReason != "" && finishReason != finishReasonLength
+		// Guard against infinite loop: if the chunk produced no tokens and no
+		// text there is nothing to continue from.
+		empty := chunkTokens == 0 && chunkText == ""
+
 		if streamingEnabled {
-			if err := emitSSEChunk(w, chunkResponse); err != nil {
-				s.logger.Error(err, "failed to write SSE chunk to client")
+			last := terminal || empty || remainingTokens(originalMaxTokens, totalTokens) == 0
+			if err := emitSSEChunk(w, chunkResponse, last); err != nil {
+				logger.Error(err, "failed to write SSE chunk to client")
 				return
 			}
 			if flusher, ok := w.(http.Flusher); ok {
@@ -300,21 +329,19 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		if finishReason != "" && finishReason != finishReasonLength {
-			s.logger.V(logging.DEBUG).Info("chunked decode: terminal finish reason, stopping",
+		if terminal {
+			logger.V(logging.DEBUG).Info("chunked decode: terminal finish reason, stopping",
 				"finishReason", finishReason, "chunks", chunkIndex)
 			break
 		}
 
-		// Guard against infinite loop: if the chunk produced no tokens and no
-		// text there is nothing to continue from.
-		if chunkTokens == 0 && chunkText == "" {
-			s.logger.Info("chunked decode: empty chunk with no tokens, stopping to avoid infinite loop",
+		if empty {
+			logger.Info("chunked decode: empty chunk with no tokens, stopping to avoid infinite loop",
 				"chunk", chunkIndex)
 			break
 		}
 
-		s.logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkTextBytes", len(chunkText))
+		logger.V(logging.TRACE).Info("chunked decode: appending chunk text to request", "chunkTextBytes", len(chunkText))
 	}
 
 	span.SetAttributes(
@@ -353,7 +380,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// overwrite choices with the text accumulated across all chunks.
 	if lastResponse == nil {
 		if err := errorInternalServerError(errors.New("no chunks produced"), w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -374,7 +401,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	respBody, err := json.Marshal(lastResponse)
 	if err != nil {
 		if err := errorInternalServerError(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -446,7 +473,9 @@ func extractFinishReason(response map[string]any) string {
 
 // emitSSEChunk writes one SSE data event to w, converting a buffered
 // non-streaming response into a streaming delta event (chat or legacy).
-func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
+// Unless last is set, finish_reason is null: the decoder stopped that chunk at
+// its chunk budget, and the next chunk continues the response.
+func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
 	streamChunk := maps.Clone(chunkResponse)
 
 	if choices, _ := chunkResponse[responseFieldChoices].([]any); len(choices) > 0 {
@@ -459,7 +488,10 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any) error {
 			text := extractChoiceText(choice)
 			streamChoice := map[string]any{
 				responseFieldIndex:        choice[responseFieldIndex],
-				responseFieldFinishReason: choice[responseFieldFinishReason],
+				responseFieldFinishReason: nil,
+			}
+			if last {
+				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
 			}
 			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
 			streamChoices = append(streamChoices, streamChoice)

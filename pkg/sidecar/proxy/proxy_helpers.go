@@ -33,8 +33,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
@@ -160,25 +162,30 @@ func (s *Server) startHTTP(ctx context.Context) error {
 func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureSkipVerify bool) *httputil.ReverseProxy {
 	decoderProxy := httputil.NewSingleHostReverseProxy(decoderURL)
 	decoderProxy.Transport = s.newProxyTransport(decoderURL.Scheme, decoderInsecureSkipVerify)
-	decoderProxy.ErrorHandler = func(res http.ResponseWriter, _ *http.Request, err error) {
+	decoderProxy.ErrorHandler = func(res http.ResponseWriter, r *http.Request, err error) {
 
 		// Log errors from the decoder proxy
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			// Requests on the catch-all route skip the handler that seeds one.
+			logger = s.logger
+		}
 		var writeError error
 		switch {
 		case errors.Is(err, syscall.ECONNREFUSED):
-			s.logger.Error(err, "failed to connect to vLLM decoder",
+			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 
 		default:
-			s.logger.Error(err, "http: proxy error",
+			logger.Error(err, "http: proxy error",
 				"decoderURL", s.config.DecoderURL.String())
 			writeError = errorBadGateway(err, res)
 		}
 		if writeError != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 	}
 	return decoderProxy
@@ -266,11 +273,12 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+	logger := log.FromContext(r.Context())
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client")
+			logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
 	}
@@ -280,9 +288,9 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	// bodies, so those requests bypass this guard.
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
-			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
 			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-				s.logger.Error(writeErr, "failed to send error response to client")
+				logger.Error(writeErr, "failed to send error response to client")
 			}
 			return nil, nil, false
 		}

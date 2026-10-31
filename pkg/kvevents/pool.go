@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -463,13 +464,15 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 //
 // For 1:many (engine BS > canonical BS): each engine block's features are replicated
 // to all its constituent canonical sub-blocks.
-// For many:1 (engine BS < canonical BS): features from multiple engine blocks are
-// merged (union of MMHashes) into each canonical block.
+// For many:1 (engine BS < canonical BS): features from the engine blocks whose tokens
+// fall in a canonical block are merged into it, and engine blocks past the last full
+// canonical block are dropped.
 //
 // When all entries are nil (text-only prompts), this simply produces a nil-filled
 // slice of the correct length.
-func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockCount int) []*kvblock.BlockExtraFeatures {
+func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, numTokens int) []*kvblock.BlockExtraFeatures {
 	engineBlockCount := len(engineFeatures)
+	canonicalBlockCount := numTokens / canonicalBlockSize
 	if canonicalBlockCount == 0 {
 		return nil
 	}
@@ -486,17 +489,33 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 			canonical[i] = engineFeatures[engineIdx]
 		}
 	} else {
-		// many:1 -> merge constituent engine features into each canonical block
+		// many:1 -> merge each engine block into the canonical block holding its tokens.
+		engineBlockSize := numTokens / engineBlockCount
+		var prev *kvblock.BlockExtraFeatures // engine block i-1, if in the same canonical block
 		for i, ef := range engineFeatures {
-			canonicalIdx := i * canonicalBlockCount / engineBlockCount
-			if ef == nil {
-				continue
+			canonicalIdx := i * engineBlockSize / canonicalBlockSize
+			if canonicalIdx >= canonicalBlockCount {
+				break
 			}
-			if canonical[canonicalIdx] == nil {
-				canonical[canonicalIdx] = &kvblock.BlockExtraFeatures{}
+			if (i-1)*engineBlockSize/canonicalBlockSize != canonicalIdx {
+				prev = nil
 			}
-			canonical[canonicalIdx].MMHashes = append(
-				canonical[canonicalIdx].MMHashes, ef.MMHashes...)
+			if ef != nil {
+				if canonical[canonicalIdx] == nil {
+					canonical[canonicalIdx] = &kvblock.BlockExtraFeatures{}
+				}
+				hashes := ef.MMHashes
+				// An MM item spanning several engine blocks is tagged on each of them,
+				// while ComputeBlockExtraFeatures lists it once per canonical block.
+				// Placeholders don't overlap, so only the item ending engine block i-1
+				// can continue into block i, where it is the first entry. Block i-1 is
+				// searched whole because block 0 ends with the cache salt, if any.
+				if prev != nil && len(hashes) > 0 && slices.Contains(prev.MMHashes, hashes[0]) {
+					hashes = hashes[1:]
+				}
+				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
+			}
+			prev = ef
 		}
 	}
 
@@ -688,7 +707,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// since TokensToKVBlockKeys will produce zero keys anyway.
 					extraFeatures = nil
 				} else if len(extraFeatures) != canonicalBlockCount {
-					extraFeatures = realignExtraFeatures(extraFeatures, canonicalBlockCount)
+					extraFeatures = realignExtraFeatures(extraFeatures, p.tokenProcessor.BlockSize(), len(ev.Tokens))
 				}
 			}
 

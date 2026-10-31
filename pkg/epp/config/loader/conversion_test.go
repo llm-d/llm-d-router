@@ -187,12 +187,14 @@ func requireNoZeroField(t *testing.T, v reflect.Value, path string) {
 
 func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 	band := configapiv1alpha1.PriorityBandConfig{
-		Priority:          10,
-		MaxBytes:          resource.NewQuantity(1024, resource.DecimalSI),
-		MaxRequests:       resource.NewQuantity(64, resource.DecimalSI),
-		DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second},
-		FairnessPolicyRef: "fairness",
-		OrderingPolicyRef: "ordering",
+		MaxBytesPerFlow:    resource.NewQuantity(512, resource.DecimalSI),
+		MaxRequestsPerFlow: resource.NewQuantity(4, resource.DecimalSI),
+		Priority:           10,
+		MaxBytes:           resource.NewQuantity(1024, resource.DecimalSI),
+		MaxRequests:        resource.NewQuantity(64, resource.DecimalSI),
+		DefaultRequestTTL:  &metav1.Duration{Duration: 5 * time.Second},
+		FairnessPolicyRef:  "fairness",
+		OrderingPolicyRef:  "ordering",
 	}
 
 	return &configapiv1alpha1.EndpointPickerConfig{

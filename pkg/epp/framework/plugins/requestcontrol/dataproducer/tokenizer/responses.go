@@ -317,6 +317,8 @@ func appendResponsesItem(conversation []tokenizerTypes.Conversation, item any) (
 		if err != nil {
 			return nil, err
 		}
+		// Reasoning text is never empty, so an empty prev.Reasoning matches
+		// vLLM's check that the message has no reasoning yet.
 		if prev != nil && prev.Reasoning == "" {
 			prev.Reasoning = text
 			return conversation, nil
@@ -343,9 +345,10 @@ func appendResponsesItem(conversation []tokenizerTypes.Conversation, item any) (
 // responsesToolCall converts a function_call item into the tool_calls entry
 // vLLM builds from it. The Responses API requires all three fields, so an
 // item missing one fails the conversion; a namespaced call renders under a
-// flattened name this code does not derive, so it fails too.
+// flattened name this code does not derive, so it fails too. vLLM writes
+// "namespace": null on every call it returns, so null is not a namespace.
 func responsesToolCall(m map[string]any) (map[string]any, error) {
-	if _, namespaced := m["namespace"]; namespaced {
+	if ns, ok := m["namespace"]; ok && ns != nil {
 		return nil, fmt.Errorf("responses input item type %q with a namespace is not supported by legacy translation", responsesItemTypeFunctionCall)
 	}
 	callID, _ := m["call_id"].(string)
@@ -362,8 +365,10 @@ func responsesToolCall(m map[string]any) (map[string]any, error) {
 }
 
 // responsesReasoningText returns the text vLLM takes from a reasoning item:
-// the first content part, else the first summary part, else nothing.
-// Encrypted content cannot be rendered, so it fails the conversion.
+// the first content part, else the first summary part. Encrypted content
+// cannot be rendered, so it fails the conversion. Empty text fails too:
+// vLLM keeps an empty reasoning as an assistant message of its own, which
+// Conversation cannot express. vLLM never returns an empty reasoning item.
 func responsesReasoningText(m map[string]any) (string, error) {
 	if encrypted, _ := m["encrypted_content"].(string); encrypted != "" {
 		return "", fmt.Errorf("responses input item type %q with encrypted_content is not supported by legacy translation", responsesItemTypeReasoning)
@@ -378,9 +383,12 @@ func responsesReasoningText(m map[string]any) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("responses input item type %q %s part has no text field", responsesItemTypeReasoning, field)
 		}
+		if text == "" {
+			break
+		}
 		return text, nil
 	}
-	return "", nil
+	return "", fmt.Errorf("responses input item type %q with empty text is not supported by legacy translation", responsesItemTypeReasoning)
 }
 
 // responsesToolMessage converts a function_call_output item into the tool

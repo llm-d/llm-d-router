@@ -144,9 +144,11 @@ func (r *vllmHTTPRenderer) observeRender(ctx context.Context, path string, timeo
 		return
 	}
 	renderFailuresTotal.WithLabelValues(PluginType, r.pluginName, BackendVLLM, reason).Inc()
+	r.failuresSinceLog.Add(1)
 	r.failureLog.Do(func() {
 		log.FromContext(ctx).Error(err, "token-producer render call failed",
 			"backend", BackendVLLM, "path", path, "reason", reason,
-			"elapsed", elapsed.String(), "timeout", timeout.String())
+			"elapsed", elapsed.String(), "timeout", timeout.String(),
+			"suppressed", r.failuresSinceLog.Swap(0)-1)
 	})
 }

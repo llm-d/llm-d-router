@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -95,11 +96,12 @@ func (s *Server) requestBody(r *http.Request, w http.ResponseWriter, p2p p2pRout
 // prefill request runs to completion before decode is dispatched, so the decoder's
 // fetch finds the blocks already stored, matching the NIXL path.
 func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, p2p p2pRouting, apiType reqcommon.APIType) {
+	logger := log.FromContext(r.Context())
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
-		s.logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
+		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
 		if err := errorInternalServerError(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -115,7 +117,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// its own tier and wait out the NIXL handshake timeout. Another rank of
 	// the prefill pod differs in port and is a valid peer.
 	if source != nil && source.p2pPeer == *p2p.prefill {
-		s.logger.Info("warning: KV cache source is the prefill pod's own P2P tier; proceeding without a pull",
+		logger.Info("warning: KV cache source is the prefill pod's own P2P tier; proceeding without a pull",
 			"p2p_source", source.String())
 		source = nil
 	}
@@ -129,7 +131,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	if source != nil {
 		kv = append(kv, "p2p_source", source.String())
 	}
-	s.logger.Info("running P2P protocol", kv...)
+	logger.Info("running P2P protocol", kv...)
 
 	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
@@ -146,11 +148,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("prefill request body", logBodyBytesKey, len(prefillBody))
 	}
 
@@ -164,11 +166,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("decode request body", logBodyBytesKey, len(decodeBody))
 	}
 
@@ -187,13 +189,14 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // the prefiller and waits for it to return before dispatching decode.
 func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
 	defer toolFields.report(r.Context())
+	logger := log.FromContext(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -225,7 +228,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
-	s.logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
+	logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
 
 	if prefillFailed {
 		// Return the prefill error verbatim; decode is never dispatched, so it
@@ -243,7 +246,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		}
 		w.WriteHeader(status)
 		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send prefill error to client")
+			logger.Error(writeErr, "failed to send prefill error to client")
 		}
 		return
 	}
@@ -378,6 +381,7 @@ func parsePrefillP2P(logger logr.Logger, value string) *p2pPeer {
 // them. The sidecar owns the field, so client-supplied keys are dropped. It
 // routes through dispatchDecode so chunked decode still applies.
 func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p p2pRouting) {
+	logger := log.FromContext(r.Context())
 	raw, requestData, ok := s.requestBody(r, w, p2p)
 	if !ok {
 		return
@@ -389,18 +393,18 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p
 	source := p2p.source
 	requestData[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldRemoteKVSource: source.params()}
 
-	s.logger.Info("running P2P source protocol",
+	logger.Info("running P2P source protocol",
 		"kv_request_id", source.kvRequestID,
 		"p2p_source", source.String())
 
 	newBody, err := json.Marshal(requestData)
 	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
-	if v := s.logger.V(logging.TRACE); v.Enabled() {
+	if v := logger.V(logging.TRACE); v.Enabled() {
 		v.Info("decoder request body with p2p source", logBodyBytesKey, len(newBody))
 	}
 

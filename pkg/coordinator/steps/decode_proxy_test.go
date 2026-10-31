@@ -234,6 +234,85 @@ func TestTimedRoundTripper_RecordsOnTransportError(t *testing.T) {
 	require.True(t, called, "record must fire on transport error to match gwClient.Post semantics")
 }
 
+func TestNewDecodeProxy_TransportErrorsUseOpenAIEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "connection failure", err: errors.New("connection refused at private gateway")},
+		{name: "response header timeout", err: backendTimeoutErr{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses} {
+				t.Run(path, func(t *testing.T) {
+					transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+						return nil, tc.err
+					})
+					proxy, outcome := newDecodeProxy(logr.Discard(), transport, nil)
+					req := httptest.NewRequest(http.MethodPost, path, nil)
+					req.Header.Set(reqcommon.RequestIDHeaderKey, "req-1")
+					rec := httptest.NewRecorder()
+
+					proxy.ServeHTTP(rec, req)
+
+					require.Equal(t, http.StatusBadGateway, rec.Code)
+					require.Equal(t, reqcommon.ContentTypeJSON, rec.Header().Get(reqcommon.HeaderContentType))
+					require.Equal(t, reqcommon.ContentTypeOptionsNoSniff, rec.Header().Get(reqcommon.HeaderContentTypeOptions))
+					require.JSONEq(t, `{"error":{"message":"internal error (request_id: req-1)","type":"server_error","code":502}}`, rec.Body.String())
+					require.ErrorIs(t, outcome.TransportErr, tc.err)
+				})
+			}
+		})
+	}
+}
+
+func TestNewDecodeProxy_NonOpenAITransportErrorsKeepEmptyBody(t *testing.T) {
+	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+		t.Run(path, func(t *testing.T) {
+			transportErr := errors.New("connection refused")
+			transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, transportErr
+			})
+			proxy, outcome := newDecodeProxy(logr.Discard(), transport, nil)
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			rec := httptest.NewRecorder()
+
+			proxy.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.Empty(t, rec.Body.String())
+			require.Empty(t, rec.Header().Get(reqcommon.HeaderContentType))
+			require.ErrorIs(t, outcome.TransportErr, transportErr)
+		})
+	}
+}
+
+func TestNewDecodeProxy_UpstreamErrorsAreForwarded(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			const body = `{"upstream_error":"preserve this response"}`
+			transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    status,
+					Header:        http.Header{reqcommon.HeaderContentType: {reqcommon.ContentTypeJSON}},
+					Body:          io.NopCloser(strings.NewReader(body)),
+					ContentLength: int64(len(body)),
+				}, nil
+			})
+			proxy, outcome := newDecodeProxy(logr.Discard(), transport, nil)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)
+			rec := httptest.NewRecorder()
+
+			proxy.ServeHTTP(rec, req)
+
+			require.Equal(t, status, rec.Code)
+			require.Equal(t, body, rec.Body.String())
+			require.Equal(t, status, outcome.Status)
+			require.NoError(t, outcome.TransportErr)
+		})
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -429,6 +508,10 @@ func TestNewDecodeProxy_ClientCancelNotLoggedAsError(t *testing.T) {
 			require.Equal(t, ctx.Err(), out.Cancelled, "Cancelled must mirror the request context's error")
 			if got := len(sink.errors); got != tt.wantErrorLogs {
 				t.Fatalf("Error-level logs: got %d (%v), want %d", got, sink.errors, tt.wantErrorLogs)
+			}
+			if errors.Is(tt.err, errCacheMiss) {
+				require.Empty(t, rec.Body.String())
+				require.Empty(t, rec.Header().Get(reqcommon.HeaderContentType))
 			}
 		})
 	}

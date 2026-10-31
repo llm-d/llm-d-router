@@ -179,6 +179,10 @@ type RequestContext struct {
 	responseStatusCode         string
 	requestRunning             bool
 
+	// sseLineCarry is the partial last SSE line of the previous response chunk.
+	sseLineCarry      []byte
+	sseLineDiscarding bool
+
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
 	toolCallingResponseEventStream bool
@@ -376,6 +380,13 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	return fairnessID, priority
 }
 
+func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+		s.bufferPool.Put(buf)
+	}
+}
+
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
 
@@ -435,13 +446,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 	}()
 
-	buf := s.bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
+	var buf *bytes.Buffer
 	defer func() {
-		buf.Reset()
-		// Return to pool if capacity is within limits.
-		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
-			s.bufferPool.Put(buf)
+		if buf != nil {
+			s.putBuffer(buf)
 		}
 	}()
 	var respBody []byte
@@ -484,9 +492,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		if reqCtx.responseStatusCode != "" {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
 		} else if err != nil {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
 		}
 		if span != nil {
 			if err != nil {
@@ -584,6 +592,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+			if buf == nil {
+				buf = s.bufferPool.Get().(*bytes.Buffer)
+				buf.Reset()
+			}
 			// In the stream case, we can receive multiple request bodies.
 			buf.Write(v.RequestBody.Body)
 
@@ -675,7 +687,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 						span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
 					}
 				}
-				buf.Reset()
+				// The response phase can last for the whole generation, so return
+				// the buffer here unless the tool-calling snapshot in ctx still
+				// references its bytes.
+				if hasInboundToolSnapshot {
+					buf.Reset()
+				} else {
+					s.putBuffer(buf)
+					buf = nil
+				}
 
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
@@ -709,20 +729,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
-			// The traceEnabled guard is intentional: passing arguments to a disabled
-			// logger still boxes them into a heap-allocated slice, and this loop runs
-			// per header. string(header.RawValue) in the status comparison does not
-			// allocate; the content-type check runs at most once per response.
+			// Skip building trace-log args per header when tracing is off.
 			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				if traceEnabled {
-					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
+					loggerTrace.Info("header", "key", header.Key, "value", envoy.GetHeaderValue(header))
 				}
-				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && string(header.RawValue) != "200" {
+				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && envoy.GetHeaderValue(header) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType {
-					mediaType, _, _ := strings.Cut(envoy.GetHeaderValue(header), ";")
-					if !strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream) {
+					if !isEventStream(envoy.GetHeaderValue(header)) {
 						continue
 					}
 					reqCtx.modelServerStreaming = true

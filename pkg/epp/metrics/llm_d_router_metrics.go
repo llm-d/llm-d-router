@@ -57,6 +57,24 @@ var (
 		append(append([]string{}, requestLabelsWithAPISurface...), "error_code"),
 	)
 
+	llmdFairnessIDResolvedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "fairness_id_resolved_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests by resolved fairness ID and where the ID came from.", compbasemetrics.ALPHA),
+		},
+		[]string{"fairness_id", "source", "inference_pool"},
+	)
+
+	llmdFairnessIDOverflowCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "fairness_id_overflow_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests whose fairness ID was folded into the overflow label value because the label cap was full.", compbasemetrics.ALPHA),
+		},
+		[]string{"source", "inference_pool"},
+	)
+
 	llmdRequestLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

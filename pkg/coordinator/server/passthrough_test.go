@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -202,20 +203,24 @@ func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
 }
 
 func TestPassthrough_StripsClientSuppliedInternalHeaders(t *testing.T) {
-	// Peer topology and revision decision id are set by the coordinator alone;
-	// a client copy must not reach EPP through the passthrough any more than
-	// through handleInference.
+	// Client-supplied internal routing headers must not reach EPP.
 	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
 	srv := newTestServerWithGateway(nil, upstream.URL)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`))
 	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
 	req.Header.Set(reqcommon.RevisionDecisionIDHeaderKey, "shared-by-everyone")
+	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-a")
+	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-b")
 	req.Header.Set("X-Keep", "kept")
 	doPassthrough(t, srv, req)
 
 	_, _, _, headers, _ := cap.get()
-	for _, name := range []string{reqcommon.PeerTopologyHeaderKey, reqcommon.RevisionDecisionIDHeaderKey} {
+	for _, name := range []string{
+		reqcommon.PeerTopologyHeaderKey,
+		reqcommon.RevisionDecisionIDHeaderKey,
+		reqcommon.DisaggregatedRevisionHeaderKey,
+	} {
 		if got := headers.Values(name); len(got) != 0 {
 			t.Fatalf("client %s reached the gateway: %q", name, got)
 		}
@@ -231,6 +236,7 @@ func TestPassthrough_StripsUpstreamSuppliedInternalHeaders(t *testing.T) {
 	// not reach the client, as on the decode proxy.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(reqcommon.PeerTopologyHeaderKey, "host=node12,rack=r7")
+		w.Header().Set(reqcommon.DisaggregatedRevisionHeaderKey, "revision-a")
 		w.Header().Set("X-Keep", "kept")
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -246,6 +252,9 @@ func TestPassthrough_StripsUpstreamSuppliedInternalHeaders(t *testing.T) {
 	if got := rec.Header().Values(reqcommon.PeerTopologyHeaderKey); len(got) != 0 {
 		t.Fatalf("upstream %s reached the client: %q", reqcommon.PeerTopologyHeaderKey, got)
 	}
+	if got := rec.Header().Get(reqcommon.DisaggregatedRevisionHeaderKey); got != "revision-a" {
+		t.Fatalf("upstream revision: got %q want %q", got, "revision-a")
+	}
 	if got := rec.Header().Get("X-Keep"); got != "kept" {
 		t.Fatalf("X-Keep: got %q want %q, other response headers must still be forwarded", got, "kept")
 	}
@@ -260,10 +269,104 @@ func TestPassthrough_TransportErrorReturns502(t *testing.T) {
 
 	srv := newTestServerWithGateway(nil, closedURL)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set(reqcommon.RequestIDHeaderKey, "req-1")
 	rec := doPassthrough(t, srv, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 on transport error, got %d", rec.Code)
+	}
+	require.JSONEq(t, `{"error":{"message":"internal error (request_id: req-1)","type":"server_error","code":502}}`, rec.Body.String())
+}
+
+func TestPassthrough_ProxyErrorResponses(t *testing.T) {
+	gwURL, err := url.Parse("http://gw:80")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		path   string
+		openAI bool
+	}{
+		{path: reqcommon.PathChatCompletions, openAI: true},
+		{path: reqcommon.PathCompletions, openAI: true},
+		{path: reqcommon.PathResponses, openAI: true},
+		{path: reqcommon.PathConversations, openAI: true},
+		{path: reqcommon.PathModels, openAI: true},
+		{path: reqcommon.PathEmbeddings, openAI: true},
+		{path: reqcommon.PathAudioSpeech, openAI: true},
+		{path: reqcommon.PathImagesGenerations, openAI: true},
+		{path: reqcommon.PathImagesEdits, openAI: true},
+		{path: reqcommon.PathMessages},
+		{path: reqcommon.PathVLLMGenerate},
+		{path: reqcommon.PathSGLangGenerate},
+		{path: "/tokenize"},
+		{path: "/detokenize"},
+		{path: "/pooling"},
+		{path: "/unknown"},
+		{path: "/v1/unknown"},
+		{path: "/v1/models-extra"},
+		{path: reqcommon.PathChatCompletions + "/render"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			for _, failure := range []struct {
+				name       string
+				err        error
+				wantStatus int
+				wantBody   string
+			}{
+				{
+					name:       "connection failure",
+					err:        errors.New("connection refused at private gateway"),
+					wantStatus: http.StatusBadGateway,
+					wantBody:   `{"error":{"message":"internal error (request_id: req-1)","type":"server_error","code":502}}`,
+				},
+				{
+					name:       "response header timeout",
+					err:        backendTimeoutErr{},
+					wantStatus: http.StatusBadGateway,
+					wantBody:   `{"error":{"message":"internal error (request_id: req-1)","type":"server_error","code":502}}`,
+				},
+				{
+					name:       "body too large",
+					err:        &http.MaxBytesError{Limit: config.BytesPerMB},
+					wantStatus: http.StatusRequestEntityTooLarge,
+					wantBody:   `{"error":{"message":"request body too large","type":"invalid_request_error","code":413}}`,
+				},
+			} {
+				t.Run(failure.name, func(t *testing.T) {
+					proxy := newPassthroughProxy(logr.Discard(), gwURL, http.DefaultTransport, "req-1")
+					rec := httptest.NewRecorder()
+					req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+
+					proxy.ErrorHandler(rec, req, failure.err)
+
+					require.Equal(t, failure.wantStatus, rec.Code)
+					if !tc.openAI {
+						require.Empty(t, rec.Body.String())
+						require.Empty(t, rec.Header().Get(reqcommon.HeaderContentType))
+						require.Empty(t, rec.Header().Get(reqcommon.HeaderContentTypeOptions))
+						return
+					}
+					require.Equal(t, reqcommon.ContentTypeJSON, rec.Header().Get(reqcommon.HeaderContentType))
+					require.Equal(t, reqcommon.ContentTypeOptionsNoSniff, rec.Header().Get(reqcommon.HeaderContentTypeOptions))
+					require.JSONEq(t, failure.wantBody, rec.Body.String())
+				})
+			}
+		})
+	}
+}
+
+func TestPassthrough_UpstreamErrorsAreForwarded(t *testing.T) {
+	for _, path := range []string{reqcommon.PathModels, "/v1/messages/count_tokens"} {
+		t.Run(path, func(t *testing.T) {
+			const body = `{"upstream_error":"preserve this response"}`
+			upstream, _ := newCapturingUpstream(t, http.StatusBadGateway, body)
+			srv := newTestServerWithGateway(nil, upstream.URL)
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+
+			rec := doPassthrough(t, srv, req)
+
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.Equal(t, body, rec.Body.String())
+		})
 	}
 }
 
@@ -437,6 +540,7 @@ func TestPassthrough_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413 for oversize passthrough body, got %d", rec.Code)
 	}
+	require.JSONEq(t, `{"error":{"message":"request body too large","type":"invalid_request_error","code":413}}`, rec.Body.String())
 }
 
 func TestPassthrough_RegisteredPathsBypass(t *testing.T) {
