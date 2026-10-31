@@ -803,6 +803,74 @@ func TestBlockStoredEvent_OffloadingEmptyTokens(t *testing.T) {
 	}
 }
 
+// TestBlockStoredEvent_OffloadingEmptyTokensOneToMany verifies that an
+// offloading event for engine blocks larger than the canonical block adds the
+// CPU entry to every canonical key each engine block covers, so the prefix
+// still matches on the CPU tier after the GPU copy is evicted.
+func TestBlockStoredEvent_OffloadingEmptyTokensOneToMany(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 64)
+
+	// 256 tokens over 2 engine keys: engine block 128, so each engine key
+	// covers 2 canonical keys.
+	tokens := makeTokens(256)
+	engineKeys := makeEngineKeys(2, 1900)
+
+	gpuBatch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				Tokens:      tokens,
+				ParentHash:  0,
+			},
+		},
+	}
+	pool.processEventBatch(ctx, gpuBatch, "pod-a", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 4)
+
+	cpuBatch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				Tokens:      nil,
+				ParentHash:  0,
+				DeviceTier:  "CPU",
+			},
+		},
+	}
+	pool.processEventBatch(ctx, cpuBatch, "pod-a", "test-model")
+
+	for i, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		tiers := map[string]bool{}
+		for _, pe := range result[ck] {
+			tiers[pe.DeviceTier] = true
+		}
+		assert.True(t, tiers["gpu"], "canonical key %d should have a gpu entry", i)
+		assert.True(t, tiers["cpu"], "canonical key %d should have a cpu entry", i)
+	}
+
+	removeBatch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockRemovedEvent{BlockHashes: engineKeys},
+		},
+	}
+	pool.processEventBatch(ctx, removeBatch, "pod-a", "test-model")
+
+	result, err := idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	require.Len(t, result, 4, "the CPU tier holds the whole prefix")
+	for _, ck := range canonicalKeys {
+		require.Len(t, result[ck], 1)
+		assert.Equal(t, "cpu", result[ck][0].DeviceTier)
+	}
+}
+
 // TestBlockStoredEvent_OffloadingUnknownEngineKeys verifies that an offloading
 // event with engine keys not yet in the index is a graceful no-op.
 func TestBlockStoredEvent_OffloadingUnknownEngineKeys(t *testing.T) {

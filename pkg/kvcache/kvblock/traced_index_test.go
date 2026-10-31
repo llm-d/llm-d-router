@@ -302,6 +302,10 @@ func (f *failingIndex) GetRequestKey(context.Context, kvblock.BlockHash) (kvbloc
 	return kvblock.EmptyBlockHash, f.err
 }
 
+func (f *failingIndex) GetRequestKeys(context.Context, kvblock.BlockHash) ([]kvblock.BlockHash, error) {
+	return nil, f.err
+}
+
 func (f *failingIndex) Clear(context.Context, string) error {
 	return f.err
 }

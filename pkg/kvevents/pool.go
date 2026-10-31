@@ -525,13 +525,15 @@ func (p *Pool) handleDeviceTierUpdate(
 	seen := make(map[kvblock.BlockHash]struct{})
 	var resolvedKeys []kvblock.BlockHash
 	for _, ek := range engineKeys {
-		rk, err := p.index.GetRequestKey(ctx, ek)
+		rks, err := p.index.GetRequestKeys(ctx, ek)
 		if err != nil {
 			continue
 		}
-		if _, ok := seen[rk]; !ok {
-			seen[rk] = struct{}{}
-			resolvedKeys = append(resolvedKeys, rk)
+		for _, rk := range rks {
+			if _, ok := seen[rk]; !ok {
+				seen[rk] = struct{}{}
+				resolvedKeys = append(resolvedKeys, rk)
+			}
 		}
 	}
 

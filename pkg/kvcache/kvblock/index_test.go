@@ -865,6 +865,13 @@ func testAddMappingOneToMany(t *testing.T, ctx context.Context, index Index) {
 	assert.Equal(t, requestKeys[len(requestKeys)-1], rk,
 		"engine key should resolve to last mapped request key")
 
+	rks, err := index.GetRequestKeys(ctx, engineKeys[0])
+	require.NoError(t, err)
+	assert.Equal(t, requestKeys, rks, "engine key should resolve to every mapped request key in chain order")
+
+	_, err = index.GetRequestKeys(ctx, BlockHash(599))
+	require.Error(t, err, "an unknown engine key should return an error")
+
 	// All 4 request keys should have the pod
 	result, err := index.Lookup(ctx, requestKeys, nil)
 	require.NoError(t, err)
