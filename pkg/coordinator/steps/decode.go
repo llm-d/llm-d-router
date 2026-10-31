@@ -286,7 +286,15 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
+		// vLLM decode builds the engine input from these ids and skips chat
+		// templating. Engines that predate media detection on this path drop
+		// multimodal data, so multimodal requests keep re-rendering messages.
+		if len(reqCtx.TokenIDs) > 0 && len(reqCtx.MultimodalEntries) == 0 {
+			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
+		}
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+	case reqcommon.APITypeVLLMGenerate:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
