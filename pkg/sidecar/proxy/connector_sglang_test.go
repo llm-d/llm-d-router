@@ -121,6 +121,59 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
+	// sendRanked sends a chat completion with the given extra headers and returns the
+	// recorded prefill and decode bodies and headers.
+	sendRanked := func(headers map[string]string) (map[string]any, map[string]any, http.Header, http.Header) {
+		go func() {
+			defer GinkgoRecover()
+			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+			Expect(testInfo.proxy.Start(testInfo.ctx)).To(Succeed())
+			testInfo.stoppedCh <- struct{}{}
+		}()
+		<-testInfo.proxy.readyCh
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+
+		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}`
+		req, err := http.NewRequest(http.MethodPost, "http://"+testInfo.proxy.addr.String()+reqcommon.PathChatCompletions,
+			bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+		return testInfo.prefillHandler.GetCompletionRequests()[0], testInfo.decodeHandler.GetCompletionRequests()[0],
+			testInfo.prefillHandler.GetCompletionHeaders()[0], testInfo.decodeHandler.GetCompletionHeaders()[0]
+	}
+
+	// SGLang's prefill must know its rank was picked externally, or it requires
+	// rank bootstrap_room % dp_size; decode uses it to find the prefill rank.
+	It("sends the EPP's prefill rank as disagg_prefill_dp_rank to both requests", func() {
+		prefill, decode, prefillHeaders, decodeHeaders := sendRanked(map[string]string{
+			routing.DataParallelRankHeader:        "0",
+			routing.PrefillDataParallelRankHeader: "3",
+		})
+		Expect(prefill).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(decode).To(HaveKeyWithValue(reqcommon.FieldDisaggPrefillDPRank, float64(3)))
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(Equal("3"))
+		Expect(decodeHeaders.Get(routing.DataParallelRankHeader)).To(Equal("0"))
+	})
+
+	It("omits disagg_prefill_dp_rank when the EPP picked no prefill rank", func() {
+		prefill, decode, prefillHeaders, _ := sendRanked(map[string]string{routing.DataParallelRankHeader: "1"})
+		Expect(prefill).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(decode).ToNot(HaveKey(reqcommon.FieldDisaggPrefillDPRank))
+		Expect(prefillHeaders.Get(routing.DataParallelRankHeader)).To(BeEmpty())
+	})
+
 	It("should not panic when prefill response is slower than decode response", func() {
 		// Stop previously injected servers
 		testInfo.decodeBackend.Close()

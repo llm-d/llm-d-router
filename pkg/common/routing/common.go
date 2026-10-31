@@ -47,6 +47,10 @@ const (
 	// instead of recomputing them
 	KVCacheSourceHeader = "x-llm-d-kv-cache-source-host-port"
 
+	// PrefillDataParallelRankHeader carries the data-parallel rank of the Prefill worker
+	// in PrefillEndpointHeader, when that worker serves several ranks behind its port.
+	PrefillDataParallelRankHeader = "x-llm-d-prefiller-data-parallel-rank"
+
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 

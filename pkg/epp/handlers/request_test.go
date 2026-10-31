@@ -518,6 +518,7 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 	// supplying either name must not reach the sidecar.
 	canonical := []string{
 		routing.PrefillEndpointHeader,
+		routing.PrefillDataParallelRankHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
 		routing.KVCacheSourceHeader,
@@ -552,6 +553,28 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000",
 			},
 			wantRemoved: []string{
+				routing.PrefillDataParallelRankHeader,
+				routing.EncoderEndpointsHeader,
+				routing.LegacyEncoderEndpointsHeader,
+				routing.DataParallelEndpointHeader,
+				routing.KVCacheSourceHeader,
+				routing.LegacyKVCacheSourceHeader,
+				routing.EndpointPinHeader,
+			},
+		},
+		{
+			name: "prefill rank is set with its prefill target",
+			headers: map[string]string{
+				routing.PrefillEndpointHeader:         "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader:   "10.0.0.1:8000",
+				routing.PrefillDataParallelRankHeader: "1",
+			},
+			wantSet: map[string]string{
+				routing.PrefillEndpointHeader:         "10.0.0.1:8000",
+				routing.LegacyPrefillEndpointHeader:   "10.0.0.1:8000",
+				routing.PrefillDataParallelRankHeader: "1",
+			},
+			wantRemoved: []string{
 				routing.EncoderEndpointsHeader,
 				routing.LegacyEncoderEndpointsHeader,
 				routing.DataParallelEndpointHeader,
@@ -568,6 +591,7 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			wantSet: map[string]string{routing.LegacyPrefillEndpointHeader: "10.0.0.1:8000"},
 			wantRemoved: []string{
 				routing.PrefillEndpointHeader,
+				routing.PrefillDataParallelRankHeader,
 				routing.EncoderEndpointsHeader,
 				routing.LegacyEncoderEndpointsHeader,
 				routing.DataParallelEndpointHeader,
