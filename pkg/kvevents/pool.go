@@ -523,8 +523,8 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 }
 
 // handleDeviceTierUpdate handles offloading/location-only events (e.g., DeviceTier=CPU
-// with no tokens). It resolves existing request keys from the engine→request mapping and
-// adds the new PodEntry so the EPP tracks which device tiers hold each block.
+// with no tokens). It expands each engine key to every mapped request key and
+// re-Adds with both key lists so RetrievalSpan is stamped for 1:many mappings.
 //
 // It returns true only when at least one engine key resolved and the resulting
 // PodEntry was added to the index, so the caller knows the store took effect
@@ -541,31 +541,28 @@ func (p *Pool) handleDeviceTierUpdate(
 		return false
 	}
 
-	seen := make(map[kvblock.BlockHash]struct{})
-	var resolvedKeys []kvblock.BlockHash
+	added := false
 	for _, ek := range engineKeys {
-		rk, err := p.index.GetRequestKey(ctx, ek)
-		if err != nil {
+		rks, err := p.index.GetRequestKeys(ctx, ek)
+		if err != nil || len(rks) == 0 {
 			continue
 		}
-		if _, ok := seen[rk]; !ok {
-			seen[rk] = struct{}{}
-			resolvedKeys = append(resolvedKeys, rk)
+		// Pass the engine key with its full request-key chain so Add can
+		// stamp RetrievalSpan (nil engineKeys would force span 1).
+		if err := p.index.Add(ctx, []kvblock.BlockHash{ek}, rks, podEntries); err != nil {
+			debugLogger.Error(err, "Failed to add device-tier update to index",
+				"podIdentifier", podIdentifier, "deviceTier", deviceTier,
+				"engineKey", ek.String())
+			continue
 		}
+		added = true
 	}
 
-	if len(resolvedKeys) == 0 {
+	if !added {
 		debugLogger.Info("no indexed engine keys found for device-tier update, skipping",
 			"podIdentifier", podIdentifier, "engineKeyCount", len(engineKeys))
-		return false
 	}
-
-	if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
-		debugLogger.Error(err, "Failed to add device-tier update to index",
-			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
-		return false
-	}
-	return true
+	return added
 }
 
 // processEventBatch processes a batch of events using type switches.

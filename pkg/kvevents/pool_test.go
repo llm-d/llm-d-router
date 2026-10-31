@@ -2157,3 +2157,92 @@ func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
 		})
 	}
 }
+
+// TestCPUChunkSingleHashRetrievalBoundary covers issue #2889 write path: one
+// retrievable 64-token CPU block with canonical size 16 must land in the index
+// with RetrievalSpan=4 on every mapped request key. Match scoring for the
+// 0,0,0,4 credit rule is covered in kvcache.TestMatchBlockKeysRetrievalSpanCPUOnly.
+func TestCPUChunkSingleHashRetrievalBoundary(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(1, 400)
+	batch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				BlockSize:   64,
+				Tokens:      tokens,
+				ParentHash:  0,
+				DeviceTier:  "CPU",
+			},
+		},
+	}
+	pool.processEventBatch(ctx, batch, "pod-cpu", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 4)
+
+	for _, ck := range canonicalKeys {
+		looked, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, looked[ck], 1, "canonical key %v", ck)
+		assert.Equal(t, "pod-cpu", looked[ck][0].PodIdentifier)
+		assert.Equal(t, "cpu", looked[ck][0].DeviceTier)
+		assert.Equal(t, 4, looked[ck][0].RetrievalSpan, "canonical key %v", ck)
+	}
+}
+
+// TestCPUOffloadWithoutTokensStampsRetrievalSpan covers the empty-token CPU
+// offload path (#2889): a GPU store establishes a 1:many engine→request mapping
+// (BlockSize=64, canonical=16), then a tokenless CPU DeviceTier event must
+// expand to every mapped request key and stamp RetrievalSpan=4 on each.
+func TestCPUOffloadWithoutTokensStampsRetrievalSpan(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(1, 410)
+
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				BlockSize:   64,
+				Tokens:      tokens,
+				ParentHash:  0,
+			},
+		},
+	}, "pod-offload-span", "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				Tokens:      nil,
+				ParentHash:  0,
+				DeviceTier:  "CPU",
+			},
+		},
+	}, "pod-offload-span", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 4)
+
+	for _, ck := range canonicalKeys {
+		looked, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, looked[ck], 2, "gpu and cpu entries for canonical key %v", ck)
+		tiers := map[string]kvblock.PodEntry{}
+		for _, pe := range looked[ck] {
+			tiers[pe.DeviceTier] = pe
+		}
+		require.Contains(t, tiers, "gpu")
+		require.Contains(t, tiers, "cpu")
+		assert.Equal(t, 4, tiers["gpu"].RetrievalSpan, "gpu span on %v", ck)
+		assert.Equal(t, 4, tiers["cpu"].RetrievalSpan, "cpu span on %v", ck)
+	}
+}
