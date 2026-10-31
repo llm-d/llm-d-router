@@ -28,6 +28,15 @@ spec:
           containerPort: 8080
         - name: metrics
           containerPort: 9090
+        # Startup gets its own budget: generating the self-signed certificate
+        # on a slow node can outlast the liveness failure threshold.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTPS
+          periodSeconds: 5
+          failureThreshold: 60
         livenessProbe:
           httpGet:
             path: /healthz

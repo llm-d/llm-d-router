@@ -44,6 +44,14 @@ spec:
         - containerPort: 9003
         - name: metrics
           containerPort: 9090
+        # Startup gets its own budget so liveness cannot restart the
+        # container while it is still initializing.
+        startupProbe:
+          grpc:
+            port: 9003
+            service: liveness
+          periodSeconds: 5
+          failureThreshold: 60
         livenessProbe:
           grpc:
             port: 9003
