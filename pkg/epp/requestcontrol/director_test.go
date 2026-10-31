@@ -536,6 +536,10 @@ func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
 }
 
+func (m *mockRequestHeaderPlugin) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{m.attributeKey: ""}
+}
+
 func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
 	if m.modifyFn != nil {
 		m.modifyFn(request)
