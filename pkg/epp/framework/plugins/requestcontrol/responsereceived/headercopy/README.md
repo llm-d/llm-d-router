@@ -8,10 +8,15 @@ request EPP forwarded.
 
 ## What it does
 
-Scoped to coordinator deployments. A request header a PreRequest plugin sets reaches the
-model server and stops there: the server builds its response from its own result, and
-Envoy has no default rule that copies request headers onto a response. The coordinator
-is the client of that exchange and never sees the request after EPP changed it.
+Scoped to coordinator deployments. In a sidecar or plain gateway deployment the response
+goes to the end client, and the copied headers go with it: a configured
+`x-llm-d-kv-cache-prefill-p2p-host-port` exposes the prefill pod's address and P2P tier
+port to that client.
+
+A request header a PreRequest plugin sets reaches the model server and stops there: the
+server builds its response from its own result, and Envoy has no default rule that copies
+request headers onto a response. The coordinator is the client of that exchange and never
+sees the request after EPP changed it.
 
 Runs after response headers are received (`ResponseHeader`). For each name in the
 `headers` parameter that is present on the request, it writes the same name and value
