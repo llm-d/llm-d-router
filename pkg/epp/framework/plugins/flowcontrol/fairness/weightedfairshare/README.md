@@ -112,6 +112,8 @@ Under contention the virtual-service gauges of backlogged flows in one band stay
 
 The weight gauge shows the weight resolved for each flow. A fairness ID that does not match a `flowWeights` key silently takes `defaultFlowWeight`, and this gauge is how to detect that. Collectors are per-instance and registered through `handle.Metrics()`, so two instances can share one registry.
 
+Both gauges label `flow_id` with the fairness ID, so they share the `--fairness-id-metric-label-limit` cap. Flows past the cap are still scheduled and charged; they just get no series.
+
 ## Trade-offs
 
 *   **The control loop is delayed.** Cost is charged at completion, which on long requests is tens of seconds after the dispatch decision it should have informed. Requests in flight are not yet reflected in their flow's virtual service, so with few dispatch slots and long requests the achieved split can fall short of the weight ratio. [Round Robin](../roundrobin/README.md) knows a turn's cost at selection time and has no such lag.
