@@ -380,10 +380,11 @@ listener as inference.
 
 When render uses a different listener, configure ordered `portRules`. The
 first matching Kubernetes label selector resolves the port as
-`basePort + RankIndex`. `RankIndex` is the endpoint's zero-based position in
-the `InferencePool`'s `targetPorts`, not a port-number difference. For example,
-a decode endpoint at index 3 uses render port `8203` with `basePort: 8200`,
-even when its inference port is `8003`.
+`basePort` plus the endpoint's zero-based position in the `InferencePool`'s
+`targetPorts`, not a port-number difference. For example, a decode endpoint at
+index 3 uses render port `8203` with `basePort: 8200`, even when its inference
+port is `8003`. When a pod serves several data-parallel ranks behind its port, every rank of a
+pod uses the render port of the pod's single target port.
 
 This configuration maps prefill and decode endpoints to separate render port
 ranges:

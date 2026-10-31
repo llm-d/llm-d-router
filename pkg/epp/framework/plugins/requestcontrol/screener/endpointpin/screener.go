@@ -66,8 +66,9 @@ func (s *Screener) TypedName() plugin.TypedName {
 }
 
 // Screen returns every endpoint when the request carries no pin. With a pin it
-// returns only the matching endpoint, and none when that endpoint is not a
-// candidate: falling back to another pod would send the request to a pod its
+// returns only the endpoints at the pinned address, which are several when the
+// pod serves several data-parallel ranks on that port, and none when no such
+// endpoint is a candidate: falling back to another pod would send the request to a pod its
 // peer request does not name, so the director answers 503 instead.
 func (s *Screener) Screen(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	if request == nil {
@@ -84,11 +85,14 @@ func (s *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 	}
 	// Parsed so that any spelling of the address matches the one the endpoint stores.
 	host, port := addrPort.Addr().String(), strconv.Itoa(int(addrPort.Port()))
+	var pinnedEndpoints []fwksched.Endpoint
 	for _, endpoint := range endpoints {
 		if md := endpoint.GetMetadata(); md != nil && md.GetIPAddress() == host && md.GetPort() == port {
-			return []fwksched.Endpoint{endpoint}
+			pinnedEndpoints = append(pinnedEndpoints, endpoint)
 		}
 	}
-	log.FromContext(ctx).V(logutil.DEBUG).Info("pinned endpoint is not a candidate", "pin", pin)
-	return nil
+	if pinnedEndpoints == nil {
+		log.FromContext(ctx).V(logutil.DEBUG).Info("pinned endpoint is not a candidate", "pin", pin)
+	}
+	return pinnedEndpoints
 }
