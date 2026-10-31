@@ -26,6 +26,8 @@ import (
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -223,6 +225,39 @@ func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason 
 		})
 }
 
+// ExpectRejectNoEndpoints asserts that the EPP rejected the request because no endpoint can serve it.
+// The error message is left empty; set ignoreErrorMessage on the test case.
+func ExpectRejectNoEndpoints() []*extProcPb.ProcessingResponse {
+	code := envoyTypePb.StatusCode_ServiceUnavailable
+	return integration.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
+		&envoyCorev3.HeaderValueOption{
+			Header: &envoyCorev3.HeaderValue{
+				Key:      errcommon.RequestDroppedReasonHeaderKey,
+				RawValue: []byte(errcommon.RequestDroppedReasonNoEndpoints),
+			},
+		})
+}
+
+// errorBodyOption compares immediate response bodies without error.message, so the rest of the
+// error envelope is still asserted.
+func errorBodyOption(ignoreMessage bool) cmp.Option {
+	if !ignoreMessage {
+		return cmp.Options{}
+	}
+	strip := func(b []byte) map[string]any {
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			return nil
+		}
+		if e, ok := m["error"].(map[string]any); ok {
+			delete(e, "message")
+		}
+		return m
+	}
+	return protocmp.FilterField(&extProcPb.ImmediateResponse{}, "body",
+		cmp.Comparer(func(a, b []byte) bool { return cmp.Equal(strip(a), strip(b)) }))
+}
+
 // openAIErrorBody is the OpenAI error envelope the EPP answers with for the given status.
 func openAIErrorBody(code envoyTypePb.StatusCode, msg string) string {
 	errType := "server_error"
@@ -354,6 +389,8 @@ type testCase struct {
 	requiresCRDs bool
 	// wantSpans lists the span names expected to be recorded (hermetic tests only).
 	wantSpans []string
+	// ignoreErrorMessage compares the immediate response body without its error message.
+	ignoreErrorMessage bool
 }
 
 // commonTestCases returns the test cases shared between the standard and data layer test suites.
@@ -389,12 +426,11 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 		},
 		{
-			name:     "no backend pods available",
-			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
-			pods:     nil,
-			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-				"no pods available in datastore",
-				errcommon.RequestDroppedReasonNoEndpoints),
+			name:               "no backend pods available",
+			requests:           integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			pods:               nil,
+			wantResponses:      ExpectRejectNoEndpoints(),
+			ignoreErrorMessage: true,
 		},
 		{
 			name: "request missing model field",

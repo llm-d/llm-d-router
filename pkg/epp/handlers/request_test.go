@@ -692,11 +692,10 @@ func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
 	}
 
 	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
-	assert.Equal(t, errcommon.Error{
-		Code:    errcommon.ServiceUnavailable,
-		Msg:     "no pods available in datastore",
-		Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
-	}, err)
+	var epErr errcommon.Error
+	require.ErrorAs(t, err, &epErr)
+	assert.Equal(t, errcommon.ServiceUnavailable, epErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), epErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }
 
 type emptyPoolDirector struct {

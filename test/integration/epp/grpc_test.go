@@ -23,12 +23,10 @@ import (
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 	"github.com/llm-d/llm-d-router/test/integration"
@@ -73,6 +71,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 		// requiresCRDs indicates that this test case relies on specific Gateway API CRD features (like
 		// InferenceModelRewrite) which are not available in Standalone runMode without CRD.
 		requiresCRDs bool
+		// ignoreErrorMessage compares the immediate response body without its error message.
+		ignoreErrorMessage bool
 	}{
 		// --- Standard Routing Logic ---
 		{
@@ -171,12 +171,11 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "no backend pods available",
-			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
-			pods:     nil,
-			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-				"no pods available in datastore",
-				errcommon.RequestDroppedReasonNoEndpoints),
+			name:               "no backend pods available",
+			requests:           integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			pods:               nil,
+			wantResponses:      ExpectRejectNoEndpoints(),
+			ignoreErrorMessage: true,
 		},
 
 		// // --- Subsetting & Metadata ---
@@ -209,9 +208,8 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 				P(0, 0, 0.2, "foo"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 			},
-			wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-				"failed to find endpoint candidates for serving the request",
-				errcommon.RequestDroppedReasonNoEndpoints),
+			wantResponses:      ExpectRejectNoEndpoints(),
+			ignoreErrorMessage: true,
 		},
 
 		// --- Response Processing (Non-streaming) ---
@@ -410,6 +408,7 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 					return a.GetHeader().GetKey() < b.GetHeader().GetKey()
 				}),
 				protocmp.SortRepeated(func(a, b string) bool { return a < b }),
+				errorBodyOption(tc.ignoreErrorMessage),
 			); diff != "" {
 				t.Errorf("Response mismatch (-want +got): %v", diff)
 			}

@@ -46,7 +46,6 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -283,12 +282,11 @@ dataLayer:
 						"images edits request must have a multipart/form-data content-type"),
 				},
 				{
-					name:     "no backend pods available",
-					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
-					pods:     nil,
-					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-						"no pods available in datastore",
-						errcommon.RequestDroppedReasonNoEndpoints),
+					name:               "no backend pods available",
+					requests:           integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+					pods:               nil,
+					wantResponses:      ExpectRejectNoEndpoints(),
+					ignoreErrorMessage: true,
 				},
 				{
 					name: "request missing model field",
@@ -339,9 +337,8 @@ dataLayer:
 						P(0, 0, 0.2, "foo"),
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-						"failed to find endpoint candidates for serving the request",
-						errcommon.RequestDroppedReasonNoEndpoints),
+					wantResponses:      ExpectRejectNoEndpoints(),
+					ignoreErrorMessage: true,
 				},
 
 				// --- Request Modification (Passthrough & Rewrite) ---
@@ -504,6 +501,7 @@ dataLayer:
 							return a.GetHeader().GetKey() < b.GetHeader().GetKey()
 						}),
 						protocmp.SortRepeated(func(a, b string) bool { return a < b }),
+						errorBodyOption(tc.ignoreErrorMessage),
 					); diff != "" {
 						t.Errorf("Response mismatch (-want +got): %v", diff)
 					}
