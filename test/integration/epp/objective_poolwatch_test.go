@@ -53,7 +53,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 )
 
 // startObjectiveEnv boots an envtest environment serving the gaie v1
@@ -134,7 +135,7 @@ func TestInferenceObjectivePoolWatchWiring(t *testing.T) {
 	}))
 
 	createPool := func(tier string) {
-		pool := testutil.MakeInferencePool(poolName).
+		pool := fwkgaie.MakeInferencePool(poolName).
 			Namespace(namespace).
 			Selector(map[string]string{"app": poolName}).
 			EndpointPickerRef("epp").
@@ -154,7 +155,7 @@ func TestInferenceObjectivePoolWatchWiring(t *testing.T) {
 	objectiveRegistered := func() bool { return ds.ObjectiveGet(objectiveName) != nil }
 
 	createPool("shared")
-	objective := testutil.MakeV1InferenceObjective(objectiveName).
+	objective := fwkapix.MakeV1InferenceObjective(objectiveName).
 		Namespace(namespace).
 		Priority(int32(1)).
 		PoolSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"tiers": "shared"}}).
@@ -214,7 +215,7 @@ func TestInferenceObjectiveEmptySelectorRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			objective := testutil.MakeV1InferenceObjective(tc.name).
+			objective := fwkapix.MakeV1InferenceObjective(tc.name).
 				Namespace("default").
 				Priority(int32(1)).
 				PoolSelector(tc.selector).
@@ -289,7 +290,7 @@ func TestInferenceObjectiveDualVersionWiring(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: namespace},
 	}))
 
-	pool := testutil.MakeInferencePool(poolName).
+	pool := fwkgaie.MakeInferencePool(poolName).
 		Namespace(namespace).
 		Selector(map[string]string{"app": poolName}).
 		EndpointPickerRef("epp").
@@ -301,7 +302,7 @@ func TestInferenceObjectiveDualVersionWiring(t *testing.T) {
 	// A v1-written objective stores losslessly: the v1alpha2 storage schema
 	// is a superset of v1's targeting fields, so None conversion prunes
 	// nothing and the primary watch loads it.
-	v1Objective := testutil.MakeV1InferenceObjective("v1-objective").
+	v1Objective := fwkapix.MakeV1InferenceObjective("v1-objective").
 		Namespace(namespace).
 		Priority(int32(3)).
 		PoolRefs(apixv1.PoolObjectReference{Name: apixv1.ObjectName(poolName), Group: apixv1.Group(routing.InferencePoolAPIGroup)}).
@@ -322,7 +323,7 @@ func TestInferenceObjectiveDualVersionWiring(t *testing.T) {
 	// A typed client can author a poolRefs-only v1alpha2 objective: omitzero
 	// keeps the zero-value poolRef out of the serialized object. The v1 view
 	// carries the targeting, so the primary watch loads it.
-	refsOnly := testutil.MakeInferenceObjective("refs-only-objective").
+	refsOnly := fwkapix.MakeInferenceObjective("refs-only-objective").
 		Namespace(namespace).
 		Priority(int32(4)).
 		ObjRef()
@@ -335,7 +336,7 @@ func TestInferenceObjectiveDualVersionWiring(t *testing.T) {
 	// A v1alpha2-written objective reaches the datastore through the
 	// secondary watch, converted to the v1 shape with the poolRef mapped
 	// to a single poolRefs entry, and logs the deprecation.
-	legacyObjective := testutil.MakeInferenceObjective("legacy-objective").
+	legacyObjective := fwkapix.MakeInferenceObjective("legacy-objective").
 		Namespace(namespace).
 		Priority(int32(2)).
 		PoolName(poolName).
@@ -353,7 +354,7 @@ func TestInferenceObjectiveDualVersionWiring(t *testing.T) {
 	require.Len(t, ds.ObjectiveGetAll(), 3, "one datastore entry per objective, got %d", len(ds.ObjectiveGetAll()))
 
 	// poolRef cannot be combined with the v1 targeting fields.
-	mixed := testutil.MakeInferenceObjective("mixed-objective").
+	mixed := fwkapix.MakeInferenceObjective("mixed-objective").
 		Namespace(namespace).
 		Priority(int32(1)).
 		PoolName(poolName).
@@ -445,7 +446,7 @@ func TestInferenceObjectiveDualVersionV1StorageWiring(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: namespace},
 	}))
 
-	pool := testutil.MakeInferencePool(poolName).
+	pool := fwkgaie.MakeInferencePool(poolName).
 		Namespace(namespace).
 		Selector(map[string]string{"app": poolName}).
 		EndpointPickerRef("epp").
@@ -455,7 +456,7 @@ func TestInferenceObjectiveDualVersionV1StorageWiring(t *testing.T) {
 	require.NoError(t, directClient.Create(ctx, pool), "failed to create pool")
 
 	// A v1-written objective loads natively through the primary watch.
-	v1Objective := testutil.MakeV1InferenceObjective("v1-objective").
+	v1Objective := fwkapix.MakeV1InferenceObjective("v1-objective").
 		Namespace(namespace).
 		Priority(int32(3)).
 		PoolRefs(apixv1.PoolObjectReference{Name: apixv1.ObjectName(poolName), Group: apixv1.Group(routing.InferencePoolAPIGroup)}).
@@ -467,7 +468,7 @@ func TestInferenceObjectiveDualVersionV1StorageWiring(t *testing.T) {
 		15*time.Second, 50*time.Millisecond, "expected exactly one datastore entry, got %d", len(ds.ObjectiveGetAll()))
 
 	// A v1alpha2-written objective is stripped at storage in this state.
-	legacyObjective := testutil.MakeInferenceObjective("legacy-objective").
+	legacyObjective := fwkapix.MakeInferenceObjective("legacy-objective").
 		Namespace(namespace).
 		Priority(int32(2)).
 		PoolName(poolName).
