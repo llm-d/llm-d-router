@@ -2157,3 +2157,107 @@ func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessEventBatch_LoRA(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokensA := makeTokens(16)
+	tokensB := makeTokens(32)[16:]
+	tokensC := makeTokens(48)[32:]
+
+	loraID := 1
+	loraName := "sql-lora"
+	emptyName := ""
+
+	skippedMetric := metrics.KVEventStoresSkipped.WithLabelValues(
+		cacheKindLabel(""), "unresolved_lora_adapter")
+	beforeSkipped := counterValue(t, skippedMetric)
+
+	// 1. Base-model event: LoraID == nil. Must be indexed under base model.
+	baseEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{1001},
+		Tokens:      tokensA,
+		BlockSize:   16,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{baseEvent}}, "pod-a", "test-model")
+
+	baseKeysA, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensA, "test-model", nil)
+	require.NoError(t, err)
+	lookupA, err := idx.Lookup(ctx, baseKeysA, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupA[baseKeysA[0]], "base-model event must be indexed under base model")
+
+	// 2. Unresolved LoRA events: LoraID != nil and (LoraName == nil or empty).
+	// Must NOT be indexed under base model or adapter, and must increment skipped metric.
+	unresolvedEvents := []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2001},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    nil,
+		},
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2002},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    &emptyName,
+		},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: unresolvedEvents}, "pod-a", "test-model")
+
+	assert.Equal(t, 2.0, counterValue(t, skippedMetric)-beforeSkipped,
+		"unresolved LoRA events must increment skipped metric")
+
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2001))
+	assert.Error(t, err, "unresolved LoRA engine key must not be mapped")
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2002))
+	assert.Error(t, err, "unresolved LoRA engine key with empty name must not be mapped")
+
+	// Base-model request for tokensB must not hit unresolved LoRA entries
+	baseKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, "test-model", nil)
+	require.NoError(t, err)
+	lookupB, err := idx.Lookup(ctx, baseKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupB[baseKeysB[0]], "base-model request must not hit unresolved LoRA entry")
+
+	// Adapter request for tokensB must also find nothing
+	loraKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraB, err := idx.Lookup(ctx, loraKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupLoraB[loraKeysB[0]], "adapter request must not hit unresolved LoRA entry")
+
+	// 3. Valid LoRA event: LoraID != nil and valid LoraName.
+	// Must be indexed under LoraName ("sql-lora"), not base model.
+	validLoraEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{3001},
+		Tokens:      tokensC,
+		BlockSize:   16,
+		LoraID:      &loraID,
+		LoraName:    &loraName,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{validLoraEvent}}, "pod-a", "test-model")
+
+	// Base-model request for tokensC must not hit LoRA entry
+	baseKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, "test-model", nil)
+	require.NoError(t, err)
+	lookupBaseC, err := idx.Lookup(ctx, baseKeysC, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupBaseC[baseKeysC[0]], "base-model request must not hit resolved LoRA entry")
+
+	// Adapter request for tokensC must hit
+	loraKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraC, err := idx.Lookup(ctx, loraKeysC, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupLoraC[loraKeysC[0]], "adapter request must hit resolved LoRA entry")
+
+	// 4. Removal of unresolved LoRA block must be a safe no-op.
+	removeEvent := &BlockRemovedEvent{
+		BlockHashes: []uint64{2001, 2002},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{removeEvent}}, "pod-a", "test-model")
+}

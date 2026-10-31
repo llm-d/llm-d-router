@@ -642,6 +642,21 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				continue
 			}
 
+			if ev.LoraID != nil && (ev.LoraName == nil || *ev.LoraName == "") {
+				const reason = "unresolved_lora_adapter"
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+					"podIdentifier", podIdentifier,
+					"groupIdx", ev.GroupIdx,
+					"cacheKind", ev.KVCacheSpecKind,
+					"loraID", *ev.LoraID,
+					"reason", reason,
+					"numTokens", len(ev.Tokens),
+					"numBlockHashes", len(ev.BlockHashes),
+					"blockSize", ev.BlockSize)
+				continue
+			}
+
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
 			for i, hash := range ev.BlockHashes {
 				engineKeys[i] = kvblock.BlockHash(hash)
