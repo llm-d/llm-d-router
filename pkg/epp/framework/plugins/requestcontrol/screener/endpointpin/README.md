@@ -3,7 +3,7 @@
 **Type:** `endpoint-pin-screener`
 **Interfaces:** `requestcontrol.Screener`
 
-Keeps only the endpoint that the request's `x-llm-d-pin-host-port` header names.
+Keeps only the endpoints at the address the request's `x-llm-d-pin-host-port` header names.
 
 ## What it does
 
@@ -16,8 +16,9 @@ header.
 ## How It Works
 
 - A request without `x-llm-d-pin-host-port` keeps every endpoint.
-- A request with the header keeps the one endpoint whose `<ip:port>` equals the
-  header value. The value is parsed, so every spelling of an address matches.
+- A request with the header keeps the endpoints whose `<ip:port>` equals the
+  header value: one, or every data-parallel rank of a pod that serves several
+  ranks on that port (see [Data-parallel ranks behind one port](../../../../../../../docs/data-parallel-ranks.md)). The value is parsed, so every spelling of an address matches.
   IPv6 addresses are in brackets, as `net.JoinHostPort` writes them.
 - When that endpoint is not a candidate, the screener keeps no endpoint, and the
   director answers `503`. The screener does not fall back to another pod.
@@ -56,8 +57,8 @@ request. Do not add it to a scheduling profile.
 
 ## Limitations
 
-- A pin names an HTTP endpoint. With several data-parallel ranks behind one
-  SGLang port, SGLang chooses the rank inside that endpoint.
+- A pin names an address, not a data-parallel rank. With several ranks behind
+  the pinned port, the scheduling profile picks one of them.
 - EPP cannot tell a trusted pin from a client pin. The coordinator drops a
   client's `x-llm-d-pin-host-port` on its pipeline and passthrough paths. A
   caller that reaches EPP without the coordinator can pin a request to any

@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -542,11 +543,24 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
 
-	for _, pod := range primaryResult.TargetEndpoints {
+	targets := primaryResult.TargetEndpoints
+	// A data-parallel rank endpoint is reached through its pod's shared port and
+	// the rank header. The header applies to every destination, so a fallback
+	// would run the request on a rank the scheduler did not pick.
+	if len(targets) > 0 && targets[0].GetMetadata().RanksPerPort > 1 {
+		targets = targets[:1]
+		if reqCtx.SchedulingRequest.Headers == nil {
+			reqCtx.SchedulingRequest.Headers = map[string]string{}
+		}
+		reqCtx.SchedulingRequest.Headers[routing.DataParallelRankHeader] = strconv.Itoa(targets[0].GetMetadata().DataParallelRank)
+	}
+	for _, pod := range targets {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)
-		targetEndpoints = append(targetEndpoints, curEndpoint)
+		if !slices.Contains(targetEndpoints, curEndpoint) {
+			targetEndpoints = append(targetEndpoints, curEndpoint)
+		}
 	}
 
 	multiEndpointString := strings.Join(targetEndpoints, ",")
@@ -559,7 +573,11 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		scores := make(map[string]float64, len(primaryResult.ScoredCandidates))
 		for _, scoredEndpoint := range primaryResult.ScoredCandidates {
 			curMetadata := scoredEndpoint.GetMetadata()
-			scores[net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())] = scoredEndpoint.Score
+			address := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
+			// The proxy routes by address, so an address shared by data-parallel ranks takes its best rank's score.
+			if score, ok := scores[address]; !ok || scoredEndpoint.Score > score {
+				scores[address] = scoredEndpoint.Score
+			}
 		}
 		reqCtx.TargetEndpointScores = scores
 	}

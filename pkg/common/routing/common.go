@@ -38,6 +38,10 @@ const (
 	// pre-convention name rather than gaining a second one to remove.
 	DataParallelEndpointHeader = "x-data-parallel-host-port"
 
+	// DataParallelRankHeader names the vLLM data-parallel rank that serves the request,
+	// for a model server that runs several ranks behind one port.
+	DataParallelRankHeader = "x-data-parallel-rank"
+
 	// KVCacheSourceHeader is the header name used to indicate the worker <ip:port> holding
 	// the most cached prefix KV blocks for the request, to pull from over the P2P connector
 	// instead of recomputing them
