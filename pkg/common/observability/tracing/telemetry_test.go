@@ -554,3 +554,127 @@ func TestNoneExporterReportsSelection(t *testing.T) {
 	}
 	t.Errorf("logged %q, want the selected exporter type reported", logged)
 }
+
+func TestScopesFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "empty enables every scope", raw: ""},
+		{name: "whitespace enables every scope", raw: "   "},
+		{name: "only separators enable every scope", raw: ",,"},
+		{name: "a single scope", raw: "llm-d-router/pkg/kvcache", want: []string{"llm-d-router/pkg/kvcache"}},
+		{name: "comma separated scopes", raw: "llm-d-router/pkg/kvcache,llm-d-router/pkg/kvevents", want: []string{"llm-d-router/pkg/kvcache", "llm-d-router/pkg/kvevents"}},
+		{name: "entries are trimmed", raw: " llm-d-router/pkg/kvcache , llm-d-router/pkg/kvevents ", want: []string{"llm-d-router/pkg/kvcache", "llm-d-router/pkg/kvevents"}},
+		{name: "blank entries are ignored", raw: "llm-d-router/pkg/kvcache,,", want: []string{"llm-d-router/pkg/kvcache"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scopesFromEnv(tc.raw)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("scopesFromEnv(%q) = %v, want nil to record every scope", tc.raw, got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("scopesFromEnv(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for _, name := range tc.want {
+				if _, ok := got[name]; !ok {
+					t.Errorf("scopesFromEnv(%q) missing %q", tc.raw, name)
+				}
+			}
+		})
+	}
+}
+
+func TestScopeEnabled(t *testing.T) {
+	orig := enabledScopes
+	t.Cleanup(func() { enabledScopes = orig })
+
+	tests := []struct {
+		name   string
+		scopes string
+		scope  string
+		want   bool
+	}{
+		{name: "an empty allowlist records every scope", scopes: "", scope: "llm-d-router/pkg/kvcache", want: true},
+		{name: "a listed scope records", scopes: "llm-d-router/pkg/kvcache", scope: "llm-d-router/pkg/kvcache", want: true},
+		{name: "an unlisted scope does not record", scopes: "llm-d-router/pkg/kvcache", scope: "llm-d-router/pkg/kvevents", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enabledScopes = scopesFromEnv(tc.scopes)
+
+			if got := scopeEnabled(tc.scope); got != tc.want {
+				t.Errorf("scopeEnabled(%q) with allowlist %q = %v, want %v", tc.scope, tc.scopes, got, tc.want)
+			}
+		})
+	}
+}
+
+// A disabled scope must create no span ID yet leave the active span context
+// untouched, so enabled descendants attach to the nearest enabled ancestor
+// rather than an unexported span.
+func TestTracerDisabledScopePreservesContext(t *testing.T) {
+	origProvider := otel.GetTracerProvider()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origProvider)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown() error = %v", err)
+		}
+	})
+
+	origScopes := enabledScopes
+	t.Cleanup(func() { enabledScopes = origScopes })
+	enabledScopes = scopesFromEnv("llm-d-router/pkg/kvcache")
+
+	ctx, parent := Tracer("llm-d-router/pkg/kvcache").Start(context.Background(), "parent")
+	defer parent.End()
+	parentSC := parent.SpanContext()
+	if !parentSC.IsValid() {
+		t.Fatal("enabled scope did not create a valid span")
+	}
+
+	childCtx, disabled := Tracer("llm-d-router/pkg/kvevents").Start(ctx, "disabled")
+	defer disabled.End()
+	if disabled.IsRecording() {
+		t.Error("disabled scope recorded a span")
+	}
+	if got := trace.SpanContextFromContext(childCtx); !got.Equal(parentSC) {
+		t.Errorf("disabled scope changed the active span context: got %v, want %v", got, parentSC)
+	}
+
+	_, grandchild := Tracer("llm-d-router/pkg/kvcache").Start(childCtx, "grandchild")
+	defer grandchild.End()
+	if got := grandchild.SpanContext().TraceID(); got != parentSC.TraceID() {
+		t.Errorf("grandchild trace ID = %v, want %v", got, parentSC.TraceID())
+	}
+	ro, ok := grandchild.(sdktrace.ReadOnlySpan)
+	if !ok {
+		t.Fatal("grandchild span does not implement sdktrace.ReadOnlySpan")
+	}
+	if got := ro.Parent().SpanID(); got != parentSC.SpanID() {
+		t.Errorf("grandchild parent span ID = %v, want the nearest enabled ancestor %v", got, parentSC.SpanID())
+	}
+}
+
+// With no enabled ancestor, a disabled root scope still yields no span.
+func TestTracerDisabledScopeRootCreatesNoSpan(t *testing.T) {
+	origScopes := enabledScopes
+	t.Cleanup(func() { enabledScopes = origScopes })
+	enabledScopes = scopesFromEnv("llm-d-router/pkg/kvcache")
+
+	_, span := Tracer("llm-d-router/pkg/kvevents").Start(context.Background(), "root")
+	defer span.End()
+
+	if span.SpanContext().IsValid() {
+		t.Error("disabled root scope created a valid span context, want none")
+	}
+}
