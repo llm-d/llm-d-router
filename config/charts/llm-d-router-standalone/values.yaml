@@ -34,7 +34,7 @@ router:
     # Each constraint needs a labelSelector matching the proxy pods: llm-d-router-proxy: <release>-proxy.
     topologySpreadConstraints: []
     priorityClassName: ""
-    # Extra labels added to the proxy pod template. Must not reuse the llm-d-router-proxy key.
+    # Extra labels added to the proxy pod template. Chart-owned label keys are rejected.
     podLabels: {}
 
     # Annotations and pod-level securityContext for the proxy Deployment when
