@@ -184,6 +184,9 @@ type RequestContext struct {
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+	// sseSalvage scans the bytes of the oversized SSE line being dropped for
+	// its usage object, which is merged when the line ends.
+	sseSalvage *usageSalvager
 
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
