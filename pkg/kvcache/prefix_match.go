@@ -165,8 +165,12 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	acc := acquireAccumulator(weights, filter)
 	defer releaseAccumulator(acc)
 
-	pods, tiers := ordinalTable{}, ordinalTable{}
-	var refs []kvblock.EntryRef
+	refs := acc.refs[:0]
+	defer func() {
+		clear(refs[:cap(refs)])
+		acc.refs = refs[:0]
+	}()
+
 	for pos, key := range keys {
 		if pos&matchCancellationMask == 0 && ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -175,12 +179,29 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 		if len(entries) == 0 {
 			break
 		}
-		refs = refs[:0]
-		for _, e := range entries {
+		// Keys along a cached prefix usually hold the same entries in the same
+		// order. Reuse matching prefix ordinals in place, and fold a full
+		// repeat directly into pendingRun.
+		same := !acc.first && len(entries) == len(refs)
+		j := 0
+		for ; j < len(entries) && j < len(refs); j++ {
+			e, r := &entries[j], &refs[j].PodEntry
+			if e.PodIdentifier != r.PodIdentifier || e.DeviceTier != r.DeviceTier || e.Speculative != r.Speculative {
+				same = false
+				break
+			}
+		}
+		if same {
+			acc.pendingRun++
+			continue
+		}
+		refs = refs[:j]
+		for ; j < len(entries); j++ {
+			e := entries[j]
 			refs = append(refs, kvblock.EntryRef{
 				PodEntry:    e,
-				PodOrdinal:  pods.of(e.PodIdentifier),
-				TierOrdinal: tiers.of(e.DeviceTier),
+				PodOrdinal:  acc.podOrdinal(e.PodIdentifier),
+				TierOrdinal: acc.tierOrdinal(e.DeviceTier),
 			})
 		}
 		if !acc.key(refs) {
@@ -205,6 +226,12 @@ func (t ordinalTable) of(name string) uint32 {
 	id := clampOrdinal(len(t))
 	t[name] = id
 	return id
+}
+
+// tierNameOrdinal pairs a device-tier name with its request-local ordinal.
+type tierNameOrdinal struct {
+	name    string
+	ordinal uint32
 }
 
 // clampOrdinal bounds a table size below the math.MaxUint32 sentinel that
@@ -339,6 +366,12 @@ type prefixAccumulator struct {
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
+
+	// Materialized-lookup scratch state, allocated lazily when matchMaterialized
+	// runs so walked calls allocate no extra state.
+	pods         ordinalTable
+	tierOrdinals []tierNameOrdinal
+	refs         []kvblock.EntryRef
 }
 
 var accumulatorPool = sync.Pool{New: func() any { return &prefixAccumulator{} }}
@@ -353,6 +386,10 @@ func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *pr
 	a.weightCache = a.weightCache[:0]
 	a.prev = a.prev[:0]
 	a.pendingRun = 0
+	if a.pods != nil {
+		clear(a.pods)
+	}
+	a.tierOrdinals = a.tierOrdinals[:0]
 	return a
 }
 
@@ -362,7 +399,30 @@ func releaseAccumulator(a *prefixAccumulator) {
 		a.slots[i].pod = ""
 		clear(a.slots[i].tiers)
 	}
+	if a.pods != nil {
+		clear(a.pods)
+	}
+	clear(a.tierOrdinals)
+	a.tierOrdinals = a.tierOrdinals[:0]
 	accumulatorPool.Put(a)
+}
+
+func (a *prefixAccumulator) podOrdinal(name string) uint32 {
+	if a.pods == nil {
+		a.pods = make(ordinalTable, 64)
+	}
+	return a.pods.of(name)
+}
+
+func (a *prefixAccumulator) tierOrdinal(name string) uint32 {
+	for i := range a.tierOrdinals {
+		if a.tierOrdinals[i].name == name {
+			return a.tierOrdinals[i].ordinal
+		}
+	}
+	id := clampOrdinal(len(a.tierOrdinals))
+	a.tierOrdinals = append(a.tierOrdinals, tierNameOrdinal{name: name, ordinal: id})
+	return id
 }
 
 // flushRun applies deferred increments from consecutive identical keys.
