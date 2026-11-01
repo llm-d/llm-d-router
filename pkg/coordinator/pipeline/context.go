@@ -220,12 +220,7 @@ type RequestContext struct {
 	ResponseWriter http.ResponseWriter
 }
 
-// PrefillDrain tracks a background drain of a streaming prefill response.
-// The step that starts the drain reports the result with Complete. Decode
-// records the request outcome with Release on success, so the drain runs to
-// completion, or Cancel, which aborts the prefill request; pipeline exit
-// calls Cancel when decode has not recorded an outcome. The first of
-// Release and Cancel runs its callback and later calls do nothing.
+// PrefillDrain tracks a streaming prefill response until its reader finishes.
 type PrefillDrain struct {
 	done    chan struct{}
 	err     error
