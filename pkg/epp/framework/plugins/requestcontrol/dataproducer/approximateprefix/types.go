@@ -49,6 +49,11 @@ type blockHash = prefixhash.BlockHash
 type server struct {
 	ServerID
 	NumOfGPUBlocks int
+	// CapacityFromMetrics reports whether NumOfGPUBlocks was derived from the
+	// endpoint's metrics rather than from configuration or the default. The
+	// indexer lets a metrics-derived capacity replace any earlier capacity,
+	// but never lets a fallback capacity replace a metrics-derived one.
+	CapacityFromMetrics bool
 }
 
 // ServerID is a unique identifier for a server, based on its NamespacedName.

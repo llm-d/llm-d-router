@@ -22,7 +22,9 @@ import (
 	"maps"
 	"sync"
 	"time"
+	"unsafe"
 
+	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -36,11 +38,19 @@ type indexer struct {
 	defaultLRUSize int
 	pluginName     string
 	pluginType     string
+	logger         logr.Logger
 }
 
 type podCache struct {
 	mu  sync.RWMutex
 	lru *hashLRU
+	// capacityFromMetrics records whether the LRU's capacity came from the
+	// endpoint's metrics; see resizeIfNeeded.
+	capacityFromMetrics bool
+	// Pad to one 64-byte cache line. Without it podCache lands in the 48-byte
+	// size class, where caches straddle cache lines and concurrent RLocks on
+	// neighboring pods contend: about 15% slower matching in BenchmarkParallel.
+	_ [64 - unsafe.Sizeof(sync.RWMutex{}) - unsafe.Sizeof((*hashLRU)(nil)) - unsafe.Sizeof(false)]byte
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
@@ -50,10 +60,18 @@ func newIndexer(ctx context.Context, defaultLRUSize int, pluginName, pluginType 
 		defaultLRUSize: defaultLRUSize,
 		pluginName:     pluginName,
 		pluginType:     pluginType,
+		logger:         log.FromContext(ctx).WithValues("plugin", pluginName),
 	}
 
 	go i.reportLRUSize(ctx, time.Second)
 	return i
+}
+
+func (i *indexer) lruSizeFor(pod server) int {
+	if pod.NumOfGPUBlocks <= 0 {
+		return i.defaultLRUSize
+	}
+	return pod.NumOfGPUBlocks
 }
 
 func (i *indexer) podCacheFor(pod server) *podCache {
@@ -67,14 +85,34 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if pc = i.pods[pod.ServerID]; pc == nil {
-		lruSize := pod.NumOfGPUBlocks
-		if lruSize <= 0 {
-			lruSize = i.defaultLRUSize
-		}
-		pc = &podCache{lru: newHashLRU(lruSize)}
+		lruSize := i.lruSizeFor(pod)
+		pc = &podCache{lru: newHashLRU(lruSize), capacityFromMetrics: pod.CapacityFromMetrics}
 		i.pods[pod.ServerID] = pc
+		i.logger.V(logutil.VERBOSE).Info("Created prefix index for pod",
+			"pod", pod.ServerID, "capacityBlocks", lruSize, "capacityFromMetrics", pod.CapacityFromMetrics)
 	}
 	return pc
+}
+
+// resizeIfNeeded applies pod's capacity to pc, whose lock the caller must
+// hold. The capacity fixed on a pod's first Add can be stale: the first
+// request may arrive before the first metrics scrape, and some engines report
+// capacity only after startup. A metrics-derived capacity therefore replaces
+// any earlier one, but a fallback capacity never replaces a metrics-derived
+// one, so a scrape that briefly lacks the metric cannot evict live entries.
+func (i *indexer) resizeIfNeeded(pc *podCache, pod server) {
+	if pc.capacityFromMetrics && !pod.CapacityFromMetrics {
+		return
+	}
+	pc.capacityFromMetrics = pod.CapacityFromMetrics
+	newSize := i.lruSizeFor(pod)
+	oldSize := pc.lru.Cap()
+	if newSize == oldSize {
+		return
+	}
+	pc.lru.Resize(newSize)
+	i.logger.V(logutil.DEFAULT).Info("Resized prefix index for pod",
+		"pod", pod.ServerID, "fromBlocks", oldSize, "toBlocks", newSize, "capacityFromMetrics", pod.CapacityFromMetrics)
 }
 
 // Add inserts hashes tail-first: matching is anchored at the first block, so
@@ -92,6 +130,7 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 	pc := i.podCacheFor(pod)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	i.resizeIfNeeded(pc, pod)
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
 		pc.lru.Add(hashes[idx])
 	}

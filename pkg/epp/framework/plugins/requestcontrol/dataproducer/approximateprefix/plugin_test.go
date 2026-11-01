@@ -430,6 +430,68 @@ func TestMakeserver_AutotuneCapacityInRouterBlocks(t *testing.T) {
 	}
 }
 
+// TestMakeserver_CapacityFromMetrics checks that only a capacity derived from
+// endpoint metrics is marked as such, so the indexer never lets a fallback
+// capacity replace it.
+func TestMakeserver_CapacityFromMetrics(t *testing.T) {
+	tests := []struct {
+		name     string
+		autoTune bool
+		metrics  *fwkdl.Metrics
+		want     server
+	}{
+		{name: "autotune with blocks", autoTune: true, metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000},
+			want: server{NumOfGPUBlocks: 1000, CapacityFromMetrics: true}},
+		{name: "autotune before first scrape", autoTune: true, metrics: &fwkdl.Metrics{},
+			want: server{NumOfGPUBlocks: 500}},
+		{name: "autotune off ignores metrics", autoTune: false, metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000},
+			want: server{NumOfGPUBlocks: 500}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{AutoTune: tc.autoTune, BlockSizeTokens: defaultBlockSizeTokens, LRUCapacityPerServer: 500}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			assert.NoError(t, err)
+
+			id := k8stypes.NamespacedName{Name: "pod1"}
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: id}, tc.metrics, fwkdl.NewAttributes())
+			tc.want.ServerID = ServerID(id)
+			assert.Equal(t, tc.want, p.makeserver(endpoint))
+		})
+	}
+}
+
+// TestPreRequest_ResizesLRUWhenMetricsArriveLate checks that a pod first
+// indexed before its metrics were scraped is resized to the metrics-derived
+// capacity on a later request, and keeps it when the metrics then disappear.
+func TestPreRequest_ResizesLRUWhenMetricsArriveLate(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: defaultBlockSizeTokens, LRUCapacityPerServer: 500}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	id := k8stypes.NamespacedName{Name: "pod1"}
+	add := func(m *fwkdl.Metrics) {
+		endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: id}, m, fwkdl.NewAttributes())
+		p.indexerInst.Add([]blockHash{1}, p.makeserver(endpoint))
+	}
+	capacity := func() int {
+		idx := p.indexerInst.(*indexer)
+		pc := idx.pods[ServerID(id)]
+		pc.mu.RLock()
+		defer pc.mu.RUnlock()
+		return pc.lru.Cap()
+	}
+
+	add(&fwkdl.Metrics{})
+	assert.Equal(t, 500, capacity(), "before the first scrape the configured capacity applies")
+
+	add(&fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000})
+	assert.Equal(t, 1000, capacity(), "metrics-derived capacity replaces the fallback")
+
+	add(&fwkdl.Metrics{})
+	assert.Equal(t, 1000, capacity(), "a scrape missing the metric must not shrink the LRU")
+}
+
 func TestMaxPrefixTokensToMatch(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1, MaxPrefixTokensToMatch=2 -> maxBlocks = 2/1 = 2.
