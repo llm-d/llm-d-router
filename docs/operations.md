@@ -92,6 +92,26 @@ successful endpoint refreshes, including latency variation; see the
 [Redis syncer README](../pkg/epp/framework/plugins/datalayer/cross_plugin/redis/README.md)
 for transport restrictions and publisher timing.
 
+##### Approximate prefix background merge
+
+With a cross-replica syncer configured, `callback` lets
+`approx-prefix-cache-producer` merge peer prefixes before requests arrive, so a
+replica taking over after leader election can match cached prefixes on its
+first request.
+
+```yaml
+backgroundMerge:
+  trigger: disabled # disabled (default) or callback
+```
+
+All modes merge peer prefixes synchronously when a request arrives. The default
+`disabled` mode does not merge in the background. `callback` also merges after
+this replica publishes cross-replica state. Use `disabled` to turn background
+merging off: YAML parses unquoted `off` as a boolean.
+
+`multicluster-approx-prefix-cache-producer` accepts the same `backgroundMerge`
+configuration.
+
 ##### Approximate prefix cross-replica sync cost (microbenchmarks)
 
 These numbers are in-process Go benchmarks (`go test -bench`), not full-cluster
