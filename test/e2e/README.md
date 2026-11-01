@@ -6,7 +6,9 @@ This document provides instructions on how to run the end-to-end tests.
 
 The end-to-end tests validate router functionality against a Kubernetes cluster using Ginkgo.
 Each case renders the repository's `config/charts/llm-d-router-standalone` chart with its local
-`routerlib` dependency. The default standalone topology runs Envoy and EPP in the same Pod.
+`routerlib` dependency. The default standalone topology runs Envoy and EPP in the same Pod. A case can
+set `ProxyMode: standalone.ProxyModeService` to render Envoy as its own proxy Deployment in front of
+the EPP Service, and `FailOpen: true` to render the fail-open fallback route to the model servers.
 The chart supplies the InferencePool, plugin configuration, Services, and RBAC. Model simulators,
 disaggregation sidecars, and the shared renderer use the development Kustomize manifests.
 
@@ -32,7 +34,8 @@ These tests exercise rendered chart workloads; they do not exercise Helm release
 
 By default the end to end tests run in groups that run in parallel to each other on the same Kubernetes cluster.
 Each process uses an independent Namespace and a pair of NodePorts for HTTP and metrics. A test-only
-`router-access` Service selects the chart's router Pods. The chart's EPP Service also accepts simulator
+`router-access` Service selects the chart's router Pods. In service mode it selects the proxy Pods for
+HTTP, and a second `router-metrics-access` Service selects the EPP Pods for metrics. The chart's EPP Service also accepts simulator
 KV events on port 5557. Each case registers cleanup before creating chart and model resources and waits
 for their Pods to terminate before reusing resource names. `E2E_KEEP_CLUSTER_ON_FAILURE` preserves failed
 cases for inspection.
@@ -65,7 +68,8 @@ Follow these steps to run the end-to-end tests:
 
      **Note:** Existing-context runs use a supervised `kubectl port-forward` process for both HTTP and
      metrics. It selects a Ready, non-terminating router Pod and reconnects after Pod deletion, leader
-     failover, or process exit. Cleanup stops the forwarder and waits for it to exit.
+     failover, or process exit. In service mode it forwards HTTP from any Ready proxy Pod and metrics
+     from the EPP leader. Cleanup stops the forwarders and waits for them to exit.
 
    - **Set the test namespace**: The namespace(s) in which the tests run vary based on whether or not the tests
      are being run in parallel or not. 

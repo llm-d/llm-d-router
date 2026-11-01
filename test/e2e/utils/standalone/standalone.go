@@ -31,6 +31,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -71,17 +72,42 @@ type Config struct {
 	PodSelector     map[string]string
 	ReleaseName     string
 	KeepOnFailure   bool
+	// ProxyMode selects the chart's proxy topology. The zero value keeps the
+	// chart default, which runs Envoy and EPP in one Pod.
+	ProxyMode ProxyMode
+	// FailOpen sets router.proxy.failOpen, so Envoy routes to the model
+	// servers through the fallback route when EPP is unreachable.
+	FailOpen bool
 }
+
+// ProxyMode is the chart's router.proxy.mode.
+type ProxyMode string
+
+const (
+	// ProxyModeSidecar runs Envoy in the EPP Pod.
+	ProxyModeSidecar ProxyMode = "sidecar"
+	// ProxyModeService runs Envoy in its own Deployment in front of the EPP Service.
+	ProxyModeService ProxyMode = "service"
+)
+
+// proxySelectorKey is the label key of the proxy Deployment's selector in service mode.
+const proxySelectorKey = "llm-d-router-proxy"
 
 // Router describes the router one test case rendered and created.
 type Router struct {
-	// Selector is the router Deployment's pod selector.
+	// Selector is the EPP Deployment's pod selector. In sidecar mode those Pods
+	// also run Envoy.
 	Selector map[string]string
+	// ProxySelector is the proxy Deployment's pod selector in service mode, and
+	// nil in sidecar mode.
+	ProxySelector map[string]string
 	// PoolName is the rendered InferencePool's name.
 	PoolName string
 
-	objects []*unstructured.Unstructured
-	cfg     Config
+	eppDeployment string
+	proxyReplicas int
+	objects       []*unstructured.Unstructured
+	cfg           Config
 }
 
 // Create renders the standalone chart for one test case, creates all objects,
@@ -91,24 +117,60 @@ func Create(cfg Config, plugins string, replicas int, targetPorts ...int32) *Rou
 	defer cancel()
 	router, err := renderRouter(ctx, cfg, plugins, replicas, targetPorts)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	access, err := runtime.DefaultUnstructuredConverter.ToUnstructured(router.accessService(cfg.Namespace, cfg.HTTPNodePort, cfg.MetricsNodePort))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	router.objects = append(router.objects, &unstructured.Unstructured{Object: access})
+	for _, service := range router.accessServices(cfg.Namespace, cfg.HTTPNodePort, cfg.MetricsNodePort) {
+		access, err := runtime.DefaultUnstructuredConverter.ToUnstructured(service)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		router.objects = append(router.objects, &unstructured.Unstructured{Object: access})
+	}
 	resources := &lifecycle.CaseResources{Client: cfg.TestConfig.K8sClient}
-	var stopForward func()
+	var stopForwards []func()
 	lifecycle.DeferCaseCleanup(cfg.TestConfig, cfg.KeepOnFailure, resources, cfg.Namespace, func() {
-		if stopForward != nil {
-			stopForward()
+		for _, stop := range stopForwards {
+			stop()
 		}
 	})
 	ginkgo.By("Creating router resources from " + chartPath)
 	gomega.Expect(resources.Create(ctx, router.objects)).To(gomega.Succeed())
 	WaitForReadyLeader(cfg, replicas, cfg.Namespace, router.Selector)
+	if router.ProxySelector != nil {
+		waitForReadyPods(cfg, router.ProxySelector, router.proxyReplicas)
+	}
 	if cfg.K8sContext != "" {
-		stopForward = startPortForward(cfg, router.Selector)
+		httpPort, metricsPort := fmt.Sprintf("%d:8081", cfg.HTTPPort), fmt.Sprintf("%d:9090", cfg.MetricsPort)
+		if router.ProxySelector == nil {
+			stopForwards = append(stopForwards, startPortForward(cfg, router.Selector, false, httpPort, metricsPort))
+		} else {
+			// In service mode any proxy Pod serves traffic, and only the EPP leader serves metrics.
+			stopForwards = append(stopForwards,
+				startPortForward(cfg, router.ProxySelector, true, httpPort),
+				startPortForward(cfg, router.Selector, false, metricsPort))
+		}
 	}
 	router.WaitForRouting()
 	return router
+}
+
+// ScaleEPP sets the EPP Deployment's replica count. Scaling to 0 blocks until
+// every EPP Pod is gone, so the proxy can no longer reach EPP.
+func (r *Router) ScaleEPP(replicas int32) {
+	cfg := r.cfg.TestConfig
+	ginkgo.By(fmt.Sprintf("Scaling EPP Deployment %s to %d replicas", r.eppDeployment, replicas))
+	gomega.Eventually(func() error {
+		deployment := &appsv1.Deployment{}
+		if err := cfg.K8sClient.Get(cfg.Context, types.NamespacedName{Namespace: r.cfg.Namespace, Name: r.eppDeployment}, deployment); err != nil {
+			return err
+		}
+		deployment.Spec.Replicas = &replicas
+		return cfg.K8sClient.Update(cfg.Context, deployment)
+	}, cfg.ReadyTimeout, cfg.Interval).Should(gomega.Succeed())
+	if replicas != 0 {
+		return
+	}
+	gomega.Eventually(func() ([]corev1.Pod, error) {
+		pods := &corev1.PodList{}
+		err := cfg.K8sClient.List(cfg.Context, pods, client.InNamespace(r.cfg.Namespace), client.MatchingLabels(r.Selector))
+		return pods.Items, err
+	}, cfg.ReadyTimeout, cfg.Interval).Should(gomega.BeEmpty())
 }
 
 // WaitForRouting blocks until the proxy answers a request and the EPP has
@@ -145,6 +207,16 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 			"pluginsCustomConfig": map[string]string{"epp-config.yaml": plugins},
 		},
 	}
+	proxyValues := map[string]any{}
+	if cfg.ProxyMode != "" {
+		proxyValues["mode"] = string(cfg.ProxyMode)
+	}
+	if cfg.FailOpen {
+		proxyValues["failOpen"] = true
+	}
+	if len(proxyValues) > 0 {
+		routerValues["proxy"] = proxyValues
+	}
 	values, err := yaml.Marshal(map[string]any{
 		"router": routerValues,
 	})
@@ -169,19 +241,37 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 	for _, obj := range objects {
 		switch obj.GetKind() {
 		case "Deployment":
-			if router.Selector != nil {
-				return nil, errors.New("standalone chart must have one router Deployment")
-			}
-			router.Selector, _, err = unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
+			selector, _, err := unstructured.NestedStringMap(obj.Object, "spec", "selector", "matchLabels")
 			if err != nil {
 				return nil, err
 			}
+			if _, isProxy := selector[proxySelectorKey]; isProxy {
+				if router.ProxySelector != nil {
+					return nil, errors.New("standalone chart must have at most one proxy Deployment")
+				}
+				proxyReplicas, _, err := unstructured.NestedInt64(obj.Object, "spec", "replicas")
+				if err != nil {
+					return nil, err
+				}
+				router.ProxySelector, router.proxyReplicas = selector, int(proxyReplicas)
+				continue
+			}
+			if router.Selector != nil {
+				return nil, errors.New("standalone chart must have one EPP Deployment")
+			}
+			router.Selector, router.eppDeployment = selector, obj.GetName()
 		case "InferencePool":
 			router.PoolName = obj.GetName()
 		}
 	}
 	if len(router.Selector) == 0 || router.PoolName == "" {
-		return nil, errors.New("standalone chart must render a router selector and InferencePool")
+		return nil, errors.New("standalone chart must render an EPP selector and InferencePool")
+	}
+	if (cfg.ProxyMode == ProxyModeService) != (router.ProxySelector != nil) {
+		return nil, fmt.Errorf("proxy mode %q rendered proxy selector %v", cfg.ProxyMode, router.ProxySelector)
+	}
+	if router.ProxySelector != nil && router.proxyReplicas < 1 {
+		return nil, fmt.Errorf("proxy Deployment has %d replicas, want at least 1", router.proxyReplicas)
 	}
 	return router, nil
 }
@@ -208,18 +298,48 @@ func imageValues(image string) (map[string]string, error) {
 	return map[string]string{"registry": registry, "repository": repository, "tag": tag, "pullPolicy": "IfNotPresent"}, nil
 }
 
-func (r *Router) accessService(namespace string, httpPort, metricsPort int) *corev1.Service {
+// accessServices returns the test-only NodePort Services clients reach the
+// router through. In sidecar mode one Service selects the router Pods. In
+// service mode HTTP goes to the proxy Pods and metrics to the EPP Pods, so each
+// gets its own Service.
+func (r *Router) accessServices(namespace string, httpPort, metricsPort int) []*corev1.Service {
+	httpServicePort := corev1.ServicePort{Name: "http", Port: 8081, TargetPort: intstr.FromInt32(8081), NodePort: int32(httpPort)}          //#nosec G115 -- test-controlled port, always small
+	metricsServicePort := corev1.ServicePort{Name: "metrics", Port: 9090, TargetPort: intstr.FromInt32(9090), NodePort: int32(metricsPort)} //#nosec G115 -- test-controlled port, always small
+	if r.ProxySelector == nil {
+		return []*corev1.Service{accessService(namespace, "router-access", r.Selector, httpServicePort, metricsServicePort)}
+	}
+	return []*corev1.Service{
+		accessService(namespace, "router-access", r.ProxySelector, httpServicePort),
+		accessService(namespace, "router-metrics-access", r.Selector, metricsServicePort),
+	}
+}
+
+func accessService(namespace, name string, selector map[string]string, ports ...corev1.ServicePort) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-		ObjectMeta: metav1.ObjectMeta{Name: "router-access", Namespace: namespace},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeNodePort, Selector: r.Selector,
-			Ports: []corev1.ServicePort{
-				{Name: "http", Port: 8081, TargetPort: intstr.FromInt32(8081), NodePort: int32(httpPort)},       //#nosec G115 -- test-controlled port, always small
-				{Name: "metrics", Port: 9090, TargetPort: intstr.FromInt32(9090), NodePort: int32(metricsPort)}, //#nosec G115 -- test-controlled port, always small
-			},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort, Selector: selector, Ports: ports},
 	}
+}
+
+// waitForReadyPods blocks until want live Pods match selector and all are Ready.
+func waitForReadyPods(cfg Config, selector map[string]string, want int) {
+	gomega.Eventually(func() error {
+		pods := &corev1.PodList{}
+		if err := cfg.TestConfig.K8sClient.List(cfg.TestConfig.Context, pods, client.InNamespace(cfg.Namespace), client.MatchingLabels(selector)); err != nil {
+			return err
+		}
+		ready := 0
+		for _, pod := range pods.Items {
+			if ReadyRouterPod(&pod) {
+				ready++
+			}
+		}
+		if ready != want {
+			return fmt.Errorf("%d of %d Pods matching %v are Ready", ready, want, selector)
+		}
+		return nil
+	}, cfg.TestConfig.ReadyTimeout, cfg.TestConfig.Interval).Should(gomega.Succeed())
 }
 
 // WaitForReadyLeader blocks until replicas live router Pods exist and exactly
@@ -238,9 +358,11 @@ func WaitForReadyLeader(cfg Config, replicas int, namespace string, selector map
 	return leaderPod
 }
 
-// ReadyRouterPod reports whether both router containers are running and Ready.
+// ReadyRouterPod reports whether every container of a router Pod is running
+// and Ready: Envoy and EPP in sidecar mode, or the single container of an EPP
+// or proxy Pod in service mode.
 func ReadyRouterPod(pod *corev1.Pod) bool {
-	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) != 2 {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !allContainersStarted(pod) {
 		return false
 	}
 	for _, container := range pod.Status.ContainerStatuses {
@@ -264,8 +386,8 @@ func readyLeader(pods []corev1.Pod, replicas int) (*corev1.Pod, error) {
 			continue
 		}
 		live++
-		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) != 2 {
-			return nil, fmt.Errorf("router Pod %s has not started both containers", pod.Name)
+		if pod.Status.Phase != corev1.PodRunning || !allContainersStarted(&pod) {
+			return nil, fmt.Errorf("router Pod %s has not started all containers", pod.Name)
 		}
 		for _, container := range pod.Status.ContainerStatuses {
 			if container.State.Running == nil || (container.Name == "envoy-proxy" && !container.Ready) {
@@ -283,6 +405,12 @@ func readyLeader(pods []corev1.Pod, replicas int) (*corev1.Pod, error) {
 	return leader, nil
 }
 
+// allContainersStarted reports whether the kubelet reports a status for every
+// container in the Pod spec.
+func allContainersStarted(pod *corev1.Pod) bool {
+	return len(pod.Status.ContainerStatuses) > 0 && len(pod.Status.ContainerStatuses) == len(pod.Spec.Containers)
+}
+
 type forwardProcess struct {
 	done <-chan struct{}
 	stop func()
@@ -292,6 +420,9 @@ type routerPortForward struct {
 	podUID  types.UID
 	process *forwardProcess
 	start   func(context.Context, *corev1.Pod) (*forwardProcess, error)
+	// anyReady follows any one Ready Pod. Otherwise exactly one Pod, the
+	// leader, may be Ready.
+	anyReady bool
 }
 
 func (f *routerPortForward) close() {
@@ -305,14 +436,23 @@ func (f *routerPortForward) close() {
 
 func (f *routerPortForward) reconcile(ctx context.Context, pods []corev1.Pod) error {
 	var leader *corev1.Pod
-	for _, pod := range pods {
-		if ReadyRouterPod(&pod) {
-			if leader != nil {
-				f.close()
-				return errors.New("multiple Ready router Pods")
-			}
-			leader = pod.DeepCopy()
+	for i := range pods {
+		pod := &pods[i]
+		if !ReadyRouterPod(pod) {
+			continue
 		}
+		if f.anyReady {
+			// Keep the Pod already forwarded to while it stays Ready, else take the first.
+			if leader == nil || pod.UID == f.podUID {
+				leader = pod.DeepCopy()
+			}
+			continue
+		}
+		if leader != nil {
+			f.close()
+			return errors.New("multiple Ready router Pods")
+		}
+		leader = pod.DeepCopy()
 	}
 	if f.process != nil {
 		select {
@@ -335,16 +475,17 @@ func (f *routerPortForward) reconcile(ctx context.Context, pods []corev1.Pod) er
 	return nil
 }
 
-// startPortForward follows the Ready leader Pod with a kubectl port-forward
-// subprocess and returns a function that stops it.
-func startPortForward(cfg Config, selector map[string]string) func() {
+// startPortForward follows a Ready Pod matching selector with a kubectl
+// port-forward subprocess for ports (local:remote) and returns a function that
+// stops it. With anyReady false it follows the single Ready leader.
+func startPortForward(cfg Config, selector map[string]string, anyReady bool, ports ...string) func() {
 	ctx, cancel := context.WithCancel(cfg.TestConfig.Context)
 	done := make(chan struct{})
-	forward := &routerPortForward{start: func(ctx context.Context, pod *corev1.Pod) (*forwardProcess, error) {
+	forward := &routerPortForward{anyReady: anyReady, start: func(ctx context.Context, pod *corev1.Pod) (*forwardProcess, error) {
+		args := append([]string{"port-forward", "pod/" + pod.Name}, ports...)
+		args = append(args, "--context="+cfg.K8sContext, "--namespace="+cfg.Namespace, "--address=127.0.0.1")
 		//#nosec G204 -- Fixed kubectl executable; API Pod names, integer ports and test settings are separate argv, without a shell.
-		command := exec.CommandContext(ctx, "kubectl", "port-forward", "pod/"+pod.Name,
-			fmt.Sprintf("%d:8081", cfg.HTTPPort), fmt.Sprintf("%d:9090", cfg.MetricsPort),
-			"--context="+cfg.K8sContext, "--namespace="+cfg.Namespace, "--address=127.0.0.1")
+		command := exec.CommandContext(ctx, "kubectl", args...)
 		command.Stdout, command.Stderr = ginkgo.GinkgoWriter, ginkgo.GinkgoWriter
 		if err := command.Start(); err != nil {
 			return nil, err

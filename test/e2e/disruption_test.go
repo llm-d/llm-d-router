@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
@@ -44,6 +45,9 @@ const (
 	trafficProbeTimeout = 30 * time.Second
 	// requestInterval is the delay between requests in traffic loops.
 	requestInterval = 200 * time.Millisecond
+	// unreachablePrefiller is a prefill target no sidecar can use. A request
+	// that reaches a decode sidecar with it set fails instead of decoding locally.
+	unreachablePrefiller = "127.0.0.1:1"
 )
 
 var disruptionClient = &http.Client{Timeout: 10 * time.Second}
@@ -348,6 +352,41 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			<-done
 
 			ginkgo.By(fmt.Sprintf("Traffic results: %d successes, %d failures", tc.successes(), tc.failures()))
+		})
+	}))
+
+	ginkgo.When("EPP is unavailable behind a service-mode proxy with fail-open", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("should serve requests through the fallback route and drop client routing headers", func() {
+			nsName := getNamespace()
+
+			// The decode Pods run the routing sidecar, which honours a prefiller
+			// header that reaches it.
+			createModelServersPDNixlV2(0, 1)
+
+			cfg := standaloneConfig()
+			cfg.ProxyMode, cfg.FailOpen = standalone.ProxyModeService, true
+			router := standalone.Create(cfg, simpleConfig, 1, 8000)
+
+			ginkgo.By("Verifying requests route through EPP before the outage")
+			nsHdr, _, _ := runCompletion(simplePrompt, simModelName)
+			gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
+
+			router.ScaleEPP(0)
+
+			// Requests fail open with their body only after Envoy's active health checks mark
+			// the EPP host unhealthy (healthCheckInterval x healthCheckUnhealthyThreshold).
+			ginkgo.By("Verifying requests reach the model servers through the fallback route")
+			gomega.Eventually(func() error {
+				return completionRoutedToNamespace(nsName)
+			}, eppRecoveryTimeout, requestInterval).Should(gomega.Succeed())
+
+			ginkgo.By("Verifying the fallback route removes a client-supplied prefiller header")
+			body := fmt.Sprintf(`{"model":%q,"prompt":%q,"max_tokens":%d}`, simModelName, simplePrompt, echoOutputTokens)
+			for range 5 {
+				status, respBody := doPostWithError("/v1/completions", body,
+					map[string]string{routing.PrefillEndpointHeader: unreachablePrefiller})
+				gomega.Expect(status).To(gomega.Equal(http.StatusOK), "response: %s", respBody)
+			}
 		})
 	}))
 
