@@ -49,6 +49,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
 		IncRunningRequests("model", "target", surface, "", "0")
 		DecRunningRequests("model", "target", surface, "", "0")
+		RecordRequestOutcome("model", "target", surface, "", "0", "completed", "")
 		RecordRequestProcessingLatency(surface, time.Millisecond)
 		RecordResponseProcessingLatency(surface, time.Millisecond)
 	}
@@ -63,7 +64,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		record(reqcommon.APISurface(1000 + i))
 	}
 	for _, collector := range []prometheus.Collector{
-		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
+		llmdRequestCounter, llmdRequestErrCounter, llmdRequestOutcomeCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
 		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
 		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
 		llmdRequestProcessingLatency, llmdResponseProcessingLatency,
@@ -220,6 +221,26 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
 		"100 distinct model names must collapse to cap+overflow series, not one series each")
+}
+
+// RecordSchedulerAttempt's target_model_name falls back to the request-body model when no
+// rewrite rule matches, so it must go through the model limiter like the other record functions.
+func TestSchedulerAttemptBoundsTargetModelLabel(t *testing.T) {
+	const testCap = 3
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
+	llmdSchedulerAttemptsTotal.Reset()
+	t.Cleanup(func() {
+		modelLabelLimiter = oldModels
+		llmdSchedulerAttemptsTotal.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordSchedulerAttempt(nil, fmt.Sprintf("model-%d", i), nil)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdSchedulerAttemptsTotal),
+		"100 distinct target models must collapse to cap+overflow series, not one series each")
 }
 
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not

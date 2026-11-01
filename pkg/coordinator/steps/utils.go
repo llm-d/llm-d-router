@@ -297,6 +297,9 @@ func collectMediaParts(items []any, apiType reqcommon.APIType) []mediaPart {
 					continue
 				}
 				partType, _ := partMap[reqcommon.FieldType].(string)
+				if apiType == reqcommon.APITypeChatCompletions {
+					partType = reqcommon.NormalizeChatPart(partMap)
+				}
 				modality, ok := modalityOf(partType)
 				if !ok {
 					continue

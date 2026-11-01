@@ -71,13 +71,28 @@ Request control runs once per request before any scheduling profiles:
 
 1. Request headers are processed and flow-control admission completes
 2. Endpoint candidates are located
-3. Global `Screener` plugins perform preliminary filtering of located endpoints
+3. Request handling data producers prepare per-request data using the located candidates
+4. Global `Screener` plugins perform preliminary filtering of located endpoints
    - Each screener receives an independent copy of the same endpoint set, and their returned subsets are intersected
    - Most endpoint-selection plugins should implement a scheduling `Filter`, not a `Screener`
    - Use a `Screener` only for mandatory constraints that must apply to every scheduling profile
-4. Data producers prepare per-request data using the filtered candidate set
-5. Admission plugins may reject the request
-6. The scheduler runs the configured scheduling profiles using the filtered candidate set
+5. The remaining data producers prepare per-request data using the filtered candidate set
+6. Admission plugins may reject the request
+7. The scheduler runs the configured scheduling profiles using the filtered candidate set
+
+A data producer runs in exactly one of steps 3 and 5. `requestHandler.dataProducers` lists the
+producers that run during request handling, in step 3:
+
+```yaml
+requestHandler:
+  dataProducers:
+  - pluginRef: token-producer
+```
+
+A producer not listed also runs in step 3 when a screener or a listed producer consumes its data,
+Required or Optional, directly or through other producers. This includes producers created
+automatically. Every other producer runs in step 5. Producers in step 3 see every located candidate,
+so their per-endpoint work grows with the candidates the screeners remove.
 
 #### Scheduling
 

@@ -84,8 +84,9 @@ func rejectIfSheddableAndSaturated(
 			logger.V(logutil.TRACE).Info("Request rejected: system saturated and request is sheddable",
 				"requestID", reqCtx.SchedulingRequest.RequestID)
 			return errcommon.Error{
-				Code: errcommon.ResourceExhausted,
-				Msg:  "system saturated, sheddable request dropped",
+				Code:    errcommon.ResourceExhausted,
+				Msg:     "system saturated, sheddable request dropped",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 			}
 		}
 	}

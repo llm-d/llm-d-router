@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
@@ -188,6 +189,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
 	}
+	indexer.SetCacheFormats(pool.CacheFormats())
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
@@ -334,26 +336,94 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	perPromptKeys, perPromptMMContent, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, p.blockSizeTokens)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to compute block keys: %w", err)
-	}
-	if len(perPromptKeys) == 0 {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil ||
+		len(request.Body.TokenizedRequest.Prompts) == 0 {
 		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
 		return nil
 	}
 
-	return p.produceFromBlockKeys(ctx, span, request, endpoints, perPromptKeys, perPromptMMContent)
+	groups := make(map[kvblock.CacheFormat][]endpointWithPodID)
+	for _, endpoint := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if md := endpoint.GetMetadata(); md != nil {
+			podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
+			format := p.kvCacheIndexer.CacheFormat(podID)
+			groups[format] = append(groups[format], endpointWithPodID{endpoint: endpoint, podID: podID})
+		}
+	}
+	if len(groups) == 0 {
+		// Compute default-format keys even when no endpoint has metadata.
+		groups[kvblock.CacheFormat{BlockSize: p.blockSizeTokens}] = nil
+	}
+	keysByFormat := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(groups))
+	var results []endpointResult
+	for format, group := range groups {
+		perPromptKeys, perPromptMMContent, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, format)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("failed to compute block keys: %w", err)
+		}
+		if len(perPromptKeys) == 0 {
+			continue
+		}
+		keysByFormat[format] = perPromptKeys
+		groupResults, err := p.matchEndpointBlockKeys(ctx, span, request, group,
+			perPromptKeys, perPromptMMContent, format)
+		if err != nil {
+			return err
+		}
+		results = append(results, groupResults...)
+	}
+	if len(keysByFormat) == 0 {
+		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
+		return nil
+	}
+	if err := p.publishEndpointResults(ctx, results); err != nil {
+		return err
+	}
+
+	state := &bestAvailableState{predictedCachedTokens: make(map[datalayer.ID]int, len(results))}
+	totalBlocks, maxMatch, maxMMMatch := 0, 0, 0
+	mmTracked := false
+	for _, result := range results {
+		predicted := predictedCachedTokens(result.info)
+		state.predictedCachedTokens[result.endpoint.GetMetadata().ID] = predicted
+		state.cachedTokens = max(state.cachedTokens, predicted)
+		blockSize := result.info.BlockSizeTokens()
+		totalBlocks = max(totalBlocks, result.info.TotalBlocks()*blockSize/p.blockSizeTokens)
+		maxMatch = max(maxMatch, result.info.MatchBlocks()*blockSize/p.blockSizeTokens)
+		if mm := result.info.MM(); mm != nil {
+			mmTracked = true
+			maxMMMatch = max(maxMMMatch, mm.MatchBlocks*blockSize/p.blockSizeTokens)
+		}
+	}
+	p.pluginState.Write(request.RequestID, bestAvailableStateKey, state)
+	if p.speculativeEnabled {
+		p.pluginState.Write(request.RequestID, blockKeysStateKey,
+			&blockKeysState{perFormatKeys: keysByFormat})
+	}
+	span.SetAttributes(
+		semconv.LLMDEPPProducerTotalBlocks(totalBlocks),
+		semconv.LLMDEPPProducerMaxMatchBlocks(maxMatch),
+	)
+	if mmTracked && span.IsRecording() {
+		span.SetAttributes(
+			mmMatchedBlocksKey.Int(maxMMMatch),
+			mmTotalBlocksKey.Int(totalMMBlocks(request, p.blockSizeTokens)),
+		)
+	}
+	return nil
 }
 
-// produceFromBlockKeys matches the per-prompt block keys against the index and
-// publishes per-endpoint PrefixCacheMatchInfo. perPromptKeys and
-// perPromptMMContent are computeBlockKeys' aligned return values.
-func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
-	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
+// matchEndpointBlockKeys matches one format's prompts against its endpoints.
+func (p *Producer) matchEndpointBlockKeys(ctx context.Context, span trace.Span,
+	request *scheduling.InferenceRequest, endpoints []endpointWithPodID,
 	perPromptKeys [][]kvblock.BlockHash, perPromptMMContent []*mmPromptContent,
-) error {
+	format kvblock.CacheFormat,
+) ([]endpointResult, error) {
+	blockSizeTokens := format.BlockSize
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	endpointSet := extractEndpointSet(endpoints)
 
@@ -372,7 +442,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, endpointSet)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
-			return fmt.Errorf("failed to match block keys: %w", err)
+			return nil, fmt.Errorf("failed to match block keys: %w", err)
 		}
 		totalBlocks += len(blockKeys)
 		if mm := perPromptMMContent[i]; mm != nil {
@@ -383,7 +453,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			}
 			for pod, m := range promptMatches {
 				mmMatches[pod] += countMMMatchedBlocks(mm.blockIndices, m.MatchedBlocks)
-				mmTokens[pod] += countMMMatchedTokens(mm.features, m.MatchedBlocks, p.blockSizeTokens)
+				mmTokens[pod] += countMMMatchedTokens(mm.features, m.MatchedBlocks, blockSizeTokens)
 			}
 		}
 		if matches == nil {
@@ -395,82 +465,60 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 		}
 	}
 
+	scale, reportedBlockSize := 1, blockSizeTokens
+	if format.Bigram {
+		// The denominator includes pages that cannot match without lookahead.
+		scale, reportedBlockSize = blockSizeTokens, 1
+		totalBlocks = 0
+		for _, prompt := range request.Body.TokenizedRequest.Prompts {
+			totalBlocks += len(prompt.TokenIDs) / blockSizeTokens * scale
+		}
+	}
+
 	// weightedScoreRoundOff absorbs float error in the summed tier weights
 	// before flooring: ten cpu-tier blocks at 0.8 sum to 7.999999999999999.
 	// It covers at least 278,000 blocks at any one default tier weight.
 	const weightedScoreRoundOff = 1e-6
 
-	maxMatch := 0
-	maxMMMatch := 0
 	results := make([]endpointResult, 0, len(endpoints))
-	for _, ep := range endpoints {
+	for _, candidate := range endpoints {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
+		ep := candidate.endpoint
 		md := ep.GetMetadata()
 		if md == nil {
 			continue
 		}
-		podKey := fmt.Sprintf("%s:%s", md.Address, md.Port)
+		podKey := candidate.podID
 		match := matches[podKey]
-		if mmTracked {
-			maxMMMatch = max(maxMMMatch, mmMatches[podKey])
+		tiers := match.BlocksByTier
+		if tiers == nil {
+			tiers = map[string]int{} // no match: consumers still read a map
+		} else if scale != 1 {
+			tiers = maps.Clone(tiers)
+			for tier, count := range tiers {
+				tiers[tier] = count * scale
+			}
 		}
-		if match.BlocksByTier == nil {
-			match.BlocksByTier = map[string]int{} // no match: consumers still read a map
-		}
-		matchLen := int(match.WeightedScore + weightedScoreRoundOff)
-		if matchLen > maxMatch {
-			maxMatch = matchLen
-		}
-		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, p.blockSizeTokens).
-			WithCachedBlockCount(match.MatchedBlocks).
-			WithConfirmedCachedBlockCount(match.ConfirmedBlocks).
-			WithCachedBlocksByTier(match.BlocksByTier)
+		// Token units preserve weighted scores and exact cached-token counts.
+		matchLen := int(match.WeightedScore*float64(scale) + weightedScoreRoundOff)
+		info := attrprefix.NewPrefixCacheMatchInfo(matchLen, totalBlocks, reportedBlockSize).
+			WithCachedBlockCount(match.MatchedBlocks * scale).
+			WithConfirmedCachedBlockCount(match.ConfirmedBlocks * scale).
+			WithCachedBlocksByTier(tiers)
 		if mmTracked {
 			info.WithMM(attrprefix.MMMatchInfo{
-				MatchBlocks: mmMatches[podKey],
+				MatchBlocks: mmMatches[podKey] * scale,
 				MatchTokens: mmTokens[podKey],
 			})
 		}
 		results = append(results, endpointResult{endpoint: ep, info: info})
 	}
-	if err := p.publishEndpointResults(ctx, results); err != nil {
-		return err
-	}
-
-	state := &bestAvailableState{predictedCachedTokens: make(map[datalayer.ID]int, len(results))}
-	for _, result := range results {
-		predicted := predictedCachedTokens(result.info)
-		state.predictedCachedTokens[result.endpoint.GetMetadata().ID] = predicted
-		state.cachedTokens = max(state.cachedTokens, predicted)
-	}
-	p.pluginState.Write(request.RequestID, bestAvailableStateKey, state)
-
-	if p.speculativeEnabled {
-		p.pluginState.Write(request.RequestID, blockKeysStateKey,
-			&blockKeysState{perPromptKeys: perPromptKeys})
-	}
-
-	span.SetAttributes(
-		semconv.LLMDEPPProducerTotalBlocks(totalBlocks),
-		semconv.LLMDEPPProducerMaxMatchBlocks(maxMatch),
-	)
-	// The total is request-wide, matching the mm pair's denominator: a
-	// prompt shorter than one block produces no keys and cannot match,
-	// but its MM content still counts toward the request's total. The
-	// IsRecording guard skips the feature walk on the tracing-disabled path.
-	if mmTracked && span.IsRecording() {
-		span.SetAttributes(
-			mmMatchedBlocksKey.Int(maxMMMatch),
-			mmTotalBlocksKey.Int(totalMMBlocks(request, p.blockSizeTokens)),
-		)
-	}
-
 	if v := logger.V(logging.TRACE); v.Enabled() {
-		v.Info("Produce completed", "blockKeys", totalBlocks, "matches", matches)
+		v.Info("Produce completed", "blockKeys", totalBlocks/scale, "matches", matches)
 	}
-	return nil
+	return results, nil
 }
 
 // addPodMatch sums b into a. A zero a (a pod first seen in a later prompt)
@@ -486,6 +534,11 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 		a.BlocksByTier[tier] += count
 	}
 	return a
+}
+
+type endpointWithPodID struct {
+	endpoint scheduling.Endpoint
+	podID    string
 }
 
 type endpointResult struct {

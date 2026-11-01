@@ -81,6 +81,14 @@ func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
 }
 
 func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (bool, string) {
+	if ev.LookaheadToken != nil {
+		if ev.BlockSize <= 0 {
+			return false, "invalid_block_size"
+		}
+		if len(ev.Tokens)%ev.BlockSize != 0 || len(ev.Tokens)/ev.BlockSize != len(ev.BlockHashes) {
+			return false, "non_dense_block_span"
+		}
+	}
 	if ev.GroupIdx == nil {
 		return true, ""
 	}
@@ -188,6 +196,7 @@ type Pool struct {
 	tokenProcessor kvblock.TokenProcessor
 	adapter        EngineAdapter
 	groupCatalog   *kvblock.GroupCatalog
+	cacheFormats   *kvblock.CacheFormatCatalog
 	// dedup lives in the Pool, not as an Index decorator, because its scope is
 	// built from event fields absent from the Index.Evict signature (device
 	// tier, KV-cache group, DP rank) and a store must be counted only after
@@ -229,6 +238,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		tokenProcessor: tokenProcessor,
 		adapter:        adapter,
 		groupCatalog:   kvblock.NewGroupCatalog(),
+		cacheFormats:   kvblock.NewCacheFormatCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
 	}
@@ -284,6 +294,11 @@ func (p *Pool) addQueueDepth(delta int64) {
 // GroupCatalog returns the KV cache group metadata learned from events.
 func (p *Pool) GroupCatalog() *kvblock.GroupCatalog {
 	return p.groupCatalog
+}
+
+// CacheFormats returns per-pod cache formats learned from store events.
+func (p *Pool) CacheFormats() *kvblock.CacheFormatCatalog {
+	return p.cacheFormats
 }
 
 // Start begins the worker pool.
@@ -455,6 +470,7 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 	p.dedup.clear(podIdentifier)
 	if retire {
 		p.groupCatalog.Clear(podIdentifier)
+		p.cacheFormats.Clear(podIdentifier)
 	}
 }
 
@@ -510,7 +526,9 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 				// Placeholders don't overlap, so only the item ending engine block i-1
 				// can continue into block i, where it is the first entry. Block i-1 is
 				// searched whole because block 0 ends with the cache salt, if any.
-				if prev != nil && len(hashes) > 0 && slices.Contains(prev.MMHashes, hashes[0]) {
+				// The event offset, when present, tells a continuation from a new copy.
+				if prev != nil && len(hashes) > 0 && ef.FirstContinuation != kvblock.MMContinuationNew &&
+					slices.Contains(prev.MMHashes, hashes[0]) {
 					hashes = hashes[1:]
 				}
 				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
@@ -642,6 +660,21 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				continue
 			}
 
+			if ev.LoraID != nil && (ev.LoraName == nil || *ev.LoraName == "") {
+				const reason = "unresolved_lora_adapter"
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+					"podIdentifier", podIdentifier,
+					"groupIdx", ev.GroupIdx,
+					"cacheKind", ev.KVCacheSpecKind,
+					"loraID", *ev.LoraID,
+					"reason", reason,
+					"numTokens", len(ev.Tokens),
+					"numBlockHashes", len(ev.BlockHashes),
+					"blockSize", ev.BlockSize)
+				continue
+			}
+
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
 			for i, hash := range ev.BlockHashes {
 				engineKeys[i] = kvblock.BlockHash(hash)
@@ -700,7 +733,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// Realign extraFeatures from engine-block granularity to canonical-block
 			// granularity. ParseRawExtraKeys returns one entry per engine block, but
 			// TokensToKVBlockKeys expects one entry per canonical block.
-			if extraFeatures != nil {
+			if extraFeatures != nil && ev.LookaheadToken == nil {
 				canonicalBlockCount := len(ev.Tokens) / p.tokenProcessor.BlockSize()
 				if canonicalBlockCount == 0 {
 					// Tokens don't fill a complete canonical block; no realignment needed
@@ -736,9 +769,21 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				}
 			}
 
-			// Compute request keys at canonical block size (= BlockSize)
-			requestKeys, err := p.tokenProcessor.TokensToKVBlockKeys(
-				parentRequestKey, ev.Tokens, effectiveModelName, extraFeatures)
+			// Bigram keys follow engine pages; plain keys use canonical blocks.
+			var requestKeys []kvblock.BlockHash
+			var err error
+			format := kvblock.CacheFormat{BlockSize: p.tokenProcessor.BlockSize()}
+			if ev.LookaheadToken != nil {
+				format = kvblock.CacheFormat{Bigram: true, BlockSize: ev.BlockSize}
+				rawTokens := make([]uint32, len(ev.Tokens)+1)
+				copy(rawTokens, ev.Tokens)
+				rawTokens[len(ev.Tokens)] = *ev.LookaheadToken
+				requestKeys, err = p.tokenProcessor.TokensToBigramKVBlockKeys(
+					parentRequestKey, rawTokens, ev.BlockSize, effectiveModelName, extraFeatures)
+			} else {
+				requestKeys, err = p.tokenProcessor.TokensToKVBlockKeys(
+					parentRequestKey, ev.Tokens, effectiveModelName, extraFeatures)
+			}
 			if err != nil {
 				debugLogger.Error(err, "Failed to generate request keys",
 					"podIdentifier", podIdentifier, "effectiveModelName", effectiveModelName)
@@ -759,6 +804,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
+			p.cacheFormats.Learn(podIdentifier, format)
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
 		case *BlockRemovedEvent:

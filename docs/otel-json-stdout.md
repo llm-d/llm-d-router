@@ -34,3 +34,20 @@ Example:
 ```
 
 Trace fields are omitted when no valid span is active.
+
+## Routing sidecar request line
+
+Each request through the routing sidecar ends with one `INFO` record,
+`request finished`, so the request can be found by `trace_id` at the default
+verbosity. The per-stage records stay at debug (`--zap-log-level=4`).
+
+| Field | Meaning |
+| --- | --- |
+| `path` | `decode-only`, `prefill-decode`, `encode-decode`, or `encode-prefill-decode` |
+| `status` | HTTP status sent to the client, `0` when none was written |
+| `duration` | Seconds the request spent in the sidecar |
+| `decoder`, `prefiller` | Target `host:port`. `prefiller` only when prefill ran on another pod |
+| `encoders` | Number of encoders, when any were used |
+| `encodeDuration`, `prefillDuration`, `decodeDuration` | Seconds spent in each stage, when the connector measures it |
+| `failedStage` | The first stage that failed |
+| `clientWriteFailed` | `true` when the response could not be delivered to the client |

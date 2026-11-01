@@ -18,15 +18,22 @@ package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
 	"bytes"
+	"context"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
+	"k8s.io/utils/ptr"
 )
 
 // TestSGLangShardingKey tests the sharding key extraction.
@@ -34,6 +41,181 @@ func TestSGLangShardingKey(t *testing.T) {
 	adapter := NewSGLangAdapter()
 	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123@llama-2-7b"}))
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
+}
+
+func TestSGLangParseMessage_TokenIDs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tokens        any
+		want          []uint32
+		wantErr       string
+		testMap       bool
+		wantLookahead *uint32
+	}{
+		"plain":   {tokens: []uint32{11, 22}, want: []uint32{11, 22}},
+		"bigrams": {tokens: [][]uint32{{11, 22}, {22, 33}}, want: []uint32{11, 22}, testMap: true, wantLookahead: ptr.To(uint32(33))},
+		"empty":   {tokens: []uint32{}, want: []uint32{}},
+		"clamped plain": {
+			tokens: []any{int64(-1), uint64(math.MaxUint32) + 1},
+			want:   []uint32{0, math.MaxUint32},
+		},
+		"clamped bigrams": {
+			tokens:        [][]any{{int64(-1), uint64(math.MaxUint32) + 1}, {uint64(math.MaxUint32) + 1, int64(-1)}},
+			want:          []uint32{0, math.MaxUint32},
+			wantLookahead: ptr.To(uint32(0)),
+		},
+		"nil":        {tokens: nil, wantErr: "token_ids is not an array"},
+		"non-array":  {tokens: "invalid", wantErr: "token_ids is not an array"},
+		"short pair": {tokens: [][]uint32{{1}}, wantErr: "token_ids[0]"},
+		"long pair":  {tokens: [][]uint32{{1, 2, 3}}, wantErr: "token_ids[0]"},
+		"non-integer second": {
+			tokens: [][]any{{1, "invalid"}}, wantErr: "token_ids[0]: unsupported numeric type",
+		},
+		"plain then pair":       {tokens: []any{1, []uint32{2, 3}}, wantErr: "token_ids[1]"},
+		"pair then plain":       {tokens: []any{[]uint32{1, 2}, 3}, wantErr: "token_ids[1]"},
+		"non-overlapping pairs": {tokens: [][]uint32{{1, 2}, {3, 4}}, wantErr: "does not overlap"},
+	} {
+		encodings := []string{"array"}
+		if tc.testMap {
+			encodings = append(encodings, "map")
+		}
+		for _, encoding := range encodings {
+			t.Run(name+"/"+encoding, func(t *testing.T) {
+				var event any = []any{eventTagBlockStored, []uint64{100}, nil, tc.tokens, 2, nil, "GPU"}
+				if encoding == "map" {
+					event = map[string]any{
+						"type": eventTagBlockStored, "block_hashes": []uint64{100},
+						"token_ids": tc.tokens, "block_size": 2, "medium": "GPU",
+					}
+				}
+				payload, err := msgpack.Marshal([]any{0.0, []any{event}, nil})
+				require.NoError(t, err)
+				_, _, batch, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+				if tc.wantErr != "" {
+					require.ErrorContains(t, err, tc.wantErr)
+					return
+				}
+				require.NoError(t, err)
+				require.Len(t, batch.Events, 1)
+				stored, ok := batch.Events[0].(*kvevents.BlockStoredEvent)
+				require.True(t, ok)
+				require.Equal(t, tc.want, stored.Tokens)
+				require.Equal(t, tc.wantLookahead, stored.LookaheadToken)
+				require.Equal(t, 2, stored.BlockSize)
+			})
+		}
+	}
+}
+
+func TestDecodeSGLangTokenIDs_PairWireEncoding(t *testing.T) {
+	for name, payload := range map[string][]byte{
+		"array16 pair": {0x91, 0xdc, 0, 2, 11, 22},
+		"array32 pair": {0x91, 0xdd, 0, 0, 0, 2, 11, 22},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tokens, lookahead, err := decodeSGLangTokenIDs(msgpack.NewDecoder(bytes.NewReader(payload)))
+			require.NoError(t, err)
+			require.Equal(t, []uint32{11}, tokens)
+			require.NotNil(t, lookahead)
+			require.Equal(t, uint32(22), *lookahead)
+		})
+	}
+}
+
+func TestSGLangBigramEventsMatchRequestKeys(t *testing.T) {
+	server := miniredis.RunT(t)
+	for name, config := range map[string]*kvblock.IndexConfig{
+		"memory":     kvblock.DefaultIndexConfig(),
+		"cost-aware": {CostAwareMemoryConfig: &kvblock.CostAwareMemoryIndexConfig{Size: "16MiB", NumCounters: 1000}},
+		"redis":      {RedisConfig: &kvblock.RedisIndexConfig{Address: server.Addr()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			testSGLangBigramEventIndex(t, config)
+		})
+	}
+}
+
+func testSGLangBigramEventIndex(t *testing.T, indexConfig *kvblock.IndexConfig) {
+	t.Helper()
+	ctx := context.Background()
+	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 1})
+	require.NoError(t, err)
+	config, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	config.KVBlockIndexConfig = indexConfig
+	indexer, err := kvcache.NewKVCacheIndexer(ctx, config, processor)
+	require.NoError(t, err)
+	index := indexer.KVBlockIndex()
+	poolConfig := kvevents.DefaultConfig()
+	poolConfig.Concurrency = 1
+	pool, err := kvevents.NewPool(poolConfig, index, processor, NewSGLangAdapter())
+	require.NoError(t, err)
+	indexer.SetCacheFormats(pool.CacheFormats())
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
+
+	for _, event := range []any{
+		[]any{eventTagBlockStored, []uint64{100}, nil, [][]uint32{{11, 22}, {22, 33}}, 2, nil, "GPU"},
+		[]any{eventTagBlockStored, []uint64{101}, uint64(100), [][]uint32{{33, 44}, {44, 55}}, 2, nil, "GPU"},
+	} {
+		payload, err := msgpack.Marshal([]any{0.0, []any{event}, nil})
+		require.NoError(t, err)
+		pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-1@test-model", Payload: payload})
+	}
+
+	requestKeys, err := indexer.ComputeBlockKeysForFormat(ctx, []uint32{11, 22, 33, 44, 55}, "test-model", nil,
+		kvblock.CacheFormat{Bigram: true, BlockSize: 2})
+	require.NoError(t, err)
+	require.Len(t, requestKeys, 2)
+	require.Eventually(t, func() bool {
+		key, err := index.GetRequestKey(ctx, kvblock.BlockHash(101))
+		return err == nil && key == requestKeys[1]
+	}, time.Second, time.Millisecond)
+	parentKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+	require.Equal(t, requestKeys[0], parentKey)
+	matches, err := index.Lookup(ctx, requestKeys, nil)
+	require.NoError(t, err)
+	for _, key := range requestKeys {
+		require.Len(t, matches[key], 1)
+		require.Equal(t, "pod-1", matches[key][0].PodIdentifier)
+	}
+
+	payload, err := msgpack.Marshal([]any{0.0, []any{[]any{
+		eventTagBlockStored, []uint64{102}, nil, [][]uint32{{11, 22}, {22, 44}}, 2, nil, "GPU",
+	}}, nil})
+	require.NoError(t, err)
+	pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-2@test-model", Payload: payload})
+	require.Eventually(t, func() bool {
+		_, ok := pool.CacheFormats().Get("pod-2")
+		return ok
+	}, time.Second, time.Millisecond)
+	format := indexer.CacheFormat("pod-2")
+	keys, err := indexer.ComputeBlockKeysForFormat(ctx, []uint32{11, 22, 44}, "test-model", nil, format)
+	require.NoError(t, err)
+	podMatches, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Len(t, podMatches, 1)
+	require.Equal(t, 1, podMatches["pod-2"].MatchedBlocks)
+	keys, err = indexer.ComputeBlockKeysForFormat(ctx, []uint32{11, 22}, "test-model", nil, format)
+	require.NoError(t, err)
+	podMatches, err = indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	require.Empty(t, podMatches)
+
+	payload, err = msgpack.Marshal([]any{0.0, []any{[]any{eventTagBlockRemoved, []uint64{101}, "GPU"}}, nil})
+	require.NoError(t, err)
+	pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-1@test-model", Payload: payload})
+	require.Eventually(t, func() bool {
+		matches, err := index.Lookup(ctx, requestKeys, nil)
+		return err == nil && len(matches[requestKeys[0]]) == 1 && len(matches[requestKeys[1]]) == 0
+	}, time.Second, time.Millisecond)
+	payload, err = msgpack.Marshal([]any{0.0, []any{[]any{"AllBlocksCleared"}}, nil})
+	require.NoError(t, err)
+	pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-1@test-model", Payload: payload})
+	require.Eventually(t, func() bool {
+		matches, err := index.Lookup(ctx, requestKeys, nil)
+		return err == nil && len(matches) == 0
+	}, time.Second, time.Millisecond)
 }
 
 // TestSGLangParseMessage_Valid tests full message parsing through the SGLang adapter.
@@ -122,6 +304,42 @@ func TestSGLangBlockStored_FullFields(t *testing.T) {
 	assert.Equal(t, "gpu", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.LoraName)
+	assert.Nil(t, blockStored.ExtraKeys)
+}
+
+// TestSGLangBlockStored_WithLoraName tests decoding a 9-field array event carrying lora_name
+// after cache_salt and session_id (sgl-project/sglang#42455).
+func TestSGLangBlockStored_WithLoraName(t *testing.T) {
+	event := []any{
+		"BlockStored",
+		[]any{uint64(100), uint64(101)},
+		uint64(99),
+		[]uint32{1, 2, 3},
+		16,
+		nil,
+		"gpu",
+		"salt-1",
+		"session-1",
+		"sql-lora",
+	}
+
+	rawBytes, err := msgpack.Marshal(event)
+	require.NoError(t, err)
+
+	result, err := decodeSGLangEvent(rawBytes)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	blockStored, ok := result.(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint64{100, 101}, blockStored.BlockHashes)
+	assert.Equal(t, uint64(99), blockStored.ParentHash)
+	assert.Equal(t, []uint32{1, 2, 3}, blockStored.Tokens)
+	assert.Equal(t, 16, blockStored.BlockSize)
+	assert.Equal(t, "gpu", blockStored.DeviceTier)
+	assert.Nil(t, blockStored.LoraID)
+	require.NotNil(t, blockStored.LoraName)
+	assert.Equal(t, "sql-lora", *blockStored.LoraName)
 	assert.Nil(t, blockStored.ExtraKeys)
 }
 
@@ -332,6 +550,40 @@ func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, "GPU", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.ExtraKeys)
+}
+
+// TestSGLangParseMessage_MapEncodedBlockStored_WithLoraName verifies map-encoded
+// BlockStored carrying lora_name decodes LoraName.
+func TestSGLangParseMessage_MapEncodedBlockStored_WithLoraName(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	blockStoredEvent := map[string]any{
+		"type":              "BlockStored",
+		"block_hashes":      []any{uint64(100), uint64(101)},
+		"parent_block_hash": uint64(99),
+		"token_ids":         []uint32{1, 2, 3},
+		"block_size":        16,
+		"lora_id":           nil,
+		"medium":            "GPU",
+		"cache_salt":        "some-salt",
+		"session_id":        "some-session",
+		"lora_name":         "sql-lora",
+	}
+	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, 3})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@llama-2-7b",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Nil(t, blockStored.LoraID)
+	require.NotNil(t, blockStored.LoraName)
+	assert.Equal(t, "sql-lora", *blockStored.LoraName)
 }
 
 // TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot verifies that a
@@ -562,11 +814,11 @@ func decodeSGLangEvent(payload []byte) (kvevents.GenericEvent, error) {
 func TestSGLangParseMessage_EngineSchema(t *testing.T) {
 	stored := []any{eventTagBlockStored, []uint64{1}, nil, []uint32{2}, 1, nil, "GPU"}
 	for name, event := range map[string]any{
-		"array trailing fields": append(stored, nil, 42, "unused", -1),
+		"array trailing fields": append(stored, nil, 42, nil, "unused", -1),
 		"map engine fields": map[string]any{
 			"type": eventTagBlockStored, "block_hashes": []uint64{1},
 			"token_ids": []uint32{2}, "block_size": 1, "medium": "GPU",
-			"lora_name": 42, "extra_keys": "unused", "group_idx": -1,
+			"extra_keys": "unused", "group_idx": -1,
 			"session_id": "session",
 		},
 	} {
@@ -660,11 +912,11 @@ func TestSGLangParseMessage_MapTagOrder(t *testing.T) {
 		require.NoError(t, encoder.EncodeFloat64(1))
 		require.NoError(t, encoder.EncodeArrayLen(1))
 		require.NoError(t, encoder.EncodeMapLen(5))
-		names := []string{"block_hashes", "token_ids", "block_size", "lora_name", "type"}
+		names := []string{"block_hashes", "token_ids", "block_size", "extra_keys", "type"}
 		if tagFirst {
-			names = []string{"type", "block_hashes", "token_ids", "block_size", "lora_name"}
+			names = []string{"type", "block_hashes", "token_ids", "block_size", "extra_keys"}
 		}
-		values := map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}, "block_size": 1, "lora_name": 42}
+		values := map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}, "block_size": 1, "extra_keys": 42}
 		for _, name := range names {
 			require.NoError(t, encoder.EncodeString(name))
 			require.NoError(t, encoder.Encode(values[name]))

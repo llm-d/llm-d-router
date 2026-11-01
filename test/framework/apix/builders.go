@@ -15,15 +15,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package testing
+// Package apix provides builders for llm-d apix inference CRDs used in tests.
+package apix
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // InferenceObjectiveWrapper wraps an InferenceObjective.
@@ -127,60 +126,4 @@ func (m *V1InferenceObjectiveWrapper) PoolSelector(sel *metav1.LabelSelector) *V
 func (m *V1InferenceObjectiveWrapper) CreationTimestamp(t metav1.Time) *V1InferenceObjectiveWrapper {
 	m.ObjectMeta.CreationTimestamp = t
 	return m
-}
-
-// InferencePoolWrapper wraps an group "inference.networking.k8s.io" InferencePool.
-type InferencePoolWrapper struct {
-	v1.InferencePool
-}
-
-// MakeInferencePool creates a wrapper for a InferencePool.
-func MakeInferencePool(name string) *InferencePoolWrapper {
-	return &InferencePoolWrapper{
-		v1.InferencePool{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name,
-			},
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: routing.InferencePoolAPIGroup + "/v1",
-				Kind:       "InferencePool",
-			},
-			Spec: v1.InferencePoolSpec{
-				TargetPorts: []v1.Port{
-					{Number: 8000},
-				},
-			},
-		},
-	}
-}
-
-func (m *InferencePoolWrapper) Namespace(ns string) *InferencePoolWrapper {
-	m.ObjectMeta.Namespace = ns
-	return m
-}
-
-func (m *InferencePoolWrapper) Selector(selector map[string]string) *InferencePoolWrapper {
-	s := make(map[v1.LabelKey]v1.LabelValue)
-	for k, v := range selector {
-		s[v1.LabelKey(k)] = v1.LabelValue(v)
-	}
-	m.Spec.Selector = v1.LabelSelector{
-		MatchLabels: s,
-	}
-	return m
-}
-
-func (m *InferencePoolWrapper) TargetPorts(p int32) *InferencePoolWrapper {
-	m.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(p)}}
-	return m
-}
-
-func (m *InferencePoolWrapper) EndpointPickerRef(name string) *InferencePoolWrapper {
-	m.Spec.EndpointPickerRef = &v1.EndpointPickerRef{Name: v1.ObjectName(name)}
-	return m
-}
-
-// Obj returns the wrapped InferencePool.
-func (m *InferencePoolWrapper) ObjRef() *v1.InferencePool {
-	return &m.InferencePool
 }

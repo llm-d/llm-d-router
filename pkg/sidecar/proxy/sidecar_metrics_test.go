@@ -2542,15 +2542,21 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 func TestRecordDecodeAbort(t *testing.T) {
 	t.Run("not returned records decode error and duration", func(t *testing.T) {
 		before := snapshotStageMetrics(t)
+		ctx, summary := withRequestSummary(context.Background())
 		returned := false
-		recordDecodeAbort(&returned, time.Now())
+		recordDecodeAbort(ctx, &returned, time.Now())
 		assert.Equal(t, stageMetrics{decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
+		assert.Equal(t, metrics.StageDecode, summary.failedStage, "the request's summary line must show the aborted decode")
+		assert.Contains(t, summary.durations, metrics.StageDecode)
 	})
 	t.Run("returned records nothing", func(t *testing.T) {
 		before := snapshotStageMetrics(t)
+		ctx, summary := withRequestSummary(context.Background())
 		returned := true
-		recordDecodeAbort(&returned, time.Now())
+		recordDecodeAbort(ctx, &returned, time.Now())
 		assert.Equal(t, stageMetrics{}, snapshotStageMetrics(t).delta(before))
+		assert.Empty(t, summary.failedStage)
+		assert.Empty(t, summary.durations)
 	})
 }
 

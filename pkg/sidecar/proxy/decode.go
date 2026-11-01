@@ -41,8 +41,6 @@ const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
 
-	requestFieldN = "n"
-
 	responseFieldMessage = "message"
 	responseFieldIndex   = "index"
 	responseFieldDelta   = "delta"
@@ -130,7 +128,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
-	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
+	if n, ok := toInt(body[reqcommon.FieldN]); ok && n > 1 {
 		logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
 		regularDecode()
 		return
@@ -143,6 +141,15 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// without re-encoding them.
 	if requestMayCallTools(body) {
 		logger.V(logging.DEBUG).Info("chunked decode: tools requested, using regular decode")
+		regularDecode()
+		return
+	}
+
+	// The decoder rejects an invalid min_tokens; an unchunked request returns that 400 to the client unchanged.
+	minTokens, hasMinTokens := toInt(body[reqcommon.FieldMinTokens])
+	if hasMinTokens && (minTokens < 0 || (originalMaxTokens > 0 && minTokens > originalMaxTokens)) {
+		logger.V(logging.DEBUG).Info("chunked decode: invalid min_tokens, using regular decode",
+			"minTokens", minTokens, "maxTokens", originalMaxTokens)
 		regularDecode()
 		return
 	}
@@ -229,10 +236,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// min_tokens would otherwise exceed the lowered per-chunk max_tokens.
 		// Once the floor has been met, drop it so a later chunk is not forced
 		// to suppress EOS and does not get min_tokens > max_tokens.
-		// An invalid client value is forwarded unchanged so the first chunk
-		// fails with the same 400 as an unchunked request.
-		if minTokens, ok := toInt(body[reqcommon.FieldMinTokens]); ok &&
-			minTokens >= 0 && (originalMaxTokens < 0 || minTokens <= originalMaxTokens) {
+		if hasMinTokens {
 			if remainingMin := minTokens - totalTokens; remainingMin > 0 {
 				chunkReq[reqcommon.FieldMinTokens] = min(remainingMin, chunkBudget)
 			} else {
@@ -282,7 +286,21 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			if streamingEnabled && chunkIndex > 0 {
 				// The status went out with the first chunk, so the error is sent the
 				// way vLLM reports a failure in a stream: as a data event before [DONE].
-				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, bw.bodyBytes(), reqcommon.SSEDone)
+				errorBody := bw.bodyBytes()
+				var flatError errorResponse
+				if json.Unmarshal(errorBody, &flatError) == nil && flatError.Object == "error" {
+					var err error
+					errorBody, err = json.Marshal(reqcommon.OpenAIErrorResponse{Error: reqcommon.OpenAIError{
+						Message: flatError.Message,
+						Type:    flatError.Type,
+						Code:    flatError.Code,
+					}})
+					if err != nil {
+						logger.Error(err, "failed to marshal SSE error")
+						return
+					}
+				}
+				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, errorBody, reqcommon.SSEDone)
 				return
 			}
 			WriteAll(w, bw.bodyBytes())

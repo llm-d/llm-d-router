@@ -67,7 +67,8 @@ const (
 	// EPP admission attributes, recorded on the request_orchestration span.
 	// LLMDEPPAdmissionDecisionKey is "admitted" or "rejected", absent if the request failed before admission.
 	LLMDEPPAdmissionDecisionKey = attribute.Key("llm_d.epp.admission.decision")
-	// LLMDEPPAdmissionReasonKey is the rejection's dropped-reason header value, else its error code.
+	// LLMDEPPAdmissionReasonKey is the rejection's dropped-reason header value, else its error code,
+	// or "admitter:" plus the plugin type when an Admitter denies without an error code.
 	LLMDEPPAdmissionReasonKey = attribute.Key("llm_d.epp.admission.reason")
 	// LLMDEPPAdmissionQueueDurationMsKey is the Flow Control queue time in milliseconds of a dispatched request.
 	LLMDEPPAdmissionQueueDurationMsKey = attribute.Key("llm_d.epp.admission.queue_duration_ms")

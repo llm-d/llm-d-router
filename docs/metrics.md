@@ -122,6 +122,7 @@ lifecycle handled by the router.
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
 | `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
 | `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Response body size. |
@@ -214,6 +215,56 @@ Longer ladders increase series cardinality and can affect rolling-upgrade query 
 - **Rolling upgrades.** Pods on the old and new layouts expose different `le` sets at the same
   time, so a query window spanning both can combine two bucket layouts until the rollout
   finishes.
+
+#### Request outcomes
+
+`llm_d_epp_request_outcome_total` counts each request once, when its stream ends. It covers requests
+whose body reached the EPP and whose ending the EPP observes.
+
+| `outcome` | Meaning | `reason` |
+|---|---|---|
+| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated`. |
+| `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
+| `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
+| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+
+When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
+non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+
+Routes that skip response processing, such as `/render`, are not counted because the EPP stops
+observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
+count requests that fail or are rejected before dispatch, so compare outcomes with each other rather
+than with `llm_d_epp_request_total`.
+
+Flow Control uses "evicted" for requests removed from its queue before dispatch. Those requests end
+as `rejected` here, with a reason such as `rejected-ttl-expired`, unless the client left while queued,
+which ends as `cancelled`.
+
+With the disaggregation coordinator, each phase is a separate EPP request and is counted on its own,
+except phases on routes that skip response processing.
+
+#### Per-tenant view
+
+Every request metric carries `fairness_id`, so per-tenant load can be read from existing series.
+Scope these queries to one pool, for example by its scrape `job`.
+
+```promql
+# Requests in flight per tenant (dispatched, plus queued when Flow Control is enabled).
+sum by (fairness_id) (llm_d_epp_request_running)
+sum by (fairness_id) (llm_d_epp_flow_control_queue_size)
+
+# Each tenant's share of in-flight requests. Sums across EPP replicas before dividing.
+sum by (fairness_id) (llm_d_epp_request_running) / scalar(sum(llm_d_epp_request_running))
+
+# Token rate per tenant. Recorded only when a response reports usage, so cancelled or evicted
+# streams may add nothing; a missing observation is not zero usage.
+sum by (fairness_id) (rate(llm_d_epp_request_input_tokens_sum[5m]))
+sum by (fairness_id) (rate(llm_d_epp_request_output_tokens_sum[5m]))
+
+# How each tenant's requests ended.
+sum by (fairness_id, outcome) (rate(llm_d_epp_request_outcome_total[5m]))
+```
 
 #### Exemplars
 
