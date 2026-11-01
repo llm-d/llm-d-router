@@ -21,6 +21,7 @@ import (
 	"context"
 	"maps"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -56,6 +57,22 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 		return s.fallbackToRandomEndpoint(ctx, reqCtx, 0)
 	}
 
+	// Envoy sends the body of a WebSocket upgrade, and then the connection's
+	// frames, with no EndOfStream, so the body-end scheduling trigger never
+	// arrives. Route a GET upgrade now and close the ext_proc stream.
+	if isWebSocketUpgrade(req) {
+		// RFC 6455 section 4.1 requires GET. Other methods would carry a body
+		// past admission control.
+		if envoy.ExtractHeaderValue(req, ":method") != http.MethodGet {
+			return errcommon.Error{Code: errcommon.BadRequest, Msg: "WebSocket upgrade requires the GET method"}
+		}
+		if err := s.fallbackToRandomEndpoint(ctx, reqCtx, 0); err != nil {
+			return err
+		}
+		reqCtx.requestState = requestResponseProcessingSkipped
+		return nil
+	}
+
 	for _, header := range req.RequestHeaders.Headers.Headers {
 		key := strings.ToLower(header.Key)
 		if request.InternalRoutingHeaders.Has(key) {
@@ -68,6 +85,20 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	reqCtx.TargetModelName, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ModelNameRewriteKey)
 
 	return nil
+}
+
+// isWebSocketUpgrade reports whether req asks to upgrade to WebSocket (RFC 6455
+// section 4.1). Connection may list several tokens.
+func isWebSocketUpgrade(req *extProcPb.ProcessingRequest_RequestHeaders) bool {
+	if !strings.EqualFold(strings.TrimSpace(envoy.ExtractHeaderValue(req, "upgrade")), "websocket") {
+		return false
+	}
+	for _, token := range strings.Split(envoy.ExtractHeaderValue(req, "connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
