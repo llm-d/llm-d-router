@@ -146,6 +146,9 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	lineEnd := bytes.LastIndexByte(chunk, '\n')
 	if lineEnd < 0 {
 		if len(reqCtx.sseLineCarry)+len(chunk) > maxSSELineBytes {
+			// This chunk has no newline, so every byte still belongs to the
+			// dropped line. The newline that ends it arrives in a later chunk
+			// and finishes the salvage there.
 			salvageDroppedSSELine(ctx, reqCtx, reqCtx.sseLineCarry, false)
 			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			dropSSELine(ctx, reqCtx, endOfStream)

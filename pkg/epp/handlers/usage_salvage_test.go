@@ -154,3 +154,135 @@ func TestScanDroppedSSEUsage(t *testing.T) {
 		})
 	}
 }
+
+// A "usage" key whose value is a string must not desynchronize quote tracking,
+// or the token object later in the same dropped line is missed.
+func TestSalvageStringValuedUsageKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want fwkrh.Usage
+	}{
+		{
+			name: "string none before real usage",
+			line: `{"metadata":{"usage":"none"},"response":{"usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38}}}`,
+			want: fwkrh.Usage{PromptTokens: 31, CompletionTokens: 7, TotalTokens: 38},
+		},
+		{
+			name: "empty string before real usage",
+			line: `{"usage":"","usage":{"input_tokens":8,"output_tokens":9,"total_tokens":17}}`,
+			want: fwkrh.Usage{PromptTokens: 8, CompletionTokens: 9, TotalTokens: 17},
+		},
+		{
+			name: "string value is the word usage",
+			line: `{"usage":"usage","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}`,
+			want: fwkrh.Usage{PromptTokens: 4, CompletionTokens: 5, TotalTokens: 9},
+		},
+		{
+			name: "whitespace around colon and string value",
+			line: `{"metadata":{"usage" : "none"},"response":{"usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38}}}`,
+			want: fwkrh.Usage{PromptTokens: 31, CompletionTokens: 7, TotalTokens: 38},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scanDroppedSSEUsage([]byte(tc.line))
+			require.NotNil(t, got)
+			assert.Equal(t, tc.want.PromptTokens, got.PromptTokens)
+			assert.Equal(t, tc.want.CompletionTokens, got.CompletionTokens)
+			assert.Equal(t, tc.want.TotalTokens, got.TotalTokens)
+		})
+	}
+}
+
+// Anthropic cache_read_input_tokens is part of the prompt total and is also the
+// cached-token metric. Nested cached_tokens still wins when both are present.
+func TestSalvageAnthropicCacheReadTokens(t *testing.T) {
+	t.Parallel()
+
+	t.Run("root cache read and cache creation", func(t *testing.T) {
+		t.Parallel()
+
+		got := scanDroppedSSEUsage([]byte(`data: {"type":"message_delta","usage":{"input_tokens":30,"cache_creation_input_tokens":4,"cache_read_input_tokens":12,"output_tokens":15}}`))
+		require.NotNil(t, got)
+		assert.Equal(t, 46, got.PromptTokens)
+		assert.Equal(t, 15, got.CompletionTokens)
+		assert.Equal(t, 61, got.TotalTokens)
+		require.NotNil(t, got.PromptTokenDetails)
+		assert.Equal(t, 12, got.PromptTokenDetails.CachedTokens)
+	})
+
+	t.Run("nested cached_tokens is kept", func(t *testing.T) {
+		t.Parallel()
+
+		got := scanDroppedSSEUsage([]byte(`{"usage":{"input_tokens":30,"cache_read_input_tokens":12,"output_tokens":1,"total_tokens":43,"input_tokens_details":{"cached_tokens":7}}}`))
+		require.NotNil(t, got)
+		assert.Equal(t, 42, got.PromptTokens)
+		assert.Equal(t, 1, got.CompletionTokens)
+		assert.Equal(t, 43, got.TotalTokens)
+		require.NotNil(t, got.PromptTokenDetails)
+		assert.Equal(t, 7, got.PromptTokenDetails.CachedTokens)
+	})
+}
+
+// A "usage" value larger than the collection cap is not a token block. Skipping
+// it must stay in phase so the real usage object later in the line is recovered,
+// including when the capped string itself contains usage-shaped text.
+func TestSalvageSkipsOversizedUsageObject(t *testing.T) {
+	t.Parallel()
+
+	want := fwkrh.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}
+	real := `,"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}`
+
+	t.Run("sibling usage after a capped object", func(t *testing.T) {
+		t.Parallel()
+
+		blob := strings.Repeat("x", maxSalvageObjectBytes+32)
+		got := scanDroppedSSEUsage([]byte(`{"debug":{"usage":{"blob":"` + blob + `"}}` + real))
+		require.NotNil(t, got)
+		assert.Equal(t, want.PromptTokens, got.PromptTokens)
+		assert.Equal(t, want.CompletionTokens, got.CompletionTokens)
+		assert.Equal(t, want.TotalTokens, got.TotalTokens)
+	})
+
+	t.Run("usage text inside the capped string", func(t *testing.T) {
+		t.Parallel()
+
+		blob := strings.Repeat("x", maxSalvageObjectBytes) + `\"usage\":{\"input_tokens\":999,\"output_tokens\":1}`
+		got := scanDroppedSSEUsage([]byte(`{"debug":{"usage":{"blob":"` + blob + `"}}` + real))
+		require.NotNil(t, got)
+		assert.Equal(t, want.PromptTokens, got.PromptTokens)
+		assert.Equal(t, want.CompletionTokens, got.CompletionTokens)
+		assert.Equal(t, want.TotalTokens, got.TotalTokens)
+	})
+}
+
+// A chunk that both finishes an oversized line and carries the next event must
+// salvage only the dropped line. The following event stays in the bytes returned
+// for parsing, and its usage must not replace the dropped line's token counts.
+func TestOverflowChunkKeepsFollowingEventOutOfSalvage(t *testing.T) {
+	t.Parallel()
+
+	prefix := `{"pad":"`
+	first := prefix + strings.Repeat("x", maxSSELineBytes-len(prefix))
+	require.Len(t, first, maxSSELineBytes)
+	require.NotContains(t, first, "\n")
+
+	second := strings.Repeat("y", 8) + `","usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}` + "\n" +
+		`data: {"usage":{"output_tokens":7}}` + "\n"
+
+	reqCtx := &RequestContext{}
+	ctx := context.Background()
+	require.Nil(t, completeSSELines(ctx, reqCtx, []byte(first), false))
+	assert.Zero(t, reqCtx.Usage.PromptTokens)
+	assert.Zero(t, reqCtx.Usage.CompletionTokens)
+
+	kept := completeSSELines(ctx, reqCtx, []byte(second), true)
+	assert.Equal(t, 100, reqCtx.Usage.PromptTokens)
+	assert.Equal(t, 50, reqCtx.Usage.CompletionTokens)
+	assert.Equal(t, 150, reqCtx.Usage.TotalTokens)
+	assert.Contains(t, string(kept), `data: {"usage":{"output_tokens":7}}`)
+	assert.NotContains(t, string(kept), `"prompt_tokens":100`)
+}
