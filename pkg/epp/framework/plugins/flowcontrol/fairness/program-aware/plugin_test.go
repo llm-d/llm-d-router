@@ -310,13 +310,13 @@ func TestEvictIdle_EvictsNeverCompletedAfterTTL(t *testing.T) {
 	assert.False(t, exists)
 }
 
-// program_id carries the fairness ID, so it shares the fairness ID label cap. Programs past the
-// cap get no series: a set-value gauge cannot merge them into one overflow series.
-func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
-	const testCap = 3
+// newCappedPlugin returns a plugin whose per-program gauges share a fairness ID label cap of
+// limit. The gauges start empty and the default cap is restored after the test.
+func newCappedPlugin(t *testing.T, limit int) *ProgramAwarePlugin {
+	t.Helper()
 	avgWaitTimeMs.Reset()
 	attainedServiceTokens.Reset()
-	metricsutil.SetFairnessIDLabelLimit(testCap)
+	metricsutil.SetFairnessIDLabelLimit(limit)
 	t.Cleanup(func() {
 		metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit)
 		avgWaitTimeMs.Reset()
@@ -325,7 +325,14 @@ func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 
 	p, err := ProgramAwarePluginFactory("test", nil, nil)
 	require.NoError(t, err)
-	pa := p.(*ProgramAwarePlugin)
+	return p.(*ProgramAwarePlugin)
+}
+
+// program_id carries the fairness ID, so it shares the fairness ID label cap. Programs past the
+// cap get no series: a set-value gauge cannot merge them into one overflow series.
+func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
+	const testCap = 3
+	pa := newCappedPlugin(t, testCap)
 	ctx := context.Background()
 
 	for i := 0; i < 100; i++ {
@@ -344,6 +351,20 @@ func TestMetrics_ProgramIDCardinalityBounded(t *testing.T) {
 	pa.evictKey("program-99")
 	require.Equal(t, testCap-1, promtestutil.CollectAndCount(avgWaitTimeMs))
 	require.Equal(t, testCap-1, promtestutil.CollectAndCount(attainedServiceTokens))
+}
+
+// A program whose fairness ID equals the overflow value is a real program while the cap has room,
+// so it keeps its series.
+func TestMetrics_ProgramNamedLikeOverflowValueIsReported(t *testing.T) {
+	pa := newCappedPlugin(t, 3)
+	ctx := context.Background()
+
+	req := &fwksched.InferenceRequest{FairnessID: metricsutil.OverflowValue}
+	require.NoError(t, pa.PreRequest(ctx, req, nil))
+	pa.ResponseBody(ctx, req, &fwkrc.Response{EndOfStream: true}, nil)
+
+	require.Equal(t, 1, promtestutil.CollectAndCount(avgWaitTimeMs))
+	require.Equal(t, 1, promtestutil.CollectAndCount(attainedServiceTokens))
 }
 
 func TestComputeFairnessIndex_EqualWaits(t *testing.T) {
