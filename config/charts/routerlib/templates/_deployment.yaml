@@ -176,7 +176,6 @@
             grpc:
               port: {{ $grpcHealthPort }}
               service: liveness
-            initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             grpc:

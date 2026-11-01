@@ -43,14 +43,12 @@ spec:
             path: /healthz
             port: 8080
             scheme: HTTPS
-          initialDelaySeconds: 5
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8080
             scheme: HTTPS
-          initialDelaySeconds: 5
           periodSeconds: 10
         volumeMounts:
         - name: config

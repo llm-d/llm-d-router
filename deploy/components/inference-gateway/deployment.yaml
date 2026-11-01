@@ -57,13 +57,11 @@ spec:
           grpc:
             port: 9003
             service: liveness
-          initialDelaySeconds: 5
           periodSeconds: 10
         readinessProbe:
           grpc:
             port: 9003
             service: readiness
-          initialDelaySeconds: 5
           periodSeconds: 10
         volumeMounts:
         - name: epp-config
