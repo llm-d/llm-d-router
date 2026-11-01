@@ -1955,6 +1955,33 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name:        "Video response without usage headers",
+			body:        []byte{0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70},
+			headers:     map[string]string{reqcommon.HeaderContentType: "video/mp4"},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
+			name: "Video response with usage headers",
+			body: []byte{0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70},
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "video/mp4",
+				"X-Vllm-Omni-Input-Tokens":  "9",
+				"X-Vllm-Omni-Output-Tokens": "30",
+				"X-Vllm-Omni-Total-Tokens":  "39",
+			},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     9,
+					CompletionTokens: 30,
+					TotalTokens:      39,
+				},
+			},
+		},
+		{
 			name: "Octet-stream response with malformed usage headers",
 			body: []byte{0x00, 0x01, 0x02},
 			headers: map[string]string{
@@ -2611,6 +2638,9 @@ func TestOpenAIParser_ParseRequestVideosInvalidForms(t *testing.T) {
 		{name: "integral float height", field: "height", value: "480.0"},
 		{name: "fractional frames", field: videoFormFieldNumFrames, value: "9.5"},
 		{name: "invalid fps", field: "fps", value: "fast"},
+		{name: "NaN fps", field: "fps", value: "NaN"},
+		{name: "Inf fps", field: "fps", value: "Inf"},
+		{name: "negative Inf fps", field: "fps", value: "-Inf"},
 		{name: "integral float steps", field: "num_inference_steps", value: "4.0"},
 		{name: "steps with whitespace", field: "num_inference_steps", value: " 4 "},
 		{name: "invalid outputs", field: "num_outputs_per_prompt", value: "two"},

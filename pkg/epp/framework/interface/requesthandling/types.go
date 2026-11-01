@@ -629,7 +629,7 @@ func (i *ImagesGenerationsRequest) String() string {
 // dereferencing a nil, so String stays safe on a partially populated request.
 func derefInt(v *int64) string {
 	if v == nil {
-		return "<nil>"
+		return nilStr
 	}
 	return strconv.FormatInt(*v, 10)
 }
@@ -638,7 +638,7 @@ func derefInt(v *int64) string {
 // dereferencing a nil, so String stays safe on a partially populated request.
 func derefFloat(v *float64) string {
 	if v == nil {
-		return "<nil>"
+		return nilStr
 	}
 	return strconv.FormatFloat(*v, 'g', -1, 64)
 }

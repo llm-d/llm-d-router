@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"strconv"
@@ -255,10 +256,10 @@ func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
 	}
 }
 
-// ParseResponse extracts usage metadata from JSON, SSE, and binary audio responses.
+// ParseResponse extracts usage metadata from JSON, SSE, and binary audio and video responses.
 func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
 	mediaType := responseMediaType(headers)
-	if strings.HasPrefix(mediaType, "audio/") || mediaType == octetStreamType {
+	if strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "video/") || mediaType == octetStreamType {
 		if !endOfStream {
 			return &fwkrh.ParsedResponse{}, nil
 		}
@@ -654,6 +655,9 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 			fps, err := strconv.ParseFloat(string(value), 64)
 			if err != nil {
 				return fmt.Errorf("invalid videos fps field: %w", err)
+			}
+			if math.IsNaN(fps) || math.IsInf(fps, 0) {
+				return fmt.Errorf("invalid videos fps field: %q", value)
 			}
 			videos.FPS = &fps
 		}
