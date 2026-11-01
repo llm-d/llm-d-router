@@ -41,7 +41,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "qos_charged_tokens_total",
-			Help:      metricsutil.HelpMsgWithStability("Weighted tokens charged to a team's quota, after refunds, by served class.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Weighted tokens consumed by a team, after refunds, by served class.", compbasemetrics.ALPHA),
 		},
 		[]string{"team", "served_class"},
 	)
@@ -50,16 +50,7 @@ var (
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "qos_inflight_requests",
-			Help:      metricsutil.HelpMsgWithStability("Requests per team counted against its concurrency cap, from admission to completion.", compbasemetrics.ALPHA),
-		},
-		[]string{"team"},
-	)
-
-	bucketTokens = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "qos_bucket_tokens",
-			Help:      metricsutil.HelpMsgWithStability("Weighted tokens available in a team's token bucket at its last update.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Requests per team counted against its concurrency commit, from admission to completion.", compbasemetrics.ALPHA),
 		},
 		[]string{"team"},
 	)
@@ -69,7 +60,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return nil
 	}
-	for _, collector := range []prometheus.Collector{admissionDecisions, chargedTokens, inflightRequests, bucketTokens} {
+	for _, collector := range []prometheus.Collector{admissionDecisions, chargedTokens, inflightRequests} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
