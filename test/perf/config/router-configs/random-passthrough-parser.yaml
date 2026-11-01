@@ -11,7 +11,7 @@ router:
     replicas: 1
     image:
       registry: ghcr.io/llm-d
-      repository: llm-d-router-endpoint-picker-dev
+      repository: llm-d-router-endpoint-picker
       tag: main
       pullPolicy: Always
     flags:

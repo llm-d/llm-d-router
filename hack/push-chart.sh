@@ -36,7 +36,27 @@ HELM=${HELM:-./bin/helm}
 
 readonly semver_regex='^v([0-9]+)(\.[0-9]+){1,2}(-rc.[0-9]+)?$'
 
-chart_version=${CHART_VERSION}
+chart_versions=("${CHART_VERSION}")
+
+# PR builds version charts as <latest release tag>-pr.<n>, overwritten on each
+# push, plus an immutable <base>-pr.<n>+sha.<short sha> snapshot. The release
+# tag base keeps PR charts sortable against production chart versions.
+if [[ -n "${PR_NUMBER:-}" ]]; then
+  : "${CHART_VERSION_BASE:?CHART_VERSION_BASE is required for PR builds}"
+  : "${PR_SHA:?PR_SHA is required for PR builds}"
+
+  # PR images are published to the staging registry, so the chart has to point
+  # there instead of at the production defaults in values.yaml.
+  ${YQ} -i \
+    '.router.epp.image.registry=strenv(IMAGE_REGISTRY) |
+     .router.epp.image.repository=strenv(EPP_RELEASE_IMAGE_REPOSITORY) |
+     .router.epp.image.tag=strenv(EXTRA_TAG) |
+     .router.epp.image.pullPolicy="IfNotPresent"' \
+    config/charts/${CHART}/values.yaml
+
+  chart_versions=("${CHART_VERSION_BASE}-pr.${PR_NUMBER}" "${CHART_VERSION_BASE}-pr.${PR_NUMBER}+sha.${PR_SHA}")
+fi
+
 if [[ ${EXTRA_TAG} =~ ${semver_regex} ]]
 then
   ${YQ} -i \
@@ -64,7 +84,7 @@ then
       '.router.proxy.presets.agentgateway.image="cr.agentgateway.dev/agentgateway:" + strenv(AGENTGATEWAY_TAG)' \
       config/charts/${CHART}/values.yaml
   fi
-  chart_version=${EXTRA_TAG}
+  chart_versions=("${EXTRA_TAG}")
 fi
 
 # If suffix is defined, dynamically rename the chart in Chart.yaml before packaging and ensure it gets reverted on exit
@@ -81,9 +101,11 @@ fi
 # Update dependencies
 ${HELM} dependency update "config/charts/${CHART}"
 
-# Create the package
-${HELM} package --version "${chart_version}" --app-version "${chart_version}" "config/charts/${CHART}" -d "${DEST_CHART_DIR}"
+for version in "${chart_versions[@]}"; do
+  # Create the package
+  ${HELM} package --version "${version}" --app-version "${version}" "config/charts/${CHART}" -d "${DEST_CHART_DIR}"
 
-# Push the package
-echo "pushing chart to ${HELM_CHART_REPO}"
-${HELM} push "${DEST_CHART_DIR}${CHART}${CHART_SUFFIX}-${chart_version}.tgz" "oci://${HELM_CHART_REPO}"
+  # Push the package
+  echo "pushing chart to ${HELM_CHART_REPO}"
+  ${HELM} push "${DEST_CHART_DIR}${CHART}${CHART_SUFFIX}-${version}.tgz" "oci://${HELM_CHART_REPO}"
+done
