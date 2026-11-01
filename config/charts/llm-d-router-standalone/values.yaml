@@ -27,7 +27,7 @@ router:
     terminationGracePeriodSeconds: 70
 
     # Pod scheduling for the proxy Deployment when mode=service. In sidecar mode
-    # the proxy shares the EPP pod and follows router.epp.affinity and router.epp.tolerations.
+    # the proxy shares the EPP pod and follows router.epp.nodeSelector, affinity and tolerations.
     nodeSelector: {}
     affinity: {}
     tolerations: []

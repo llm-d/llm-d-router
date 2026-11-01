@@ -279,6 +279,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.clusterDomain` | Kubernetes cluster DNS domain used to build in-cluster Service FQDNs. | `cluster.local` |
 | `router.imagePullSecrets` | Secrets holding credentials for pulling images from private registries. | `[]` |
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
+| `router.epp.nodeSelector` | Node selector for EPP pods. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
 | `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |

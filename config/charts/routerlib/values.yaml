@@ -152,6 +152,7 @@ epp:
     # behavior: {}
     # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
 
+  nodeSelector: {}
   affinity: {}
   tolerations: []
 

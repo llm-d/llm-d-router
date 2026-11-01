@@ -325,6 +325,10 @@
           configMap:
             name: {{ include "llm-d-router.name" . }}
       {{- include "llm-d-router.latencyPredictor.volumes" . | nindent 8 }}
+      {{- with .Values.router.epp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.router.epp.affinity }}
       affinity:
         {{- toYaml .Values.router.epp.affinity | nindent 8 }}
