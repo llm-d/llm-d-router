@@ -756,7 +756,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
 				require.NoError(t, err)
-				got := realignExtraFeaturesWithContinuation(engine, firstMMContinuation(tc.raw, ""), 32, 32)
+				got := realignExtraFeatures(engine, 32, 32)
 				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
 					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 32, 32)
 				assert.Equal(t, want, got)
