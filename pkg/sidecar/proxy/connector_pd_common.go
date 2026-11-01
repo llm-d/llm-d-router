@@ -95,7 +95,7 @@ func (s *Server) runConcurrentPD(
 	if err != nil {
 		prefillSpan.SetStatus(codes.Error, "failed to create prefill handler")
 		prefillSpan.End()
-		if err := errorBadGateway(err, w); err != nil {
+		if err := errorBadGateway(w, r, err); err != nil {
 			log.FromContext(r.Context()).Error(err, "failed to send error response to client")
 		}
 		return

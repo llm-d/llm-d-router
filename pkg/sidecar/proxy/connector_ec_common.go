@@ -336,7 +336,7 @@ func (s *Server) runPDPipeline(
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
 		logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
-		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return

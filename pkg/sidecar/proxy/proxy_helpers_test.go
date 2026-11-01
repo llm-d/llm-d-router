@@ -114,7 +114,7 @@ var _ = Describe("readJSONBody", func() {
 		Expect(w.Code).To(Equal(http.StatusOK))
 	})
 
-	It("answers a null body with a vLLM-shaped 400", func() {
+	It("answers a null body with an OpenAI-shaped 400", func() {
 		w := httptest.NewRecorder()
 
 		_, parsed, ok := proxy.readJSONBody(postBody(`null`), w)
@@ -122,11 +122,10 @@ var _ = Describe("readJSONBody", func() {
 		Expect(ok).To(BeFalse())
 		Expect(parsed).To(BeNil())
 		Expect(w.Code).To(Equal(http.StatusBadRequest))
-		Expect(w.Body.String()).To(ContainSubstring("BadRequestError"))
-		Expect(w.Body.String()).To(ContainSubstring("is not a JSON object"))
+		Expect(expectErrorEnvelope(w.Body.Bytes())).To(ContainSubstring("is not a JSON object"))
 	})
 
-	It("answers a read failure with a vLLM-shaped 400", func() {
+	It("answers a read failure with an OpenAI-shaped 400", func() {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 
@@ -134,14 +133,31 @@ var _ = Describe("readJSONBody", func() {
 
 		Expect(ok).To(BeFalse())
 		Expect(w.Code).To(Equal(http.StatusBadRequest))
-		Expect(w.Body.String()).To(ContainSubstring("BadRequestError"))
-		Expect(w.Body.String()).To(ContainSubstring("failed to read request body"))
-		Expect(w.Body.String()).To(ContainSubstring("read failed"))
+		Expect(expectErrorEnvelope(w.Body.Bytes())).To(And(
+			ContainSubstring("failed to read request body"),
+			ContainSubstring("read failed"),
+		))
 	})
 
-	// A gateway unmarshals the sidecar 400 as a vLLM error. Both refusal paths
-	// must therefore answer with that envelope, not with a bare Go string.
-	DescribeTable("answers every refusal with a parseable vLLM error envelope",
+	It("answers a refusal on the Messages path with the Anthropic envelope", func() {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, reqcommon.PathMessages, bytes.NewReader([]byte(`{bad`)))
+
+		_, _, ok := proxy.readJSONBody(r, w)
+
+		Expect(ok).To(BeFalse())
+		Expect(w.Code).To(Equal(http.StatusBadRequest))
+		var got reqcommon.AnthropicErrorResponse
+		Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed())
+		Expect(got.Type).To(Equal("error"))
+		Expect(got.Error.Type).To(Equal("invalid_request_error"))
+		Expect(got.Error.Message).To(ContainSubstring("invalid JSON"))
+	})
+
+	// Clients parse the 400 with the error envelope of the API they called. Both
+	// refusal paths must therefore answer with that envelope, not with a bare Go
+	// string.
+	DescribeTable("answers every refusal with a parseable OpenAI error envelope",
 		func(newRequest func() *http.Request) {
 			w := httptest.NewRecorder()
 
@@ -308,21 +324,29 @@ var _ = Describe("readJSONBody", func() {
 })
 
 var _ = Describe("createDecoderProxyHandler", func() {
-	It("labels the decoder-unavailable error body as JSON", func() {
-		decoder := httptest.NewServer(http.NotFoundHandler())
-		decoderURL, err := url.Parse(decoder.URL)
-		Expect(err).ToNot(HaveOccurred())
-		decoder.Close()
+	DescribeTable("answers a refused decoder connection with a 503 in the request's error envelope",
+		func(path, want string) {
+			decoder := httptest.NewServer(http.NotFoundHandler())
+			decoderURL, err := url.Parse(decoder.URL)
+			Expect(err).ToNot(HaveOccurred())
+			decoder.Close()
 
-		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
-		w := httptest.NewRecorder()
+			proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{"model":"m"}`)))
 
-		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(w, postBody(`{"model":"m"}`))
+			proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(w, r)
 
-		resp := w.Result()
-		Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
-		Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
-	})
+			resp := w.Result()
+			Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+			Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
+			Expect(w.Body.String()).To(MatchJSON(want))
+		},
+		Entry("chat completions", reqcommon.PathChatCompletions,
+			`{"error":{"message":"The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.","type":"server_error","code":503}}`),
+		Entry("messages", reqcommon.PathMessages,
+			`{"type":"error","error":{"type":"overloaded_error","message":"The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct."}}`),
+	)
 
 	// The catch-all route reaches the decoder without the inference handler,
 	// so its requests carry no context logger.
@@ -363,6 +387,69 @@ var _ = Describe("createDecoderProxyHandler", func() {
 	})
 })
 
+// httputil.ReverseProxy's default error handler answers a transport failure
+// with an empty 502, which every P/D connector would relay to the client as is.
+var _ = Describe("createProxyHandler", func() {
+	DescribeTable("answers an unreachable target with a 502 in the request's error envelope",
+		func(handler func(*Server, string) (http.Handler, error), path string, check func(body []byte)) {
+			target := httptest.NewServer(http.NotFoundHandler())
+			hostPort := target.Listener.Addr().String()
+			target.Close()
+
+			proxy := NewProxy(Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2})
+			h, err := handler(proxy, hostPort)
+			Expect(err).ToNot(HaveOccurred())
+			w := &bufferedResponseWriter{}
+
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{"model":"m"}`))))
+
+			Expect(w.statusCode).To(Equal(http.StatusBadGateway))
+			Expect(w.Header().Get("Content-Type")).To(Equal("application/json"))
+			check(w.bodyBytes())
+		},
+		Entry("prefiller on chat completions", (*Server).prefillerProxyHandler, reqcommon.PathChatCompletions, func(body []byte) {
+			var got reqcommon.OpenAIErrorResponse
+			Expect(json.Unmarshal(body, &got)).To(Succeed())
+			Expect(got.Error.Type).To(Equal("server_error"))
+			Expect(got.Error.Code).To(Equal(http.StatusBadGateway))
+			Expect(got.Error.Message).To(ContainSubstring("connection refused"))
+		}),
+		Entry("prefiller on messages", (*Server).prefillerProxyHandler, reqcommon.PathMessages, func(body []byte) {
+			var got reqcommon.AnthropicErrorResponse
+			Expect(json.Unmarshal(body, &got)).To(Succeed())
+			Expect(got.Type).To(Equal("error"))
+			Expect(got.Error.Type).To(Equal("api_error"))
+			Expect(got.Error.Message).To(ContainSubstring("connection refused"))
+		}),
+		Entry("encoder", (*Server).encoderProxyHandler, reqcommon.PathChatCompletions, func(body []byte) {
+			var got reqcommon.OpenAIErrorResponse
+			Expect(json.Unmarshal(body, &got)).To(Succeed())
+			Expect(got.Error.Code).To(Equal(http.StatusBadGateway))
+		}),
+	)
+
+	It("logs a target failure through the request's context logger", func() {
+		target := httptest.NewServer(http.NotFoundHandler())
+		hostPort := target.Listener.Addr().String()
+		target.Close()
+
+		proxy := NewProxy(Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2})
+		proxyLogged := captureLogs(proxy, 0)
+		var requestLogged []string
+		requestLogger := funcr.New(func(prefix, args string) {
+			requestLogged = append(requestLogged, prefix+" "+args)
+		}, funcr.Options{})
+		h, err := proxy.prefillerProxyHandler(hostPort)
+		Expect(err).ToNot(HaveOccurred())
+		r := postBody(`{"model":"m"}`)
+
+		h.ServeHTTP(&bufferedResponseWriter{}, r.WithContext(log.IntoContext(r.Context(), requestLogger)))
+
+		Expect(requestLogged).To(ContainElement(ContainSubstring("http: proxy error")))
+		Expect(*proxyLogged).To(BeEmpty())
+	})
+})
+
 // captureLogs points the proxy logger at the returned slice, keeping entries up
 // to the given verbosity.
 func captureLogs(proxy *Server, verbosity int) *[]string {
@@ -380,19 +467,18 @@ func withContextLogger(proxy *Server, r *http.Request) *http.Request {
 	return r.WithContext(log.IntoContext(r.Context(), proxy.logger))
 }
 
-// expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and
-// returns its message, so a caller can additionally check the refusal reason.
+// expectErrorEnvelope asserts the OpenAI error envelope of a 400 and returns its
+// message, so a caller can additionally check the refusal reason.
 func expectErrorEnvelope(body []byte) string {
 	GinkgoHelper()
 
-	var got errorResponse
+	var got reqcommon.OpenAIErrorResponse
 	Expect(json.Unmarshal(body, &got)).To(Succeed())
-	Expect(got.Object).To(Equal("error"))
-	Expect(got.Type).To(Equal("BadRequestError"))
-	Expect(got.Code).To(Equal(http.StatusBadRequest))
-	Expect(got.Message).ToNot(BeEmpty())
+	Expect(got.Error.Type).To(Equal("invalid_request_error"))
+	Expect(got.Error.Code).To(Equal(http.StatusBadRequest))
+	Expect(got.Error.Message).ToNot(BeEmpty())
 
-	return got.Message
+	return got.Error.Message
 }
 
 // errWriter accepts a status code and then fails the body write, standing in

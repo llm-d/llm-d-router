@@ -77,7 +77,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// Generate unique request UUID
 	uuidStr, err := s.nixlRequestIDFn()
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		if err := errorBadGateway(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -182,7 +182,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	pbody, err := json.Marshal(prefillRequest)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -192,7 +192,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		if err := errorBadGateway(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -296,7 +296,7 @@ retryLoop:
 			logBodyBytesKey, pw.buffer.Len())
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 		prefillSpan.End()
-		if err := errorBadGateway(prefillErr, w); err != nil {
+		if err := errorBadGateway(w, r, prefillErr); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -363,7 +363,7 @@ retryLoop:
 				if podIndex < 0 {
 					err := fmt.Errorf("cannot determine prefill pod index for %q", prefillHost)
 					logger.Error(err, "failed to route MoRI-IO decode notify", "request_id", uuidStr)
-					if err := errorBadGateway(err, w); err != nil {
+					if err := errorBadGateway(w, r, err); err != nil {
 						logger.Error(err, "failed to send error response to client")
 					}
 					return
@@ -443,7 +443,7 @@ retryLoop:
 
 	dbody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -622,7 +622,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	pbody, err := json.Marshal(prefillRequest)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal P)")
 		}
 		return
@@ -674,7 +674,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	dbody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client (concurrent-dispatch marshal D)")
 		}
 		return
@@ -683,7 +683,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// ---------- Fire prefill + decode in parallel ----------
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		if err := errorBadGateway(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client (concurrent-dispatch P handler init)")
 		}
 		return
@@ -900,9 +900,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 				"request_id", uuidStr, "timeout", waitTimeout.String())
 			clientResponded = true
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusGatewayTimeout)
-			if _, writeErr := w.Write([]byte(`{"error":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"}`)); writeErr != nil {
+			if writeErr := sendError(w, r, http.StatusGatewayTimeout, "decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout"); writeErr != nil {
 				logger.Error(writeErr, "failed to send timeout error to client (concurrent-dispatch)")
 			}
 			<-prefillDone // let the cancelled prefill goroutine finish to avoid a leak
@@ -954,7 +952,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		}
 		// Nothing was relayed, so the response is still ours to write. Returning
 		// without one would let net/http synthesise an empty 200.
-		if err := errorBadGateway(errDecodeAborted, w); err != nil {
+		if err := errorBadGateway(w, r, errDecodeAborted); err != nil {
 			logger.Error(err, "failed to send decode abort error to client (concurrent-dispatch)")
 		}
 	}

@@ -122,7 +122,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 					semconv.LLMDPDProxyDeniedTarget(prefillHostPort),
 				)
 				span.SetStatus(codes.Error, "SSRF protection: prefill target not in allowlist")
-				http.Error(w, "Forbidden: prefill target not allowed by SSRF protection", http.StatusForbidden)
+				if err := sendError(w, r, http.StatusForbidden, "Forbidden: prefill target not allowed by SSRF protection"); err != nil {
+					logger.Error(err, "failed to send error response to client")
+				}
 				return
 			}
 			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
