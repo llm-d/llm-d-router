@@ -127,6 +127,11 @@ type Config struct {
 	// event path are emitted by the traced Index wrapper and are not gated
 	// here, so an exporter still receives those with this unset.
 	Tracing bool `json:"tracing,omitempty"`
+	// IndexSlidingWindowGroups, when true, indexes the stores and removals of
+	// sliding-window KV cache groups into the Pool's WindowIndex, keyed by
+	// group, once the group's window size is known. The prefix index that
+	// scoring reads never receives them.
+	IndexSlidingWindowGroups bool `json:"indexSlidingWindowGroups,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
@@ -197,6 +202,9 @@ type Pool struct {
 	adapter        EngineAdapter
 	groupCatalog   *kvblock.GroupCatalog
 	cacheFormats   *kvblock.CacheFormatCatalog
+	// windowIndex holds sliding-window group entries; nil unless
+	// Config.IndexSlidingWindowGroups is set.
+	windowIndex kvblock.Index
 	// dedup lives in the Pool, not as an Index decorator, because its scope is
 	// built from event fields absent from the Index.Evict signature (device
 	// tier, KV-cache group, DP rank) and a store must be counted only after
@@ -241,6 +249,14 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		cacheFormats:   kvblock.NewCacheFormatCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
+	}
+
+	if cfg.IndexSlidingWindowGroups {
+		windowIndex, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create the sliding-window index: %w", err)
+		}
+		p.windowIndex = windowIndex
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -294,6 +310,23 @@ func (p *Pool) addQueueDepth(delta int64) {
 // GroupCatalog returns the KV cache group metadata learned from events.
 func (p *Pool) GroupCatalog() *kvblock.GroupCatalog {
 	return p.groupCatalog
+}
+
+// WindowIndex returns the index of sliding-window group entries, or nil
+// unless Config.IndexSlidingWindowGroups is set.
+func (p *Pool) WindowIndex() kvblock.Index {
+	return p.windowIndex
+}
+
+// slidingWindowGroup reports whether the pod's group is a sliding-window group
+// with a known window size.
+func (p *Pool) slidingWindowGroup(podIdentifier string, groupIdx *int) bool {
+	if groupIdx == nil {
+		return false
+	}
+	meta, found := p.groupCatalog.Get(podIdentifier, kvblock.GroupID(*groupIdx))
+	return found && meta.Kind == string(KVCacheSpecKindSlidingWindow) &&
+		meta.SlidingWindowSize != nil && *meta.SlidingWindowSize > 0
 }
 
 // CacheFormats returns per-pod cache formats learned from store events.
@@ -467,6 +500,12 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
 	}
+	if p.windowIndex != nil {
+		if err := p.windowIndex.Clear(ctx, podIdentifier); err != nil {
+			debugLogger.Error(err, "Failed to clear pod from the sliding-window index",
+				"podIdentifier", podIdentifier)
+		}
+	}
 	p.dedup.clear(podIdentifier)
 	if retire {
 		p.groupCatalog.Clear(podIdentifier)
@@ -548,7 +587,7 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 // PodEntry was added to the index, so the caller knows the store took effect
 // and can reference-count it.
 func (p *Pool) handleDeviceTierUpdate(
-	ctx context.Context, tokens []uint32, engineKeys []kvblock.BlockHash,
+	ctx context.Context, index kvblock.Index, tokens []uint32, engineKeys []kvblock.BlockHash,
 	podEntries []kvblock.PodEntry, podIdentifier, deviceTier string,
 ) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
@@ -562,7 +601,7 @@ func (p *Pool) handleDeviceTierUpdate(
 	seen := make(map[kvblock.BlockHash]struct{})
 	var resolvedKeys []kvblock.BlockHash
 	for _, ek := range engineKeys {
-		rk, err := p.index.GetRequestKey(ctx, ek)
+		rk, err := index.GetRequestKey(ctx, ek)
 		if err != nil {
 			continue
 		}
@@ -578,7 +617,7 @@ func (p *Pool) handleDeviceTierUpdate(
 		return false
 	}
 
-	if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
+	if err := index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
 		debugLogger.Error(err, "Failed to add device-tier update to index",
 			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
 		return false
@@ -647,6 +686,20 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					})
 				}
 			}
+			// With a window index, a sliding-window group's stores go there, so the
+			// prefix index that scoring reads stays as it is.
+			index, windowed := p.index, false
+			if !digestible && reason == "unsupported_cache_kind" && p.windowIndex != nil &&
+				ev.KVCacheSpecKind == KVCacheSpecKindSlidingWindow {
+				switch {
+				case !p.slidingWindowGroup(podIdentifier, ev.GroupIdx):
+					reason = "unknown_sliding_window"
+				case len(ev.Tokens) > 0 && len(ev.Tokens) < p.tokenProcessor.BlockSize():
+					reason = "incomplete_canonical_block"
+				default:
+					digestible, index, windowed = true, p.windowIndex, true
+				}
+			}
 			if !digestible {
 				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
 				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
@@ -683,7 +736,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			parentRequestKey := kvblock.EmptyBlockHash
 			if ev.ParentHash != 0 {
 				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
-				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
+				key, err := index.GetRequestKey(ctx, parentEngineKey)
+				if err != nil && windowed {
+					// A sliding-window group may not store the blocks before its
+					// window; a full-attention group's store maps the same engine key.
+					key, err = p.index.GetRequestKey(ctx, parentEngineKey)
+				}
 				if err != nil {
 					// Engine blocks smaller than the canonical block that end mid
 					// canonical block yield no request key, so their hashes stay
@@ -791,7 +849,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 			if len(requestKeys) == 0 {
-				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
+				if p.handleDeviceTierUpdate(ctx, index, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
 					p.dedup.trackStore(storeScope, ev.BlockHashes)
 				}
 				continue
@@ -799,20 +857,25 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Index.Add infers the engine->request mapping from the ratio of
 			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
-			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
+			if err := index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
-			p.cacheFormats.Learn(podIdentifier, format)
+			if !windowed {
+				p.cacheFormats.Learn(podIdentifier, format)
+			}
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			index := p.index
 			if ev.GroupIdx != nil {
 				groupIdx := kvblock.GroupID(*ev.GroupIdx)
 				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)
-				if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
+				if p.windowIndex != nil && p.slidingWindowGroup(podIdentifier, ev.GroupIdx) {
+					index = p.windowIndex
+				} else if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
 					reason := "unsupported_cache_kind"
 					if !found {
 						reason = "unknown_group"
@@ -868,7 +931,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			for i, hash := range hashesToEvict {
 				engineKeys[i] = kvblock.BlockHash(hash)
 			}
-			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
+			if err := index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to evict engine keys from index",
 					"podIdentifier", podIdentifier, "keyCount", len(engineKeys))
 			}
