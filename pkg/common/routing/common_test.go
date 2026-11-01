@@ -22,6 +22,7 @@ package routing
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -184,9 +185,11 @@ func TestHeaderNames(t *testing.T) {
 	}{
 		{PrefillEndpointHeader, []string{"x-llm-d-prefiller-host-port", "x-prefiller-host-port"}},
 		{EncoderEndpointsHeader, []string{"x-llm-d-encoder-hosts-ports", "x-encoder-hosts-ports"}},
-		{KVCacheSourceHeader, []string{"x-llm-d-kv-cache-source-host-port", "x-kv-cache-source-host-port"}},
 		// Deprecated without a rename, so it has no alias of its own.
 		{DataParallelEndpointHeader, []string{"x-data-parallel-host-port"}},
+		// Introduced under the convention, so it has no alias.
+		{KVCachePrefillHeader, []string{"x-llm-d-kv-cache-prefill-p2p-host-port"}},
+		{KVCacheSourceHeader, []string{"x-llm-d-kv-cache-source-p2p-host-port"}},
 		{"x-unrelated", []string{"x-unrelated"}},
 	}
 	for _, tt := range tests {
@@ -201,6 +204,21 @@ func TestHeaderNames(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	t.Run("several names keep order, each followed by its alias", func(t *testing.T) {
+		got := HeaderNames(PrefillEndpointHeader, KVCachePrefillHeader, EncoderEndpointsHeader)
+		want := []string{
+			"x-llm-d-prefiller-host-port", "x-prefiller-host-port",
+			"x-llm-d-kv-cache-prefill-p2p-host-port",
+			"x-llm-d-encoder-hosts-ports", "x-encoder-hosts-ports",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("HeaderNames(...) = %v, want %v", got, want)
+		}
+	})
+	if got := HeaderNames(); len(got) != 0 {
+		t.Errorf("HeaderNames() = %v, want empty", got)
 	}
 }
 
@@ -290,13 +308,13 @@ func TestTakeRoutingHeaderValues(t *testing.T) {
 
 func TestTakeRoutingHeaderValueMultiValued(t *testing.T) {
 	h := http.Header{}
-	h.Add(LegacyKVCacheSourceHeader, "first:1")
-	h.Add(LegacyKVCacheSourceHeader, "second:2")
+	h.Add(LegacyPrefillEndpointHeader, "first:1")
+	h.Add(LegacyPrefillEndpointHeader, "second:2")
 
-	if got := TakeRoutingHeaderValue(h, KVCacheSourceHeader); got != "first:1" {
+	if got := TakeRoutingHeaderValue(h, PrefillEndpointHeader); got != "first:1" {
 		t.Errorf("TakeRoutingHeaderValue = %q, want %q", got, "first:1")
 	}
-	if got := TakeRoutingHeaderValue(h, KVCacheSourceHeader); got != "" {
+	if got := TakeRoutingHeaderValue(h, PrefillEndpointHeader); got != "" {
 		t.Errorf("second take = %q, want empty", got)
 	}
 }
@@ -312,5 +330,84 @@ func TestTakeRoutingHeaderValuesWithoutAlias(t *testing.T) {
 	}
 	if h.Get(DataParallelEndpointHeader) != "" {
 		t.Error("header survived the take")
+	}
+}
+
+func TestIsTCPPort(t *testing.T) {
+	tests := []struct {
+		port int
+		want bool
+	}{
+		{-1, false},
+		{0, false},
+		{1, true},
+		{7777, true},
+		{65535, true},
+		{65536, false},
+	}
+	for _, tt := range tests {
+		if got := IsTCPPort(tt.port); got != tt.want {
+			t.Errorf("IsTCPPort(%d) = %v, want %v", tt.port, got, tt.want)
+		}
+	}
+}
+
+func TestAllHeaderNames(t *testing.T) {
+	// Each name's spellings in HeaderNames order, then its retired names.
+	got := AllHeaderNames(KVCacheSourceHeader, PrefillEndpointHeader)
+	want := []string{
+		"x-llm-d-kv-cache-source-p2p-host-port",
+		"x-llm-d-prefiller-host-port", "x-prefiller-host-port",
+		"x-llm-d-kv-cache-source-host-port", "x-kv-cache-source-host-port",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("AllHeaderNames(...) = %v, want %v", got, want)
+	}
+	if got := AllHeaderNames(KVCachePrefillHeader); !slices.Equal(got, []string{"x-llm-d-kv-cache-prefill-p2p-host-port"}) {
+		t.Errorf("AllHeaderNames(prefill P2P) = %v, want the one name", got)
+	}
+}
+
+// A client value under a retired name is dropped with the header, while
+// SetRoutingHeader never writes a retired name.
+func TestDeleteRoutingHeaderRemovesRetiredNames(t *testing.T) {
+	headers := map[string]string{}
+	for _, name := range LegacyKVCacheSourceHeaders {
+		headers[name] = "10.0.0.9:8000"
+	}
+	SetRoutingHeader(headers, KVCacheSourceHeader, "10.0.0.5:7777")
+	for _, name := range LegacyKVCacheSourceHeaders {
+		if headers[name] != "10.0.0.9:8000" {
+			t.Fatalf("SetRoutingHeader wrote the retired name %s: %q", name, headers[name])
+		}
+	}
+
+	DeleteRoutingHeader(headers, KVCacheSourceHeader)
+
+	if len(headers) != 0 {
+		t.Errorf("headers after delete = %v, want none", headers)
+	}
+}
+
+func TestRankPort(t *testing.T) {
+	tests := []struct {
+		name       string
+		base, rank int
+		wantPort   int
+		wantOK     bool
+	}{
+		{"rank 0", 7777, 0, 7777, true},
+		{"rank 3", 7777, 3, 7780, true},
+		{"upper bound", 65534, 1, 65535, true},
+		{"above the TCP range", 65535, 1, 65536, false},
+		{"negative rank", 7777, -1, 7776, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port, ok := RankPort(tt.base, tt.rank)
+			if port != tt.wantPort || ok != tt.wantOK {
+				t.Errorf("RankPort(%d, %d) = %d, %v, want %d, %v", tt.base, tt.rank, port, ok, tt.wantPort, tt.wantOK)
+			}
+		})
 	}
 }

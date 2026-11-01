@@ -249,3 +249,32 @@ func TestUnmarshalMapWithRawFieldRejectsInvalidJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestObjectField(t *testing.T) {
+	want := map[string]any{"a": json.Number("1")}
+	cases := map[string]struct {
+		payload map[string]any
+		want    map[string]any
+		ok      bool
+	}{
+		"map":           {payload: map[string]any{"k": map[string]any{"a": 1}}, want: map[string]any{"a": 1}, ok: true},
+		"raw object":    {payload: map[string]any{"k": json.RawMessage(`{"a":1}`)}, want: want, ok: true},
+		"raw null":      {payload: map[string]any{"k": json.RawMessage(`null`)}},
+		"raw array":     {payload: map[string]any{"k": json.RawMessage(`[1]`)}},
+		"raw malformed": {payload: map[string]any{"k": json.RawMessage(`{`)}},
+		"string":        {payload: map[string]any{"k": "x"}},
+		"absent":        {payload: map[string]any{}},
+		"nil payload":   {},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, ok := ObjectField(tc.payload, "k")
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Fatalf("ObjectField() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
