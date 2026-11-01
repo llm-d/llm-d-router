@@ -106,6 +106,9 @@ endpoints:
   [docs/discovery.md](../../../../../../../docs/discovery.md)).
 - A single bad entry on initial load is logged and skipped, not fatal. If
   the entire file is not readable or fails to parse, startup fails.
+- On Docker Desktop for macOS, replacing a bind-mounted endpoints file from
+  the host with an atomic rename stops reloads until the EPP restarts. Edit
+  the file in place instead.
 
 ## Related Documentation
 
