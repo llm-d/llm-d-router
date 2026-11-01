@@ -59,10 +59,13 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - With probability `explorationProbability` (default 0, disabled), skip the gate entirely for exploration
 - TTFT load gate: if best sticky endpoint's TTFT exceeds best non-sticky by more than
   `maxTTFTPenaltyMs`, break stickiness and keep all endpoints (0 = always stick). The
-  per-endpoint TTFT is estimated from in-flight tokens as
-  `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
-  `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
-  is `latencyPredictor`
+  per-endpoint TTFT is estimated as
+  `inFlightTokens / peakPrefillThroughput * 1000 + waitingQueueSize / completionsPerSecond * 1000`
+  (ms) when `ttftSource` is `prefillThroughput` (default), or comes from the latency
+  predictor when `ttftSource` is `latencyPredictor`. The first term is the time to process
+  the uncached prompt tokens already sent to the endpoint; the second is the time a new
+  request waits in the model server's queue for a running slot. The second term is 0 when
+  nothing is waiting or no request finished on the endpoint in the last 30 s
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
@@ -128,7 +131,7 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
-- Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `InFlightLoad` (tokens and completion rate) and the endpoint's `WaitingQueueSize` metric for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer` and the metrics extractor)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 
 **Configuration Example:**
