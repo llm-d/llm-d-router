@@ -677,6 +677,25 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 
 ---
 
+### 7. RBAC
+
+The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts (`<name>` is the EPP name, `<ns>` the release namespace):
+
+| Object | Kind | Rendered when | Grants |
+|---|---|---|---|
+| `<name>-sa` | Role + RoleBinding | always | `pods` get/list/watch |
+| `<name>-non-sa` | Role + RoleBinding | gateway chart always; standalone chart unless `router.inferencePool.create=false` | `inferencepools`, `inferenceobjectives`, `inferencemodelrewrites` get/list/watch |
+| `<name>-leader-election` | Role + RoleBinding | `router.epp.replicas` > 1 and `router.epp.autoscaling.enabled` is false (unless GKE preferred backends or priority routing is in use), or `router.epp.flags.ha-enable-leader-election` is truthy (`true`, `t`, `1`) | `leases` (all verbs), `events` create/patch |
+| `<release>-<ns>-epp` | ClusterRole + ClusterRoleBinding | `router.monitoring.prometheus.auth.enabled` is true (the default) | `tokenreviews` and `subjectaccessreviews` create; `/metrics` get only when `router.monitoring.prometheus.enabled=true` and `router.monitoring.provider.name=prometheusoperator` |
+| `<ns>-<release>-metrics-reader` | ClusterRole + ClusterRoleBinding | `router.monitoring.prometheus.enabled`, `router.monitoring.prometheus.auth.enabled` and `router.monitoring.provider.name=gmp` (gateway chart also needs `provider.name=gke`) | `/metrics` get (GMP) |
+| `<release>-metrics-reader-secret-read` | Role + RoleBinding | `router.monitoring.prometheus.enabled`, `router.monitoring.prometheus.auth.enabled` and `router.monitoring.provider.name=gmp` (gateway chart also needs `provider.name=gke`) | one named Secret get/list/watch, bound to the GMP `collector` ServiceAccount |
+
+Chart defaults render the ClusterRole above (`prometheus.auth.enabled` defaults to true), so a default install needs cluster-scoped permissions. Metrics authentication needs a ClusterRole: `TokenReview` and `SubjectAccessReview` are cluster-scoped, as is the `/metrics` non-resource URL, and a `Role` cannot grant them (see [Kubernetes RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/)).
+
+**Namespace-only install:** set `router.monitoring.prometheus.auth.enabled=false`. The chart then renders no ClusterRole or ClusterRoleBinding and passes `--metrics-endpoint-auth=false`. Metrics are served unauthenticated, so restrict access with a NetworkPolicy. Prometheus Operator can still scrape through the ServiceMonitor; GMP PodMonitoring needs the authenticated path.
+
+---
+
 ## Deployment Mode Specific Configurations
 
 Depending on your target deployment architecture (Gateway Mode vs Standalone Mode), utilize the following specific configurations.
