@@ -133,6 +133,7 @@ func TestServerRouteDispatch(t *testing.T) {
 		{http.MethodPost, "/v1/embeddings", passthrough, "/v1/embeddings"},
 		{http.MethodPost, "/v1/files", passthrough, "/v1/files"},
 		{http.MethodGet, "/v1/files/file_1", passthrough, "/v1/files/file_1"},
+		{http.MethodPatch, "/v1/files/file_1", passthrough, "/v1/files/file_1"},
 		{http.MethodGet, "/v1/models", passthrough, "/v1/models"},
 		{http.MethodGet, "/health", passthrough, "/health"},
 		{http.MethodGet, "/v1/requests/req_1", passthrough, "/v1/requests/req_1"},
@@ -194,6 +195,7 @@ func TestServerRouteMethodNotAllowed(t *testing.T) {
 		{http.MethodHead, "/v1/messages", http.MethodPost},
 		{http.MethodPost, "/healthz", http.MethodGet},
 		{http.MethodHead, "/readyz", http.MethodGet},
+		{"PROPFIND", "/v1/files", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {

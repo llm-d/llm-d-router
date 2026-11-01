@@ -61,11 +61,12 @@ keeps its path, so the 405 in the table applies to the exact path only.
 EPP picks its request parser by matching the end of the raw path and ignores a
 trailing slash. The sidecar therefore serves a POST to the six paths with or
 without a trailing slash, and no other form of them. It answers a POST to a
-percent-encoded form of the six paths, and its `ServeMux` answers a path with
-repeated slashes or dot segments, with a 307 redirect to the clean path, for
-example `/v1%2Fresponses` and `//v1/responses` to `/v1/responses`, so the
-client sends the clean path back through EPP. It forwards any other request to
-the decoder as sent.
+percent-encoded form of the six paths with a 307 redirect to the decoded path,
+for example `/v1%2Fresponses` to `/v1/responses`. Its `ServeMux` redirects a
+path with repeated slashes or dot segments to the cleaned path, for example
+`//v1/responses` to `/v1/responses`, with the status Go's `net/http` uses for
+that redirect. Either redirect sends the client back through EPP with the clean
+path. The sidecar forwards any other request to the decoder as sent.
 
 A gateway can normalize repeated slashes, dot segments and encoded slashes
 before the HTTPRoute, EPP and both components see the path. In Envoy these are
@@ -112,7 +113,7 @@ table.
 | GET, HEAD | `/health` | answered | passthrough | terminates |
 | any | `/healthz`, `/readyz` | passthrough | answered for GET; 405 for other methods | no route |
 | GET, DELETE | `/v1/requests/{id}` | passthrough | answered by the `async-broker` step when enabled, which answers other methods with 405; otherwise passthrough | no route |
-| any | `/v1/files` and its sub-paths, `/v1/embeddings`, any other path | passthrough | passthrough | no route |
+| any method chi recognizes | `/v1/files` and its sub-paths, `/v1/embeddings`, any other path | passthrough | passthrough | no route |
 
 1. The coordinator pipeline does not handle SGLang generate requests. The
    request reaches a decode pod's sidecar, which serves it.
