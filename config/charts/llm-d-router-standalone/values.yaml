@@ -49,6 +49,8 @@ router:
       standbyReplicas: 1
       connectTimeout: "0.250s"
       dnsRefreshRate: "5s"
+      # Ignored with failOpen: true, where the ext_proc cluster never enters panic mode
+      # so requests fail open with their body when no EPP host is healthy.
       healthyPanicThreshold: 10.0
 
     # Active gRPC health check configuration for the ext_proc cluster.
@@ -371,8 +373,9 @@ router:
                       # Avoid routing traffic to newly started hosts until their first health check passes.
                       ignore_new_hosts_until_first_hc: true
                       # Prevent Envoy from entering panic mode (broadcasting to all priorities) during primary ejection.
+                      # With fail-open, never enter panic mode; see the fail-open comment below.
                       healthy_panic_threshold:
-                        value: {{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}
+                        value: {{ if $fallback }}0{{ else }}{{ .Values.router.proxy.priorityRouting.healthyPanicThreshold }}{{ end }}
                     outlier_detection:
                       # Treat local origin (connection/TCP) failures separately from HTTP errors for immediate failover.
                       split_external_local_origin_errors: true
@@ -390,6 +393,16 @@ router:
                     {{- else }}
                     connect_timeout: 86400s
                     lb_policy: {{ .Values.router.proxy.lbPolicy | default "LEAST_REQUEST" }}
+                    {{- end }}
+                    {{- if and $fallback (not $isPriorityRouting) }}
+                    common_lb_config:
+                      # Fail-open: once health checks mark every EPP host unhealthy, the cluster has no
+                      # host to pick, the ext_proc stream fails before any body chunk is sent, and Envoy
+                      # forwards the request with its body through the fallback route. In panic mode
+                      # Envoy would keep connecting to an unhealthy host after handing it the body,
+                      # and the request would lose its body.
+                      healthy_panic_threshold:
+                        value: 0
                     {{- end }}
                     circuit_breakers:
                       thresholds:
@@ -468,7 +481,7 @@ router:
                               load_balancing_weight: 1
                         {{- end }}
         name: envoy-proxy
-        image: docker.io/envoyproxy/envoy:distroless-v1.33.2
+        image: docker.io/envoyproxy/envoy:distroless-v1.40.2
         command: "envoy"
         args:
           - "--service-node"
