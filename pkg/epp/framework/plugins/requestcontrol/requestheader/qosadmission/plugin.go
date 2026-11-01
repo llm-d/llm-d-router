@@ -16,8 +16,8 @@ limitations under the License.
 
 // Package qosadmission provides a RequestHeaderProcessor plugin that enforces per-team QoS
 // contracts before flow control: it maps a team to a service class (a priority band), applies
-// size caps, a concurrency cap, a committed token rate and a daily budget, and moves traffic
-// above the commit to the next lower class.
+// size caps, and moves traffic above the team's commits (concurrency and a daily budget) to the
+// next lower class.
 package qosadmission
 
 import (
@@ -45,10 +45,6 @@ const (
 
 	// ClassHeader reports the class that served the request, or the class a rejection applied to.
 	ClassHeader = "x-llm-d-qos-class"
-	// RemainingTokensHeader reports the weighted tokens left in the team's bucket.
-	RemainingTokensHeader = "x-ratelimit-remaining-tokens" //#nosec G101 -- header name, not a credential
-	// ResetTokensHeader reports the seconds until the team's bucket is full.
-	ResetTokensHeader = "x-ratelimit-reset-tokens" //#nosec G101 -- header name, not a credential
 	// ConcurrencyRemainingHeader reports the team's unused concurrency.
 	ConcurrencyRemainingHeader = "x-llm-d-qos-concurrency-remaining"
 	// RetryAfterHeader carries the seconds a rejected client should wait.
@@ -58,7 +54,6 @@ const (
 
 	decisionAdmitted            = "admitted"
 	decisionDowngraded          = "downgraded"
-	decisionRejectedQuota       = "rejected_quota"
 	decisionRejectedConcurrency = "rejected_concurrency"
 	decisionRejectedSize        = "rejected_size"
 	decisionRejectedDaily       = "rejected_daily"
@@ -77,7 +72,6 @@ type teamState struct {
 	classIndex int
 
 	mu        sync.Mutex
-	bucket    *tokenBucket // nil when the team has no commit
 	inflight  int
 	dailyDay  int
 	dailyUsed float64
@@ -85,11 +79,13 @@ type teamState struct {
 
 // admission is the accounting held for one admitted request until it completes.
 type admission struct {
-	team          *teamState
-	servedClass   string
-	reserved      float64
-	bucketCharged bool
-	stop          func() bool
+	team        *teamState
+	servedClass string
+	reserved    float64
+	// committed is true when the request was admitted within the commits and so holds a
+	// concurrency slot and a daily-budget charge.
+	committed bool
+	stop      func() bool
 }
 
 // Plugin enforces per-team QoS contracts. See the package README.
@@ -138,13 +134,8 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 	for i, c := range params.Classes {
 		classIndex[c.Name] = i
 	}
-	start := now()
 	newState := func(cfg TeamConfig) *teamState {
-		st := &teamState{cfg: cfg, label: metricsutil.BoundFairnessID(cfg.ID), classIndex: classIndex[cfg.Class]}
-		if cfg.CommitTokensPerMinute > 0 {
-			st.bucket = newTokenBucket(cfg.CommitTokensPerMinute, cfg.BurstSeconds, start)
-		}
-		return st
+		return &teamState{cfg: cfg, label: metricsutil.BoundFairnessID(cfg.ID), classIndex: classIndex[cfg.Class]}
 	}
 	teams := make(map[string]*teamState, len(params.Teams))
 	for _, t := range params.Teams {
@@ -190,7 +181,9 @@ func (p *Plugin) estimateCost(request *scheduling.InferenceRequest, cfg TeamConf
 	return prompt, float64(prompt) + p.outputWeight*float64(output)
 }
 
-// RequestHeader decides the request's class and charges its reservation.
+// RequestHeader decides the request's class. A request within the team's commits is served at
+// the committed class and charged; a request above them moves one class down without a charge,
+// and is rejected in the lowest class.
 func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.InferenceRequest) error {
 	if request == nil {
 		return nil
@@ -216,35 +209,27 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	if day := dayNumber(now); day != team.dailyDay {
 		team.dailyDay, team.dailyUsed = day, 0
 	}
-	if team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens {
+	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
+	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
+	served, decision, withinCommit := committed, decisionAdmitted, !overDaily && !overConcurrency
+	switch {
+	case withinCommit:
+		team.inflight++
+		team.dailyUsed += cost
+		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
+	case team.classIndex+1 < len(p.classes):
+		served, decision = p.classes[team.classIndex+1], decisionDowngraded
+	case overDaily:
 		team.mu.Unlock()
 		return p.reject(team, committed.Name, decisionRejectedDaily, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
-	}
-	if team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency {
+	default:
 		team.mu.Unlock()
 		return p.reject(team, committed.Name, decisionRejectedConcurrency, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
 	}
-	served, decision, charged := committed, decisionAdmitted, false
-	if team.bucket != nil {
-		switch {
-		case team.bucket.tryTake(cost, now):
-			charged = true
-		case team.classIndex+1 < len(p.classes):
-			served, decision = p.classes[team.classIndex+1], decisionDowngraded
-		default:
-			wait := team.bucket.waitFor(cost, now)
-			team.mu.Unlock()
-			return p.reject(team, committed.Name, decisionRejectedQuota, p.quotaError(team, committed.Name, wait, "token rate commit exceeded"))
-		}
-		bucketTokens.WithLabelValues(team.label).Set(team.bucket.remaining(now))
-	}
-	team.inflight++
-	team.dailyUsed += cost
-	inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
 	team.mu.Unlock()
 
 	admissionDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, p.mode()).Inc()
-	rec := &admission{team: team, servedClass: served.Name, reserved: cost, bucketCharged: charged}
+	rec := &admission{team: team, servedClass: served.Name, reserved: cost, committed: withinCommit}
 	p.admissions.Store(request.RequestID, rec)
 	// A request that never reaches end of stream (flow-control rejection, scheduling failure)
 	// is released in full when its stream ends.
@@ -286,8 +271,9 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	p.finish(request.RequestID, &usage)
 }
 
-// finish releases a request's concurrency slot and settles its charge exactly once. A nil usage
-// refunds the reservation in full; a usage with no token counts keeps the reservation.
+// finish settles a request exactly once. For a committed request it releases the concurrency slot
+// and settles the daily charge: a nil usage refunds the reservation in full, and a usage with no
+// token counts keeps the reservation.
 func (p *Plugin) finish(requestID string, usage *fwkrh.Usage) {
 	v, ok := p.admissions.LoadAndDelete(requestID)
 	if !ok {
@@ -304,18 +290,14 @@ func (p *Plugin) finish(requestID string, usage *fwkrh.Usage) {
 			actual = float64(usage.PromptTokens) + p.outputWeight*float64(usage.CompletionTokens)
 		}
 	}
-	refund := rec.reserved - actual
-	now := p.now()
 	team := rec.team
-	team.mu.Lock()
-	team.inflight--
-	team.dailyUsed = math.Max(0, team.dailyUsed-refund)
-	if rec.bucketCharged {
-		team.bucket.adjust(refund, now)
-		bucketTokens.WithLabelValues(team.label).Set(team.bucket.remaining(now))
+	if rec.committed {
+		team.mu.Lock()
+		team.inflight--
+		team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual))
+		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
+		team.mu.Unlock()
 	}
-	inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
-	team.mu.Unlock()
 	if actual > 0 {
 		chargedTokens.WithLabelValues(team.label, rec.servedClass).Add(actual)
 	}
@@ -349,16 +331,11 @@ func (p *Plugin) quotaError(team *teamState, class string, retryAfter time.Durat
 	}
 }
 
-// quotaHeaders returns the remaining-quota headers for team. The caller must not hold team.mu.
+// quotaHeaders returns the remaining-commit headers for team. The caller must not hold team.mu.
 func (p *Plugin) quotaHeaders(team *teamState) map[string]string {
 	headers := map[string]string{}
-	now := p.now()
 	team.mu.Lock()
 	defer team.mu.Unlock()
-	if team.bucket != nil {
-		headers[RemainingTokensHeader] = strconv.FormatInt(int64(team.bucket.remaining(now)), 10)
-		headers[ResetTokensHeader] = strconv.FormatInt(int64(math.Ceil(team.bucket.untilFull(now).Seconds())), 10)
-	}
 	if team.cfg.MaxConcurrency > 0 {
 		headers[ConcurrencyRemainingHeader] = strconv.Itoa(max(0, team.cfg.MaxConcurrency-team.inflight))
 	}

@@ -30,7 +30,6 @@ const (
 	ModeShadow = "shadow"
 
 	defaultOutputTokenWeight = 2
-	defaultBurstSeconds      = 30
 )
 
 // ClassConfig is one service class, mapped onto a flow-control priority band.
@@ -39,23 +38,22 @@ type ClassConfig struct {
 	Priority int    `json:"priority"`
 }
 
-// TeamConfig is one team's QoS contract. Zero-valued limits are unenforced.
+// TeamConfig is one team's QoS contract. Zero-valued limits are unenforced. MaxConcurrency and
+// DailyTokens are the team's commits: traffic above either moves one class down, and is rejected
+// in the lowest class.
 type TeamConfig struct {
 	ID string `json:"id"`
 	// Class is the name of the class the team's committed traffic is served at.
 	Class string `json:"class"`
-	// CommitTokensPerMinute is the committed weighted-token rate. 0 disables the token bucket.
-	CommitTokensPerMinute float64 `json:"commitTokensPerMinute,omitempty"`
-	// BurstSeconds sizes the bucket as BurstSeconds of committed rate. Default 30.
-	BurstSeconds float64 `json:"burstSeconds,omitempty"`
-	// MaxConcurrency caps the team's requests from admission to completion. 0 is unlimited.
+	// MaxConcurrency is the committed number of requests from admission to completion. 0 is
+	// unlimited.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
 	// MaxPromptTokens rejects larger prompts with 400. 0 is unlimited.
 	MaxPromptTokens int64 `json:"maxPromptTokens,omitempty"`
 	// MaxOutputTokens rejects larger output caps with 400, and is the reservation for a request
 	// that sets no output cap. 0 is unlimited.
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
-	// DailyTokens is a weighted-token budget per UTC day. 0 is unlimited.
+	// DailyTokens is the committed weighted-token budget per UTC day. 0 is unlimited.
 	DailyTokens float64 `json:"dailyTokens,omitempty"`
 }
 
@@ -141,12 +139,8 @@ func validateTeam(t *TeamConfig, classes map[string]struct{}) error {
 	if _, ok := classes[t.Class]; !ok {
 		return fmt.Errorf("unknown class %q", t.Class)
 	}
-	if t.CommitTokensPerMinute < 0 || t.BurstSeconds < 0 || t.MaxConcurrency < 0 ||
-		t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 {
+	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 {
 		return errors.New("limits must be >= 0")
-	}
-	if t.BurstSeconds == 0 {
-		t.BurstSeconds = defaultBurstSeconds
 	}
 	return nil
 }
