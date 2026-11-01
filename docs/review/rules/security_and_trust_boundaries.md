@@ -77,7 +77,7 @@ Prefix newly introduced router-owned HTTP headers with lowercase `x-llm-d-` (suc
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/rbac/**` (referenced symbols: `x-llm-d-`, `x-llm-d-epp-profile`, `pkg/common/request`, `pkg/epp/metadata`, `-host-port`); see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/manifests/**`, `deploy/**` (referenced symbols: `x-llm-d-`, `x-llm-d-epp-profile`, `pkg/common/request`, `pkg/epp/metadata`, `-host-port`); see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Trusting client-supplied routing headers, dialing unverified target addresses, or logging raw prompts exposes backends to header spoofing, SSRF, and credential or prompt leakage.
 - **Conflict audit references**: `UNR-01`.
 
@@ -103,7 +103,7 @@ Validate peer endpoint URLs and KV-cache transfer targets against `InferencePool
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/rbac/**`; see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/manifests/**`, `deploy/**`; see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Trusting client-supplied routing headers, dialing unverified target addresses, or logging raw prompts exposes backends to header spoofing, SSRF, and credential or prompt leakage.
 - **Conflict audit references**: `MVM-08`.
 
@@ -121,7 +121,7 @@ Enforce minimum TLS versions and header-read timeouts on HTTP servers, trim trai
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/rbac/**`; see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/epp/**`, `pkg/coordinator/**`, `pkg/sidecar/**`, `config/charts/**`, `config/manifests/**`, `deploy/**`; see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Trusting client-supplied routing headers, dialing unverified target addresses, or logging raw prompts exposes backends to header spoofing, SSRF, and credential or prompt leakage.
 - **Conflict audit references**: `UNR-05`.
 

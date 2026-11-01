@@ -11,7 +11,6 @@ import pathlib
 import posixpath
 import re
 import sys
-import tempfile
 from typing import Any, Dict, List, Tuple
 
 GENERATED_HEADER = (
@@ -310,8 +309,7 @@ def github_heading_anchor(heading: str) -> str:
     """Computes GitHub-flavored Markdown heading anchor slug."""
     cleaned = heading.strip().lower()
     cleaned = re.sub(r"[^\w\s-]", "", cleaned)
-    cleaned = re.sub(r"\s+", "-", cleaned)
-    return cleaned
+    return cleaned.replace(" ", "-")
 
 
 def collect_file_anchors(md_path: pathlib.Path) -> set[str]:
@@ -457,28 +455,25 @@ def main() -> int:
     rendered = render_playbook(args.bundle, omit_generated_header=args.omit_header)
 
     if args.check:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=True) as tmp:
-            tmp.write(rendered)
-            tmp.flush()
-            if not args.output.is_file():
-                sys.stderr.write(
-                    f"ERROR: {args.output} does not exist. Run 'python3 hack/render_playbook.py'.\n"
-                )
-                return 1
-            actual = args.output.read_text(encoding="utf-8")
-            if actual != rendered:
-                diff = difflib.unified_diff(
-                    actual.splitlines(keepends=True),
-                    rendered.splitlines(keepends=True),
-                    fromfile=str(args.output),
-                    tofile=f"{args.output} (rendered from {args.bundle})",
-                )
-                sys.stderr.writelines(diff)
-                sys.stderr.write(
-                    f"\nERROR: {args.output} is out of sync with {args.bundle}.\n"
-                    "Run 'python3 hack/render_playbook.py' and commit the updated file.\n"
-                )
-                return 1
+        if not args.output.is_file():
+            sys.stderr.write(
+                f"ERROR: {args.output} does not exist. Run 'python3 hack/render_playbook.py'.\n"
+            )
+            return 1
+        actual = args.output.read_text(encoding="utf-8")
+        if actual != rendered:
+            diff = difflib.unified_diff(
+                actual.splitlines(keepends=True),
+                rendered.splitlines(keepends=True),
+                fromfile=str(args.output),
+                tofile=f"{args.output} (rendered from {args.bundle})",
+            )
+            sys.stderr.writelines(diff)
+            sys.stderr.write(
+                f"\nERROR: {args.output} is out of sync with {args.bundle}.\n"
+                "Run 'python3 hack/render_playbook.py' and commit the updated file.\n"
+            )
+            return 1
         print(f"OK: {args.output} matches rendered output from {args.bundle}.")
         return 0
 
