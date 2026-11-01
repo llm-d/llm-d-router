@@ -43,9 +43,8 @@ const (
 
 	defaultPrefillProfile = "prefill"
 
-	pathRemote     = "remote"
-	pathLocal      = "local"
-	pathAggregated = "aggregated"
+	pathRemote = "remote"
+	pathLocal  = "local"
 
 	// Outcome values match llm_d_epp_request_outcome_total. A request rejected before dispatch
 	// produces no response, so "rejected" never reaches this plugin.
@@ -234,19 +233,17 @@ func (p *Plugin) bucket(tokens int) string {
 	return p.bucketLabels[len(p.bucketLabels)-1]
 }
 
+// path is remote when the prefill profile picked an endpoint, and local when prefill ran on the
+// serving pod. The disagg profile handler drops a declined prefill from the scheduling result,
+// so a declined prefill and a deployment without P/D both read as local.
 func (p *Plugin) path(request *scheduling.InferenceRequest) string {
 	if request.SchedulingResult == nil {
-		return pathAggregated
-	}
-	res, ok := request.SchedulingResult.ProfileResults[p.prefillProfile]
-	switch {
-	case !ok:
-		return pathAggregated
-	case res != nil && len(res.TargetEndpoints) > 0:
-		return pathRemote
-	default:
 		return pathLocal
 	}
+	if res := request.SchedulingResult.ProfileResults[p.prefillProfile]; res != nil && len(res.TargetEndpoints) > 0 {
+		return pathRemote
+	}
+	return pathLocal
 }
 
 func registerMetrics(registerer prometheus.Registerer) error {

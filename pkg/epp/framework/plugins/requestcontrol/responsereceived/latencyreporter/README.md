@@ -23,11 +23,12 @@ At end of stream the plugin records:
 **Prompt bucket**: taken from the reported `usage.prompt_tokens`, falling back to the tokenized prompt.
 
 **Path**:
-- `remote`: the prefill profile picked an endpoint.
-- `local`: the prefill profile ran or was declined without one.
-- `aggregated`: no prefill profile exists.
+- `remote`: the prefill profile picked an endpoint, so prefill ran on a separate prefill pod.
+- `local`: prefill ran on the pod that served the request. This covers a request whose P/D decider declined remote prefill and every request in a deployment without P/D. The `disagg-profile-handler` drops a declined prefill from the scheduling result, so the two cannot be told apart per request; tell deployments apart by their EPP instead.
 
 Report latency per path as well as combined: a healthy aggregate can hide a slow remote path behind a fast local share.
+
+The path is read from the `disagg-profile-handler` flow, where one EPP request carries the whole client request. With the disaggregation coordinator, each phase is a separate EPP request routed by the `x-llm-d-epp-profile` header: the prefill phase is labeled `remote` and the decode phase `local`, so the label describes the phase, not the client request.
 
 Requests rejected before dispatch (`429`, `503`) never produce a response and are not recorded here. Count them from `llm_d_epp_request_outcome_total{outcome="rejected"}`.
 

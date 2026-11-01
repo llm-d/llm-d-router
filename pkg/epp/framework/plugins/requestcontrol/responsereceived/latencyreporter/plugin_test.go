@@ -29,9 +29,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
 const testConfig = `{"promptBuckets": [1024, 8192]}`
@@ -143,49 +145,49 @@ func TestOutcomeAndPath(t *testing.T) {
 			name:        "completed stream",
 			spec:        reqSpec{prompt: 100, completion: 101, ttft: 200 * time.Millisecond, decode: 2 * time.Second, streaming: true},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeCompleted,
 		},
 		{
 			name:        "long prompt lands in the top bucket",
 			spec:        reqSpec{prompt: 20000, completion: 2, ttft: 3 * time.Second, streaming: true},
 			bucket:      "gt8192",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeCompleted,
 		},
 		{
 			name:        "server error is failed",
 			spec:        reqSpec{prompt: 100, status: "503"},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeFailed,
 		},
 		{
 			name:        "client disconnect is cancelled",
 			spec:        reqSpec{prompt: 100, cause: fwkrc.TerminationCauseClientDisconnect},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeCancelled,
 		},
 		{
 			name:        "non-200 status wins over a disconnect",
 			spec:        reqSpec{prompt: 100, status: "500", cause: fwkrc.TerminationCauseClientDisconnect},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeFailed,
 		},
 		{
 			name:        "eviction wins over the status",
 			spec:        reqSpec{prompt: 100, status: "500", cause: fwkrc.TerminationCauseEvicted},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeEvicted,
 		},
 		{
 			name:        "stream error is failed",
 			spec:        reqSpec{prompt: 100, cause: fwkrc.TerminationCauseError},
 			bucket:      "le1024",
-			path:        pathAggregated,
+			path:        pathLocal,
 			wantOutcome: outcomeFailed,
 		},
 		{
@@ -199,10 +201,9 @@ func TestOutcomeAndPath(t *testing.T) {
 			wantOutcome: outcomeCompleted,
 		},
 		{
-			name: "declined prefill is the local path",
+			name: "decode-only result is the local path",
 			spec: reqSpec{prompt: 100, ttft: 100 * time.Millisecond, scheduling: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
-				"decode":  {TargetEndpoints: []fwksched.Endpoint{nil}},
-				"prefill": nil,
+				"decode": {TargetEndpoints: []fwksched.Endpoint{nil}},
 			}}},
 			bucket:      "le1024",
 			path:        pathLocal,
@@ -221,18 +222,77 @@ func TestOutcomeAndPath(t *testing.T) {
 	}
 }
 
+type stubProfile struct{}
+
+func (stubProfile) Run(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	return &fwksched.ProfileRunResult{}, nil
+}
+
+// disaggResult builds the real disagg profile handler and decider through their factories, as
+// the EPP does from a config file, schedules a request through it, and returns what
+// ProcessResults hands the request. Each picked profile gets a one-endpoint result, the way the
+// scheduler records it.
+func disaggResult(t *testing.T, deciderFactory fwkplugin.FactoryFunc) *fwksched.SchedulingResult {
+	t.Helper()
+	handle := fwkplugin.NewEppHandle(context.Background(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	decider, err := deciderFactory("pd-decider", nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin("pd-decider", decider)
+	raw, err := disagg.HandlerFactory("disagg", fwkplugin.StrictDecoder(json.RawMessage(`{"deciders":{"prefill":"pd-decider"}}`)), handle)
+	require.NoError(t, err)
+	handler := raw.(fwksched.ProfileHandler)
+
+	profiles := map[string]fwksched.SchedulerProfile{"decode": stubProfile{}, "prefill": stubProfile{}}
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{Address: "10.0.0.1", Port: "8000"}, nil, fwkdl.NewAttributes())
+	request := &fwksched.InferenceRequest{RequestID: "disagg"}
+
+	results := map[string]*fwksched.ProfileRunResult{}
+	for picked := handler.Pick(context.Background(), request, profiles, results); len(picked) > 0; picked = handler.Pick(context.Background(), request, profiles, results) {
+		for name := range picked {
+			results[name] = &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{endpoint}}
+		}
+	}
+	res, err := handler.ProcessResults(context.Background(), request, results)
+	require.NoError(t, err)
+	return res
+}
+
+// TestPathFromDisaggProfileHandler labels results produced by the real handler, so the test
+// cannot pass on a result shape the handler never produces.
+func TestPathFromDisaggProfileHandler(t *testing.T) {
+	p := newTestPlugin(t, testConfig)
+
+	tests := []struct {
+		name    string
+		decider fwkplugin.FactoryFunc
+		want    string
+	}{
+		{name: "decider sends prefill to a prefill pod", decider: disagg.AlwaysDisaggPDDeciderPluginFactory, want: pathRemote},
+		// With no parameters the prefix-based decider has nonCachedTokens 0 and always declines.
+		{name: "decider declines remote prefill", decider: disagg.PrefixBasedPDDeciderPluginFactory, want: pathLocal},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prio := 300 + i
+			before := count(strconv.Itoa(prio), "le1024", tc.want, false, outcomeCompleted)
+			run(p, "req-disagg-"+strconv.Itoa(prio), reqSpec{priority: prio, prompt: 100, ttft: time.Millisecond, scheduling: disaggResult(t, tc.decider)})
+			assert.Equal(t, before+1, count(strconv.Itoa(prio), "le1024", tc.want, false, outcomeCompleted))
+		})
+	}
+}
+
 // TestLatencyObservations checks the recorded TTFT and TPOT values. A distinct priority keeps the
 // histogram series isolated from other tests.
 func TestLatencyObservations(t *testing.T) {
 	p := newTestPlugin(t, testConfig)
 
 	t.Run("streamed request records TTFT and mean TPOT", func(t *testing.T) {
-		n0, s0 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated, "true")
-		m0, u0 := histogram(t, latencyTPOT, "71", pathAggregated)
+		n0, s0 := histogram(t, latencyTTFT, "71", "le1024", pathLocal, "true")
+		m0, u0 := histogram(t, latencyTPOT, "71", pathLocal)
 		// 101 output tokens over 2s after the first token: TPOT = 2s / 100 = 20ms.
 		run(p, "obs-stream", reqSpec{priority: 71, prompt: 100, completion: 101, ttft: 250 * time.Millisecond, decode: 2 * time.Second, streaming: true})
-		n1, s1 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated, "true")
-		m1, u1 := histogram(t, latencyTPOT, "71", pathAggregated)
+		n1, s1 := histogram(t, latencyTTFT, "71", "le1024", pathLocal, "true")
+		m1, u1 := histogram(t, latencyTPOT, "71", pathLocal)
 		assert.Equal(t, n0+1, n1)
 		assert.InDelta(t, 0.25, s1-s0, 1e-9)
 		assert.Equal(t, m0+1, m1)
@@ -240,38 +300,38 @@ func TestLatencyObservations(t *testing.T) {
 	})
 
 	t.Run("non-streaming request records TTFT only", func(t *testing.T) {
-		m0, _ := histogram(t, latencyTPOT, "72", pathAggregated)
-		n0, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated, "false")
+		m0, _ := histogram(t, latencyTPOT, "72", pathLocal)
+		n0, _ := histogram(t, latencyTTFT, "72", "le1024", pathLocal, "false")
 		run(p, "obs-unary", reqSpec{priority: 72, prompt: 100, completion: 500, ttft: 300 * time.Millisecond, decode: 30 * time.Second})
-		m1, _ := histogram(t, latencyTPOT, "72", pathAggregated)
-		n1, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated, "false")
+		m1, _ := histogram(t, latencyTPOT, "72", pathLocal)
+		n1, _ := histogram(t, latencyTTFT, "72", "le1024", pathLocal, "false")
 		assert.Equal(t, n0+1, n1)
 		assert.Equal(t, m0, m1)
 	})
 
 	t.Run("non-streaming request stays out of the streaming series", func(t *testing.T) {
-		st0, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "true")
-		un0, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "false")
-		c0 := count("75", "le1024", pathAggregated, false, outcomeCompleted)
+		st0, _ := histogram(t, latencyTTFT, "75", "le1024", pathLocal, "true")
+		un0, _ := histogram(t, latencyTTFT, "75", "le1024", pathLocal, "false")
+		c0 := count("75", "le1024", pathLocal, false, outcomeCompleted)
 		run(p, "obs-split", reqSpec{priority: 75, prompt: 100, completion: 500, ttft: 30 * time.Second})
-		st1, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "true")
-		un1, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "false")
+		st1, _ := histogram(t, latencyTTFT, "75", "le1024", pathLocal, "true")
+		un1, _ := histogram(t, latencyTTFT, "75", "le1024", pathLocal, "false")
 		assert.Equal(t, st0, st1)
 		assert.Equal(t, un0+1, un1)
-		assert.Equal(t, c0+1, count("75", "le1024", pathAggregated, false, outcomeCompleted))
+		assert.Equal(t, c0+1, count("75", "le1024", pathLocal, false, outcomeCompleted))
 	})
 
 	t.Run("failed request records no latency", func(t *testing.T) {
-		n0, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated, "false")
+		n0, _ := histogram(t, latencyTTFT, "73", "le1024", pathLocal, "false")
 		run(p, "obs-failed", reqSpec{priority: 73, prompt: 100, ttft: 100 * time.Millisecond, status: "500"})
-		n1, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated, "false")
+		n1, _ := histogram(t, latencyTTFT, "73", "le1024", pathLocal, "false")
 		assert.Equal(t, n0, n1)
 	})
 
 	t.Run("cancelled request records no latency", func(t *testing.T) {
-		n0, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated, "false")
+		n0, _ := histogram(t, latencyTTFT, "74", "le1024", pathLocal, "false")
 		run(p, "obs-cancelled", reqSpec{priority: 74, prompt: 100, ttft: 100 * time.Millisecond, cause: fwkrc.TerminationCauseClientDisconnect})
-		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated, "false")
+		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathLocal, "false")
 		assert.Equal(t, n0, n1)
 	})
 }
@@ -279,20 +339,20 @@ func TestLatencyObservations(t *testing.T) {
 func TestPriorityFilter(t *testing.T) {
 	p := newTestPlugin(t, `{"priorities": [100]}`)
 
-	before := count("10", "all", pathAggregated, false, outcomeCompleted)
+	before := count("10", "all", pathLocal, false, outcomeCompleted)
 	run(p, "req-filtered", reqSpec{priority: 10, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before, count("10", "all", pathAggregated, false, outcomeCompleted), "an unlisted priority is not recorded")
+	assert.Equal(t, before, count("10", "all", pathLocal, false, outcomeCompleted), "an unlisted priority is not recorded")
 	_, held := p.statuses.Load("req-filtered")
 	assert.False(t, held, "per-request status is released at end of stream")
 
-	before = count("100", "all", pathAggregated, false, outcomeCompleted)
+	before = count("100", "all", pathLocal, false, outcomeCompleted)
 	run(p, "req-listed", reqSpec{priority: 100, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("100", "all", pathAggregated, false, outcomeCompleted))
+	assert.Equal(t, before+1, count("100", "all", pathLocal, false, outcomeCompleted))
 }
 
 func TestNoPriorityFilterRecordsEveryPriority(t *testing.T) {
 	p := newTestPlugin(t, testConfig)
-	before := count("-5", "le1024", pathAggregated, false, outcomeCompleted)
+	before := count("-5", "le1024", pathLocal, false, outcomeCompleted)
 	run(p, "req-anyprio", reqSpec{priority: -5, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("-5", "le1024", pathAggregated, false, outcomeCompleted))
+	assert.Equal(t, before+1, count("-5", "le1024", pathLocal, false, outcomeCompleted))
 }
