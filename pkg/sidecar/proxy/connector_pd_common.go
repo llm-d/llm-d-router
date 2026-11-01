@@ -102,10 +102,9 @@ func (s *Server) runConcurrentPD(
 	r *http.Request,
 	prefillBody, decodeBody []byte,
 	prefillHost, connector string,
-	prepareRequests func(prefillReq, decodeReq *http.Request),
 	toolFields *toolCallingRequest,
 ) {
-	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillHost, connector, prepareRequests, toolFields, false)
+	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillHost, connector, nil, toolFields, false)
 }
 
 // runConcurrentPDWithUsage is runConcurrentPD with an option to report the
