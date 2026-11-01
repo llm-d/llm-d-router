@@ -443,11 +443,11 @@ func deltaHasUnfoldableField(delta map[string]any) bool {
 // trailing include_usage frame; folding per field also tolerates a server that
 // reports halves separately without dropping either.
 //
-// Each field retained for the first time is charged to contentBytes at its
-// encoded size, so an upstream streaming usage-only frames with ever new fields
-// trips the per-request ceiling rather than growing the map past the
-// reservation. A field that repeats is not charged again: a stream that reports
-// usage on every chunk keeps a fixed set of keys.
+// The retained usage is charged to contentBytes at its encoded size, so an
+// upstream streaming usage-only frames with ever new fields, or ever larger
+// values, trips the per-request ceiling rather than growing the map past the
+// reservation. A field is charged by the change in its size: a stream that
+// reports the same counters on every chunk is charged for them once.
 func (r *sseReassembler) mergeUsage(usage map[string]any) {
 	if r.usage == nil {
 		r.usage = map[string]any{}
@@ -456,8 +456,11 @@ func (r *sseReassembler) mergeUsage(usage map[string]any) {
 		if v == nil {
 			continue
 		}
-		if _, seen := r.usage[k]; !seen {
-			r.contentBytes += int64(len(k)) + encodedSize(v)
+		size := encodedSize(v)
+		if prev, seen := r.usage[k]; seen {
+			r.contentBytes += size - encodedSize(prev)
+		} else {
+			r.contentBytes += int64(len(k)) + size
 		}
 		r.usage[k] = v
 	}

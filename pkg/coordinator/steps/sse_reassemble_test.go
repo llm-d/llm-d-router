@@ -122,10 +122,10 @@ func TestSSEReassemble_IgnoresMalformedFrameParts(t *testing.T) {
 }
 
 // TestSSEReassemble_UsageChargedToCeiling verifies the retained usage block counts
-// toward bufferedBytes, so a stream of usage-only frames each adding a new field
-// trips the per-request ceiling instead of growing the heap past the reservation.
-// A field that repeats is charged once, so the trailing usage frame of a
-// well-behaved stream costs only its own size.
+// toward bufferedBytes, so usage-only frames that add new fields, or grow an
+// existing one, trip the per-request ceiling instead of growing the heap past the
+// reservation. A field that repeats at the same size is charged once, so the
+// trailing usage frame of a well-behaved stream costs only its own size.
 func TestSSEReassemble_UsageChargedToCeiling(t *testing.T) {
 	r := newSSEReassembler(sseShapeChat, 0)
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5}}`))
@@ -143,6 +143,20 @@ func TestSSEReassemble_UsageChargedToCeiling(t *testing.T) {
 	sb.WriteString("data: [DONE]\n\n")
 	err := scanForcedResponse(strings.NewReader(sb.String()), newSSEReassembler(sseShapeChat, 1), 4096, 0)
 	require.ErrorIs(t, err, errForceStreamCeiling, "usage-only frames past the reservation trip the ceiling")
+
+	// One key, first seen small, then resent with a value past the reservation.
+	grow := "data: {\"choices\":[],\"usage\":{\"note\":\"x\"}}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"note\":\"" + strings.Repeat("y", 3500) + "\"}}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"note\":\"" + strings.Repeat("y", 4500) + "\"}}\n\n" +
+		"data: [DONE]\n\n"
+	err = scanForcedResponse(strings.NewReader(grow), newSSEReassembler(sseShapeChat, 1), 4096, 0)
+	require.ErrorIs(t, err, errForceStreamCeiling, "a repeated field that grows is charged its growth")
+
+	// A field that shrinks gives back the difference, so the charge tracks what is held.
+	shrink := newSSEReassembler(sseShapeChat, 0)
+	shrink.add(frame(t, `{"choices":[],"usage":{"note":"`+strings.Repeat("y", 100)+`"}}`))
+	shrink.add(frame(t, `{"choices":[],"usage":{"note":"y"}}`))
+	require.EqualValues(t, len(`note`)+len(`"y"`), shrink.bufferedBytes())
 }
 
 // TestSSEReassemble_MergesUsageAcrossFrames verifies usage folds field by field
