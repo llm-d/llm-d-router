@@ -447,6 +447,9 @@ func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([
 		return nil, nil, fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
 	}
 	headers := gatewayHeaders(reqCtx, gateway.PhaseDecode)
+	if reqCtx.PeerTopology != "" {
+		headers[reqcommon.PeerTopologyHeaderKey] = reqCtx.PeerTopology
+	}
 	return bodyBytes, headers, nil
 }
 
