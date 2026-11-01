@@ -159,7 +159,7 @@ epp:
   # llm-d-router-standalone: <release>-epp (llm-d-router-gateway: <release>-epp in the gateway chart).
   topologySpreadConstraints: []
   priorityClassName: ""
-  # Extra labels added to the EPP pod template. Must not reuse the chart's selector label keys.
+  # Extra labels added to the EPP pod template. Chart-owned label keys are rejected.
   podLabels: {}
 
   # Annotations added to the EPP pod template. Useful for clusters that rely on
