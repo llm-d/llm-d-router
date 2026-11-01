@@ -373,10 +373,12 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			router.ScaleEPP(0)
 
+			// Requests fail open with their body only after Envoy's active health checks mark
+			// the EPP host unhealthy (healthCheckInterval x healthCheckUnhealthyThreshold).
 			ginkgo.By("Verifying requests reach the model servers through the fallback route")
 			gomega.Eventually(func() error {
 				return completionRoutedToNamespace(nsName)
-			}, trafficProbeTimeout, requestInterval).Should(gomega.Succeed())
+			}, eppRecoveryTimeout, requestInterval).Should(gomega.Succeed())
 
 			ginkgo.By("Verifying the fallback route removes a client-supplied prefiller header")
 			body := fmt.Sprintf(`{"model":%q,"prompt":%q,"max_tokens":%d}`, simModelName, simplePrompt, echoOutputTokens)
