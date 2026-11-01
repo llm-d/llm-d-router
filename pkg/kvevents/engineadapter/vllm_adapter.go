@@ -32,7 +32,7 @@ var vllmWireSchema = eventWireSchema{
 	storedFields:         vllmBlockStoredFieldDecoders,
 	removedFields:        vllmBlockRemovedFieldDecoders,
 	storedEvent:          (*typedEventFields).blockStoredEvent,
-	unknownTagPrefix:     "unknown vLLM event tag",
+	skipUnknownTags:      true,
 }
 
 // VLLMAdapter parses vLLM KV-cache events.

@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
@@ -389,6 +390,69 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("tool_choice required", `,"tool_choice":"required"`),
 	)
 
+	DescribeTable("sends each chunk the part of min_tokens not yet generated",
+		func(streaming bool, limits string, wantMinTokens []string) {
+			raw := fmt.Sprintf(`{"messages":[{"role":"user","content":"Hi"}]%s,"stream":%t}`, limits, streaming)
+			var requests []map[string]json.RawMessage
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				Expect(json.NewDecoder(r.Body).Decode(&body)).To(Succeed())
+				requests = append(requests, body)
+				// Ends requests without max_tokens, which have no token budget to exhaust.
+				reason := finishReasonLength
+				if len(requests) == len(wantMinTokens) {
+					reason = "stop"
+				}
+				_, err := io.WriteString(w, chatResponse("text ", reason, 8, 5))
+				Expect(err).ToNot(HaveOccurred())
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(response.Code).To(Equal(http.StatusOK))
+			Expect(requests).To(HaveLen(len(wantMinTokens)))
+			for index, request := range requests {
+				if wantMinTokens[index] == "" {
+					Expect(request).ToNot(HaveKey(reqcommon.FieldMinTokens), "chunk %d", index)
+					continue
+				}
+				Expect(string(request[reqcommon.FieldMinTokens])).To(Equal(wantMinTokens[index]), "chunk %d", index)
+			}
+		},
+		Entry("floor met in the first chunk", false, `,"max_tokens":20,"min_tokens":4`, []string{"4", "", "", ""}),
+		Entry("floor spans several chunks", false, `,"max_tokens":20,"min_tokens":12`, []string{"5", "5", "2", ""}),
+		Entry("floor met in the first chunk, streaming", true, `,"max_tokens":20,"min_tokens":4`, []string{"4", "", "", ""}),
+		Entry("floor spans several chunks without max_tokens", false, `,"min_tokens":12`, []string{"5", "5", "2", ""}),
+		Entry("no min_tokens", false, `,"max_tokens":20`, []string{"", "", "", ""}),
+		Entry("zero min_tokens", false, `,"max_tokens":20,"min_tokens":0`, []string{"", "", "", ""}),
+	)
+
+	DescribeTable("forwards requests with an invalid min_tokens unchanged",
+		func(minTokens int, streaming bool) {
+			raw := fmt.Sprintf(`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"min_tokens":%d,"stream":%t}`, minTokens, streaming)
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+				Expect(w.Header().Get("Content-Type")).To(BeEmpty())
+				w.WriteHeader(http.StatusBadRequest)
+			})
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+			Expect(response.Code).To(Equal(http.StatusBadRequest))
+		},
+		Entry("above max_tokens", 30, false),
+		Entry("above max_tokens, streaming", 30, true),
+		Entry("negative", -1, false),
+		Entry("negative, streaming", -1, true),
+	)
+
 	It("still chunks when tools are declared but tool_choice is none", func() {
 		ti := newChunkedTestSetup(5, []string{
 			chatResponse("hello ", "length", 8, 5),
@@ -405,6 +469,58 @@ var _ = Describe("Chunked Decode", func() {
 
 		content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
 		Expect(content).To(Equal("hello world"))
+	})
+
+	DescribeTable("caps min_tokens to each chunk's budget",
+		func(minTokens, maxTokens, chunkSize, wantStatus int) {
+			ti := newChunkedTestSetupWithHandler(chunkSize, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req map[string]any
+				Expect(json.NewDecoder(r.Body).Decode(&req)).To(Succeed())
+				maxTok, _ := toInt(req[reqcommon.FieldMaxTokens])
+				if minTok, ok := toInt(req[reqcommon.FieldMinTokens]); ok && (minTok < 0 || minTok > maxTok) {
+					http.Error(w, `{"error":"min_tokens must be >= 0 and <= max_tokens"}`, http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, chatResponse("x", finishReasonLength, 8, maxTok))
+			}))
+			defer ti.stop()
+
+			resp := doPost(ti.addr, fmt.Sprintf(
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":%d,"min_tokens":%d}`,
+				maxTokens, minTokens))
+			Expect(resp.StatusCode).To(Equal(wantStatus))
+		},
+		Entry("first chunk: min_tokens exceeds chunk budget", 17, 20, 16, http.StatusOK),
+		Entry("final chunk: remaining budget below min_tokens", 5, 50, 16, http.StatusOK),
+		Entry("min_tokens above max_tokens is rejected", 30, 20, 16, http.StatusBadRequest),
+		Entry("negative min_tokens is rejected", -1, 20, 16, http.StatusBadRequest),
+	)
+
+	It("spends the min_tokens floor across chunks and drops it once met", func() {
+		var mu sync.Mutex
+		var seen []any
+		ti := newChunkedTestSetupWithHandler(16, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]any
+			Expect(json.NewDecoder(r.Body).Decode(&req)).To(Succeed())
+			maxTok, _ := toInt(req[reqcommon.FieldMaxTokens])
+			mu.Lock()
+			seen = append(seen, req[reqcommon.FieldMinTokens])
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, chatResponse("x", finishReasonLength, 8, maxTok))
+		}))
+		defer ti.stop()
+
+		resp := doPost(ti.addr, `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":50,"min_tokens":40}`)
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(seen).To(HaveLen(4))
+		Expect(seen[0]).To(BeNumerically("==", 16))
+		Expect(seen[1]).To(BeNumerically("==", 16))
+		Expect(seen[2]).To(BeNumerically("==", 8))
+		Expect(seen[3]).To(BeNil())
 	})
 
 	Describe("non-streaming", func() {
@@ -502,6 +618,34 @@ var _ = Describe("Chunked Decode", func() {
 
 	Describe("streaming", func() {
 
+		It("ends the stream with an error event when a later chunk fails", func() {
+			errorBody := `{"error":{"message":"maximum context length exceeded","type":"BadRequestError","param":null,"code":400}}`
+			calls := 0
+			ti := newChunkedTestSetupWithHandler(5, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 1 {
+					fmt.Fprint(w, chatResponse("hello ", finishReasonLength, 5, 5))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, errorBody)
+			}))
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			body, err := io.ReadAll(resp.Body)
+			Expect(err).ToNot(HaveOccurred())
+
+			events := strings.Split(strings.TrimSuffix(string(body), "\n\n"), "\n\n")
+			Expect(events).To(HaveLen(3))
+			Expect(events[0]).To(HavePrefix(reqcommon.SSEDataPrefix))
+			Expect(events[1]).To(Equal(reqcommon.SSEDataPrefix + errorBody))
+			Expect(events[2]).To(Equal(reqcommon.SSEDone))
+		})
+
 		It("emits one SSE event per chunk and terminates with [DONE]", func() {
 			ti := newChunkedTestSetup(5, []string{
 				chatResponse("hello ", "length", 5, 5),
@@ -542,6 +686,46 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(completionTokens).To(Equal(10))
 			Expect(totalTokens).To(Equal(15))
 		})
+
+		DescribeTable("reports a finish reason only on the last chunk",
+			func(maxTokens int, decodeResponses []string, wantFinishReasons []any) {
+				ti := newChunkedTestSetup(5, decodeResponses)
+				defer ti.stop()
+
+				resp := doPost(ti.addr, fmt.Sprintf(
+					`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":%d,"stream":true}`, maxTokens))
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+				var finishReasons []any
+				scanner := bufio.NewScanner(resp.Body)
+				for scanner.Scan() {
+					data, ok := strings.CutPrefix(scanner.Text(), reqcommon.SSEDataPrefix)
+					if !ok || scanner.Text() == reqcommon.SSEDone {
+						continue
+					}
+					var event map[string]any
+					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
+					if choice := firstChoice(event); choice != nil {
+						Expect(choice).To(HaveKey(reqcommon.FieldFinishReason))
+						finishReasons = append(finishReasons, choice[reqcommon.FieldFinishReason])
+					}
+				}
+				Expect(scanner.Err()).ToNot(HaveOccurred())
+				Expect(finishReasons).To(Equal(wantFinishReasons))
+			},
+			Entry("decoder stops in a later chunk", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", "stop", 10, 3),
+			}, []any{nil, "stop"}),
+			Entry("token budget runs out", 10, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("world", finishReasonLength, 10, 5),
+			}, []any{nil, finishReasonLength}),
+			Entry("chunk produces nothing to continue from", 20, []string{
+				chatResponse("hello ", finishReasonLength, 5, 5),
+				chatResponse("", finishReasonLength, 10, 0),
+			}, []any{nil, finishReasonLength}),
+		)
 	})
 
 	Describe("helper functions", func() {

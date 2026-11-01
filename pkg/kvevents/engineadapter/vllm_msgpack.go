@@ -19,6 +19,7 @@ package engineadapter
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -39,6 +40,10 @@ const maxDecodeDepth = 64
 // Limit hash processing because only the final bytes contribute to the hash.
 const maxDecodeHashBytes = 64
 
+// errUnknownTypedEventTag is returned only after all fields of the event are
+// consumed, so a batch decoder can continue with the next event.
+var errUnknownTypedEventTag = errors.New("unknown typed event tag")
+
 type eventWireSchema struct {
 	name                 string
 	minimumBatchFields   int
@@ -47,7 +52,9 @@ type eventWireSchema struct {
 	storedFields         []eventFieldDecoder
 	removedFields        []eventFieldDecoder
 	storedEvent          func(*typedEventFields) *kvevents.BlockStoredEvent
-	unknownTagPrefix     string
+	// skipUnknownTags drops events with an unknown tag instead of rejecting the batch.
+	skipUnknownTags  bool
+	unknownTagPrefix string
 }
 
 type msgpackTypedEventBatch struct {
@@ -86,6 +93,11 @@ func (b *msgpackTypedEventBatch) DecodeMsgpack(dec *msgpack.Decoder) error {
 		b.events = make([]kvevents.GenericEvent, 0, min(eventCount, maxDecodePreallocate))
 		for range eventCount {
 			event, err := decodeTypedEventFromDecoder(dec, b.schema)
+			// Skip events with tags this adapter does not know so the rest of
+			// the batch still reaches the index.
+			if errors.Is(err, errUnknownTypedEventTag) {
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("failed to decode %s event: %w", engine, err)
 			}
@@ -170,7 +182,13 @@ func decodeArrayTypedEvent(dec *msgpack.Decoder, schema *eventWireSchema) (kveve
 		}
 		return &kvevents.AllBlocksClearedEvent{}, nil
 	default:
-		return nil, fmt.Errorf("%s: %s", schema.unknownTagPrefix, tag)
+		if !schema.skipUnknownTags {
+			return nil, fmt.Errorf("%s: %s", schema.unknownTagPrefix, tag)
+		}
+		if err := skipFields(dec, fieldCount-1); err != nil {
+			return nil, err
+		}
+		return nil, errUnknownTypedEventTag
 	}
 }
 
@@ -283,23 +301,24 @@ func decodeBlockSizeField(dec *msgpack.Decoder, fields *typedEventFields) error 
 }
 
 type typedEventFields struct {
-	tag           string
-	hasTag        bool
-	blockHashes   []uint64
-	hasHashes     bool
-	parentHash    uint64
-	tokens        []uint32
-	hasTokens     bool
-	blockSize     int
-	hasBlockSize  bool
-	loraID        *int
-	medium        string
-	loraName      *string
-	extraKeys     [][]any
-	cacheSalt     string
-	groupIdx      *int
-	specKind      kvevents.KVCacheSpecKind
-	slidingWindow *int
+	tag            string
+	hasTag         bool
+	blockHashes    []uint64
+	hasHashes      bool
+	parentHash     uint64
+	tokens         []uint32
+	lookaheadToken *uint32
+	hasTokens      bool
+	blockSize      int
+	hasBlockSize   bool
+	loraID         *int
+	medium         string
+	loraName       *string
+	extraKeys      [][]any
+	cacheSalt      string
+	groupIdx       *int
+	specKind       kvevents.KVCacheSpecKind
+	slidingWindow  *int
 }
 
 type rawTypedMapField struct {
@@ -429,7 +448,10 @@ func decodeMapTypedEvent(dec *msgpack.Decoder, schema *eventWireSchema) (kvevent
 	case eventTagAllBlocksCleared:
 		return &kvevents.AllBlocksClearedEvent{}, nil
 	default:
-		return nil, fmt.Errorf("%s: %s", schema.unknownTagPrefix, fields.tag)
+		if !schema.skipUnknownTags {
+			return nil, fmt.Errorf("%s: %s", schema.unknownTagPrefix, fields.tag)
+		}
+		return nil, errUnknownTypedEventTag
 	}
 }
 
@@ -602,28 +624,11 @@ func decodeTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
 
 	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
 	for i := range count {
-		code, err := dec.PeekCode()
+		token, err := decodeTokenID(dec)
 		if err != nil {
 			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		if !isIntegerCode(code) {
-			return nil, fmt.Errorf("token_ids[%d]: unsupported numeric type: MessagePack code %#x", i, code)
-		}
-		var value uint64
-		if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
-			signed, decodeErr := dec.DecodeInt64()
-			err = decodeErr
-			if signed > 0 {
-				value = uint64(signed)
-			}
-		} else {
-			value, err = dec.DecodeUint64()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
-		}
-		value = min(value, uint64(math.MaxUint32))
-		tokens = append(tokens, uint32(value))
+		tokens = append(tokens, token)
 	}
 	return tokens, nil
 }
@@ -975,10 +980,4 @@ func discardBytes(dec *msgpack.Decoder, length int) error {
 		length -= chunk
 	}
 	return nil
-}
-
-func isIntegerCode(code byte) bool {
-	return msgpcode.IsFixedNum(code) || code == msgpcode.Uint8 || code == msgpcode.Uint16 ||
-		code == msgpcode.Uint32 || code == msgpcode.Uint64 || code == msgpcode.Int8 ||
-		code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
 }

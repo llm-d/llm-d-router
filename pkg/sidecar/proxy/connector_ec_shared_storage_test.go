@@ -697,7 +697,7 @@ func TestMMItemsForFanoutLogsRequestID(t *testing.T) {
 		logged = append(logged, args)
 	}, funcr.Options{Verbosity: logging.DEBUG})
 
-	srv.mmItemsForFanout(parsed, "req-42", reqcommon.APITypeResponses)
+	srv.mmItemsForFanout(log.IntoContext(context.Background(), srv.logger), parsed, "req-42", reqcommon.APITypeResponses)
 
 	idx := slices.IndexFunc(logged, func(e string) bool {
 		return strings.Contains(e, "skipped multimodal content parts")

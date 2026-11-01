@@ -2346,3 +2346,42 @@ func TestForceStream_PrefillCachedTokens(t *testing.T) {
 	require.EqualValues(t, prefillCached, details["cached_tokens"], "the forced reply reports the prefill cache-hit count")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 }
+
+// TestForceStream_PromptTokenParity covers the prompt token parity check on a
+// forced reply. The forced reply is written through the decode response writer,
+// so a decode prompt count that differs from the rendered token count is counted
+// the same as on the pass-through.
+func TestForceStream_PromptTokenParity(t *testing.T) {
+	frames := []string{
+		`{"id":"c","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"c","model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`,
+	}
+	server := sseServer(t, frames, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-forced-parity",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "m",
+		Stream:           false,
+		TokenIDs:         []int{1, 2, 3},
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+	require.InDelta(t, 1.0, counterValue(t, reg, parityMetric, map[string]string{"api_type": "chat_completions"}), 1e-9,
+		"the forced reply's 5 prompt tokens differ from the 3 rendered")
+	var got map[string]any
+	respBody, _ := io.ReadAll(recorder.Result().Body)
+	require.NoError(t, json.Unmarshal(respBody, &got))
+	require.EqualValues(t, 5, got["usage"].(map[string]any)["prompt_tokens"], "the check does not change the reply")
+}

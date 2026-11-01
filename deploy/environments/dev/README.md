@@ -69,7 +69,7 @@ Variables substituted at deploy time via `envsubst` or Go test `substituteMany`:
 | `VLLM_SIM_MODE` | Simulator response mode: `echo` (returns input) or `random` (random sentences) | `echo` |
 | `VLLM_IMAGE` | vLLM container image (simulator or real) | `ghcr.io/llm-d/llm-d-inference-sim:v1.0.0` |
 | `SIDECAR_IMAGE` | Routing sidecar image | `ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev` |
-| `VLLM_RENDER_IMAGE` | vLLM render sidecar image | `vllm/vllm-openai-cpu:v0.21.0` |
+| `VLLM_RENDER_IMAGE` | vLLM render sidecar image | `vllm/vllm-openai-cpu:v0.31.0` |
 | `VLLM_RENDER_PORT` | Port the vllm-render Service listens on | `8082` |
 | `VLLM_RENDER_URL` | URL of the vllm-render Service used by decode/encode/prefill pods | `http://vllm-render:${VLLM_RENDER_PORT}` |
 | `VLLM_RENDER_MAX_MODEL_LEN` | Maximum tokenized request length accepted by the render service | `131072` |

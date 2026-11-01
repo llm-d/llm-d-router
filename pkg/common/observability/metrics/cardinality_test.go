@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func TestBoundedLabel(t *testing.T) {
@@ -68,4 +70,93 @@ func TestBoundedLabelConcurrentAdmissionsUnderCap(t *testing.T) {
 	for i, g := range got {
 		require.Equal(t, fmt.Sprintf("m%d", i), g)
 	}
+}
+
+// Overflow is reported only when the cap folds a value. A client sending the literal overflow
+// value takes a slot like any other ID while the cap has room, and is folded once it is full.
+func TestBoundedLabelBoundWithOverflow(t *testing.T) {
+	type step struct {
+		in       string
+		want     string
+		overflow bool
+	}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{name: "literal overflow value under the cap", steps: []step{
+			{in: "", want: ""},
+			{in: OverflowValue, want: OverflowValue},
+			{in: "a", want: "a"},
+			{in: "b", want: OverflowValue, overflow: true},
+			{in: "a", want: "a"},
+			{in: OverflowValue, want: OverflowValue},
+			{in: "pinned", want: "pinned"},
+		}},
+		{name: "literal overflow value after the cap fills", steps: []step{
+			{in: "a", want: "a"},
+			{in: "b", want: "b"},
+			{in: OverflowValue, want: OverflowValue, overflow: true},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			b := NewBoundedLabel(2)
+			b.Pin("pinned")
+			for _, s := range test.steps {
+				got, overflow := b.BoundWithOverflow(s.in)
+				require.Equal(t, s.want, got, "value %q", s.in)
+				require.Equal(t, s.overflow, overflow, "overflow for %q", s.in)
+			}
+		})
+	}
+}
+
+// Racing admissions near a full cap must report exactly one overflow per folded value, or the
+// overflow counter drifts from the series it describes.
+func TestBoundedLabelBoundWithOverflowConcurrent(t *testing.T) {
+	const n = 500
+	b := NewBoundedLabel(1)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	folded, overflows := 0, 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			got, overflow := b.BoundWithOverflow(fmt.Sprintf("m%d", i))
+			mu.Lock()
+			defer mu.Unlock()
+			if got == OverflowValue {
+				folded++
+			}
+			if overflow {
+				overflows++
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	require.Equal(t, n-1, folded)
+	require.Equal(t, n-1, overflows)
+}
+
+// The fallback fairness ID stays visible once client IDs fill the cap, unless the
+// operator disabled per-ID labels with a cap of 0.
+func TestFairnessIDLimitPinsDefaultFlow(t *testing.T) {
+	t.Cleanup(func() { SetFairnessIDLabelLimit(DefaultFairnessIDLabelLimit) })
+
+	SetFairnessIDLabelLimit(1)
+	require.Equal(t, "team-a", BoundFairnessID("team-a"))
+	got, overflow := BoundFairnessIDWithOverflow("team-b")
+	require.Equal(t, OverflowValue, got)
+	require.True(t, overflow)
+	got, overflow = BoundFairnessIDWithOverflow(request.DefaultFairnessID)
+	require.Equal(t, request.DefaultFairnessID, got)
+	require.False(t, overflow)
+
+	SetFairnessIDLabelLimit(0)
+	require.Equal(t, OverflowValue, BoundFairnessID(request.DefaultFairnessID))
 }

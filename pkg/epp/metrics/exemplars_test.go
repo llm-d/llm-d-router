@@ -169,6 +169,42 @@ func TestLatencyRecordersAttachTraceExemplars(t *testing.T) {
 	}
 }
 
+// errorCounter returns the request_error_total series RecordRequestErrCounter
+// writes for the arguments used below.
+func errorCounter(t *testing.T) *dto.Counter {
+	t.Helper()
+	m, err := llmdRequestErrCounter.GetMetricWithLabelValues("m", "t", "f", "1", reqcommon.APITypeMessages.String(), "502")
+	require.NoError(t, err)
+	var metric dto.Metric
+	require.NoError(t, m.Write(&metric))
+	return metric.GetCounter()
+}
+
+func TestRequestErrCounterAttachesTraceExemplar(t *testing.T) {
+	t.Run("sampled", func(t *testing.T) {
+		Reset()
+		ctx, span := ctxWithRecordingSpan(t)
+		defer span.End()
+		RecordRequestErrCounter(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", "502")
+
+		counter := errorCounter(t)
+		require.InDelta(t, 1, counter.GetValue(), 1e-9)
+		require.NotNil(t, counter.GetExemplar(), "an error on a sampled request must link to its trace")
+		labels := exemplarLabels(counter.GetExemplar())
+		require.Equal(t, span.SpanContext().TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+		require.Equal(t, span.SpanContext().SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+	})
+
+	t.Run("unsampled", func(t *testing.T) {
+		Reset()
+		RecordRequestErrCounter(ctxWithSpan(t, false), "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", "502")
+
+		counter := errorCounter(t)
+		require.Nil(t, counter.GetExemplar())
+		require.InDelta(t, 1, counter.GetValue(), 1e-9, "the error must still be counted")
+	})
+}
+
 // BenchmarkRecordInterTokenLatency measures the exemplar cost on the ITL path,
 // which records once per streaming chunk.
 func BenchmarkRecordInterTokenLatency(b *testing.B) {

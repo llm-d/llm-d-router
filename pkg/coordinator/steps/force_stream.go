@@ -291,7 +291,7 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 // does not overwrite it. The fallback sentinels (ceiling, oversize, lossy-frame,
 // unreadable, truncated) instead return so decode runs the pass-through, which can
 // still serve the request or preserve a field the fold would drop.
-func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, reserved int64) error {
+func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, reserved int64, parity *parityCheck) error {
 	defer s.budget.release(reserved)
 
 	bodyBytes, headers, err := buildForceStreamRequest(reqCtx, shape)
@@ -358,7 +358,8 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		return fmt.Errorf("%s: %w", DecodeStepName, err)
 	}
 
-	writer, finalize := s.responseWriter(reqCtx)
+	// The client asked for a non-streaming reply, so no include_usage was injected.
+	writer, finalize := s.responseWriter(reqCtx, parity, false)
 	return writeForcedResponse(logger, reqCtx, writer, finalize, reassembler)
 }
 
@@ -465,7 +466,7 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 		if existing, ok := body[reqcommon.FieldStreamOptions].(map[string]any); ok {
 			maps.Copy(opts, existing)
 		}
-		opts["include_usage"] = true
+		opts[fieldIncludeUsage] = true
 		body[reqcommon.FieldStreamOptions] = opts
 	}
 	return body

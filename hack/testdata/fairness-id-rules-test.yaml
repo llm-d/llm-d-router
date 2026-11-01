@@ -1,0 +1,108 @@
+rule_files: [../../docs/rules/fairness-id-rules.yaml]
+evaluation_interval: 1m
+tests:
+  # Case set 1: normal pool behaviour
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="team-a",source="header"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a2",fairness_id="team-b",source="header"}'
+        values: '_ _ _ _ _ _ _ 1 2 2 2'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="team-c",source="header"}'
+        values: '_ _ _ _ _ _ _ _ 1 1 1'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a2",fairness_id="team-c",source="header"}'
+        values: '_ _ _ _ _ _ 1 3 3 3 3'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="team-d",source="header"}'
+        values: '4x10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a3",fairness_id="team-e",source="header"}'
+        values: '9 9 9 9 9 9 9 1 1 1 1'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="team-f",source="header"}'
+        values: '_ _ _ _ _ _ _ _ _ 1 1'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="sess-1",source="agent_identity"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="other",source="agent_identity"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="default-flow",source="default"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a2",fairness_id="other",source="header"}'
+        values: '_ _ _ _ _ _ _ _ 1 2 3'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",inference_pool="pool-a",pod="a1",source="header"}'
+        values: '0x10'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",inference_pool="pool-a",pod="a2",source="header"}'
+        values: '_ _ _ _ _ _ _ 0 1 2 3'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-b",pod="b1",fairness_id="team-z",source="header"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",inference_pool="pool-b",pod="b1",source="header"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'llm_d:epp_named_fairness_ids:count5m{inference_pool="pool-a"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:count5m{namespace="ns",inference_pool="pool-a"}'
+            value: 5
+      - expr: 'llm_d:epp_named_fairness_ids:count5m{inference_pool="pool-b"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:count5m{namespace="ns",inference_pool="pool-b"}'
+            value: 1
+      - expr: 'llm_d:epp_named_fairness_ids:incomplete5m{inference_pool="pool-a"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:incomplete5m{namespace="ns",inference_pool="pool-a"}'
+            value: 1
+      - expr: 'llm_d:epp_named_fairness_ids:incomplete5m{inference_pool="pool-b"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:incomplete5m{namespace="ns",inference_pool="pool-b"}'
+            value: 0
+      - expr: 'llm_d:epp_agent_sessions:count5m'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_agent_sessions:count5m{namespace="ns",inference_pool="pool-a"}'
+            value: 1
+  # Edge A: burst on a replica deleted before eval -> counted
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a9",fairness_id="g1",source="header"}'
+        values: '_ _ _ _ _ _ _ 2 2 stale'
+    promql_expr_test:
+      - expr: 'llm_d:epp_named_fairness_ids:count5m'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:count5m{namespace="ns",inference_pool="pool-a"}'
+            value: 1
+  # Edge B: idle ID, failed scrape exactly at T-W -> not counted
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="g2",source="header"}'
+        values: '7 7 7 7 7 stale 7 7 7 7 7'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="g3",source="header"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
+    promql_expr_test:
+      - expr: 'llm_d:epp_named_fairness_ids:count5m'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:count5m{namespace="ns",inference_pool="pool-a"}'
+            value: 1
+  # Edge C: one overflow, pre-created series -> incomplete
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",inference_pool="pool-a",pod="a1",source="header"}'
+        values: '0 0 0 0 0 0 0 1 1 1 1'
+    promql_expr_test:
+      - expr: 'llm_d:epp_named_fairness_ids:incomplete5m'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:incomplete5m{namespace="ns",inference_pool="pool-a"}'
+            value: 1
+  # Edge D: no overflow, pre-created series -> complete (0)
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",inference_pool="pool-a",pod="a1",source="header"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: 'llm_d:epp_named_fairness_ids:incomplete5m'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'llm_d:epp_named_fairness_ids:incomplete5m{namespace="ns",inference_pool="pool-a"}'
+            value: 0

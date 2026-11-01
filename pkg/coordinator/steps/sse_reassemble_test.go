@@ -18,6 +18,8 @@ package steps
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -116,6 +118,30 @@ func TestSSEReassemble_IgnoresMalformedFrameParts(t *testing.T) {
 	require.Len(t, choices, 1)
 	msg := choices[0].(map[string]any)["message"].(map[string]any)
 	require.Equal(t, "hi", msg["content"])
+}
+
+// TestSSEReassemble_UsageChargedToCeiling verifies the retained usage block counts
+// toward bufferedBytes, so a stream of usage-only frames each adding a new field
+// trips the per-request ceiling instead of growing the heap past the reservation.
+// A field that repeats is charged once, so the trailing usage frame of a
+// well-behaved stream costs only its own size.
+func TestSSEReassemble_UsageChargedToCeiling(t *testing.T) {
+	r := newSSEReassembler(sseShapeChat, 0)
+	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5}}`))
+	first := r.bufferedBytes()
+	require.Positive(t, first, "a retained usage field is charged")
+	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5}}`))
+	require.Equal(t, first, r.bufferedBytes(), "a repeated field is not charged twice")
+	r.add(frame(t, `{"choices":[],"usage":{"completion_tokens":2}}`))
+	require.Greater(t, r.bufferedBytes(), first, "a new field is charged")
+
+	var sb strings.Builder
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&sb, "data: {\"choices\":[],\"usage\":{\"field_%04d\":\"%s\"}}\n\n", i, strings.Repeat("x", 64))
+	}
+	sb.WriteString("data: [DONE]\n\n")
+	err := scanForcedResponse(strings.NewReader(sb.String()), newSSEReassembler(sseShapeChat, 1), 4096, 0)
+	require.ErrorIs(t, err, errForceStreamCeiling, "usage-only frames past the reservation trip the ceiling")
 }
 
 // TestSSEReassemble_MergesUsageAcrossFrames verifies usage folds field by field
@@ -399,7 +425,8 @@ func TestSSEReassemble_Messages(t *testing.T) {
 	r.add(frame(t, `{"type":"message_stop"}`))
 
 	require.True(t, r.terminated())
-	require.EqualValues(t, len("Hello world"), r.bufferedBytes())
+	// The text plus the two retained usage fields, input_tokens charged once.
+	require.EqualValues(t, len("Hello world")+len(`input_tokens`+`25`)+len(`output_tokens`+`2`), r.bufferedBytes())
 
 	got := r.result()
 	require.Equal(t, "msg_1", got["id"])

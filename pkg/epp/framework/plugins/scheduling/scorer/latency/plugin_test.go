@@ -19,6 +19,8 @@ package latency
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -332,3 +334,64 @@ func TestScoreConstantHeadroomPreservesDisabledWeights(t *testing.T) {
 
 // Note: EpsilonExploreNeg (tier selection) is now handled by the
 // slo-headroom-tier-filter, not the scorer. See filter tests.
+
+func TestScoreHeadroomWithinUnitInterval(t *testing.T) {
+	for _, strategy := range []HeadroomSelectionStrategy{StrategyLeast, StrategyMost} {
+		t.Run(string(strategy), func(t *testing.T) {
+			cfg := DefaultConfig
+			cfg.TTFTWeight, cfg.TPOTWeight = 1, 0
+			cfg.HeadroomSelectionStrategy = strategy
+			scorer := NewPlugin(cfg)
+
+			// The best endpoint and one 0.005 behind it on the normalized headroom.
+			ttft := []float64{10, 10.5, 110}
+			if strategy == StrategyMost {
+				ttft = []float64{110, 109.5, 10}
+			}
+			endpoints := make([]fwksched.Endpoint, len(ttft))
+			for i, headroom := range ttft {
+				endpoints[i] = makeLatencyScorerEndpoint(string(rune('a'+i)), 0.5, 0, 1)
+				setLatencyPrediction(endpoints[i], true, true, headroom, 5, 0, 0)
+			}
+			scores := scorer.Score(context.Background(), nil, endpoints)
+
+			for _, ep := range endpoints {
+				if s := scores[ep]; s < 0 || s > 1 {
+					t.Errorf("score of %s = %f, want it in [0, 1]", ep.GetMetadata().ID.Name, s)
+				}
+			}
+			if best, next := scores[endpoints[0]], scores[endpoints[1]]; best <= next {
+				t.Errorf("best endpoint should outscore the runner-up: best=%f, runner-up=%f", best, next)
+			}
+		})
+	}
+}
+
+func TestFactoryValidatesConfig(t *testing.T) {
+	valid := []string{
+		`{}`,
+		`{"headroomSelectionStrategy": "most"}`,
+		`{"headroomSelectionStrategy": "least", "ttftWeight": 1, "tpotWeight": 0}`,
+		`{"compositeKVWeight": 0, "compositeQueueWeight": 2, "compositePrefixWeight": 0}`,
+	}
+	for _, raw := range valid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err != nil {
+			t.Errorf("Factory(%s) returned error %v, want nil", raw, err)
+		}
+	}
+
+	invalid := []string{
+		`{"headroomSelectionStrategy": "Most"}`,
+		`{"headroomSelectionStrategy": "fastest"}`,
+		`{"ttftWeight": -1}`,
+		`{"tpotWeight": -0.5}`,
+		`{"compositeKVWeight": -1}`,
+		`{"compositeQueueWeight": -1}`,
+		`{"compositePrefixWeight": -1}`,
+	}
+	for _, raw := range invalid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err == nil {
+			t.Errorf("Factory(%s) returned nil error, want an invalid-parameter error", raw)
+		}
+	}
+}

@@ -17,6 +17,7 @@ limitations under the License.
 package steps
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -441,22 +442,44 @@ func deltaHasUnfoldableField(delta map[string]any) bool {
 // coordinator routes report usage once with every field populated, in the
 // trailing include_usage frame; folding per field also tolerates a server that
 // reports halves separately without dropping either.
+//
+// Each field retained for the first time is charged to contentBytes at its
+// encoded size, so an upstream streaming usage-only frames with ever new fields
+// trips the per-request ceiling rather than growing the map past the
+// reservation. A field that repeats is not charged again: a stream that reports
+// usage on every chunk keeps a fixed set of keys.
 func (r *sseReassembler) mergeUsage(usage map[string]any) {
 	if r.usage == nil {
 		r.usage = map[string]any{}
 	}
 	for k, v := range usage {
-		if v != nil {
-			r.usage[k] = v
+		if v == nil {
+			continue
 		}
+		if _, seen := r.usage[k]; !seen {
+			r.contentBytes += int64(len(k)) + encodedSize(v)
+		}
+		r.usage[k] = v
 	}
 }
 
+// encodedSize returns the JSON-encoded size of a decoded value. A value that
+// cannot be marshalled is charged its fixed envelope share, which keeps the
+// accounting conservative without failing the fold.
+func encodedSize(v any) int64 {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return forceStreamPerChoiceOverheadBytes
+	}
+	return int64(len(b))
+}
+
 // bufferedBytes is the running size estimate the per-request ceiling bounds: the
-// decoded text held so far for the chat, text, and responses shapes, and the
+// decoded text held so far for the chat, text, and responses shapes, the
 // per-token estimate (len(ids) * forceStreamBytesPerToken) for the generate
-// shape. The envelope the final marshal adds is covered by the reservation's
-// fixed overhead, so it is not counted here.
+// shape, and the retained usage fields (see mergeUsage). The envelope the final
+// marshal adds is covered by the reservation's fixed overhead, so it is not
+// counted here.
 func (r *sseReassembler) bufferedBytes() int64 {
 	return r.contentBytes
 }

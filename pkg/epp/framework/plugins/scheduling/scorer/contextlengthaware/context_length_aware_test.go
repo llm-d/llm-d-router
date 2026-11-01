@@ -587,3 +587,22 @@ func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().ID.Name)
 }
+
+func TestAcceleratorRangeUsesConfiguredLabel(t *testing.T) {
+	const label = "llm-d.ai/accelerator-capability-range"
+	created, err := Factory("accelerator-router", fwkplugin.StrictDecoder([]byte(
+		`{"label":"llm-d.ai/accelerator-capability-range","enableFiltering":true}`)), nil)
+	require.NoError(t, err)
+	configured := created.(*ContextLengthAware)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Name: "small"}, "10.0.0.1", map[string]string{label: "0-100", DefaultContextLengthLabel: "101-200"}),
+		createEndpoint(k8stypes.NamespacedName{Name: "large"}, "10.0.0.2", map[string]string{label: "101-200", DefaultContextLengthLabel: "0-100"}),
+		createEndpoint(k8stypes.NamespacedName{Name: "unlabeled"}, "10.0.0.3", nil),
+	}
+	request := createHundredTokenRequest()
+	ctx := logr.NewContext(t.Context(), logr.Discard())
+	assert.Equal(t, []scheduling.Endpoint{endpoints[0], endpoints[2]}, configured.Filter(ctx, request, endpoints))
+	scores := configured.Score(ctx, request, endpoints)
+	assert.Greater(t, scores[endpoints[0]], scores[endpoints[1]])
+	assert.Equal(t, 0.5, scores[endpoints[2]])
+}

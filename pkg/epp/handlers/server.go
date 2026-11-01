@@ -178,6 +178,8 @@ type RequestContext struct {
 	responseComplete           bool
 	responseStatusCode         string
 	requestRunning             bool
+	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
+	bodyReceived bool
 
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
@@ -368,6 +370,50 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 	return ""
 }
 
+// Values of the outcome label on llm_d_epp_request_outcome_total.
+const (
+	outcomeCompleted = "completed"
+	outcomeRejected  = "rejected"
+	outcomeEvicted   = "evicted"
+	outcomeCancelled = "cancelled"
+	outcomeFailed    = "failed"
+)
+
+// requestOutcome reports how a request ended. ok is false when the EPP did not
+// see the ending: no body was received, or the route skipped response processing.
+// A request dropped before dispatch carries a rejected-* reason header, so its
+// reason label matches what the client received.
+func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason string, ok bool) {
+	if !reqCtx.bodyReceived || reqCtx.requestState == requestResponseProcessingSkipped {
+		return "", "", false
+	}
+	switch {
+	case reqCtx.requestState == requestEvicted:
+		return outcomeEvicted, string(reqCtx.requestDroppedReason), true
+	case err != nil:
+		if e, isErr := err.(errcommon.Error); isErr {
+			if dropped := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; dropped != "" {
+				if dropped == string(errcommon.RequestDroppedReasonContextCancelled) {
+					return outcomeCancelled, dropped, true
+				}
+				return outcomeRejected, dropped, true
+			}
+		}
+		return outcomeFailed, errcommon.CanonicalCode(err), true
+	case reqCtx.responseStatusCode != "":
+		return outcomeFailed, reqCtx.responseStatusCode, true
+	case reqCtx.responseComplete:
+		if reqCtx.TerminationCause == fwkrc.TerminationCauseError {
+			return outcomeFailed, errcommon.ModelServerError, true
+		}
+		return outcomeCompleted, "", true
+	case ctxErr != nil:
+		return outcomeCancelled, "", true
+	default:
+		return outcomeFailed, errcommon.Unknown, true
+	}
+}
+
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	if reqCtx == nil {
 		return reqcommon.DefaultFairnessID, "0"
@@ -378,6 +424,13 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	}
 	priority := strconv.Itoa(reqCtx.Priority)
 	return fairnessID, priority
+}
+
+func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+		s.bufferPool.Put(buf)
+	}
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -439,13 +492,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 	}()
 
-	buf := s.bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
+	var buf *bytes.Buffer
 	defer func() {
-		buf.Reset()
-		// Return to pool if capacity is within limits.
-		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
-			s.bufferPool.Put(buf)
+		if buf != nil {
+			s.putBuffer(buf)
 		}
 	}()
 	var respBody []byte
@@ -488,9 +538,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		if reqCtx.responseStatusCode != "" {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
 		} else if err != nil {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
+		}
+		if outcome, reason, ok := requestOutcome(reqCtx, err, ctx.Err()); ok {
+			metrics.RecordRequestOutcome(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, outcome, reason)
 		}
 		if span != nil {
 			if err != nil {
@@ -588,6 +641,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+			if buf == nil {
+				buf = s.bufferPool.Get().(*bytes.Buffer)
+				buf.Reset()
+			}
 			// In the stream case, we can receive multiple request bodies.
 			buf.Write(v.RequestBody.Body)
 
@@ -603,6 +660,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				// Body stream complete. Capture raw size for flow control.
 				reqCtx.RequestSize = buf.Len()
+				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
 				if resolveErr != nil {
@@ -679,7 +737,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 						span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
 					}
 				}
-				buf.Reset()
+				// The response phase can last for the whole generation, so return
+				// the buffer here unless the tool-calling snapshot in ctx still
+				// references its bytes.
+				if hasInboundToolSnapshot {
+					buf.Reset()
+				} else {
+					s.putBuffer(buf)
+					buf = nil
+				}
 
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
@@ -713,16 +779,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
-			// The traceEnabled guard is intentional: passing arguments to a disabled
-			// logger still boxes them into a heap-allocated slice, and this loop runs
-			// per header. string(header.RawValue) in the status comparison does not
-			// allocate; the content-type check runs at most once per response.
+			// Skip building trace-log args per header when tracing is off.
 			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				if traceEnabled {
-					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
+					loggerTrace.Info("header", "key", header.Key, "value", envoy.GetHeaderValue(header))
 				}
-				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && string(header.RawValue) != "200" {
+				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && envoy.GetHeaderValue(header) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType {
 					if !isEventStream(envoy.GetHeaderValue(header)) {
