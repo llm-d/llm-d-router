@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -15,6 +16,25 @@ import yaml
 
 # Global flag to stop the metric monitoring thread
 stop_monitoring = False
+
+EPP_LOG_VERBOSITY = 4
+RUN_RECORD_SCHEMA_VERSION = 2
+# A target's setup keys are the runner's argument names and types, so a target supplies those arguments.
+TARGET_SETUP_TYPES = {
+    "router_config": str,
+    "perf_job": str,
+    "sim_deploy": str,
+    "sim_svc": str,
+    "sim_replicas": int,
+    "epp_replicas": int,
+    "epp_cpu": str,
+    "epp_memory": str,
+    "router_machine_family": str,
+    "epp_log_verbosity": int,
+}
+TARGET_FILE_KEYS = ("router_config", "perf_job", "sim_deploy", "sim_svc")
+DIGEST_FILE_KEYS = tuple(key for key in TARGET_FILE_KEYS if key != "router_config")
+TARGET_SECTIONS = ("setup", "trend")
 
 def run_cmd(cmd, check=True, capture_output=True, text=True):
     print(f"Running: {cmd}")
@@ -109,7 +129,7 @@ def double_memory(mem_str):
     val = int(mem_str)
     return str(val * 2)
 
-def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1, epp_cpu_limit=None):
+def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", epp_memory="4Gi", machine_family=None, epp_replicas=1, epp_cpu_limit=None, log_verbosity=EPP_LOG_VERBOSITY):
     print(f"Deploying EPP standalone using Helm chart from: {chart_path} (version: {chart_version})")
     
     if not os.path.exists(router_config_path):
@@ -161,7 +181,7 @@ def deploy_epp(ns, chart_path, chart_version, router_config_path, epp_cpu="2", e
                     "tag": epp_tag
                 },
                 "flags": {
-                    "v": 4,
+                    "v": log_verbosity,
                     "enable-pprof": "true",
                     "tracing": str(tracing).lower()
                 },
@@ -272,6 +292,20 @@ def get_container_images(ns, pod_name):
     )
     return res.stdout.strip().split()
 
+def get_container_image_ids(ns, pod_name):
+    res = run_cmd(
+        f"kubectl get pod {pod_name} -n {ns} -o jsonpath='{{range .status.containerStatuses[*]}}{{.name}}={{.imageID}}{{\"\\n\"}}{{end}}'"
+    )
+    return parse_container_image_ids(res.stdout)
+
+def parse_container_image_ids(output):
+    image_ids = {}
+    for line in output.strip().split('\n'):
+        name, sep, image_id = line.partition('=')
+        if sep and name:
+            image_ids[name] = image_id
+    return image_ids
+
 def sample_resources(ns, target, is_label=False):
     # Output of: kubectl top pod <pod> -n <ns> --containers --no-headers
     # Format: <pod>  <container>  <cpu>  <memory>
@@ -316,6 +350,18 @@ def sample_resources(ns, target, is_label=False):
     metrics['TOTAL'] = {'cpu': total_cpu, 'mem': total_mem}
     return metrics
 
+def average_idle_samples(idle_samples):
+    # kubectl top can omit a container from a sample, so containers come from every sample, not the first.
+    idle_metrics = {}
+    for container in set().union(*idle_samples):
+        cpus = [s[container]['cpu'] for s in idle_samples if container in s]
+        mems = [s[container]['mem'] for s in idle_samples if container in s]
+        idle_metrics[container] = {
+            'cpu': int(sum(cpus)/len(cpus)),
+            'mem': int(sum(mems)/len(mems))
+        }
+    return idle_metrics
+
 def monitor_resources_loop(ns, target, interval, peak_metrics, is_label=False):
     global stop_monitoring
     print("Starting background resource monitoring...")
@@ -351,7 +397,8 @@ def scrape_scheduler_metrics(ns, pod_name):
     metrics = {
         'buckets': {},
         'sum': 0.0,
-        'count': 0
+        'count': 0,
+        'commit': None
     }
     
     try:
@@ -364,6 +411,11 @@ def scrape_scheduler_metrics(ns, pod_name):
             if not line or line.startswith('#'):
                 continue
             
+            commit = parse_epp_info_commit(line)
+            if commit is not None:
+                metrics['commit'] = commit
+                continue
+
             # Check primary name
             match = re.match(r'llm_d_epp_scheduler_e2e_duration_seconds_bucket\{le="([^"]+)"\} ([\d.e+-]+)', line)
             if not match:
@@ -396,6 +448,21 @@ def scrape_scheduler_metrics(ns, pod_name):
         pf_process.wait()
         
     return metrics
+
+def parse_epp_info_commit(line):
+    match = re.match(r'(?:llm_d_epp|llm_d_router_epp)_info\{([^}]*)\}', line)
+    if not match:
+        return None
+    commit = re.search(r'commit="([^"]*)"', match.group(1))
+    return commit.group(1) if commit else ""
+
+def calculate_mean_latency(before, after):
+    if not before or not after:
+        return 0.0
+    diff_count = after['count'] - before['count']
+    if diff_count <= 0:
+        return 0.0
+    return (after.get('sum', 0.0) - before.get('sum', 0.0)) / diff_count * 1000
 
 def interpolate_percentile(sorted_buckets, total_count, percentile):
     target_rank = percentile * total_count
@@ -566,6 +633,105 @@ def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, route
             
             f.write(f"| {run_time} | {ns} | {config_link} | {job_link} | {mf_str} | {sim_replicas} | {epp_images} | {container} | {idle_cpu} | {idle_mem} | {peak_cpu} | {peak_mem} | {p50:.2f} | {p95:.2f} | {p99:.2f} | {cpu_link} | {mem_link} | {status} |\n")
 
+def repo_relative_path(path, repo_root):
+    # Paths are compared across runs, so absolute workspace paths must not leak in.
+    absolute = os.path.abspath(path)
+    if os.path.commonpath([absolute, repo_root]) == repo_root:
+        return os.path.relpath(absolute, repo_root)
+    return path
+
+def target_id(target_path):
+    return os.path.splitext(os.path.basename(target_path))[0]
+
+def setup_value(target_path, key, value):
+    # YAML reads an unquoted 2 as an int, and the runner expects the string a flag would give it.
+    kind = TARGET_SETUP_TYPES[key]
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)) or (kind is int and not isinstance(value, int)):
+        raise ValueError(f"{target_path}: setup.{key} must be {kind.__name__}, got {value!r}")
+    return kind(value)
+
+def load_target(target_path):
+    with open(target_path) as f:
+        target = yaml.safe_load(f) or {}
+    unknown_sections = set(target) - set(TARGET_SECTIONS)
+    if unknown_sections:
+        raise ValueError(f"{target_path}: unknown sections {sorted(unknown_sections)}")
+    setup = target.get("setup") or {}
+    unknown = set(setup) - set(TARGET_SETUP_TYPES)
+    if unknown:
+        raise ValueError(f"{target_path}: unknown setup keys {sorted(unknown)}")
+    target["setup"] = {key: setup_value(target_path, key, value) for key, value in setup.items()}
+    return target
+
+def apply_target(args, target_path, repo_root):
+    for key, value in (load_target(target_path).get("setup") or {}).items():
+        if key in TARGET_FILE_KEYS:
+            value = os.path.join(repo_root, value)
+        setattr(args, key, value)
+    args.test_name = target_id(target_path)
+
+def target_setup(args, repo_root):
+    setup = {key: getattr(args, key) for key in TARGET_SETUP_TYPES}
+    for key in TARGET_FILE_KEYS:
+        setup[key] = repo_relative_path(setup[key], repo_root)
+    return setup
+
+def file_sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def target_digest(setup, repo_root):
+    # Hashing the referenced files catches edits made in place under an unchanged path.
+    files = {key: file_sha256(os.path.join(repo_root, setup[key])) for key in DIGEST_FILE_KEYS}
+    canonical = json.dumps({"setup": setup, "files": files}, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+def build_target(args, repo_root):
+    setup = target_setup(args, repo_root)
+    return {
+        'id': args.test_name,
+        'digest': target_digest(setup, repo_root),
+        'router_config_sha256': file_sha256(os.path.join(repo_root, setup['router_config'])),
+        'setup': setup,
+    }
+
+def build_run_record(test_name, started_at, ns, status, target, epp_commit, images, image_ids, idle_metrics, peak_metrics, latency):
+    containers = {}
+    for container in sorted(set(idle_metrics) | set(peak_metrics)):
+        containers[container] = {
+            'idle_cpu_m': idle_metrics.get(container, {}).get('cpu'),
+            'idle_mem_mib': idle_metrics.get(container, {}).get('mem'),
+            'peak_cpu_m': peak_metrics.get(container, {}).get('cpu'),
+            'peak_mem_mib': peak_metrics.get(container, {}).get('mem'),
+        }
+    return {
+        'schema_version': RUN_RECORD_SCHEMA_VERSION,
+        'test_name': test_name,
+        'started_at': started_at,
+        'namespace': ns,
+        'status': status,
+        'target': target,
+        'provenance': {
+            'epp_commit': epp_commit,
+            'images': images,
+            'image_ids': image_ids,
+        },
+        'containers': containers,
+        'scheduler_latency_ms': latency,
+    }
+
+def run_record_path(results_dir, test_name, started_at):
+    stamp = started_at.replace(":", "").replace("-", "")
+    return os.path.join(results_dir, "runs", test_name, f"{stamp}.json")
+
+def write_run_record(results_dir, record):
+    path = run_record_path(results_dir, record['test_name'], record['started_at'])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path
+
 
 def collect_profiles(ns, epp_pod_name, results_dir, test_name, run_time_clean, profile_results):
     os.makedirs(results_dir, exist_ok=True)
@@ -731,11 +897,17 @@ def main():
     parser.add_argument("--epp-replicas", type=int, default=1, help="Number of EPP replicas")
     parser.add_argument("--collect-pprof-profiles", action="store_true", help="Collect EPP CPU & memory pprof profiles and render them as SVGs")
     parser.add_argument("--gcs-bucket", default=None, help="Optional GCS bucket name or URI (e.g. gs://my-bucket) to sync performance results to")
+    parser.add_argument("--epp-log-verbosity", type=int, default=EPP_LOG_VERBOSITY, help="EPP log verbosity (-v)")
+    parser.add_argument("--target", default=None, help="Benchmark target manifest; its setup overrides the matching flags and its file name becomes the test name")
     args = parser.parse_args()
+    if args.target:
+        apply_target(args, args.target, repo_root)
+    target = build_target(args, repo_root)
 
 
     global stop_monitoring
     run_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ns = args.namespace if args.namespace else f"llm-d-perf-{int(time.time())}"
     
     print(f"=== EPP Benchmarking Suite Started at {run_time} ===")
@@ -745,7 +917,10 @@ def main():
     idle_metrics = {}
     peak_metrics = {}
     p50, p95, p99 = 0.0, 0.0, 0.0
+    mean_latency = 0.0
     images = []
+    image_ids = {}
+    epp_commit = None
     profile_results = {
         'cpu_pprof': None,
         'cpu_svg': None,
@@ -789,7 +964,8 @@ def main():
             epp_cpu=args.epp_cpu, 
             epp_memory=args.epp_memory, 
             machine_family=args.router_machine_family,
-            epp_replicas=args.epp_replicas
+            epp_replicas=args.epp_replicas,
+            log_verbosity=args.epp_log_verbosity
         )
 
         # Get EPP pod details
@@ -797,6 +973,7 @@ def main():
         print(f"EPP Pod name: {pod_name}")
         images = get_container_images(ns, pod_name)
         print(f"EPP Container images: {images}")
+        image_ids = get_container_image_ids(ns, pod_name)
         epp_label = f"llm-d-router-gateway={release_name}-epp"
 
         # Step 5: Measure Idle Performance
@@ -825,13 +1002,7 @@ def main():
                 backoff = min(backoff * 2, 30)
 
         if idle_samples:
-            for container in idle_samples[0].keys():
-                cpus = [s[container]['cpu'] for s in idle_samples if container in s]
-                mems = [s[container]['mem'] for s in idle_samples if container in s]
-                idle_metrics[container] = {
-                    'cpu': int(sum(cpus)/len(cpus)) if cpus else 0,
-                    'mem': int(sum(mems)/len(mems)) if mems else 0
-                }
+            idle_metrics = average_idle_samples(idle_samples)
             print(f"Idle metrics captured: {idle_metrics}")
         else:
             print("Warning: failed to capture idle metrics.")
@@ -860,7 +1031,9 @@ def main():
         # Step 8: Scrape Post-Benchmark Metrics & Compute Latency
         metrics_after = scrape_scheduler_metrics(ns, pod_name)
         p50, p95, p99 = calculate_percentiles(metrics_before, metrics_after)
-        print(f"Benchmark latencies: P50 = {p50:.2f} ms, P95 = {p95:.2f} ms, P99 = {p99:.2f} ms")
+        mean_latency = calculate_mean_latency(metrics_before, metrics_after)
+        epp_commit = (metrics_after or {}).get('commit') or (metrics_before or {}).get('commit')
+        print(f"Benchmark latencies: P50 = {p50:.2f} ms, P95 = {p95:.2f} ms, P99 = {p99:.2f} ms, mean = {mean_latency:.2f} ms")
         print(f"Peak resource usage: {peak_metrics}")
 
     except Exception as e:
@@ -904,6 +1077,11 @@ def main():
                 profile_results=profile_results
             )
             print(f"Performance results successfully written to {args.results_dir}/{args.test_name}.md")
+
+            latency = {'p50': p50, 'p95': p95, 'p99': p99, 'mean': mean_latency}
+            record = build_run_record(args.test_name, started_at, ns, status, target, epp_commit, images, image_ids, idle_metrics, peak_metrics, latency)
+            record_path = write_run_record(args.results_dir, record)
+            print(f"Run record written to {record_path}")
 
             if gcs_dest:
                 print(f"Uploading performance results to GCS bucket {gcs_dest}...")
