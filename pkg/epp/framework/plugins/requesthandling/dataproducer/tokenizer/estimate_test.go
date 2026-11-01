@@ -55,7 +55,7 @@ func hashTokens(t []uint32) uint64 {
 func TestPackBytes_KeyPreserving(t *testing.T) {
 	raw := []byte("the quick brown fox jumps over!!") // len 32, 4-byte aligned
 	require.Zero(t, len(raw)%fwkrequest.BytesPerToken, "fixture must be %d-byte aligned, got len %d", fwkrequest.BytesPerToken, len(raw))
-	tokens := packBytes(raw)
+	tokens := fwkrequest.PackBytes(raw)
 	require.Len(t, tokens, len(raw)/fwkrequest.BytesPerToken)
 	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
 }
@@ -90,7 +90,7 @@ func TestEstimateBackend_GenerateTextEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesEstimatesPromptPseudoTokens asserts an
@@ -105,7 +105,7 @@ func TestEstimateBackend_ImagesEstimatesPromptPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIncludesNegativePrompt asserts an
@@ -118,7 +118,7 @@ func TestEstimateBackend_ImagesIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt asserts a
@@ -129,7 +129,7 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
 // pngBytes encodes a width x height PNG so a captured image head carries a
@@ -169,7 +169,7 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 	assert.Equal(t, reqcommon.ModalityImage, features[0].Modality)
 	assert.Equal(t, imageTokens(128, 64), features[0].Length)
 	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
-	assert.Equal(t, len(packBytes([]byte("add a hat"))), features[0].Offset)
+	assert.Equal(t, len(fwkrequest.PackBytes([]byte("add a hat"))), features[0].Offset)
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
 }
 
@@ -189,7 +189,7 @@ func TestImagesEstimator_MultipleImagesSumTokens(t *testing.T) {
 	require.Len(t, tp.Prompts, 1)
 	features := tp.Prompts[0].MultiModalFeatures
 	require.Len(t, features, 2)
-	textTokens := len(packBytes([]byte("add a hat")))
+	textTokens := len(fwkrequest.PackBytes([]byte("add a hat")))
 	assert.Equal(t, textTokens, features[0].Offset)
 	assert.Equal(t, imageTokens(128, 64), features[0].Length)
 	assert.Equal(t, strconv.FormatUint(images[0].Hash, 16), features[0].Hash)
@@ -238,7 +238,7 @@ func TestImagesEstimator_GenerationsCarriesNoFeature(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
 	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
-	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens asserts an
@@ -251,7 +251,7 @@ func TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIncludesNegativePrompt asserts an
@@ -264,7 +264,7 @@ func TestEstimateBackend_AudioGenerateIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt
@@ -275,7 +275,7 @@ func TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt(t *tes
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechEstimatesPseudoTokens asserts TTS input text
@@ -287,7 +287,7 @@ func TestEstimateBackend_TextToSpeechEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte(input)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte(input)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructions asserts TTS
@@ -299,7 +299,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructions(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions asserts
@@ -312,7 +312,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions(t *testin
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesRefText asserts a voice-cloning
@@ -325,7 +325,7 @@ func TestEstimateBackend_TextToSpeechIncludesRefText(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText asserts
@@ -336,7 +336,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText(t *testing.T
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText asserts a
@@ -347,7 +347,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, packBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, fwkrequest.PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -418,7 +418,7 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Len(t, tp.Prompts, 1)
-			assert.Equal(t, packBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
+			assert.Equal(t, fwkrequest.PackBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
 		})
 	}
 }
@@ -1314,7 +1314,7 @@ func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
 	assert.Equal(t, reqcommon.ModalityAudio, features[0].Modality)
 	assert.Equal(t, audioTokens(1.5), features[0].Length)
 	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
-	assert.Equal(t, len(packBytes([]byte("hint"))), features[0].Offset)
+	assert.Equal(t, len(fwkrequest.PackBytes([]byte("hint"))), features[0].Offset)
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
 }
 
