@@ -70,6 +70,22 @@ func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error)
 	return result, nil
 }
 
+// ObjectField returns payload[key] as a JSON object. UnmarshalEnvelope keeps
+// object fields as json.RawMessage, so such a value is decoded with Unmarshal;
+// a caller that edits the result must store it back under key.
+func ObjectField(payload map[string]any, key string) (map[string]any, bool) {
+	switch value := payload[key].(type) {
+	case map[string]any:
+		return value, true
+	case json.RawMessage:
+		var decoded map[string]any
+		if err := Unmarshal(value, &decoded); err == nil && decoded != nil {
+			return decoded, true
+		}
+	}
+	return nil, false
+}
+
 // Unmarshal decodes one JSON value, preserves numbers as json.Number, and rejects trailing data.
 func Unmarshal(data []byte, v any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
