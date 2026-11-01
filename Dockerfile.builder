@@ -79,6 +79,21 @@ RUN GOARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/') && \
       -C /usr/local/bin "linux-${GOARCH}/helm" && \
     rm "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz" "helm-${HELM_VERSION}-linux-${GOARCH}.tar.gz.sha256sum"
 
+# Install Weaver for telemetry registry validation and generation.
+ARG WEAVER_VERSION=0.27.0
+RUN apt-get update && apt-get install -y xz-utils && apt-get clean all && \
+    case "$(uname -m)" in \
+      x86_64) PLATFORM=x86_64-unknown-linux-gnu; CHECKSUM=7e497eb48215a5240a0bf77747cf431596c468f1039d481807b1f1e096cb5ac2 ;; \
+      aarch64) PLATFORM=aarch64-unknown-linux-gnu; CHECKSUM=5bb1ebc3c5c06ee0ceac8c65243805fe819b1484cb2ca1c22d9941f53c989962 ;; \
+      *) echo "Unsupported Weaver architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    cd /tmp && \
+    curl -sSfLO "https://github.com/open-telemetry/weaver/releases/download/v${WEAVER_VERSION}/weaver-${PLATFORM}.tar.xz" && \
+    echo "${CHECKSUM}  weaver-${PLATFORM}.tar.xz" | sha256sum -c - && \
+    tar -xJf "weaver-${PLATFORM}.tar.xz" --strip-components=1 \
+      -C /usr/local/bin "weaver-${PLATFORM}/weaver" && \
+    rm "weaver-${PLATFORM}.tar.xz"
+
 # Go caches are mounted as volumes at runtime for persistence across image rebuilds.
 # Directories are created with open permissions so non-root users (docker -u) can write.
 ENV GOMODCACHE=/go/pkg/mod

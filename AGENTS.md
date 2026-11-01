@@ -14,6 +14,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 ## Working in the codebase
 
+- Add trace attributes and span names in `pkg/common/observability/semconv/registry/` and run `make update-telemetry` to generate `llm_d.go` and `spans.go`; do not edit generated files directly.
 - State your interpretation before coding. When the task has multiple valid reads, ask; don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act; the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome: "add validation" becomes "write failing tests for invalid inputs, then make them pass". Where the issue is reproducible, the failing test IS the success criterion; write it first and let it gate the implementation.
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern; follow its structure, naming, and tests rather than introducing new conventions.
