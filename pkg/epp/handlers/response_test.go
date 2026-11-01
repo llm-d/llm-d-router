@@ -1758,3 +1758,35 @@ func TestCapAppliesToWholeLine(t *testing.T) {
 		assert.Empty(t, got, "a line over the cap must be dropped")
 	})
 }
+
+func TestHandleResponseBodyCompletion(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	completionBody := []byte(`{"object":"text_completion","choices":[{"index":0,"text":"hello","finish_reason":"stop"}]}`)
+	tests := []struct {
+		name        string
+		statusCode  string
+		endOfStream bool
+		want        *fwkrh.Completion
+	}{
+		{name: "200 response", endOfStream: true, want: &fwkrh.Completion{Text: "hello", FinishReason: "stop"}},
+		{name: "error status", statusCode: errcommon.ModelServerError, endOfStream: true},
+		{name: "before end of stream"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:           &Response{},
+				SchedulingRequest:  &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+				responseStatusCode: test.statusCode,
+			}
+			server.HandleResponseBody(ctx, reqCtx, completionBody, test.endOfStream)
+			if diff := cmp.Diff(test.want, reqCtx.Completion); diff != "" {
+				t.Errorf("Completion mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

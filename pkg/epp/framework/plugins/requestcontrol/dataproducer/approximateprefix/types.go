@@ -75,6 +75,8 @@ type SchedulingContextState struct {
 	// endpoints. Taken during Produce, the only stage that sees the candidates
 	// as they were before the scheduler's filters narrowed them.
 	BestAvailableCachedTokens int
+	// BlockSize is the block size in tokens the hashes were derived at.
+	BlockSize int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
