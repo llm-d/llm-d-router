@@ -170,14 +170,17 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	bucket := p.bucket(promptTokens(request, response))
 	path := p.path(request)
 	prio := strconv.Itoa(priority)
+	// A non-streaming response's first byte arrives with the whole answer, so its TTFT is its
+	// end-to-end latency. The label keeps the two kinds apart, as llm_d_epp_request_ttft_seconds does.
+	streaming := strconv.FormatBool(response.Streaming)
 
 	result := outcome(status, response.TerminationCause)
-	latencyRequests.WithLabelValues(prio, bucket, path, result).Inc()
+	latencyRequests.WithLabelValues(prio, bucket, path, streaming, result).Inc()
 	if result != outcomeCompleted {
 		return
 	}
 	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() {
-		latencyTTFT.WithLabelValues(prio, bucket, path).Observe(response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
+		latencyTTFT.WithLabelValues(prio, bucket, path, streaming).Observe(response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
 	}
 	if tpot, ok := meanTPOT(response); ok {
 		latencyTPOT.WithLabelValues(prio, path).Observe(tpot.Seconds())

@@ -689,12 +689,13 @@ The plugin holds no targets; thresholds are applied in PromQL.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `outcome` | `outcome` is `completed`, `evicted`, `cancelled` or `failed`, mirroring [Request outcomes](#request-outcomes) for dispatched requests. `path` is `remote`, `local` or `aggregated`. |
-| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path` | TTFT of completed requests. |
+| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `streaming`, `outcome` | `outcome` is `completed`, `evicted`, `cancelled` or `failed`, mirroring [Request outcomes](#request-outcomes) for dispatched requests. `path` is `remote`, `local` or `aggregated`. |
+| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path`, `streaming` | TTFT of completed requests. For `streaming="false"`, it equals end-to-end latency. |
 | `llm_d_epp_latency_tpot_seconds` | Histogram | `priority`, `path` | Mean TPOT of completed streaming requests. |
 
 The request counter carries the same labels as the TTFT histogram, because it is the denominator
-of attainment ratios over that histogram. For outcomes by tenant or model, use
+of attainment ratios over that histogram. `streaming` has the same meaning as on
+`llm_d_epp_request_ttft_seconds`. For outcomes by tenant or model, use
 `llm_d_epp_request_outcome_total`; the plugin counts only dispatched requests, so its totals are not
 expected to match that counter's. The plugin README carries PromQL for percentiles, threshold
 fractions and failure ratios.

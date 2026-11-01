@@ -87,8 +87,8 @@ func run(p *Plugin, id string, s reqSpec) {
 	p.ResponseBody(context.Background(), req, resp, nil)
 }
 
-func count(prio, bucket, path, outcome string) float64 {
-	return promtestutil.ToFloat64(latencyRequests.WithLabelValues(prio, bucket, path, outcome))
+func count(prio, bucket, path string, streaming bool, outcome string) float64 {
+	return promtestutil.ToFloat64(latencyRequests.WithLabelValues(prio, bucket, path, strconv.FormatBool(streaming), outcome))
 }
 
 // histogram returns the sample count and sum of one histogram series.
@@ -214,9 +214,9 @@ func TestOutcomeAndPath(t *testing.T) {
 			// A distinct priority per case keeps the counter series isolated.
 			prio := 200 + i
 			tc.spec.priority = prio
-			before := count(strconv.Itoa(prio), tc.bucket, tc.path, tc.wantOutcome)
+			before := count(strconv.Itoa(prio), tc.bucket, tc.path, tc.spec.streaming, tc.wantOutcome)
 			run(p, "req-"+strconv.Itoa(prio), tc.spec)
-			assert.Equal(t, before+1, count(strconv.Itoa(prio), tc.bucket, tc.path, tc.wantOutcome))
+			assert.Equal(t, before+1, count(strconv.Itoa(prio), tc.bucket, tc.path, tc.spec.streaming, tc.wantOutcome))
 		})
 	}
 }
@@ -227,11 +227,11 @@ func TestLatencyObservations(t *testing.T) {
 	p := newTestPlugin(t, testConfig)
 
 	t.Run("streamed request records TTFT and mean TPOT", func(t *testing.T) {
-		n0, s0 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated)
+		n0, s0 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated, "true")
 		m0, u0 := histogram(t, latencyTPOT, "71", pathAggregated)
 		// 101 output tokens over 2s after the first token: TPOT = 2s / 100 = 20ms.
 		run(p, "obs-stream", reqSpec{priority: 71, prompt: 100, completion: 101, ttft: 250 * time.Millisecond, decode: 2 * time.Second, streaming: true})
-		n1, s1 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated)
+		n1, s1 := histogram(t, latencyTTFT, "71", "le1024", pathAggregated, "true")
 		m1, u1 := histogram(t, latencyTPOT, "71", pathAggregated)
 		assert.Equal(t, n0+1, n1)
 		assert.InDelta(t, 0.25, s1-s0, 1e-9)
@@ -241,25 +241,37 @@ func TestLatencyObservations(t *testing.T) {
 
 	t.Run("non-streaming request records TTFT only", func(t *testing.T) {
 		m0, _ := histogram(t, latencyTPOT, "72", pathAggregated)
-		n0, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated)
+		n0, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated, "false")
 		run(p, "obs-unary", reqSpec{priority: 72, prompt: 100, completion: 500, ttft: 300 * time.Millisecond, decode: 30 * time.Second})
 		m1, _ := histogram(t, latencyTPOT, "72", pathAggregated)
-		n1, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated)
+		n1, _ := histogram(t, latencyTTFT, "72", "le1024", pathAggregated, "false")
 		assert.Equal(t, n0+1, n1)
 		assert.Equal(t, m0, m1)
 	})
 
+	t.Run("non-streaming request stays out of the streaming series", func(t *testing.T) {
+		st0, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "true")
+		un0, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "false")
+		c0 := count("75", "le1024", pathAggregated, false, outcomeCompleted)
+		run(p, "obs-split", reqSpec{priority: 75, prompt: 100, completion: 500, ttft: 30 * time.Second})
+		st1, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "true")
+		un1, _ := histogram(t, latencyTTFT, "75", "le1024", pathAggregated, "false")
+		assert.Equal(t, st0, st1)
+		assert.Equal(t, un0+1, un1)
+		assert.Equal(t, c0+1, count("75", "le1024", pathAggregated, false, outcomeCompleted))
+	})
+
 	t.Run("failed request records no latency", func(t *testing.T) {
-		n0, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated)
+		n0, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated, "false")
 		run(p, "obs-failed", reqSpec{priority: 73, prompt: 100, ttft: 100 * time.Millisecond, status: "500"})
-		n1, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated)
+		n1, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated, "false")
 		assert.Equal(t, n0, n1)
 	})
 
 	t.Run("cancelled request records no latency", func(t *testing.T) {
-		n0, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated)
+		n0, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated, "false")
 		run(p, "obs-cancelled", reqSpec{priority: 74, prompt: 100, ttft: 100 * time.Millisecond, cause: fwkrc.TerminationCauseClientDisconnect})
-		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated)
+		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated, "false")
 		assert.Equal(t, n0, n1)
 	})
 }
@@ -267,20 +279,20 @@ func TestLatencyObservations(t *testing.T) {
 func TestPriorityFilter(t *testing.T) {
 	p := newTestPlugin(t, `{"priorities": [100]}`)
 
-	before := count("10", "all", pathAggregated, outcomeCompleted)
+	before := count("10", "all", pathAggregated, false, outcomeCompleted)
 	run(p, "req-filtered", reqSpec{priority: 10, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before, count("10", "all", pathAggregated, outcomeCompleted), "an unlisted priority is not recorded")
+	assert.Equal(t, before, count("10", "all", pathAggregated, false, outcomeCompleted), "an unlisted priority is not recorded")
 	_, held := p.statuses.Load("req-filtered")
 	assert.False(t, held, "per-request status is released at end of stream")
 
-	before = count("100", "all", pathAggregated, outcomeCompleted)
+	before = count("100", "all", pathAggregated, false, outcomeCompleted)
 	run(p, "req-listed", reqSpec{priority: 100, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("100", "all", pathAggregated, outcomeCompleted))
+	assert.Equal(t, before+1, count("100", "all", pathAggregated, false, outcomeCompleted))
 }
 
 func TestNoPriorityFilterRecordsEveryPriority(t *testing.T) {
 	p := newTestPlugin(t, testConfig)
-	before := count("-5", "le1024", pathAggregated, outcomeCompleted)
+	before := count("-5", "le1024", pathAggregated, false, outcomeCompleted)
 	run(p, "req-anyprio", reqSpec{priority: -5, prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("-5", "le1024", pathAggregated, outcomeCompleted))
+	assert.Equal(t, before+1, count("-5", "le1024", pathAggregated, false, outcomeCompleted))
 }

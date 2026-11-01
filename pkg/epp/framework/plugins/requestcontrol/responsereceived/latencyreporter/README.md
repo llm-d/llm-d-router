@@ -54,26 +54,28 @@ plugins:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `outcome` |
-| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path` |
+| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `streaming`, `outcome` |
+| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path`, `streaming` |
 | `llm_d_epp_latency_tpot_seconds` | Histogram | `priority`, `path` |
 
 The histograms record completed requests only. Their bucket bounds include common thresholds (TTFT 0.5, 1, 2, 4 s; TPOT 20, 30, 50 ms), so a threshold on a bound is exact in PromQL.
 
+`streaming` is `true` when the model server answered with an event stream, and otherwise the client's `stream` flag, as on `llm_d_epp_request_ttft_seconds`. A `streaming="false"` TTFT equals end-to-end latency, so filter on `streaming="true"` for prefill latency. TPOT records streaming requests only and carries no `streaming` label.
+
 ### PromQL
 
-p95 TTFT per prompt bucket and path:
+p95 TTFT per prompt bucket and path, for streaming requests:
 
 ```promql
-histogram_quantile(0.95, sum by (le, prompt_bucket, path) (rate(llm_d_epp_latency_ttft_seconds_bucket{priority="100"}[5m])))
+histogram_quantile(0.95, sum by (le, prompt_bucket, path) (rate(llm_d_epp_latency_ttft_seconds_bucket{priority="100",streaming="true"}[5m])))
 ```
 
-Fraction of priority-100 requests with TTFT at or under 2 s, over 30 days. The threshold is chosen here:
+Fraction of priority-100 streaming requests with TTFT at or under 2 s, over 30 days. The threshold is chosen here:
 
 ```promql
-sum(increase(llm_d_epp_latency_ttft_seconds_bucket{priority="100",le="2"}[30d]))
+sum(increase(llm_d_epp_latency_ttft_seconds_bucket{priority="100",streaming="true",le="2"}[30d]))
 /
-sum(increase(llm_d_epp_latency_ttft_seconds_count{priority="100"}[30d]))
+sum(increase(llm_d_epp_latency_ttft_seconds_count{priority="100",streaming="true"}[30d]))
 ```
 
 Failure ratio per path, counting evictions as failures:
@@ -84,11 +86,11 @@ sum by (path) (rate(llm_d_epp_latency_requests_total{outcome=~"failed|evicted"}[
 sum by (path) (rate(llm_d_epp_latency_requests_total{outcome!="cancelled"}[5m]))
 ```
 
-A request counts toward the TTFT fraction only if it completed. To score latency and failures together, divide the TTFT-under-threshold count by `llm_d_epp_latency_requests_total{outcome!="cancelled"}` instead of the histogram count. Whether a client disconnect counts against the objective is a policy choice; this query leaves it out.
+A request counts toward the TTFT fraction only if it completed. To score latency and failures together, divide the TTFT-under-threshold count by `llm_d_epp_latency_requests_total{streaming="true",outcome!="cancelled"}` instead of the histogram count. Whether a client disconnect counts against the objective is a policy choice; this query leaves it out.
 
 When the remote path is slow, split it by stage using the sidecar's `llm_d_disagg_sidecar_prefill_duration_seconds` and the KV-transfer metrics.
 
 ## Limits
 
-- For a non-streamed response the first byte arrives with the whole answer, so its TTFT equals end-to-end latency.
+- For a non-streamed response the first byte arrives with the whole answer, so its TTFT equals end-to-end latency. It is recorded under `streaming="false"`.
 - TPOT needs token counts in the response. A streaming client that doesn't set `stream_options.include_usage` reports no usage, so only TTFT is recorded.
