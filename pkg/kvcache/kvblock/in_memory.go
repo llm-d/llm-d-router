@@ -568,6 +568,15 @@ func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) 
 	return rks[len(rks)-1], nil
 }
 
+// GetRequestKeys returns every request key mapped to the given engineKey.
+func (m *InMemoryIndex) GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	rks, found := m.engineToRequestKeys.Get(engineKey)
+	if !found || len(rks) == 0 {
+		return nil, fmt.Errorf("engine key not found: %s", engineKey.String())
+	}
+	return slices.Clone(rks), nil
+}
+
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.
 func podsPerKeyPrintHelper(ks map[BlockHash][]PodEntry) string {
 	var b strings.Builder
