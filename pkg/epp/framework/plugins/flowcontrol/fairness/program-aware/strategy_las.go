@@ -190,7 +190,7 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
-	attainedServiceTokens.WithLabelValues(id).Set(service)
+	setProgramGauge(attainedServiceTokens, id, service)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {
