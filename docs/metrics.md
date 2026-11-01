@@ -1000,6 +1000,30 @@ load reported for a replacement endpoint with the same labels.
 *   **Description:** Tokens currently in flight on each endpoint — uncached prompt tokens, optionally plus estimated output tokens when the producer's `addEstimatedOutputTokens` is set.
 *   **Usage:** Per-replica token pressure, a finer load signal than request count when request sizes vary widely.
 
+### P2P KV cache pulls
+
+This metric belongs to `p2p-source-producer`. It is registered only when the producer sets
+`trackInFlightPulls: true`.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_p2p_inflight_pulls` | Gauge | `endpoint_name`, `namespace`, `producer_name` | Current pulls directed at each source endpoint. |
+
+#### `llm_d_epp_p2p_inflight_pulls`
+
+*   **Type:** Gauge
+*   **Labels:**
+    *   `endpoint_name`: the source endpoint (pod) name.
+    *   `namespace`: the source endpoint's namespace.
+    *   `producer_name`: the configured `p2p-source-producer` instance name.
+*   **Release Stage:** ALPHA
+*   **Description:** P2P KV cache pulls this EPP replica has directed at each source endpoint
+    that are still in flight. A pull counts from the request's `PreRequest` until its first
+    response chunk, or until its end of stream if the request ends without one. A source's
+    series is removed when its count returns to zero.
+*   **Usage:** Pull load per source under a shared hot prefix. Sum across EPP replicas for the
+    fleet-wide count.
+
 ### KV-cache index
 
 These metrics belong to the precise-prefix-cache pipeline. Set
