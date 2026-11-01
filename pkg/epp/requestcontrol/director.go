@@ -264,16 +264,27 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent identity when no explicit header supplied it.
+	// Derive the FairnessID from the fairness-ID header (tenant identity) and the
+	// agent-identity attribute (program/session identity). A request carrying both —
+	// production traffic stamped with a tenant fairness ID whose clients also send
+	// session headers — gets a composed ID "<tenant>/<session>": flow control keys one
+	// queue per session, and the fairness ID keeps the tenant visible for isolation
+	// and metric labels. A request carrying only one identity keys the flow on it
+	// alone, and a request carrying neither falls back to the default flow. Tenant IDs
+	// must not contain the separator (see metadata.FairnessIDTenantSeparator).
 	source := tracing.AttributionSourceHeader
-	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
-			reqCtx.SchedulingRequest.FairnessID = agentID
-			source = tracing.AttributionSourceAgentIdentity
-		} else {
-			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
-			source = tracing.AttributionSourceDefault
-		}
+	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
+	switch {
+	case reqCtx.SchedulingRequest.FairnessID != "" && agentID != "":
+		reqCtx.SchedulingRequest.FairnessID += metadata.FairnessIDTenantSeparator + agentID
+	case reqCtx.SchedulingRequest.FairnessID != "":
+		// Header-only traffic: the tenant fairness ID keys the flow on its own.
+	case agentID != "":
+		reqCtx.SchedulingRequest.FairnessID = agentID
+		source = tracing.AttributionSourceAgentIdentity
+	default:
+		reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
+		source = tracing.AttributionSourceDefault
 	}
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)

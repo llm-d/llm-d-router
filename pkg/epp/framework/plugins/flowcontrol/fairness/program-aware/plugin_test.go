@@ -126,6 +126,35 @@ func TestPick_SingleNonEmptyQueue_StashesEnqueueTime(t *testing.T) {
 	assert.Equal(t, enqueue, stashed)
 }
 
+// TestPick_ComposedFlowID_StashesEnqueueTime drives the plugin end to end with
+// a composed "<tenant>/<session>" flow ID: the ID is an opaque per-session key,
+// so per-program metrics and the enqueue-time handoff are keyed by the full ID.
+func TestPick_ComposedFlowID_StashesEnqueueTime(t *testing.T) {
+	enqueue := time.Now().Add(-100 * time.Millisecond)
+	req := &fwksched.InferenceRequest{FairnessID: "tenant-a/sess-1"}
+	item := &fwkfcmocks.MockQueueItemAccessor{
+		EnqueueTimeV:     enqueue,
+		OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{InferenceRequestV: req},
+	}
+	queue := &fwkfcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: flowcontrol.FlowKey{ID: "tenant-a/sess-1"},
+		PeekV:    item,
+	}
+	band := &fwkfcmocks.MockPriorityBandAccessor{
+		IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) { cb(queue) },
+	}
+
+	p := &ProgramAwarePlugin{}
+	got, err := p.Pick(context.Background(), band)
+	require.NoError(t, err)
+	assert.Equal(t, queue, got)
+
+	stashed, ok := fwksched.ReadRequestAttribute[time.Time](req, enqueueTimeAttributeKey)
+	require.True(t, ok)
+	assert.Equal(t, enqueue, stashed)
+}
+
 // TestPick_IdleProgramServiceDecaysWithoutVisits is the end-to-end regression for idle-service
 // freeze under the band accessor's skip-empty iteration: an idle program's queue is never visited,
 // so its decay must not depend on visits. After idling, its decayed service must let it outrank a

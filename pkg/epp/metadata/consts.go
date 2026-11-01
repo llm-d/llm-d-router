@@ -74,6 +74,14 @@ const (
 	// FlowQueueDurationHeaderKey is the response header carrying the time a request spent in flow control admission,
 	// as integer milliseconds. It is absent when flow control did not process the request.
 	FlowQueueDurationHeaderKey = "x-llm-d-flow-queue-duration-ms"
+	// FairnessIDTenantSeparator separates the tenant prefix from the program/session
+	// identity in a composed fairness ID: "<tenant>/<session>". The Director builds such
+	// IDs when a request carries both a fairness-ID header (the tenant part) and an
+	// agent-identity attribute (the session part), so the tenant prefixes the session ID
+	// instead of replacing it, and flow control keys one queue per session while the
+	// tenant stays part of flow identity and metrics. Session IDs may contain the
+	// separator; tenant IDs must not.
+	FairnessIDTenantSeparator = "/"
 )
 
 // All headerAliases keys and values must be lower case.

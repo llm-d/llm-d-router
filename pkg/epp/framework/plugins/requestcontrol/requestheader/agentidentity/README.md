@@ -3,13 +3,13 @@
 **Type:** `agent-identity`
 **Interfaces:** `requestcontrol.RequestHeaderProcessor`, `plugin.ProducerPlugin`
 
-Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then derives `FairnessID` from this attribute when no explicit fairness header is present, so every turn of an agent session lands in the same flow-control fairness queue.
+Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then uses this attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue — composed with the tenant fairness ID as `<tenant>/<session>` when the request also carries one.
 
 ## What It Does
 
 The plugin runs after request assembly and before admission control. It inspects a fixed set of agent session headers and stores the first non-empty value as a request attribute via `request.PutAttribute(AgentIdentityKey, value)`, whose serialized name is `agent-identity`.
 
-The plugin stores the identity as a request attribute only — it does not set `FairnessID`. The Director reads the `"agent-identity"` attribute and derives `FairnessID` from it when no explicit `x-llm-d-inference-fairness-id` header is present. This separation means the agent identity is available as a reliable signal to other subsystems (scheduling, KV cache control, etc.) without being conflated with flow-control identity.
+The plugin stores the identity as a request attribute only — it does not set `FairnessID`. The Director reads the `"agent-identity"` attribute when deriving `FairnessID`. This separation means the agent identity is available as a reliable signal to other subsystems (scheduling, KV cache control, etc.) without being conflated with flow-control identity.
 
 ## How It Works
 
@@ -20,10 +20,13 @@ The plugin stores the identity as a request attribute only — it does not set `
    4. `session_id` (Codex, legacy underscored fallback)
 2. If nothing matches, no attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
 
-After the plugin returns, the Director checks:
-1. If `x-llm-d-inference-fairness-id` header is set → use as FairnessID (explicit always wins).
-2. Else if `"agent-identity"` attribute exists → copy to FairnessID.
-3. Else → `"default-flow"`.
+After the plugin returns, the Director derives `FairnessID`:
+1. If both the `x-llm-d-inference-fairness-id` header and the `"agent-identity"` attribute are set → compose them as `<fairness-header>/<agent-identity>`, so flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
+2. Else if the `x-llm-d-inference-fairness-id` header is set → use it as FairnessID alone.
+3. Else if the `"agent-identity"` attribute exists → copy it to FairnessID.
+4. Else → `"default-flow"`.
+
+Tenant fairness IDs must not contain `/` (the composition separator); agent session IDs may.
 
 The plugin is stateless and safe under concurrent use.
 
