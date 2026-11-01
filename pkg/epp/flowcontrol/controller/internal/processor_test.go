@@ -926,7 +926,7 @@ func TestProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
-					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, tc.itemByteSize)
 					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
 				})
@@ -938,7 +938,7 @@ func TestProcessor(t *testing.T) {
 				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
 				}
-				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, 1)
 				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
 				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
 			})

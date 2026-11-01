@@ -18,47 +18,47 @@ package engineadapter
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/vmihailenco/msgpack/v5"
+	"github.com/vmihailenco/msgpack/v5/msgpcode"
 
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
-// Field-name order of map-encoded SGLang events, mirroring the converters'
-// positional layouts below. "type" (the tag) is not listed here: it is read
-// separately by name and placed at position 0 by hand, then these names fill
-// the remaining positions in order.
-var (
-	sglangBlockStoredFieldOrder  = []string{"block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"}
-	sglangBlockRemovedFieldOrder = []string{"block_hashes", "medium"}
-	// sglangBlockStoredOptionalFields are appended after the required positions
-	// for map-encoded events only and do not count toward the minimum length.
-	sglangBlockStoredOptionalFields = []string{"cache_salt"}
-)
-
-// SGLangAdapter implements the kvevents.EngineAdapter interface for SGLang engines.
-//
-// SGLang emits events either as positional msgpack arrays with trailing
-// defaults omitted (msgspec array_like=True) or, since
-// sgl-project/sglang#37482, as field-name maps tagged under "type". Both
-// decode into the same positional []any layout, extracted with length guards
-// instead of fixed structs, so the converters stay encoding-agnostic.
-type SGLangAdapter struct {
-	eventConverters map[string]func([]any) (kvevents.GenericEvent, error)
+var sglangWireSchema = eventWireSchema{
+	name:                 "SGLang",
+	minimumBatchFields:   3,
+	minimumStoredFields:  7,
+	minimumRemovedFields: 3,
+	storedFields:         sglangBlockStoredFieldDecoders,
+	removedFields:        sglangBlockRemovedFieldDecoders,
+	storedEvent:          (*typedEventFields).sglangBlockStoredEvent,
+	unknownTagPrefix:     "unknown event tag",
 }
 
-// NewSGLangAdapter creates a new SGLang adapter.
+// SGLangAdapter parses SGLang KV events from arrays and tagged maps.
+type SGLangAdapter struct{}
+
+var sglangBlockStoredFieldDecoders = []eventFieldDecoder{
+	{"block_hashes", decodeHashesField},
+	{"parent_block_hash", decodeParentHashField},
+	{"token_ids", decodeSGLangTokensField},
+	{"block_size", decodeBlockSizeField},
+	{"lora_id", decodeLoraID},
+	{"medium", decodeMedium},
+	{"cache_salt", decodeSGLangCacheSalt},
+	{"session_id", func(dec *msgpack.Decoder, _ *typedEventFields) error { return skipValue(dec) }},
+	{"lora_name", decodeLoraName},
+}
+
+var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{
+	{"block_hashes", decodeHashesField},
+	{"medium", decodeMedium},
+}
+
+// NewSGLangAdapter creates a SGLang adapter.
 func NewSGLangAdapter() *SGLangAdapter {
-	adapter := &SGLangAdapter{}
-
-	adapter.eventConverters = map[string]func([]any) (kvevents.GenericEvent, error){
-		eventTagBlockStored:      adapter.convertBlockStoredEvent,
-		eventTagBlockRemoved:     adapter.convertBlockRemovedEvent,
-		eventTagAllBlocksCleared: adapter.convertAllBlocksClearedEvent,
-	}
-
-	return adapter
+	return &SGLangAdapter{}
 }
 
 // ShardingKey extracts the pod-id segment from a SGLang raw message topic.
@@ -74,194 +74,104 @@ func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	podID, modelName := parseTopic(msg.Topic)
 
-	var batch msgpackEventBatch
+	batch := msgpackTypedEventBatch{schema: &sglangWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &batch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode SGLang event batch: %w", err)
 	}
-
-	genericEvents := make([]kvevents.GenericEvent, len(batch.Events))
-	for i, rawEventBytes := range batch.Events {
-		genericEvent, err := decodeEvent(rawEventBytes, sglangMapEventToFields, s.eventConverters)
-		if err != nil {
-			return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode SGLang event: %w", err)
-		}
-		genericEvents[i] = genericEvent
-	}
-
 	eventBatch := kvevents.EventBatch{
-		Timestamp:        batch.TS,
-		Events:           genericEvents,
-		DataParallelRank: batch.DataParallelRank,
+		Timestamp:        batch.timestamp,
+		Events:           batch.events,
+		DataParallelRank: batch.dataParallelRank,
 	}
 
 	return podID, modelName, eventBatch, nil
 }
 
-// sglangMapEventToFields normalizes a map-encoded SGLang event to positional []any.
-// Absent fields become nil (same as an omitted trailing array field); unknown
-// tags pass through so converter lookup reports them uniformly.
-func sglangMapEventToFields(ev map[string]any) ([]any, error) {
-	rawTag, exists := ev["type"]
-	if !exists {
-		return nil, fmt.Errorf("map-encoded event is missing the %q tag", "type")
+func decodeSGLangTokensField(dec *msgpack.Decoder, fields *typedEventFields) error {
+	tokens, lookahead, err := decodeSGLangTokenIDs(dec)
+	if err != nil {
+		return err
 	}
-	tag, ok := rawTag.(string)
-	if !ok {
-		return nil, fmt.Errorf("map-encoded event tag (%q) is not a string: %T", "type", rawTag)
-	}
-
-	var order []string
-	switch tag {
-	case eventTagBlockStored:
-		order = slices.Concat(sglangBlockStoredFieldOrder, sglangBlockStoredOptionalFields)
-	case eventTagBlockRemoved:
-		order = sglangBlockRemovedFieldOrder
-	case eventTagAllBlocksCleared:
-		// no payload fields
-	default:
-		return []any{tag}, nil
-	}
-
-	fields := make([]any, 0, len(order)+1)
-	fields = append(fields, tag)
-	for _, name := range order {
-		fields = append(fields, ev[name])
-	}
-	return fields, nil
+	fields.tokens = tokens
+	fields.lookaheadToken = lookahead
+	fields.hasTokens = true
+	return nil
 }
 
-// convertBlockStoredEvent converts a decoded []any into a BlockStoredEvent.
-// SGLang field positions (array_like=True, tag=True), also produced when
-// normalizing the tagged-map form:
-//
-//	[0] tag                string            (consumed by decodeEvent)
-//	[1] block_hashes       []hash
-//	[2] parent_block_hash  hash|nil
-//	[3] token_ids          []uint32
-//	[4] block_size         int
-//	[5] lora_id            int|nil
-//	[6] medium             string|nil
-//	[7] cache_salt         string|nil        (optional, map form only)
-//
-// session_id is attribution only and is not carried into kvevents.BlockStoredEvent.
-func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEvent, error) {
-	minFields := len(sglangBlockStoredFieldOrder) + 1 // tag included
-	if len(fields) < minFields {
-		return nil, fmt.Errorf("BlockStored event has too few fields: %d (minimum %d)", len(fields), minFields)
-	}
-
-	rawHashes, ok := fields[1].([]any)
-	if !ok {
-		return nil, fmt.Errorf("BlockStored: block_hashes is not an array: %T", fields[1])
-	}
-	blockHashes, err := convertBlockHashes(rawHashes)
+func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, *uint32, error) {
+	count, err := dec.DecodeArrayLen()
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("token_ids is not an array: %w", err)
 	}
-
-	var parentHash uint64
-	if fields[2] != nil {
-		hash, err := getHashAsUint64(fields[2])
+	if count < 0 {
+		return nil, nil, fmt.Errorf("token_ids is not an array: <nil>")
+	}
+	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
+	if count == 0 {
+		return tokens, nil, nil
+	}
+	code, err := dec.PeekCode()
+	if err != nil {
+		return nil, nil, fmt.Errorf("token_ids[0]: %w", err)
+	}
+	bigrams := msgpcode.IsFixedArray(code) || code == msgpcode.Array16 || code == msgpcode.Array32
+	var nextToken uint32
+	for i := range count {
+		if bigrams {
+			pairSize, err := dec.DecodeArrayLen()
+			if err != nil {
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
+			if pairSize != 2 {
+				return nil, nil, fmt.Errorf("token_ids[%d]: expected pair of length 2, got %d", i, pairSize)
+			}
+		}
+		token, err := decodeTokenID(dec)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse parent hash: %w", err)
+			return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		parentHash = hash
-	}
-
-	tokens, err := toUint32Slice(fields[3])
-	if err != nil {
-		return nil, fmt.Errorf("BlockStored: %w", err)
-	}
-
-	blockSize, err := toInt(fields[4])
-	if err != nil {
-		return nil, fmt.Errorf("BlockStored: block_size: %w", err)
-	}
-
-	var loraID *int
-	if raw := fieldAt(fields, 5); raw != nil {
-		id, err := toInt(raw)
-		if err != nil {
-			return nil, fmt.Errorf("BlockStored: lora_id: %w", err)
+		if bigrams {
+			if i > 0 && token != nextToken {
+				return nil, nil, fmt.Errorf("token_ids[%d]: bigram does not overlap the preceding pair", i)
+			}
+			nextToken, err = decodeTokenID(dec)
+			if err != nil {
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
 		}
-		loraID = &id
+		tokens = append(tokens, token)
 	}
-
-	var deviceTier string
-	if raw := fieldAt(fields, 6); raw != nil {
-		mediumStr, ok := raw.(string)
-		if !ok {
-			return nil, fmt.Errorf("BlockStored: medium is not a string: %T", raw)
-		}
-		deviceTier = mediumStr
+	if bigrams {
+		return tokens, &nextToken, nil
 	}
-
-	var cacheSalt string
-	switch raw := fieldAt(fields, 7).(type) {
-	case nil, map[string]any:
-	case string:
-		cacheSalt = raw
-	default:
-		return nil, fmt.Errorf("BlockStored: cache_salt is not a string: %T", raw)
-	}
-
-	// SGLang stamps the salt on every event of a salted node, but the request side
-	// folds it into the first block only (vLLM's extra_keys layout). Events with a
-	// parent inherit the salt through the parent's request key.
-	var extraKeys [][]any
-	if cacheSalt != "" && parentHash == 0 && len(blockHashes) > 0 {
-		extraKeys = make([][]any, len(blockHashes))
-		extraKeys[0] = []any{cacheSalt}
-	}
-
-	return &kvevents.BlockStoredEvent{
-		BlockHashes: blockHashes,
-		Tokens:      tokens,
-		ParentHash:  parentHash,
-		BlockSize:   blockSize,
-		DeviceTier:  deviceTier,
-		LoraID:      loraID,
-		ExtraKeys:   extraKeys,
-	}, nil
+	return tokens, nil, nil
 }
 
-// convertBlockRemovedEvent converts a decoded []any into a BlockRemovedEvent.
-// SGLang field positions:
-//
-//	[0] tag           string
-//	[1] block_hashes  []hash
-//	[2] medium        string|nil
-func (s *SGLangAdapter) convertBlockRemovedEvent(fields []any) (kvevents.GenericEvent, error) {
-	minFields := len(sglangBlockRemovedFieldOrder) + 1 // tag included
-	if len(fields) < minFields {
-		return nil, fmt.Errorf("BlockRemoved event has too few fields: %d (minimum %d)", len(fields), minFields)
-	}
-
-	rawHashes, ok := fields[1].([]any)
-	if !ok {
-		return nil, fmt.Errorf("BlockRemoved: block_hashes is not an array: %T", fields[1])
-	}
-	blockHashes, err := convertBlockHashes(rawHashes)
+func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error {
+	code, err := dec.PeekCode()
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	var deviceTier string
-	if raw := fieldAt(fields, 2); raw != nil {
-		mediumStr, ok := raw.(string)
-		if !ok {
-			return nil, fmt.Errorf("BlockRemoved: medium is not a string: %T", raw)
-		}
-		deviceTier = mediumStr
+	if msgpcode.IsFixedMap(code) || code == msgpcode.Map16 || code == msgpcode.Map32 {
+		return skipValue(dec)
 	}
-
-	return &kvevents.BlockRemovedEvent{
-		BlockHashes: blockHashes,
-		DeviceTier:  deviceTier,
-	}, nil
+	value, err := decodeOptionalString(dec)
+	if err != nil {
+		return fmt.Errorf("cache_salt is not a string: %w", err)
+	}
+	if value != nil {
+		fields.cacheSalt = *value
+	}
+	return nil
 }
 
-// convertAllBlocksClearedEvent converts a decoded []any into an AllBlocksClearedEvent.
-func (s *SGLangAdapter) convertAllBlocksClearedEvent(_ []any) (kvevents.GenericEvent, error) {
-	return &kvevents.AllBlocksClearedEvent{}, nil
+func (f *typedEventFields) sglangBlockStoredEvent() *kvevents.BlockStoredEvent {
+	event := f.blockStoredEvent()
+	event.LookaheadToken = f.lookaheadToken
+	// Child blocks inherit the salt through the parent's request key.
+	if f.cacheSalt != "" && f.parentHash == 0 && len(f.blockHashes) > 0 {
+		event.ExtraKeys = make([][]any, len(f.blockHashes))
+		event.ExtraKeys[0] = []any{f.cacheSalt}
+	}
+	return event
 }

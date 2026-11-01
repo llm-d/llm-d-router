@@ -23,6 +23,9 @@ import (
 // Internal llm-d specific attribute keys.
 // All custom router, scheduler, scorer, and sidecar attributes are namespaced under "llm_d.*".
 const (
+	// EPP API attribution
+	LLMDEPPAPISurfaceKey = attribute.Key("llm_d.epp.api_surface")
+
 	// Tool-calling request attributes
 	LLMDToolCallingAPISurfaceKey                   = attribute.Key("llm_d.tool_calling.api_surface")
 	LLMDToolCallingPresentKey                      = attribute.Key("llm_d.tool_calling.present")
@@ -60,6 +63,15 @@ const (
 	// LLMDEPPFairnessSourceKey is the branch that resolved the fairness identity.
 	// "header" is never evidence that the producer was authenticated.
 	LLMDEPPFairnessSourceKey = attribute.Key("llm_d.epp.fairness.source")
+
+	// EPP admission attributes, recorded on the request_orchestration span.
+	// LLMDEPPAdmissionDecisionKey is "admitted" or "rejected", absent if the request failed before admission.
+	LLMDEPPAdmissionDecisionKey = attribute.Key("llm_d.epp.admission.decision")
+	// LLMDEPPAdmissionReasonKey is the rejection's dropped-reason header value, else its error code,
+	// or "admitter:" plus the plugin type when an Admitter denies without an error code.
+	LLMDEPPAdmissionReasonKey = attribute.Key("llm_d.epp.admission.reason")
+	// LLMDEPPAdmissionQueueDurationMsKey is the Flow Control queue time in milliseconds of a dispatched request.
+	LLMDEPPAdmissionQueueDurationMsKey = attribute.Key("llm_d.epp.admission.queue_duration_ms")
 
 	// EPP Scorer attributes
 	LLMDEPPScorerTypeKey               = attribute.Key("llm_d.epp.scorer.type")
@@ -182,6 +194,11 @@ const (
 
 // Typed helper functions for llm-d internal attributes.
 
+// LLMDEPPAPISurface returns an attribute for the external inference API.
+func LLMDEPPAPISurface(surface string) attribute.KeyValue {
+	return LLMDEPPAPISurfaceKey.String(surface)
+}
+
 // EPP Fairness attribution helpers
 
 // LLMDEPPFairnessID returns an attribute for the resolved fairness identity.
@@ -192,6 +209,23 @@ func LLMDEPPFairnessID(id string) attribute.KeyValue {
 // LLMDEPPFairnessSource returns an attribute for how the fairness identity was resolved.
 func LLMDEPPFairnessSource(source string) attribute.KeyValue {
 	return LLMDEPPFairnessSourceKey.String(source)
+}
+
+// EPP Admission helpers
+
+// LLMDEPPAdmissionDecision returns an attribute for the admission decision.
+func LLMDEPPAdmissionDecision(decision string) attribute.KeyValue {
+	return LLMDEPPAdmissionDecisionKey.String(decision)
+}
+
+// LLMDEPPAdmissionReason returns an attribute for the admission rejection reason.
+func LLMDEPPAdmissionReason(reason string) attribute.KeyValue {
+	return LLMDEPPAdmissionReasonKey.String(reason)
+}
+
+// LLMDEPPAdmissionQueueDurationMs returns an attribute for the Flow Control queue time in milliseconds.
+func LLMDEPPAdmissionQueueDurationMs(ms float64) attribute.KeyValue {
+	return LLMDEPPAdmissionQueueDurationMsKey.Float64(ms)
 }
 
 // EPP Scheduling helpers

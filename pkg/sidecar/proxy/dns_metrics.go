@@ -134,6 +134,9 @@ func (s *Server) maybeStartMetrics(ctx context.Context, grp *errgroup.Group) {
 // server uses HTTP by default. When --metrics-cert-dir is set, or
 // metrics-cert-dir is set in the sidecar YAML, it serves /metrics over HTTPS
 // using tls.crt and tls.key from that directory, with no fallback to HTTP.
+// The handler negotiates OpenMetrics, which is the only exposition format
+// carrying exemplars; a scraper that does not ask for it keeps receiving the
+// classic text format.
 // Startup and serving errors are returned to maybeStartMetrics. The shutdown
 // goroutine logs shutdown errors.
 func (s *Server) serveMetrics(ctx context.Context) error {
@@ -141,7 +144,7 @@ func (s *Server) serveMetrics(ctx context.Context) error {
 	metrics.Register()
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", promhttp.HandlerFor(crmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,

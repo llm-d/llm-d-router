@@ -20,14 +20,17 @@ package runner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -386,6 +389,70 @@ func TestHealthServer_Check(t *testing.T) {
 			}
 			if resp.Status != tt.wantStatus {
 				t.Errorf("Check() status = %v, want %v", resp.Status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHealthServer_StandbyLogging(t *testing.T) {
+	for _, service := range []string{ReadinessCheckService, "", extProcPb.ExternalProcessor_ServiceDesc.ServiceName} {
+		t.Run(service, func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				notSynced     bool
+				protocol      v1.AppProtocol
+				pluginErr     error
+				draining      bool
+				verbosity     int
+				wantErrorLogs int
+				wantInfoLogs  int
+			}{
+				{name: "healthy standby at trace", verbosity: logutil.TRACE, wantInfoLogs: 1},
+				{name: "healthy standby below trace", verbosity: logutil.DEBUG},
+				{name: "datastore not synced", notSynced: true, wantErrorLogs: 1},
+				{name: "plugin not ready", pluginErr: errors.New("initial sync pending"), wantErrorLogs: 1},
+				{name: "protocol mismatch", protocol: v1.AppProtocolH2C, wantErrorLogs: 2},
+				{name: "draining", draining: true, wantErrorLogs: 1},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					var errorLines []string
+					var infoLines []string
+					capture := funcr.New(func(prefix, args string) {
+						if strings.Contains(args, `"error"=`) {
+							errorLines = append(errorLines, prefix+" "+args)
+						} else {
+							infoLines = append(infoLines, prefix+" "+args)
+						}
+					}, funcr.Options{Verbosity: tt.verbosity})
+					var isLeader, draining atomic.Bool
+					draining.Store(tt.draining)
+					s := &healthServer{
+						logger: capture,
+						datastore: &mockDatastore{
+							hasSynced: !tt.notSynced,
+							pool:      &datalayer.EndpointPool{AppProtocol: tt.protocol},
+						},
+						isLeader:              &isLeader,
+						leaderElectionEnabled: true,
+						supporters:            []appProtocolSupporter{&mockSupporter{protocols: []v1.AppProtocol{v1.AppProtocolHTTP}}},
+						readinessCheckers:     []fwkplugin.ReadinessChecker{&mockReadinessChecker{name: "test", err: tt.pluginErr}},
+						draining:              &draining,
+					}
+
+					resp, err := s.Check(context.Background(), &healthPb.HealthCheckRequest{Service: service})
+					if err != nil {
+						t.Fatalf("Check failed: %v", err)
+					}
+					if resp.Status != healthPb.HealthCheckResponse_NOT_SERVING {
+						t.Errorf("Check() status = %v, want NOT_SERVING", resp.Status)
+					}
+					if len(errorLines) != tt.wantErrorLogs {
+						t.Errorf("got %d error logs, want %d: %v", len(errorLines), tt.wantErrorLogs, errorLines)
+					}
+					if len(infoLines) != tt.wantInfoLogs {
+						t.Errorf("got %d info logs, want %d: %v", len(infoLines), tt.wantInfoLogs, infoLines)
+					}
+				})
 			}
 		})
 	}

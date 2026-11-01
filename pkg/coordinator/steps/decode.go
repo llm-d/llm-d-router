@@ -18,6 +18,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,13 +38,26 @@ import (
 
 const DecodeStepName = "decode"
 
+// ParamPromptTokenParity selects what the decode step does when the worker's
+// usage reports a prompt token count different from the rendered one:
+// "off" skips the check, "warn" (default) counts and logs it, "error" also
+// records a step error. The response to the client is never changed.
+const ParamPromptTokenParity = "prompt_token_parity"
+
+const (
+	promptTokenParityOff   = "off"
+	promptTokenParityWarn  = "warn"
+	promptTokenParityError = "error"
+)
+
 func init() {
 	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
 
 type DecodeStep struct {
-	gwClient *gateway.Client
-	kv       kv.Connector
+	gwClient          *gateway.Client
+	kv                kv.Connector
+	promptTokenParity string
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -57,7 +71,27 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn}, nil
+	parity, err := parsePromptTokenParity(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity}, nil
+}
+
+func parsePromptTokenParity(params map[string]any) (string, error) {
+	mode, err := paramString(params, ParamPromptTokenParity)
+	if err != nil {
+		return "", err
+	}
+	switch mode {
+	case "":
+		return promptTokenParityWarn, nil
+	case promptTokenParityOff, promptTokenParityWarn, promptTokenParityError:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%s must be %q, %q or %q, got %q",
+			ParamPromptTokenParity, promptTokenParityOff, promptTokenParityWarn, promptTokenParityError, mode)
+	}
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -68,6 +102,8 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
 		return err
 	}
+	parity := s.newParityCheck(logger, reqCtx)
+	injectedUsage := parity != nil && injectIncludeUsage(reqCtx)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
@@ -76,7 +112,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	writer, finalize := s.responseWriter(reqCtx)
+	writer, finalize := s.responseWriter(reqCtx, parity, injectedUsage)
 	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
 	if err := finalize(); err != nil {
 		// The buffered tail could not be forwarded, so the client holds a
@@ -89,13 +125,152 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 // responseWriter returns the writer the decode response is streamed through,
 // and the function that flushes whatever it buffered. Without a prefill count
-// the client gets the decode worker's bytes untouched.
-func (s *DecodeStep) responseWriter(reqCtx *pipeline.RequestContext) (http.ResponseWriter, func() error) {
-	if reqCtx.PrefillCachedTokens == nil {
+// and without a parity check the client gets the decode worker's bytes
+// untouched.
+func (s *DecodeStep) responseWriter(reqCtx *pipeline.RequestContext, parity *parityCheck, injectedUsage bool) (http.ResponseWriter, func() error) {
+	if reqCtx.PrefillCachedTokens == nil && parity == nil {
 		return reqCtx.ResponseWriter, func() error { return nil }
 	}
-	return usage.NewCachedTokensResponseWriter(reqCtx.ResponseWriter, *reqCtx.PrefillCachedTokens, reqCtx.Stream)
+	opts := usage.Options{
+		CachedTokens:       reqCtx.PrefillCachedTokens,
+		DropUsageOnlyFrame: injectedUsage,
+	}
+	if parity != nil {
+		opts.OnUsage = parity.onUsage
+	}
+	return usage.NewResponseWriter(reqCtx.ResponseWriter, opts, reqCtx.Stream)
 }
+
+// parityCheck compares the prompt token count the decode worker reports with
+// the number of token IDs the render step produced, which is what prefill ran
+// on. A difference means decode rendered a different prompt than prefill did:
+// the worker ignored forwarded IDs (vLLM does for messages with non-text
+// content or with echo set) or the two renderers disagree (tokenizer, chat
+// template, processor version, chat_template_kwargs). Either way prefill's KV
+// cache does not match and decode silently recomputes the prompt, so the only
+// visible symptom without this check is a slower request.
+type parityCheck struct {
+	logger       logr.Logger
+	mode         string
+	requestID    string
+	model        string
+	apiType      reqcommon.APIType
+	idsForwarded bool
+	expected     int
+	reported     bool
+}
+
+// newParityCheck returns nil when the check is off or no tokens were rendered.
+func (s *DecodeStep) newParityCheck(logger logr.Logger, reqCtx *pipeline.RequestContext) *parityCheck {
+	if s.promptTokenParity == promptTokenParityOff || len(reqCtx.TokenIDs) == 0 {
+		return nil
+	}
+	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+	return &parityCheck{
+		logger:    logger,
+		mode:      s.promptTokenParity,
+		requestID: reqCtx.RequestID,
+		model:     reqCtx.Model,
+		apiType:   apiType,
+		// Completions sends the rendered IDs as the prompt (prepareDecodeBody);
+		// the generate route carries them by definition. The other routes
+		// forward the client's text today.
+		idsForwarded: apiType == reqcommon.APITypeCompletions || apiType == reqcommon.APITypeVLLMGenerate,
+		expected:     len(reqCtx.TokenIDs),
+	}
+}
+
+// onUsage is called for each usage block in the decode response. Only the
+// first block that carries a prompt count is judged: a streamed Messages
+// response reports input_tokens on message_start and again on the final
+// usage, and both describe the same prompt. usage.PromptTokens folds the
+// Messages cache split back in, so a P/D request whose prompt was served
+// from prefill's KV compares as a match, not a short count.
+func (p *parityCheck) onUsage(block map[string]any) {
+	if p.reported {
+		return
+	}
+	got, ok := usage.PromptTokens(block)
+	if !ok {
+		return
+	}
+	p.reported = true
+	if got == p.expected {
+		return
+	}
+	coordmetrics.IncPromptTokenMismatch(p.model, p.apiType.String(), p.idsForwarded)
+	keysAndValues := []any{
+		"request_id", p.requestID,
+		"rendered_tokens", p.expected,
+		"decode_prompt_tokens", got,
+		"api_type", p.apiType,
+		"ids_forwarded", p.idsForwarded,
+	}
+	if p.mode == promptTokenParityError {
+		coordmetrics.IncStepErrorTotal(DecodeStepName, coordmetrics.ErrorCodePromptTokenMismatch)
+		p.logger.Error(nil, "prompt token mismatch between prefill and decode", keysAndValues...)
+		return
+	}
+	p.logger.Info("prompt token mismatch between prefill and decode", keysAndValues...)
+}
+
+// injectIncludeUsage asks a streamed chat or completions leg for the trailing
+// usage frame when the client did not, so the parity check can read it. It
+// reports whether it added the option; the response writer then drops that
+// frame so the client's stream stays as requested. Responses and Messages
+// streams carry usage on their own terminal events.
+func injectIncludeUsage(reqCtx *pipeline.RequestContext) bool {
+	if !reqCtx.Stream {
+		return false
+	}
+	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions:
+	default:
+		return false
+	}
+	options := streamOptions(reqCtx.Body)
+	if include, ok := options[fieldIncludeUsage].(bool); ok && include {
+		return false
+	}
+	// vLLM reports usage on every chunk when include_usage and
+	// continuous_usage_stats are both set. A client that sent only the latter
+	// gets no usage today; adding include_usage would put a usage block in
+	// each of its content chunks, which the writer cannot drop, so the check
+	// is skipped rather than reshaping the stream.
+	if continuous, ok := options[fieldContinuousUsageStats].(bool); ok && continuous {
+		return false
+	}
+	merged := make(map[string]any, len(options)+1)
+	for k, v := range options {
+		merged[k] = v
+	}
+	merged[fieldIncludeUsage] = true
+	reqCtx.Body[reqcommon.FieldStreamOptions] = merged
+	return true
+}
+
+// streamOptions returns the request's stream_options object. The server
+// decodes only the fields the pipeline inspects and keeps the rest as raw
+// JSON (decodeRequestBody), so the value is usually json.RawMessage here.
+func streamOptions(body map[string]any) map[string]any {
+	switch v := body[reqcommon.FieldStreamOptions].(type) {
+	case map[string]any:
+		return v
+	case json.RawMessage:
+		var options map[string]any
+		if err := json.Unmarshal(v, &options); err != nil {
+			return nil
+		}
+		return options
+	default:
+		return nil
+	}
+}
+
+const (
+	fieldIncludeUsage         = "include_usage"
+	fieldContinuousUsageStats = "continuous_usage_stats"
+)
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
 // prefill and conditional-decode). decode is the terminal pipeline step: its body

@@ -682,6 +682,30 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 	}
 }
 
+func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
+	var epErr errcommon.Error
+	require.ErrorAs(t, err, &epErr)
+	assert.Equal(t, errcommon.ServiceUnavailable, epErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), epErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+}
+
+type emptyPoolDirector struct {
+	Director
+}
+
+func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
 type mockDirectorRequest struct {
 	Director
 	endpoint *datalayer.EndpointMetadata
@@ -824,6 +848,12 @@ func TestToolCallingAPIForPath(t *testing.T) {
 		{path: "/provider/messages/", want: reqcommon.APITypeMessages, wantOK: true},
 		{path: "/provider/responses?stream=true", want: reqcommon.APITypeResponses, wantOK: true},
 		{path: "/v1/chat/completions/?stream=true", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: reqcommon.PathCompletions, wantOK: false},
+		{path: reqcommon.PathVLLMGenerate, wantOK: false},
+		{path: reqcommon.PathSGLangGenerate, wantOK: false},
+		{path: "/provider" + reqcommon.PathCompletions + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathVLLMGenerate + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathSGLangGenerate + "/?stream=true", wantOK: false},
 		{path: "/v1/chat/completions/render", wantOK: false},
 		{path: "/v1/messages/render", wantOK: false},
 		{path: "/v1/messages/count_tokens", wantOK: false},

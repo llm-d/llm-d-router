@@ -127,6 +127,16 @@ func (m *Mapping) MetricNames() []string {
 	return names
 }
 
+// hasCustomMetric reports whether CustomMetrics defines an enabled entry for attributeKey.
+func (m *Mapping) hasCustomMetric(attributeKey string) bool {
+	for _, custom := range m.CustomMetrics {
+		if custom.Spec != nil && custom.AttributeKey == attributeKey {
+			return true
+		}
+	}
+	return false
+}
+
 // NewMapping creates a metrics.Mapping from the input specification strings.
 func NewMapping(queue, running, kvusage, lora, cacheInfo string) (*Mapping, error) {
 	return NewMappingFromConfig(MappingConfig{

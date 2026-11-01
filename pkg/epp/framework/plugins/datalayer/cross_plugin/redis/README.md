@@ -37,8 +37,8 @@ Parameters:
   `passwordEnv` and `passwordFile` are mutually exclusive. Plaintext
   `password` configuration is rejected.
 - `db`: Redis database number. Defaults to `0`.
-- `stateTTL`: Expiration for each replica's endpoint state and the local peer
-  aggregate. Defaults to `2s` and must be at least `1ms`.
+- `stateTTL`: Expiration for each replica's endpoint state in Redis. Defaults to
+  `2s` and must be at least `1ms`.
 - `coordinationTTL`: Expiration for request-level coordination values. Defaults
   to `180s` and must be at least `1ms`.
 
@@ -94,10 +94,11 @@ contributor without requiring global `gob.Register` calls.
 Endpoint state is stored in one Redis hash per state key and endpoint. Each EPP
 owns one field in that hash, identified by its hostname and a process-specific
 UUID. `Set` refreshes the field TTL, reads the hash in the same transaction,
-and caches the prepared peer aggregate locally. The aggregate expires
-`stateTTL` after the local refresh. `Get` reads the cache without accessing
-Redis and combines it with the contributor's live local value. If no peer value
-is available, `Get` aggregates the local value by itself.
+and caches the prepared peer aggregate locally until the next successful `Set`
+replaces it. A replica that stops publishing loses its field `stateTTL` after
+its last write, and the next refresh drops it from the aggregate. `Get` reads
+the cache without accessing Redis and combines it with the contributor's live
+local value. If no peer value is available, `Get` returns the local value.
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.
@@ -122,9 +123,10 @@ capacity across different requests.
 The plugin is a Redis client and does not deploy a Redis server. The server must
 be provisioned separately. Plugin construction does not connect to Redis, so an
 unavailable server does not prevent the EPP from starting. Failed publications
-are logged at error level with rate limiting and leave the current peer cache in
-place until its entries expire. Scheduling then uses local state until a later
-publication succeeds and refreshes the cache.
+are logged at error level with rate limiting and leave the peer cache unchanged,
+so scheduling keeps counting the last known peer state until a publication
+succeeds. A peer that stops while Redis is unreachable keeps counting until
+then. Before its first successful publication an EPP uses local state only.
 
 `GetOrSet` does not use a local fallback. It returns Redis errors because its
 callers require cross-replica atomicity.

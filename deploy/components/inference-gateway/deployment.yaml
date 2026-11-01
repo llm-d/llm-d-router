@@ -44,17 +44,24 @@ spec:
         - containerPort: 9003
         - name: metrics
           containerPort: 9090
+        # Startup gets its own budget so liveness cannot restart the
+        # container while it is still initializing.
+        startupProbe:
+          grpc:
+            port: 9003
+            service: liveness
+          periodSeconds: 5
+          failureThreshold: 60
+          timeoutSeconds: 5
         livenessProbe:
           grpc:
             port: 9003
             service: liveness
-          initialDelaySeconds: 5
           periodSeconds: 10
         readinessProbe:
           grpc:
             port: 9003
             service: readiness
-          initialDelaySeconds: 5
           periodSeconds: 10
         volumeMounts:
         - name: epp-config

@@ -181,10 +181,35 @@ func TestResponsesPayloadWire_ReasoningPlacement(t *testing.T) {
 	]}`, string(body))
 }
 
+// TestResponsesPayloadWire_ReplayedOutputItems covers a second turn whose
+// input carries the first response's output items verbatim, as vLLM returns
+// them: nullable fields such as namespace and encrypted_content are present
+// as null.
+func TestResponsesPayloadWire_ReplayedOutputItems(t *testing.T) {
+	var input []any
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"role":"user","content":"weather in Paris?"},
+		{"id":"rs_1","summary":[],"type":"reasoning","content":[{"text":"call the tool","type":"reasoning_text"}],"encrypted_content":null,"status":null},
+		{"id":"fc_1","arguments":"{\"city\": \"Paris\"}","call_id":"call_1","name":"get_weather","type":"function_call","async":null,"caller":null,"namespace":null,"status":"completed"},
+		{"type":"function_call_output","call_id":"call_1","output":"sunny"}
+	]`), &input))
+	got, err := responsesPayload(&fwkrh.ResponsesRequest{Input: input})
+	require.NoError(t, err)
+	body, err := got.Marshal()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"messages":[
+		{"role":"user","content":"weather in Paris?"},
+		{"role":"assistant","reasoning":"call the tool","tool_calls":[
+			{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}
+		]},
+		{"role":"tool","content":"sunny","tool_call_id":"call_1"}
+	]}`, string(body))
+}
+
 // TestResponsesPayloadWire_ItemsFailClosed covers the item shapes the
 // translation refuses: a function_call missing a required field or carrying
-// a namespace, a reasoning item with encrypted content, an output without
-// its call_id, and an item type this code does not know.
+// a namespace, a reasoning item with encrypted content or no text, an output
+// without its call_id, and an item type this code does not know.
 func TestResponsesPayloadWire_ItemsFailClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -196,6 +221,11 @@ func TestResponsesPayloadWire_ItemsFailClosed(t *testing.T) {
 		{"namespaced function_call", map[string]any{"type": "function_call", "call_id": "call_1", "name": "run", "arguments": "{}", "namespace": "ns"}, "namespace"},
 		{"encrypted reasoning", map[string]any{"type": "reasoning", "id": "rs_1", "encrypted_content": "gAAAA"}, "encrypted_content"},
 		{"reasoning part without text", map[string]any{"type": "reasoning", "id": "rs_1", "summary": []any{map[string]any{"type": "summary_text"}}}, "has no text field"},
+		{"reasoning without parts", map[string]any{"type": "reasoning", "id": "rs_1", "summary": []any{}}, "with empty text"},
+		{"reasoning with empty content text", map[string]any{"type": "reasoning", "id": "rs_1",
+			"content": []any{map[string]any{"type": "reasoning_text", "text": ""}},
+			"summary": []any{map[string]any{"type": "summary_text", "text": "short"}},
+		}, "with empty text"},
 		{"function_call_output without call_id", map[string]any{"type": "function_call_output", "output": "sunny"}, "has no call_id"},
 		{"function_call_output with an audio part", map[string]any{"type": "function_call_output", "call_id": "call_1", "output": []any{map[string]any{"type": "input_audio"}}}, `"input_audio"`},
 		{"unknown item type", map[string]any{"type": "web_search_call", "id": "ws_1"}, `"web_search_call"`},

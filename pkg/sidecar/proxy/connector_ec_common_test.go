@@ -179,7 +179,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 		},
 	}
 
-	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL} {
+	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake} {
 		t.Run(connector, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -341,9 +341,10 @@ func TestECPipelineResponsesImage(t *testing.T) {
 // client addressed the gateway, and which of the encoders behind it refused the
 // priming leg is not a distinction the client can act on.
 func TestHandleEC_EncoderErrorStatus(t *testing.T) {
-	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType){
 		"ec-nixl":           (*Server).handleECNIXL,
 		"ec-shared-storage": (*Server).handleECSharedStorage,
+		"ec-mooncake":       (*Server).handleECMooncake,
 	}
 	tests := []struct {
 		name        string
@@ -392,7 +393,7 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 				req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
 				rw := httptest.NewRecorder()
 
-				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, "", reqcommon.APITypeChatCompletions)
 
 				assert.False(t, dispatched, "a failed fanout must not reach the P/D connector")
 				assert.Equal(t, tt.wantClient, rw.Code, "body=%s", rw.Body.String())

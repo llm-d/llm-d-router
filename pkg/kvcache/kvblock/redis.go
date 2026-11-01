@@ -391,7 +391,7 @@ func redisEngineKey(engineKey BlockHash) string {
 // Clear removes every hash field for the pod across all request-key hashes and
 // device tiers. Each field is a JSON-encoded PodEntry, so matching decodes the
 // field and compares PodIdentifier — catching every tier, group, and speculative
-// variant. It pages the keyspace with SCAN (skipping engine: keys) and HDELs
+// variant. It pages the keyspace with SCAN (skipping non-hash keys) and HDELs
 // the pod's fields. O(keyspace), but Clear is rare and
 // off the Lookup/Add hot path. Because it deletes from the shared store, it is
 // correct for multi-replica deployments with no cross-process coordination.
@@ -402,15 +402,11 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 	removed := 0
 	var cursor uint64
 	for {
-		keys, next, err := r.RedisClient.Scan(ctx, cursor, "*", scanBatch).Result()
+		keys, next, err := r.RedisClient.ScanType(ctx, cursor, "*", scanBatch, "hash").Result()
 		if err != nil {
 			return fmt.Errorf("clear scan failed: %w", err)
 		}
 		for _, key := range keys {
-			if strings.HasPrefix(key, "engine:") {
-				continue // engine:<hash> ZSETs hold no pod fields
-			}
-
 			fields, err := r.RedisClient.HKeys(ctx, key).Result()
 			if err != nil {
 				return fmt.Errorf("clear hkeys failed for %s: %w", key, err)

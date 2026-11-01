@@ -806,7 +806,7 @@ func captureRequest(surface reqcommon.APIType, body map[string]any) (RequestSnap
 	}
 	if choice, present := body[string(FieldToolChoice)]; present {
 		snapshot.summary.ToolChoicePresent = true
-		snapshot.summary.ToolChoiceKind = normalizeToolChoiceValue(surface, choice)
+		snapshot.summary.ToolChoiceKind = NormalizeToolChoice(surface, choice)
 	}
 
 	return snapshot, nil

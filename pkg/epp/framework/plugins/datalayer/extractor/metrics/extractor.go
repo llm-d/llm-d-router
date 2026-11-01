@@ -88,20 +88,18 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
-// Produces declares the custom scalar metric attributes, whose names come from
-// the per-engine mappings in configuration, plus the per-pod metric fields this
-// extractor writes into the endpoint's Metrics struct that a scorer or filter
-// declares as a Consumes() dependency. Declaring both lets the data-attribute
-// registry and the DAG builder validate the scorers and filters that read them.
-// The Metrics field types mirror the fwkdl.Metrics struct (float64, int, map
-// of model name to count).
+// Produces declares the built-in and custom scalar metric attributes stored in
+// the endpoint's AttributeMap as ScalarMetricValue, plus the LoRA adapter maps
+// written into the endpoint's Metrics struct that scorers declare as Consumes()
+// dependencies. Declaring all of them lets the data-attribute registry and the
+// DAG builder validate the scorers and filters that read them.
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	produced := map[fwkplugin.DataKey]any{
-		fwkplugin.NewDataKey(KVCacheUsagePercentKey, MetricsExtractorType): float64(0),
-		fwkplugin.NewDataKey(WaitingQueueSizeKey, MetricsExtractorType):    int(0),
-		fwkplugin.NewDataKey(RunningRequestsSizeKey, MetricsExtractorType): int(0),
-		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):        map[string]int{},
-		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
+		attrmetrics.ScalarMetricDataKey(KVCacheUsagePercentKey):      attrmetrics.ScalarMetricValue(0),
+		attrmetrics.ScalarMetricDataKey(WaitingQueueSizeKey):         attrmetrics.ScalarMetricValue(0),
+		attrmetrics.ScalarMetricDataKey(RunningRequestsSizeKey):      attrmetrics.ScalarMetricValue(0),
+		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):  map[string]int{},
+		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType): map[string]int{},
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
@@ -149,6 +147,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.WaitingQueueSize = int(value)
+			putBuiltinScalarAttribute(ep, mapping, WaitingQueueSizeKey, value)
 			updated = true
 		}
 	}
@@ -158,6 +157,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.RunningRequestsSize = int(value)
+			putBuiltinScalarAttribute(ep, mapping, RunningRequestsSizeKey, value)
 			updated = true
 		}
 	}
@@ -167,6 +167,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.KVCacheUsagePercent = value
+			putBuiltinScalarAttribute(ep, mapping, KVCacheUsagePercentKey, value)
 			updated = true
 		}
 	}
@@ -258,6 +259,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// putBuiltinScalarAttribute writes a built-in scalar metric to the endpoint's
+// attribute map unless a customMetrics entry owns that attributeKey. Skipping
+// the built-in write keeps a failed custom scrape from falling back to the
+// built-in value and overwriting the custom metric's last-known value.
+func putBuiltinScalarAttribute(ep fwkdl.Endpoint, mapping *Mapping, key string, value float64) {
+	if mapping.hasCustomMetric(key) {
+		return
+	}
+	ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(key), attrmetrics.ScalarMetricValue(value))
 }
 
 // getEngineTypeFromEndpoint extracts the engine type from endpoint metadata labels.

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
@@ -61,13 +62,27 @@ type Scope struct {
 // A request carrying RevisionHeaderName always selects that revision strictly.
 // The selected endpoint's revision is stamped into the same response header.
 type RevisionGating struct {
-	RevisionHeaderName  string     `json:"revisionHeaderName,omitempty"`
-	RevisionLabelKey    string     `json:"revisionLabelKey,omitempty"`
-	RoleLabelKey        string     `json:"roleLabelKey,omitempty"`
-	DisableCoordination bool       `json:"disableCoordination,omitempty"`
-	Mode                GatingMode `json:"mode"`
-	RequiredRoles       []string   `json:"requiredRoles,omitempty"`
+	RevisionHeaderName  string            `json:"revisionHeaderName,omitempty"`
+	RevisionLabelKey    string            `json:"revisionLabelKey,omitempty"`
+	RoleLabelKey        string            `json:"roleLabelKey,omitempty"`
+	DisableCoordination bool              `json:"disableCoordination,omitempty"`
+	Mode                GatingMode        `json:"mode"`
+	RequiredRoles       []string          `json:"requiredRoles,omitempty"`
+	Overflow            *RevisionOverflow `json:"overflow,omitempty"`
 }
+
+// RevisionOverflow sends a request to another revision when the guard admits
+// no endpoint of Role in the drawn revision; see the README's Revision Overflow.
+type RevisionOverflow struct {
+	// Role is the role whose endpoints must have room. Defaults to prefill.
+	Role string `json:"role,omitempty"`
+	// GuardPluginName names the fail-closed scheduling filter that decides
+	// room, typically the concurrency-detector of Role's profile.
+	GuardPluginName string `json:"guardPluginName" pluginRef:""`
+}
+
+// DefaultOverflowRole is the role checked for room by default.
+const DefaultOverflowRole = "prefill"
 
 // UnmarshalJSON normalizes RevisionHeaderName to lowercase because request
 // headers are lowercase in the scheduling request.
@@ -169,6 +184,21 @@ func (c *Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("revisionGating.mode %q must be one of sum|max-role|disabled", c.RevisionGating.Mode)
+	}
+
+	if overflow := c.RevisionGating.Overflow; overflow != nil {
+		if !c.RevisionGating.Active() {
+			return fmt.Errorf("revisionGating.overflow requires revisionGating.mode %s or %s", GatingModeSum, GatingModeMaxRole)
+		}
+		if overflow.GuardPluginName == "" {
+			return errors.New("revisionGating.overflow.guardPluginName is required")
+		}
+		if overflow.Role == "" {
+			overflow.Role = DefaultOverflowRole
+		}
+		if !slices.Contains(c.RevisionGating.RequiredRoles, overflow.Role) {
+			return fmt.Errorf("revisionGating.overflow.role %q must be one of revisionGating.requiredRoles", overflow.Role)
+		}
 	}
 
 	return nil

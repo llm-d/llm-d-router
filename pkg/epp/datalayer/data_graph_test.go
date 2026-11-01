@@ -21,12 +21,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
@@ -78,7 +82,7 @@ func TestOptionalDataDependencyOrder(t *testing.T) {
 	t.Run("configured producer precedes optional consumer", func(t *testing.T) {
 		dag, err := buildDAG(
 			map[string]fwkplugin.ProducerPlugin{"cache/mock": cache, "load/mock": load},
-			map[string]fwkplugin.ConsumerPlugin{"load/mock": load})
+			map[string]fwkplugin.ConsumerPlugin{"load/mock": load}, nil)
 		assert.NoError(t, err)
 		assert.Equal(t, []string{"cache/mock"}, dag["load/mock"])
 		ordered, err := util.TopologicalSort(dag)
@@ -325,7 +329,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 					consumers[p.TypedName().String()] = cp
 				}
 			}
-			dag, err := buildDAG(producers, consumers)
+			dag, err := buildDAG(producers, consumers, nil)
 			if err != nil {
 				if tc.expectedErr != "" {
 					assert.Error(t, err)
@@ -552,6 +556,104 @@ func TestCreateMissingDataProducers_Transitive(t *testing.T) {
 	assert.NotNil(t, handle.Plugin(typeInner), "transitive dependency should be auto-created in the same call")
 }
 
+// TestCreateMissingDataProducers_UnresolvedRequiredKey verifies that a Required key which
+// resolution cannot satisfy is reported, both when the default producer's name is already
+// taken by a plugin that does not produce the key, and when the factory registers its
+// plugin under a name other than the one it was asked for.
+func TestCreateMissingDataProducers_UnresolvedRequiredKey(t *testing.T) {
+	const (
+		producerType  = "producer-a"
+		consumerName  = "MockSchedulingPlugin"
+		otherKeyName  = "keyOther"
+		otherProducer = "elsewhere"
+	)
+	keyA := fwkplugin.NewDataKey("keyA", producerType)
+	keyOther := fwkplugin.NewDataKey(otherKeyName, producerType)
+
+	// A factory that ignores the name it is given, so the plugin is registered under
+	// a name the resolution loop does not look up.
+	misnamedFactory := fwkplugin.FactoryFunc(func(_ string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: otherProducer, produces: map[fwkplugin.DataKey]any{keyOther: nil}}, nil
+	})
+
+	testCases := []struct {
+		name            string
+		existingPlugins []fwkplugin.Plugin
+		factoryRegistry map[string]fwkplugin.FactoryFunc
+	}{
+		{
+			name: "default producer name is taken by a plugin that does not produce the key",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: producerType, produces: map[fwkplugin.DataKey]any{keyOther: nil}},
+			},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{},
+		},
+		{
+			name:            "factory registers the producer under a different name",
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerType: misnamedFactory},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+			handle.AddPlugin(consumerName, &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}})
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+
+			err := CreateMissingDataProducers(context.Background(),
+				map[string]string{keyA.String(): producerType}, tc.factoryRegistry, handle)
+
+			assert.ErrorIs(t, err, ErrUnresolvedDataKeys)
+			assert.ErrorContains(t, err, keyA.String())
+			assert.ErrorContains(t, err, consumerName)
+			assert.ErrorContains(t, err, producerType)
+		})
+	}
+}
+
+// TestCreateMissingDataProducers_MutualDefaults verifies that default producers which
+// require each other are both created without looping, and that the cycle they form is
+// reported by ValidateAndOrderDataDependencies.
+func TestCreateMissingDataProducers_MutualDefaults(t *testing.T) {
+	const (
+		typeFirst  = "producer-first"
+		typeSecond = "producer-second"
+	)
+	keyFirst := fwkplugin.NewDataKey("keyFirst", typeFirst)
+	keySecond := fwkplugin.NewDataKey("keySecond", typeSecond)
+
+	firstFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:     name,
+			produces: map[fwkplugin.DataKey]any{keyFirst: nil},
+			consumes: map[fwkplugin.DataKey]any{keySecond: nil},
+		}, nil
+	})
+	secondFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:     name,
+			produces: map[fwkplugin.DataKey]any{keySecond: nil},
+			consumes: map[fwkplugin.DataKey]any{keyFirst: nil},
+		}, nil
+	})
+
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	handle.AddPlugin("consumer", &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyFirst: nil}})
+
+	err := CreateMissingDataProducers(context.Background(),
+		map[string]string{keyFirst.String(): typeFirst, keySecond.String(): typeSecond},
+		map[string]fwkplugin.FactoryFunc{typeFirst: firstFactory, typeSecond: secondFactory},
+		handle)
+	assert.NoError(t, err)
+	assert.NotNil(t, handle.Plugin(typeFirst))
+	assert.NotNil(t, handle.Plugin(typeSecond))
+
+	_, err = ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	assert.ErrorContains(t, err, "cycle detected")
+}
+
 // mockMayConsumerPlugin is a plugin that only optionally consumes certain data keys.
 type mockMayConsumerPlugin struct {
 	name             string
@@ -653,6 +755,196 @@ func TestCreateMissingDataProducers_MayConsume(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestCreateMissingDataProducers_UnconsumedConfiguredProducer verifies that a configured
+// producer whose data key is read by no other plugin is reported when a consumer of the
+// same data type falls back to an auto-created default producer.
+func TestCreateMissingDataProducers_UnconsumedConfiguredProducer(t *testing.T) {
+	const (
+		typeA          = "producer-a"
+		typeB          = "producer-b"
+		unconsumedLine = "Warning: configured producer's data key has no consumer"
+	)
+	keyA := fwkplugin.NewDataKey("keyA", typeA)
+	keyA2 := fwkplugin.NewDataKey("keyA2", typeA)
+	keyB := fwkplugin.NewDataKey("keyB", typeB)
+
+	defaultAFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: name, pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA: nil, keyA2: nil}}, nil
+	})
+	// A default producer that also reads the configured producer's key.
+	readingDefaultAFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:       name,
+			pluginType: typeA,
+			produces:   map[fwkplugin.DataKey]any{keyA: nil, keyA2: nil},
+			optional:   map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil},
+		}, nil
+	})
+	consumerOf := func(name string, keys ...fwkplugin.DataKey) *mockMixedConsumerPlugin {
+		required := map[fwkplugin.DataKey]any{}
+		for _, k := range keys {
+			required[k] = nil
+		}
+		return &mockMixedConsumerPlugin{name: name, consumes: required}
+	}
+
+	type warning struct {
+		producer string
+		dataKey  string
+	}
+	testCases := []struct {
+		name            string
+		existingPlugins []fwkplugin.Plugin
+		defaultFactory  fwkplugin.FactoryFunc
+		wantWarnings    []warning
+		wantErr         error
+	}{
+		{
+			name: "same-type producer under a custom name is reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil}},
+				consumerOf("consumer", keyA),
+			},
+			wantWarnings: []warning{{producer: "custom/" + typeA, dataKey: "keyA/custom"}},
+		},
+		{
+			name: "a key the producer consumes itself does not count",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{
+					name:       "custom",
+					pluginType: typeA,
+					produces:   map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil},
+					optional:   map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil},
+				},
+				consumerOf("consumer", keyA),
+			},
+			wantWarnings: []warning{{producer: "custom/" + typeA, dataKey: "keyA/custom"}},
+		},
+		{
+			name: "each unread key served by the same default producer is reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{
+					name:       "custom",
+					pluginType: typeA,
+					produces: map[fwkplugin.DataKey]any{
+						keyA.WithNonEmptyProducerName("custom"):  nil,
+						keyA2.WithNonEmptyProducerName("custom"): nil,
+					},
+				},
+				consumerOf("consumer", keyA, keyA2),
+			},
+			wantWarnings: []warning{
+				{producer: "custom/" + typeA, dataKey: "keyA/custom"},
+				{producer: "custom/" + typeA, dataKey: "keyA2/custom"},
+			},
+		},
+		{
+			name: "producer of another type emitting the same data type is reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "custom-b", pluginType: typeB, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom-b"): nil}},
+				consumerOf("consumer", keyA),
+			},
+			wantWarnings: []warning{{producer: "custom-b/" + typeB, dataKey: "keyA/custom-b"}},
+		},
+		{
+			name: "only the unread key of a multi-key producer is reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{
+					name:       "custom",
+					pluginType: typeA,
+					produces: map[fwkplugin.DataKey]any{
+						keyA.WithNonEmptyProducerName("custom"): nil,
+						keyB.WithNonEmptyProducerName("custom"): nil,
+					},
+				},
+				consumerOf("consumer", keyA),
+				consumerOf("custom-consumer", keyB.WithNonEmptyProducerName("custom")),
+			},
+			wantWarnings: []warning{{producer: "custom/" + typeA, dataKey: "keyA/custom"}},
+		},
+		{
+			name: "configured producer read by another consumer is not reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil}},
+				consumerOf("consumer", keyA),
+				consumerOf("custom-consumer", keyA.WithNonEmptyProducerName("custom")),
+			},
+		},
+		{
+			name: "configured producer read by the auto-created producer is not reported",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil}},
+				consumerOf("consumer", keyA),
+			},
+			defaultFactory: readingDefaultAFactory,
+		},
+		{
+			name: "unread producer is not reported when nothing is auto-created",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil}},
+			},
+		},
+		{
+			name: "producer of an unrelated data type is not reported",
+			existingPlugins: []fwkplugin.Plugin{
+				NewPollStatusProducer(&Config{}),
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyB.WithNonEmptyProducerName("custom"): nil}},
+				consumerOf("consumer", keyA),
+			},
+		},
+		{
+			name: "nothing is reported when a required key stays unresolved",
+			existingPlugins: []fwkplugin.Plugin{
+				// Takes the default producer's name without producing its key.
+				&mockDataProducerP{name: typeA, pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyB: nil}},
+				&mockDataProducerP{name: "custom", pluginType: typeA, produces: map[fwkplugin.DataKey]any{keyA.WithNonEmptyProducerName("custom"): nil}},
+				consumerOf("consumer", keyA),
+			},
+			wantErr: ErrUnresolvedDataKeys,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			logger := funcr.New(func(_, args string) { logs = append(logs, args) }, funcr.Options{})
+			ctx := log.IntoContext(context.Background(), logger)
+			handle := fwkplugin.NewEppHandle(ctx, func() []k8stypes.NamespacedName { return nil })
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+			factory := tc.defaultFactory
+			if factory == nil {
+				factory = defaultAFactory
+			}
+
+			err := CreateMissingDataProducers(ctx,
+				map[string]string{keyA.String(): typeA, keyA2.String(): typeA},
+				map[string]fwkplugin.FactoryFunc{typeA: factory},
+				handle)
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			var got []string
+			for _, line := range logs {
+				if strings.Contains(line, unconsumedLine) {
+					_, fields, _ := strings.Cut(line, `"producer"=`)
+					got = append(got, `"producer"=`+fields)
+				}
+			}
+			var want []string
+			for _, w := range tc.wantWarnings {
+				want = append(want, fmt.Sprintf(`"producer"=%q "dataKey"=%q "defaultProducer"=%q "consumer"=%q`,
+					w.producer, w.dataKey, typeA, "consumer"))
+			}
+			assert.ElementsMatch(t, want, got)
 		})
 	}
 }

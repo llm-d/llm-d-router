@@ -17,9 +17,11 @@ limitations under the License.
 package nohitlru
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -250,25 +252,24 @@ func (s *NoHitLRU) scoreNeverUsedPods(scoredPods map[scheduling.Endpoint]float64
 	}
 }
 
-// scoreUsedPods assigns scores to endpoints based on their LRU position.
+// scoreUsedPods assigns scores to endpoints based on their relative LRU order among usedPods.
 // Pods that were least recently used for cold requests receive higher scores.
 func (s *NoHitLRU) scoreUsedPods(scoredEndpoints map[scheduling.Endpoint]float64, usedPods []scheduling.Endpoint, lruPosition map[string]int, neverUsedCount, totalEndpoints int) {
 	// Avoid possibility of dividing by zero.
 	if totalEndpoints <= 1 {
 		return
 	}
-	for _, endpoint := range usedPods {
-		endpointName := endpoint.GetMetadata().ID.String()
-		lruPos := lruPosition[endpointName]
+	// The LRU also holds endpoints that are not candidates here (other
+	// profiles, filtered or removed pods), so rank by order among usedPods.
+	slices.SortFunc(usedPods, func(a, b scheduling.Endpoint) int {
+		return cmp.Compare(lruPosition[a.GetMetadata().ID.String()], lruPosition[b.GetMetadata().ID.String()])
+	})
+	for i, endpoint := range usedPods {
 		// LRU keys are oldest to newest so rank 0 = oldest
 		// The never used endpoint count is added to the rank so that
 		// a never-used endpoint will always have the highest score.
-		rank := neverUsedCount + lruPos
-		score := 1.0 - float64(rank)/float64(totalEndpoints-1)
-		if score < 0 {
-			score = 0
-		}
-		scoredEndpoints[endpoint] = score
+		rank := neverUsedCount + i
+		scoredEndpoints[endpoint] = 1.0 - float64(rank)/float64(totalEndpoints-1)
 	}
 }
 

@@ -135,15 +135,16 @@ type Options struct {
 	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
-	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. Bounds metric cardinality in
-	// deployments with many distinct fairness IDs.
+	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
+	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
 	//
 	// Configuration.
 	//
-	ConfigFile   string   // The path to the configuration file.
-	ConfigText   string   // The configuration specified as text, in lieu of a file.
-	FeatureGates []string // Feature gates applied on top of the configuration's featureGates.
+	ConfigFile     string   // The path to the configuration file.
+	ConfigText     string   // The configuration specified as text, in lieu of a file.
+	ObjectivesFile string   // Objectives (name, priority) loaded in file-discovery mode.
+	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
 
@@ -268,7 +269,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
 	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
 		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
-			"single overflow series, and 0 collapses all of them. Bounds metric cardinality with many distinct fairness IDs.")
+			"single overflow series, and 0 collapses all of them. default-flow does not count against the cap. "+
+			"Bounds metric cardinality with many distinct fairness IDs.")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Serve the listener over TLS.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,
 		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12.")
@@ -282,6 +284,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+	fs.StringVar(&opts.ObjectivesFile, "objectives-file", opts.ObjectivesFile,
+		"YAML file of objectives (name, priority) loaded at startup. File-discovery mode only.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
 		"Comma-separated list of feature gates to enable or disable, in kubelet style "+
 			"(e.g., 'flowControl=true'). A bare name enables the gate. Applied after the "+

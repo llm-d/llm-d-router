@@ -33,15 +33,17 @@ A family with a single matching series yields that series' value. A NaN or infin
 
 ## Attributes produced
 
-The plugin populates several standard keys on the endpoint:
+The plugin populates several standard fields on the endpoint's `Metrics` struct:
 
 -   `WaitingQueueSize` (int)
 -   `RunningRequestsSize` (int)
 -   `KVCacheUsagePercent` (float64)
 -   `MaxActiveModels` (int)
--   `ActiveModels` (int)
--   `WaitingModels` (int)
+-   `ActiveModels` (map[string]int)
+-   `WaitingModels` (map[string]int)
 -   `UpdateTime` (time.Time)
+
+The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
 
 The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 

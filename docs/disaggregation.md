@@ -642,6 +642,13 @@ pod must offload its generated (decode-phase) KV: set `offload_prompt_only:
 false` in its `kv_connector_extra_config` (the default `true` offloads only
 prefill blocks).
 
+With encode/prefill/decode disaggregation, the sidecar preserves the validated
+cache source through the encode stage and includes the P2P pull on the subsequent
+prefill request. The same connector and flag requirements apply, and no pull is
+added when the source is the prefiller itself. With encode/decode disaggregation,
+the decoder pulls from the validated source unless the source is its own serving
+endpoint.
+
 Both prefill and decode pods require the following `--kv-transfer-config`:
 
 ```json
@@ -803,6 +810,8 @@ Enabling the flag requires:
 | Connector | Flag | Env var | Default | Description |
 |---|---|---|---|---|
 | `mooncake` | `--mooncake-bootstrap-port` | `MOONCAKE_BOOTSTRAP_PORT` | `8998` | Port used to query the Mooncake bootstrap endpoint on prefill pods. Corresponds to vLLM's `VLLM_MOONCAKE_BOOTSTRAP_PORT`. |
+| `ec-mooncake` | `--ec-mooncake-port` | `EC_MOONCAKE_PORT` | `14579` | Port the EC consumer (the prefiller, or the local decoder when the request has no prefiller) listens on for Mooncake EC control messages. Corresponds to `ec_port` in vLLM's `ECTransferConfig`. `--data-parallel-size > 1` is rejected. |
+| `ec-mooncake` | `--ec-mooncake-pod-ip` | `POD_IP` | — | Address of the local decoder as encoder pods reach it, named to the encoders as the EC consumer when a request has no prefiller. |
 | `sglang` | — | `SGLANG_BOOTSTRAP_PORT` | `8998` | Port used for the SGLang bootstrap endpoint on prefill pods. |
 | `offloading` | `--p2p-connector-port` | `P2P_CONNECTOR_PORT` | `7777` | Prefiller's OffloadingConnector P2P tier listening port (rank-0 port under data parallelism), injected as `remote_port` on the decode request so the decoder can pull KV. |
 | `nixlv2` | `--enable-p2p-pull` | — | `false` | Declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXLv2, i.e. the engines run `MultiConnector(NixlConnector + OffloadingConnector)`. NIXL moves KV prefill to decode while the OffloadingConnector pulls the cached prefix named by `x-llm-d-kv-cache-source-host-port`. Rejected at startup with any other connector; `offloading` provides the tier natively and needs no flag. |

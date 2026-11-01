@@ -33,6 +33,7 @@ func resetMetrics(t *testing.T) {
 	t.Helper()
 	registerMetrics()
 	strictRevisionNoMatchTotal.Reset()
+	revisionOverflowTotal.Reset()
 	revisionGatingShare.Reset()
 }
 

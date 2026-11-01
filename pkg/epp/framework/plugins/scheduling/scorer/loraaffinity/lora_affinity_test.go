@@ -68,7 +68,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			},
 		},
 		{
-			name:    "Target model not active or waiting",
+			name:    "Target model not active or waiting: full endpoint scores 0, unreported capacity scores as free",
 			request: &fwksched.InferenceRequest{TargetModel: "active-model-1"},
 			endpoints: []fwksched.Endpoint{
 				fwksched.NewEndpoint(
@@ -88,7 +88,7 @@ func TestLoraAffinityScorer(t *testing.T) {
 			},
 			expectedScoresEndpoint: map[string]float64{
 				"pod1": 0.0,
-				"pod2": 0.0,
+				"pod2": 0.8,
 			},
 		},
 		{
@@ -177,6 +177,44 @@ func TestLoraAffinityScorer(t *testing.T) {
 			expectedScoresEndpoint: map[string]float64{
 				"pod1": 0.8,
 				"pod2": 0.0,
+			},
+		},
+		{
+			// vLLM reports max_lora only after its first engine step, so an
+			// endpoint that has not served yet has zero-value LoRA metrics.
+			name:    "Capacity not reported yet: scores as free, active still wins, full still loses",
+			request: &fwksched.InferenceRequest{TargetModel: "adapter-1"},
+			endpoints: []fwksched.Endpoint{
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "never-served"}},
+					&fwkdl.Metrics{}, nil),
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "free-slot"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-2": 1},
+						WaitingModels:   map[string]int{},
+						MaxActiveModels: 4,
+					}, nil),
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "active"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-1": 1},
+						WaitingModels:   map[string]int{},
+						MaxActiveModels: 4,
+					}, nil),
+				fwksched.NewEndpoint(
+					&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "full"}},
+					&fwkdl.Metrics{
+						ActiveModels:    map[string]int{"adapter-2": 1, "adapter-3": 1},
+						WaitingModels:   map[string]int{},
+						MaxActiveModels: 2,
+					}, nil),
+			},
+			expectedScoresEndpoint: map[string]float64{
+				"never-served": 0.8,
+				"free-slot":    0.8,
+				"active":       1.0,
+				"full":         0.0,
 			},
 		},
 		{

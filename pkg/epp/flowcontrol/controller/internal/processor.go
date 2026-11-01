@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
@@ -335,7 +336,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
+	ok, stats, err := p.hasCapacity(managedQ.FlowQueueAccessor(), req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
@@ -378,13 +379,13 @@ func (p *Processor) enqueue(item *FlowItem) {
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks if the global limits and the specific priority band have enough capacity.
+// hasCapacity checks the global, priority-band, and per-flow queue limits.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
-	snapshot, err := p.registry.CapacitySnapshot(priority)
+func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
+	snapshot, err := p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
 		return false, snapshot, err
 	}
@@ -401,6 +402,17 @@ func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contra
 	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
 		return false, snapshot, nil
 	}
+	if snapshot.MaxRequestsPerFlow > 0 && clamp.Uint64(flowQueue.Len()) >= snapshot.MaxRequestsPerFlow {
+		return false, snapshot, nil
+	}
+	if limit := snapshot.MaxBytesPerFlow; limit > 0 {
+		used := flowQueue.ByteSize()
+		// Subtract from the limit to avoid overflowing on an oversized request.
+		if used > limit || itemByteSize > limit-used {
+			return false, snapshot, nil
+		}
+	}
+
 	return true, snapshot, nil
 }
 

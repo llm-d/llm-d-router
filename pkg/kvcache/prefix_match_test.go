@@ -310,6 +310,12 @@ func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
 		want     float64
 	}{
 		{
+			name:     "default backends score SGLang's cpu_pinned host tier at 0.8",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "cpu_pinned"},
+			want:     0.8,
+		},
+		{
 			name:     "default backends score storage at 0.6",
 			backends: kvcache.DefaultKVCacheBackendConfig(),
 			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "storage"},

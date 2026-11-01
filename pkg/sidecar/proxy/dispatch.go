@@ -50,6 +50,7 @@ func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
+		w, status := captureResponseStatus(w)
 		metrics.RecordRequest(apiType.String())
 		tracer := tracing.Tracer(tracerScope)
 		ctx, span := tracer.Start(r.Context(), "forward_request",
@@ -60,13 +61,13 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		ctx = context.WithValue(ctx, toolCallingTelemetryEnabledKey{}, s.config.EnableToolCallingTelemetry)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
-		// logger is process-scoped, so seed it into the context first. Connectors
-		// reached from here still log through s.logger and stay uncorrelated;
-		// the request context carries the correlated logger for them to adopt.
+		// logger is process-scoped, so seed it into the context, where the
+		// connectors this handler dispatches to read it.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 
 		ctx = context.WithValue(ctx, requestStartTimeKey, requestStart)
+		ctx, summary := withRequestSummary(ctx)
 		r = r.WithContext(ctx)
 
 		requestPath := ""
@@ -96,6 +97,18 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				prefillHostPort = strings.TrimSpace(prefillHostPorts[0])
 			}
 		}
+
+		// Every request ends with one line at the default level; per-stage
+		// lines stay at debug.
+		route := requestRoute{path: metricsutil.DisaggPathDecodeOnly}
+		if s.config.DecoderURL != nil {
+			route.decoder = s.config.DecoderURL.Host
+		}
+		if prefillHostPort != "" {
+			route.path = metricsutil.DisaggPathPrefillDecode
+			route.prefiller = prefillHostPort
+		}
+		defer func() { summary.log(logger, route, status, time.Since(requestStart)) }()
 
 		if len(prefillHostPort) == 0 {
 			logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
@@ -182,12 +195,13 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
 				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
+			route.path = metricsutil.DisaggPathEncodeDecode
 			if len(prefillHostPort) > 0 {
-				metrics.RecordDisagg(metricsutil.DisaggPathEncodePrefillDecode)
-			} else {
-				metrics.RecordDisagg(metricsutil.DisaggPathEncodeDecode)
+				route.path = metricsutil.DisaggPathEncodePrefillDecode
 			}
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
+			route.encoders = len(allowedEncoders)
+			metrics.RecordDisagg(route.path)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, kvCacheSource, apiType)
 			return
 		}
 
