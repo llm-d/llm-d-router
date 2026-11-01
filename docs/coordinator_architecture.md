@@ -703,7 +703,6 @@ log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v override
 server:               # inbound listener; TLS unless secure_serving is false
   listen_addr: ":8080"
   read_timeout: 30s
-  write_timeout: 120s
 
 gateway:              # outbound client to the Inference Gateway
   address: "http://inference-gateway:80"

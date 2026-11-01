@@ -413,11 +413,6 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			holdIsDeadline = false
 		}
 	}
-	// Held connections must outlive the server WriteTimeout, so clear the
-	// write deadline as the streaming path does.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.Error(err, "could not clear write deadline for held connection")
-	}
 	waitCtx, cancel := context.WithTimeout(ctx, waitCap)
 	defer cancel()
 

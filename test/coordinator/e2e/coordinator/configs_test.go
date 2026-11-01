@@ -25,7 +25,6 @@ const coordinatorConfigNIXL = `log_level: 5
 server:
   listen_addr: ":8080"
   read_timeout: 30s
-  write_timeout: 120s
   # Recreated per spec behind a group-lived Envoy; drain fast so a deleted
   # coordinator stops serving immediately instead of lingering on a stale
   # endpoint the gateway may still route to. 0s is avoided: it makes the

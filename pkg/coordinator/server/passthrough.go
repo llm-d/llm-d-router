@@ -24,7 +24,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
@@ -89,16 +88,6 @@ func (h *passthroughHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
 	logger.V(logutil.DEFAULT).Info("received request", "method", r.Method, "path", r.URL.Path)
-
-	// The passthrough proxies request bodies verbatim and never parses them,
-	// so it cannot detect stream:true without defeating that design. Clear
-	// the write deadline unconditionally: a streaming response would otherwise
-	// be cut by WriteTimeout mid-stream. The trade-off is that non-streaming
-	// passthrough responses lose the slow-client guard; the gateway and
-	// server IdleTimeout still bound stalled connections.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline", "error", err)
-	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBodySize*config.BytesPerMB)
 

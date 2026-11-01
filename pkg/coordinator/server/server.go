@@ -209,10 +209,9 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	}
 
 	s.httpServer = &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      otelHandler(r),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:        cfg.ListenAddr,
+		Handler:     otelHandler(r),
+		ReadTimeout: cfg.ReadTimeout,
 	}
 
 	return s, nil
