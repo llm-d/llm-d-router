@@ -57,8 +57,8 @@ type PlaceholderRange struct {
 // into typed []*BlockExtraFeatures. A first entry equal to loraName is dropped;
 // the request key carries the adapter as its model name. Each other element is
 // either:
-//   - a bare string identifier (vLLM v0.18.0: mm_feature.identifier), or
-//   - a 2-element [string, int] tuple (vLLM v0.18.1+: identifier and
+//   - a bare string identifier (vLLM <= v0.18.x: mm_feature.identifier), or
+//   - a 2-element [string, int] tuple (vLLM v0.19.0+: identifier and
 //     block-relative offset). Only the first entry's offset is kept, as
 //     FirstContinuation.
 //
@@ -81,7 +81,7 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 		for _, entry := range blockKeys {
 			switch v := entry.(type) {
 			case string:
-				// vLLM v0.18.0+: bare identifier string per MM item.
+				// vLLM <= v0.18.x: bare identifier string per MM item.
 				features.MMHashes = append(features.MMHashes, MMHash{Hash: v})
 			case []any:
 				// [identifier, offset] tuple — extract the identifier.
