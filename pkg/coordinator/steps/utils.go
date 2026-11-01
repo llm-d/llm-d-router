@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"slices"
 
@@ -424,48 +423,19 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 }
 
 // toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
-// Each element must be a non-negative integer represented as float64 or json.Number.
+// Each element must be a non-negative integer (see reqcommon.NonNegativeInt).
 // The returned error identifies the offending element by index and wraps
 // pipeline.ErrBadRequest.
 func toIntSlice(values []any) ([]int, error) {
 	out := make([]int, 0, len(values))
 	for i, v := range values {
-		n, err := anyToNonNegativeInt(v)
+		n, err := reqcommon.NonNegativeInt(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid token at index %d: %v: %w", i, err, pipeline.ErrBadRequest)
 		}
 		out = append(out, n)
 	}
 	return out, nil
-}
-
-// anyToNonNegativeInt converts a single JSON-unmarshalled numeric value to a non-negative int.
-func anyToNonNegativeInt(v any) (int, error) {
-	switch n := v.(type) {
-	case float64:
-		if n < 0 || n != math.Trunc(n) {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		// An in-range integer-valued float64 round-trips through int; a value
-		// too large to fit does not (the conversion saturates), so this rejects
-		// overflow without depending on the fragile float64(MaxInt) boundary.
-		i := int(n)
-		if float64(i) != n {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		return i, nil
-	case json.Number:
-		i, err := n.Int64()
-		if err != nil {
-			return 0, err
-		}
-		if i < 0 || i > math.MaxInt {
-			return 0, fmt.Errorf("expected non-negative integer, got %d", i)
-		}
-		return int(i), nil
-	default:
-		return 0, fmt.Errorf("expected number, got %T", v)
-	}
 }
 
 // extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to []int.
@@ -646,11 +616,11 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			// (upper-bound guarded only) and allocates make([]int, 1+length),
 			// which panics on a negative. vLLM accepts negatives here, so this
 			// is deliberately stricter; do not relax it to a plain int parse.
-			offset, err := anyToNonNegativeInt(pMap["offset"])
+			offset, err := reqcommon.NonNegativeInt(pMap["offset"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].offset: %v: %w", mod, i, err, pipeline.ErrBadRequest)
 			}
-			length, err := anyToNonNegativeInt(pMap["length"])
+			length, err := reqcommon.NonNegativeInt(pMap["length"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].length: %v: %w", mod, i, err, pipeline.ErrBadRequest)
 			}

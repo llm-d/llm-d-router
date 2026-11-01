@@ -39,14 +39,6 @@ import (
 const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
-
-	requestFieldN = "n"
-
-	responseFieldMessage = "message"
-	responseFieldIndex   = "index"
-	responseFieldDelta   = "delta"
-
-	roleAssistant = "assistant"
 )
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
@@ -129,7 +121,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
-	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
+	if n, ok := toInt(body[reqcommon.FieldN]); ok && n > 1 {
 		logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
 		regularDecode()
 		return
@@ -168,14 +160,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		regularDecode()
 		return
 	}
-	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + roleAssistant + `"`)}
+	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + reqcommon.RoleAssistant + `"`)}
 	prefix := ""
 	if continueFinal, _ := body[reqcommon.FieldContinueFinalMessage].(bool); continueFinal {
 		var role string
 		finalMessage = nil
 		// Only an assistant message can carry the accumulated text; any other final message is sent as is.
 		if len(messages) == 0 || json.Unmarshal(messages[len(messages)-1], &finalMessage) != nil ||
-			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != roleAssistant {
+			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != reqcommon.RoleAssistant {
 			regularDecode()
 			return
 		}
@@ -367,8 +359,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Individual chunk events have usage stripped by emitSSEChunk.
 		if lastResponse != nil {
 			usageEvent := map[string]any{
-				reqcommon.FieldUsage: cumulativeUsage,
-				responseFieldChoices: []any{},
+				reqcommon.FieldUsage:   cumulativeUsage,
+				reqcommon.FieldChoices: []any{},
 			}
 			if data, err := json.Marshal(usageEvent); err == nil {
 				fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
@@ -395,12 +387,12 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if choice := firstChoice(lastResponse); choice != nil {
 		choice = maps.Clone(choice)
 		fullText := textAccum.String()
-		if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
+		if msg, ok := choice[reqcommon.FieldMessage].(map[string]any); ok {
 			msg = maps.Clone(msg)
 			msg[reqcommon.FieldContent] = fullText
-			choice[responseFieldMessage] = msg
+			choice[reqcommon.FieldMessage] = msg
 		}
-		lastResponse[responseFieldChoices] = []any{choice}
+		lastResponse[reqcommon.FieldChoices] = []any{choice}
 	}
 
 	respBody, err := json.Marshal(lastResponse)
@@ -464,7 +456,7 @@ func extractPromptTokens(response map[string]any) int {
 
 // extractFinishReason returns finish_reason or "".
 func extractFinishReason(response map[string]any) string {
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return ""
 	}
@@ -472,7 +464,7 @@ func extractFinishReason(response map[string]any) string {
 	if !ok {
 		return ""
 	}
-	reason, _ := choice[responseFieldFinishReason].(string)
+	reason, _ := choice[reqcommon.FieldFinishReason].(string)
 	return reason
 }
 
@@ -483,7 +475,7 @@ func extractFinishReason(response map[string]any) string {
 func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
 	streamChunk := maps.Clone(chunkResponse)
 
-	if choices, _ := chunkResponse[responseFieldChoices].([]any); len(choices) > 0 {
+	if choices, _ := chunkResponse[reqcommon.FieldChoices].([]any); len(choices) > 0 {
 		streamChoices := make([]any, 0, len(choices))
 		for _, c := range choices {
 			choice, ok := c.(map[string]any)
@@ -492,16 +484,16 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 			}
 			text := extractChoiceText(choice)
 			streamChoice := map[string]any{
-				responseFieldIndex:        choice[responseFieldIndex],
-				responseFieldFinishReason: nil,
+				reqcommon.FieldIndex:        choice[reqcommon.FieldIndex],
+				reqcommon.FieldFinishReason: nil,
 			}
 			if last {
-				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
+				streamChoice[reqcommon.FieldFinishReason] = choice[reqcommon.FieldFinishReason]
 			}
-			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
+			streamChoice[reqcommon.FieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: reqcommon.RoleAssistant}
 			streamChoices = append(streamChoices, streamChoice)
 		}
-		streamChunk[responseFieldChoices] = streamChoices
+		streamChunk[reqcommon.FieldChoices] = streamChoices
 	}
 
 	delete(streamChunk, reqcommon.FieldUsage)
@@ -516,7 +508,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 
 // firstChoice returns choices[0] from a response map, or nil.
 func firstChoice(response map[string]any) map[string]any {
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return nil
 	}
@@ -526,7 +518,7 @@ func firstChoice(response map[string]any) map[string]any {
 
 // extractChoiceText returns the generated text from a choice's message.content.
 func extractChoiceText(choice map[string]any) string {
-	if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
+	if msg, ok := choice[reqcommon.FieldMessage].(map[string]any); ok {
 		if content, ok := msg[reqcommon.FieldContent].(string); ok {
 			return content
 		}

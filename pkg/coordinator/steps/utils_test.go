@@ -111,6 +111,10 @@ func TestExtractTokenIDs(t *testing.T) {
 		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
 		{name: "string_element", input: []any{"abc"}, wantErr: true},
 		{name: "bool_element", input: []any{true}, wantErr: true},
+		{name: "json_number", input: []any{json.Number("1"), json.Number("2345")}, want: []int{1, 2345}},
+		{name: "json_number_non_integer", input: []any{json.Number("1.5")}, wantErr: true},
+		{name: "json_number_overflow", input: []any{json.Number("9223372036854775808")}, wantErr: true},
+		{name: "float_at_2_pow_63", input: []any{float64(1 << 63)}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,7 +434,7 @@ func TestExtractMultimodalEntries(t *testing.T) {
 	// A negative offset or length must be rejected here: EncodeStep indexes
 	// token_ids[offset] and allocates make([]int, 1+length), so a negative value
 	// panics downstream. This guard is the only thing preventing that, so it is
-	// exercised directly. Do not weaken anyToNonNegativeInt to a plain int parse.
+	// exercised directly. Do not weaken reqcommon.NonNegativeInt to a plain int parse.
 	for _, tc := range []struct {
 		name   string
 		offset float64
