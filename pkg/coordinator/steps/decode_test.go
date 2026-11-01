@@ -1165,7 +1165,7 @@ func TestDecodeStep_PrefillFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			drain := pipeline.NewPrefillDrain(nil, nil)
+			drain := pipeline.NewPrefillDrain(func() {}, func() {})
 			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				if tc.headersSent {
