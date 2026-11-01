@@ -36,6 +36,11 @@ log_level: 2
 # secure_serving is false.
 # -------------------------------------------------------------------------------
 server:
+  # Route /generate through the SGLang P/D pipeline instead of passthrough.
+  # Requires kv-sglang, prefill/decode steps, and streaming requests.
+  # env: COORDINATOR_SERVER_ENABLE_SGLANG_PD
+  # enable_sglang_pd: false
+
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
 
@@ -443,6 +448,10 @@ pipeline:
       #   use_openai_format: true
       #   ec_connector: ec-nixl     # overrides pipeline.ec_connector
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+
+      #   prefill_grace limits how long a streaming SGLang prefill may remain
+      #   open after decode succeeds. Must be a positive duration.
+      #   prefill_grace: 30s
 
     # -------------------------------------------------------------------
     # decode: streams the completion back to the client. Last step.

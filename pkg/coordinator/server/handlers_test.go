@@ -510,8 +510,8 @@ func TestDecodeRequestBody(t *testing.T) {
 		"prompt":                           "hi",
 		"token_ids":                        []any{1.0},
 		"sampling_params":                  map[string]any{"max_tokens": 5.0},
-		reqcommon.FieldDisaggPrefillDPRank: nil,
 		"features":                         map[string]any{},
+		reqcommon.FieldDisaggPrefillDPRank: nil,
 		"tools":                            json.RawMessage(tools),
 	}, parsed)
 
@@ -1331,4 +1331,38 @@ func TestInferenceRoute(t *testing.T) {
 	require.Equal(t, coordmetrics.RouteMessages, inferenceRoute(reqcommon.PathMessages))
 	require.Equal(t, coordmetrics.RouteGenerate, inferenceRoute(reqcommon.PathVLLMGenerate))
 	require.Equal(t, coordmetrics.RouteUnknown, inferenceRoute("/other"))
+}
+
+func TestSGLangGeneratePassthrough(t *testing.T) {
+	for _, body := range []string{`{"text":"hello"}`, `{"text":"hello","stream":true}`} {
+		t.Run(body, func(t *testing.T) {
+			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.Equal(t, body, string(got))
+				require.Equal(t, reqcommon.PathSGLangGenerate, r.URL.Path)
+				require.Equal(t, gateway.PhaseDecode, r.Header.Get(reqcommon.EPPProfileHeaderKey))
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer gw.Close()
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, gw.URL))
+			require.NoError(t, err)
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, reqcommon.PathSGLangGenerate, strings.NewReader(body)))
+			require.Equal(t, http.StatusAccepted, rec.Code)
+			require.Nil(t, step.captured)
+		})
+	}
+}
+
+func TestSGLangGenerateOptIn(t *testing.T) {
+	step := &capturingStep{}
+	srv, err := New(config.ServerConfig{EnableSGLangPD: true}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, reqcommon.PathSGLangGenerate, strings.NewReader(`{"text":"hello","stream":true}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, step.captured)
+	require.Equal(t, reqcommon.PathSGLangGenerate, step.captured.OriginalPath)
 }
