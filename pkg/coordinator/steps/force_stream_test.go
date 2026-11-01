@@ -1518,7 +1518,7 @@ func requireRecomputed(t *testing.T, calls []spentHandoffCall) {
 // pass-through drops kv_transfer_params, so the decode pod recomputes the prompt,
 // and the client gets a correct reply. A shared-storage request (do_remote_prefill
 // but no block ids) keeps its params on the fallback, covered by
-// TestForceStream_MalformedFrame_BufferedPath.
+// TestForceStream_SharedStorage_FallbackKeepsKVParams.
 func TestForceStream_SpentHandoff_Recomputes(t *testing.T) {
 	const passthroughReply = `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`
 	var calls []spentHandoffCall
@@ -1565,6 +1565,54 @@ func TestForceStream_SpentHandoff_Recomputes(t *testing.T) {
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
+}
+
+// TestForceStream_SharedStorage_FallbackKeepsKVParams verifies the recompute is
+// limited to a one-shot handoff. A kv-shared-storage decode body sets
+// do_remote_prefill but names no blocks, since the decode pod re-reads the shared
+// store, so the fallback re-sends its kv_transfer_params unchanged and the pod
+// still reuses the stored KV.
+func TestForceStream_SharedStorage_FallbackKeepsKVParams(t *testing.T) {
+	const passthroughReply = `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, "data: not-json\n\n", passthroughReply, &calls)
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "1GiB",
+		ParamKVConnector:               kv.SharedStorage,
+	})
+	require.NoError(t, err)
+
+	cached := 32
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:           "req-shared-storage",
+		OriginalPath:        reqcommon.PathVLLMGenerate,
+		Model:               "llama-3",
+		Stream:              false,
+		PrefillCachedTokens: &cached,
+		KVTransferParams:    map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1},
+			"sampling_params": map[string]any{"max_tokens": 8},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	require.Len(t, calls, 2, "a forced attempt, then one pass-through")
+	require.True(t, calls[1].hasKV, "the shared-storage fallback keeps its kv_transfer_params")
+	require.Equal(t, calls[0].kvParams, calls[1].kvParams, "the fallback re-sends the same params")
+	require.NotNil(t, reqCtx.PrefillCachedTokens, "the prefill cache-hit count still applies")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
 }
 
 // TestForceStream_LossyFrameSpentHandoff_Recomputes covers the frame-level lossy
