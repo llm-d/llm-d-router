@@ -202,8 +202,8 @@ var (
 					"error_ceiling (buffered reply exceeded its reserved budget, usually a short byte estimate), "+
 					"error_upstream (upstream 4xx/5xx, or an error frame streamed after the 200, forwarded to the client), "+
 					"or error_transport (no upstream response). "+
-					"The fallback outcomes and error_ceiling take the non-forced pass-through, unless a spent one-shot KV handoff "+
-					"makes a replay unsafe, in which case the request fails as an error; "+
+					"The fallback outcomes and error_ceiling take the non-forced pass-through; when the forced attempt already "+
+					"consumed a one-shot KV block handoff, the pass-through drops it and decode recomputes the prompt; "+
 					"error_upstream and error_transport are also classified generically by step_errors_total.",
 				compbasemetrics.ALPHA),
 		},

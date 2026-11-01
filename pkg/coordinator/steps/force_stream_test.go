@@ -1363,26 +1363,19 @@ func TestForceStream_CeilingAbort_FallsBack(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
-// TestForceStream_CeilingSpentHandoff_SuppressesFallback verifies a ceiling abort on
-// a NIXL path whose block handoff the forced attempt already consumed fails cleanly
-// instead of replaying: the ceiling fallback inherits the spent-handoff suppression.
-func TestForceStream_CeilingSpentHandoff_SuppressesFallback(t *testing.T) {
-	var streams []any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var parsed map[string]any
-		_ = json.Unmarshal(raw, &parsed)
-		streams = append(streams, parsed["stream"])
-		// Stream token_ids well past the small reservation to trip the ceiling; there
-		// must be no second call, since the handoff is spent.
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		for i := 0; i < 100; i++ {
-			fmt.Fprint(w, "data: {\"request_id\":\"g\",\"choices\":[{\"index\":0,\"token_ids\":[1,2,3,4,5,6,7,8,9,10]}],\"usage\":null}\n\n")
-		}
-		flusher.Flush()
-	}))
+// TestForceStream_CeilingSpentHandoff_Recomputes verifies a ceiling abort on a
+// NIXL path whose block handoff the forced attempt already consumed falls back
+// without replaying it: the pass-through drops the handoff and the decode pod
+// recomputes the prompt.
+func TestForceStream_CeilingSpentHandoff_Recomputes(t *testing.T) {
+	const passthroughReply = `{"request_id":"g","choices":[{"index":0,"token_ids":[1]}]}`
+	// Stream token_ids well past the small reservation to trip the ceiling.
+	var forced strings.Builder
+	for i := 0; i < 100; i++ {
+		forced.WriteString("data: {\"request_id\":\"g\",\"choices\":[{\"index\":0,\"token_ids\":[1,2,3,4,5,6,7,8,9,10]}],\"usage\":null}\n\n")
+	}
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, forced.String(), passthroughReply, &calls)
 	defer server.Close()
 
 	reg := prometheus.NewRegistry()
@@ -1415,12 +1408,12 @@ func TestForceStream_CeilingSpentHandoff_SuppressesFallback(t *testing.T) {
 		ResponseWriter: recorder,
 	}
 
-	err = step.(*DecodeStep).Execute(context.Background(), reqCtx)
-	require.Error(t, err, "a ceiling abort on a spent handoff must fail cleanly, not replay")
-	require.Equal(t, []any{true}, streams, "only the forced attempt runs; the fallback is suppressed")
-	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorCeiling), 1e-9,
-		"a suppressed request is not counted")
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released on the error path")
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	requireRecomputed(t, calls)
+	body, _ := io.ReadAll(recorder.Result().Body)
+	require.JSONEq(t, passthroughReply, string(body))
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorCeiling), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
 // TestForceStream_MalformedFrame_BufferedPath verifies that an unreadable 200
@@ -1478,35 +1471,64 @@ func TestForceStream_MalformedFrame_BufferedPath(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
-// TestForceStream_SpentHandoff_SuppressesFallback verifies that when the forced
-// attempt fails after the upstream 200 and the request carries a one-shot P2P block
-// handoff (remote_block_ids, the NIXL path), the request does NOT replay it through
-// the pass-through: it fails cleanly with a single upstream call and is not counted
-// as a fallback. A shared-storage request (do_remote_prefill but no block ids) still
-// falls back, covered by TestForceStream_MalformedFrame_BufferedPath.
-func TestForceStream_SpentHandoff_SuppressesFallback(t *testing.T) {
-	var streams []any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// spentHandoffCall records one upstream call of a spent-handoff test: whether it
+// asked to stream, and the kv_transfer_params it carried.
+type spentHandoffCall struct {
+	stream   any
+	kvParams any
+	hasKV    bool
+}
+
+// spentHandoffServer fails the forced (stream:true) attempt with forcedStream and
+// answers the pass-through with passthroughReply, recording every call.
+func spentHandoffServer(t *testing.T, forcedStream, passthroughReply string, calls *[]spentHandoffCall) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var parsed map[string]any
 		_ = json.Unmarshal(raw, &parsed)
-		streams = append(streams, parsed["stream"])
-		// The forced attempt gets an unparsable stream; there must be no second call,
-		// since the handoff is spent and the fallback is suppressed.
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		fmt.Fprint(w, "data: not-json\n\n")
-		flusher.Flush()
+		kvParams, hasKV := parsed[reqcommon.FieldKVTransferParams]
+		*calls = append(*calls, spentHandoffCall{stream: parsed["stream"], kvParams: kvParams, hasKV: hasKV})
+		if parsed["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, forcedStream)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(passthroughReply))
 	}))
+}
+
+// requireRecomputed asserts a spent-handoff request was served by a pass-through
+// that dropped the handoff: the forced attempt carried the block ids, the second
+// call carried no kv_transfer_params, so the decode pod recomputed the prompt.
+func requireRecomputed(t *testing.T, calls []spentHandoffCall) {
+	t.Helper()
+	require.Len(t, calls, 2, "a forced attempt, then one recompute pass-through")
+	require.Equal(t, true, calls[0].stream)
+	require.True(t, calls[0].hasKV, "the forced attempt carries the handoff")
+	require.Equal(t, false, calls[1].stream)
+	require.False(t, calls[1].hasKV, "the recompute pass-through must not replay the spent handoff, got %v", calls[1].kvParams)
+}
+
+// TestForceStream_SpentHandoff_Recomputes verifies that when the forced attempt
+// fails after the upstream 200 and the request carries a one-shot P2P block
+// handoff (remote_block_ids, the NIXL path), the fallback does not replay it: the
+// pass-through drops kv_transfer_params, so the decode pod recomputes the prompt,
+// and the client gets a correct reply. A shared-storage request (do_remote_prefill
+// but no block ids) keeps its params on the fallback, covered by
+// TestForceStream_MalformedFrame_BufferedPath.
+func TestForceStream_SpentHandoff_Recomputes(t *testing.T) {
+	const passthroughReply = `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, "data: not-json\n\n", passthroughReply, &calls)
 	defer server.Close()
 
 	reg := prometheus.NewRegistry()
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	// The NIXL connector echoes reqCtx.KVTransferParams (the prefiller's block ids)
-	// into the decode body, so the body carries a one-shot handoff.
 	step, err := NewDecodeStep(gwClient, map[string]any{
 		ParamForceStream:               true,
 		ParamForceStreamBufferSize:     "1GiB",
@@ -1535,36 +1557,25 @@ func TestForceStream_SpentHandoff_SuppressesFallback(t *testing.T) {
 		ResponseWriter: recorder,
 	}
 
-	err = step.(*DecodeStep).Execute(context.Background(), reqCtx)
-	require.Error(t, err, "a spent handoff must fail cleanly rather than replay")
-	require.Equal(t, []any{true}, streams, "only the forced attempt runs; the fallback is suppressed")
-	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9,
-		"a suppressed request is not counted as a fallback")
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	requireRecomputed(t, calls)
+	require.Equal(t, http.StatusOK, recorder.Result().StatusCode)
+	body, _ := io.ReadAll(recorder.Result().Body)
+	require.JSONEq(t, passthroughReply, string(body))
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released on the error path")
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
-// TestForceStream_LossyFrameSpentHandoff_SuppressesFallback covers the intersection
-// of the frame-level lossy gate and the spent-handoff suppression: a plain chat
-// request whose pod streams reasoning by default, on a NIXL path whose block
-// handoff the forced attempt already consumed. The lossy field is detected
-// mid-stream, but the fallback cannot replay the spent handoff, so the request fails
-// cleanly (single upstream call) rather than replaying or dropping reasoning.
-func TestForceStream_LossyFrameSpentHandoff_SuppressesFallback(t *testing.T) {
-	var streams []any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var parsed map[string]any
-		_ = json.Unmarshal(raw, &parsed)
-		streams = append(streams, parsed["stream"])
-		// The forced attempt streams a reasoning delta (a server-side default);
-		// there must be no second call, since the handoff is spent.
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"let me think\"}}]}\n\n")
-		flusher.Flush()
-	}))
+// TestForceStream_LossyFrameSpentHandoff_Recomputes covers the frame-level lossy
+// gate on a spent handoff: a plain chat request whose pod streams reasoning by
+// default, on a NIXL path whose block handoff the forced attempt already consumed.
+// The lossy field is detected mid-stream; the fallback drops the handoff so the
+// decode pod recomputes the prompt, and the reply keeps its reasoning.
+func TestForceStream_LossyFrameSpentHandoff_Recomputes(t *testing.T) {
+	const passthroughReply = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Paris","reasoning":"let me think"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":4}}}`
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"let me think\"}}]}\n\n", passthroughReply, &calls)
 	defer server.Close()
 
 	reg := prometheus.NewRegistry()
@@ -1579,12 +1590,15 @@ func TestForceStream_LossyFrameSpentHandoff_SuppressesFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	prefillCached := 32
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "req-lossy-spent",
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "llama-3",
 		Stream:       false,
+		// The prefill cache-hit count describes the handoff the recompute drops.
+		PrefillCachedTokens: &prefillCached,
 		KVTransferParams: map[string]any{
 			reqcommon.FieldRemoteBlockIDs: []any{1, 2},
 			reqcommon.FieldRemoteEngineID: "prefill-pod-a",
@@ -1596,20 +1610,22 @@ func TestForceStream_LossyFrameSpentHandoff_SuppressesFallback(t *testing.T) {
 		ResponseWriter: recorder,
 	}
 
-	err = step.(*DecodeStep).Execute(context.Background(), reqCtx)
-	require.Error(t, err, "a lossy frame on a spent handoff must fail cleanly, not replay")
-	require.Equal(t, []any{true}, streams, "only the forced attempt runs; the fallback is suppressed")
-	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9,
-		"a suppressed request is not counted as a fallback")
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	requireRecomputed(t, calls)
+	body, _ := io.ReadAll(recorder.Result().Body)
+	require.JSONEq(t, passthroughReply, string(body),
+		"the reply keeps the reasoning the fold would drop, and the recompute's own cached count, not prefill's")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released on the error path")
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
 // TestForceStream_MessagesThinkingSpentHandoff_PassesThrough covers a Messages
 // request that turns thinking on, on a NIXL path carrying a one-shot block
 // handoff. Its thinking blocks would make a forced attempt lossy, and the attempt
-// would spend the handoff so the fallback could not replay it. The request is
-// declined before any forced attempt and served by the pass-through.
+// would spend the handoff, so the fallback would have to recompute the prompt. The
+// request is declined before any forced attempt and served by the pass-through
+// with its handoff intact.
 func TestForceStream_MessagesThinkingSpentHandoff_PassesThrough(t *testing.T) {
 	const passthroughReply = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"text","text":"hi"}]}`
 	var streams []any
@@ -1710,9 +1726,9 @@ func TestForceStream_ForwardsPeerTopology(t *testing.T) {
 }
 
 // TestSpendsRemoteBlocks covers the one-shot P2P handoff detector that gates the
-// fallback suppression: only a non-empty remote_block_ids list qualifies, so a
+// fallback's recompute: only a non-empty remote_block_ids list qualifies, so a
 // shared-storage body (do_remote_prefill but no block ids) and bodies with no or a
-// malformed kv_transfer_params all report false and still fall back.
+// malformed kv_transfer_params all report false and fall back with their params.
 func TestSpendsRemoteBlocks(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2264,8 +2280,8 @@ func TestForceStream_MidStreamError_ForwardsEnvelope(t *testing.T) {
 
 // TestForceStream_MidStreamErrorSpentHandoff_ForwardsEnvelope covers a mid-stream
 // error on a NIXL path whose block handoff the forced attempt already spent. The
-// error is forwarded rather than a fallback, so the spent-handoff suppression does
-// not apply and the client gets the pod's error, not a generic 502.
+// error is forwarded rather than a fallback, so there is no recompute and the
+// client gets the pod's error.
 func TestForceStream_MidStreamErrorSpentHandoff_ForwardsEnvelope(t *testing.T) {
 	const envelope = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

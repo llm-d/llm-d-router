@@ -145,13 +145,15 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					}
 					// The attempt failed with nothing written to the client. Falling back
 					// re-sends reqCtx.Body through the pass-through, so the pod may run the
-					// request twice. The body still carries the prefiller's one-shot P2P
-					// block handoff the forced attempt already pulled; replaying spent
-					// blocks is unsafe, so such a request fails cleanly instead (nothing
-					// reached the client, so a 5xx is honest).
+					// request twice. A body carrying the prefiller's one-shot P2P block
+					// handoff cannot replay it: the forced attempt already pulled the
+					// blocks. The fallback drops the handoff instead, so the decode pod
+					// recomputes the prompt; the reply is slower but correct.
 					if spendsRemoteBlocks(reqCtx.Body) {
-						logger.Error(err, "force-stream failed and its KV block handoff is spent; not replaying")
-						return err
+						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
+						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						// The prefill cache-hit count describes the handoff just dropped.
+						reqCtx.PrefillCachedTokens = nil
 					}
 					coordmetrics.IncForceStreamTotal(reqCtx.Model, fallbackResult)
 					// Fell back with nothing written; continue to the pass-through below.
@@ -183,10 +185,10 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // spendsRemoteBlocks reports whether the decode body carries a one-shot P2P KV
 // handoff: remote_block_ids naming blocks the prefiller streamed to this decode pod
 // and frees once pulled (the NIXL path). The forced attempt already pulled them, so
-// re-sending the body would replay a spent handoff; the fallback is suppressed when
-// this is set. do_remote_prefill alone does not qualify: shared storage also sets
-// it but names no blocks, since the decode pod re-reads the shared store, making a
-// replay safe.
+// re-sending the body would replay a spent handoff; the fallback drops the handoff
+// when this is set. do_remote_prefill alone does not qualify: shared storage also
+// sets it but names no blocks, since the decode pod re-reads the shared store,
+// making a replay safe.
 func spendsRemoteBlocks(body map[string]any) bool {
 	params, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)
 	if !ok {
@@ -197,11 +199,10 @@ func spendsRemoteBlocks(body map[string]any) bool {
 }
 
 // forceStreamFallbackResult classifies a force-stream error as fallback-eligible,
-// returning the outcome label to record if the request takes the pass-through. It
+// returning the outcome label to record when the request takes the pass-through. It
 // leaves the client uncommitted, so the caller may fall back; nil (a forced
 // success) and every other error are not fallbacks, so ok is false and the caller
-// returns them directly. The caller records the label only when it actually falls
-// back, so a suppressed fallback is never counted as one.
+// returns them directly.
 func forceStreamFallbackResult(err error) (result string, ok bool) {
 	switch {
 	case errors.Is(err, errForceStreamOversize):

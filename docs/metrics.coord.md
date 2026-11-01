@@ -154,7 +154,7 @@ Recorded by the decode step when its `force_stream` parameter is on, which sends
 #### `force_stream_total` (Counter)
 *   **Labels:** `model_name`, `result`
 *   **Description:** Counts force-stream candidates, the non-streaming requests on a route the decode step can reassemble, by outcome. The metric's Help string defines each `result` value. `forced` is a reassembled reply. The `fallback_*` values and `error_ceiling` take the non-forced pass-through. `error_upstream` (an upstream 4xx/5xx, or an error frame streamed after the 200) and `error_transport` fail the request and are also counted by `step_errors_total`.
-*   A fallback outcome whose request carries a spent one-shot KV block handoff cannot be replayed, so the request fails and is counted only by `step_errors_total`.
+*   When the forced attempt already consumed a one-shot KV block handoff (`kv-nixl`), the fallback pass-through drops the handoff and the decode worker recomputes the prompt. The request is slower but still served, and is counted under its fallback outcome.
 
 #### `force_stream_buffered_bytes` (Gauge)
 *   **Labels:** None
