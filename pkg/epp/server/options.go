@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/leaderelection"
+	cliflag "k8s.io/component-base/cli/flag"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -357,9 +358,9 @@ func (opts *Options) Complete() error {
 	}
 
 	if opts.TLSMinVersion != "" {
-		v, err := parseTLSVersion(opts.TLSMinVersion)
+		v, err := cliflag.TLSVersion(opts.TLSMinVersion)
 		if err != nil {
-			return fmt.Errorf("invalid tls-min-version %q: %w", opts.TLSMinVersion, err)
+			return fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion, opts.TLSMinVersion)
 		}
 		if v < tls.VersionTLS12 {
 			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
@@ -367,7 +368,20 @@ func (opts *Options) Complete() error {
 		opts.tlsMinVersionValue = v
 	}
 	if len(opts.TLSCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.TLSCipherSuites)
+		// cliflag.TLSCipherSuites also resolves tls.InsecureCipherSuites(); reject those.
+		insecure := cliflag.InsecureTLSCiphers()
+		names := make([]string, 0, len(opts.TLSCipherSuites))
+		for _, name := range opts.TLSCipherSuites {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if _, ok := insecure[name]; ok {
+				return fmt.Errorf("invalid tls-cipher-suites: insecure cipher suite %q is not supported", name)
+			}
+			names = append(names, name)
+		}
+		suites, err := cliflag.TLSCipherSuites(names)
 		if err != nil {
 			return fmt.Errorf("invalid tls-cipher-suites: %w", err)
 		}
@@ -523,40 +537,6 @@ func (opts *Options) TLSMinVersionValue() uint16 {
 // TLSCipherSuiteValues returns the parsed uint16 TLS cipher suite IDs.
 func (opts *Options) TLSCipherSuiteValues() []uint16 {
 	return opts.tlsCipherSuiteValues
-}
-
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(s string) (uint16, error) {
-	if v, ok := tlsVersions[s]; ok {
-		return v, nil
-	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s)
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cs := range tls.CipherSuites() {
-		byName[cs.Name] = cs.ID
-	}
-	ids := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		id, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
 }
 
 // LeaderElectionOverride returns a controller manager option override that applies the lease
