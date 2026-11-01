@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"time"
@@ -46,6 +47,7 @@ type RenderStep struct {
 	serviceAddress            string
 	maxTotalTokens            int
 	maxTotalPlaceholderTokens int
+	mmPayload                 string
 	client                    *http.Client
 }
 
@@ -99,6 +101,19 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		maxPlaceholders = v
 	}
 
+	mmPayload, err := paramString(params, "mm_payload")
+	if err != nil {
+		return nil, err
+	}
+	switch mmPayload {
+	case "":
+		mmPayload = pipeline.MMPayloadNone
+	case pipeline.MMPayloadTensors, pipeline.MMPayloadNone:
+	default:
+		return nil, fmt.Errorf("mm_payload must be %q or %q, got %q",
+			pipeline.MMPayloadTensors, pipeline.MMPayloadNone, mmPayload)
+	}
+
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -113,6 +128,7 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		serviceAddress:            address,
 		maxTotalTokens:            maxTokens,
 		maxTotalPlaceholderTokens: maxPlaceholders,
+		mmPayload:                 mmPayload,
 		client:                    &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
 }
@@ -328,13 +344,16 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		totalMetadata += len(metadata)
 	}
 	expected := len(reqCtx.MultimodalEntries)
+	// A renderer without the mm_payload field ignores it and returns the
+	// tensors, which keep the features path.
+	omitted := s.mmPayload != pipeline.MMPayloadTensors && expected > 0 && totalKwargs == 0
 	if totalHashes != expected {
 		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
 	if totalPlaceholders != expected {
 		return fmt.Errorf("render returned %d mm_placeholders but expected %d", totalPlaceholders, expected)
 	}
-	if totalKwargs != expected {
+	if !omitted && totalKwargs != expected {
 		return fmt.Errorf("render returned %d kwargs_data but expected %d", totalKwargs, expected)
 	}
 	// mm_metadata is optional for backward compatibility with older renderers.
@@ -386,11 +405,13 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		placeholders := renderResp.Features.MMPlaceholders[mod]
 		kwargs := renderResp.Features.KwargsData[mod]
 		metadata := renderResp.Features.MMMetadata[mod]
-		if idx >= len(hashes) || idx >= len(placeholders) || idx >= len(kwargs) {
+		if idx >= len(hashes) || idx >= len(placeholders) || (!omitted && idx >= len(kwargs)) {
 			return fmt.Errorf("render response missing slot %d for modality %s", idx, mod)
 		}
 		reqCtx.MultimodalEntries[i].Hash = hashes[idx]
-		reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		if !omitted {
+			reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		}
 		reqCtx.MultimodalEntries[i].Placeholder = placeholders[idx]
 		if idx < len(metadata) {
 			reqCtx.MultimodalEntries[i].MMMetadata = metadata[idx]
@@ -399,6 +420,9 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
+	}
+	if omitted {
+		reqCtx.MMPayload = s.mmPayload
 	}
 
 	logger.V(logutil.DEBUG).Info("response",
@@ -410,8 +434,22 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	return nil
 }
 
-// postRender marshals reqCtx.Body, POSTs it to <serviceAddress><basePath>/render,
-// and decodes the JSON response into out.
+// bodySetsProcessorKwargs reports whether the client body sets either
+// preprocessing kwargs field. Both change preprocessing and feed vLLM's
+// multimodal hash, so a request that sets them cannot run on the
+// content_parts path, which preprocesses media at the deployment defaults.
+func bodySetsProcessorKwargs(body map[string]any) bool {
+	for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
+		if v, ok := body[field]; ok && v != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// postRender marshals reqCtx.Body, asking for no tensors unless mm_payload is
+// tensors, POSTs it to <serviceAddress><basePath>/render, and decodes the JSON
+// response into out.
 func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) error {
 	if s.serviceAddress == "" {
 		return errors.New("render: service address not configured (set 'address' in render step params)")
@@ -419,7 +457,22 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
-	body, err := json.Marshal(reqCtx.Body)
+	renderBody := reqCtx.Body
+	if s.mmPayload != pipeline.MMPayloadTensors {
+		if bodySetsProcessorKwargs(reqCtx.Body) {
+			// The generate format's content_parts path preprocesses media at
+			// the deployment defaults, so the client's preprocessing kwargs
+			// cannot travel with it. Keep the tensors form, whose output
+			// render already processed with them.
+			logger.V(logutil.DEFAULT).Info("body sets mm_processor_kwargs or media_io_kwargs; requesting tensors")
+		} else {
+			// vLLM has no metadata-only render payload; prefill rebuilds it.
+			renderBody = maps.Clone(reqCtx.Body)
+			renderBody[reqcommon.FieldReturnMMKwargs] = false
+			renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
+		}
+	}
+	body, err := json.Marshal(renderBody)
 	if err != nil {
 		return fmt.Errorf("marshaling request for render: %w", err)
 	}

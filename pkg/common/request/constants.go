@@ -57,6 +57,7 @@ const (
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
@@ -88,11 +89,17 @@ const (
 	FieldRole                 = "role"
 	FieldType                 = "type"
 	FieldURL                  = "url"
+	FieldUUID                 = "uuid" // content part field vLLM keys a multimodal item's hash on
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+	// FieldMMPayload selects what a vLLM render response carries for each
+	// multimodal item; FieldReturnMMKwargs is its deprecated boolean alias,
+	// the only one vLLM v0.32 reads.
+	FieldMMPayload      = "mm_payload"
+	FieldReturnMMKwargs = "return_mm_kwargs"
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap
