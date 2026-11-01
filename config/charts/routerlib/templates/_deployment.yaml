@@ -202,6 +202,19 @@
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+        {{- $eppEnvNames := list }}
+        {{- range .Values.router.epp.env }}
+        {{- $eppEnvNames = append $eppEnvNames .name }}
+        {{- end }}
+        {{- if and (dig "limits" "memory" "" (.Values.router.epp.resources | default dict)) (not (has "GOMEMLIMIT" $eppEnvNames)) }}
+            # Without a soft limit the Go GC lets garbage grow to twice the live heap,
+            # which can pass the container limit and get the EPP OOM-killed.
+            - name: GOMEMLIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
+                  divisor: "1"
+        {{- end }}
         {{- $crossReplica := .Values.router.epp.crossReplica | default dict }}
         {{- if $crossReplica.enabled }}
         {{- with ($crossReplica.redis | default dict).passwordSecretRef }}

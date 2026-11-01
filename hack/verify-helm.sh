@@ -686,6 +686,29 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   done
 done
 
+echo "Verifying GOMEMLIMIT follows router.epp.resources.limits.memory..."
+# Each case is name:GOMEMLIMIT entries:limits.memory references.
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for gomemlimit_case in "default:1:1" "no-limit:0:0" "user-env:1:0"; do
+    IFS=: read -r gomemlimit_set gomemlimit_want_env gomemlimit_want_ref <<< "${gomemlimit_case}"
+    case "${gomemlimit_set}" in
+      default) gomemlimit_args="" ;;
+      no-limit) gomemlimit_args="--set router.epp.resources.limits.memory=null" ;;
+      user-env) gomemlimit_args="--set 'router.epp.env[0].name=GOMEMLIMIT' --set-string 'router.epp.env[0].value=1GiB'" ;;
+    esac
+    gomemlimit_render_output="${TEMP_DIR}/${chart}-gomemlimit-${gomemlimit_set}-render.yaml"
+    gomemlimit_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway ${gomemlimit_args} > ${gomemlimit_render_output}"
+    echo "Executing: ${gomemlimit_render_command}"
+    eval "${gomemlimit_render_command}"
+    gomemlimit_env=$(grep -c -- '- name: GOMEMLIMIT$' "${gomemlimit_render_output}" || true)
+    gomemlimit_ref=$(grep -c -- 'resource: limits.memory$' "${gomemlimit_render_output}" || true)
+    if [ "${gomemlimit_env}" != "${gomemlimit_want_env}" ] || [ "${gomemlimit_ref}" != "${gomemlimit_want_ref}" ]; then
+      echo "${chart} (${gomemlimit_set}): expected ${gomemlimit_want_env} GOMEMLIMIT and ${gomemlimit_want_ref} limits.memory reference, got ${gomemlimit_env} and ${gomemlimit_ref}"
+      exit 1
+    fi
+  done
+done
+
 if ! HELM="${HELM}" bash "${SCRIPT_ROOT}/hack/verify-plugins-config.sh"; then
   echo "Structured plugins configuration validation failed"
   exit 1
