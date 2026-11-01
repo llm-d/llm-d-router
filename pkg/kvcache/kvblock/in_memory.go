@@ -450,6 +450,7 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 			evicting[key] = struct{}{}
 		}
 		type engineEvictionPlan struct {
+			engineKey       BlockHash
 			requestKeys     []BlockHash
 			filteredEntries [][]PodEntry
 		}
@@ -462,6 +463,7 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 				continue
 			}
 			groups[i] = append([]BlockHash(nil), rks...)
+			plans[i].engineKey = key
 			plans[i].requestKeys = groups[i]
 			if len(rks) > 1 {
 				filteredEntries := make([][]PodEntry, len(rks))
@@ -481,14 +483,14 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 			}
 		}
 
-		for i, plan := range plans {
+		for _, plan := range plans {
 			for j, rk := range plan.requestKeys {
 				evictEntries := entries
 				if plan.filteredEntries != nil {
 					evictEntries = plan.filteredEntries[j]
 				}
 				if len(evictEntries) > 0 {
-					m.evictPodsFromRequestKey(rk, keys[i], evictEntries, traceLogger)
+					m.evictPodsFromRequestKey(rk, plan.engineKey, evictEntries, traceLogger)
 				}
 			}
 		}
