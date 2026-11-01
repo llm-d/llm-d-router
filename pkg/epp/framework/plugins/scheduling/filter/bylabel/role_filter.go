@@ -41,7 +41,14 @@ type RoleFilter struct {
 	// validRoles defines the set of accepted RoleLabel values
 	validRoles map[string]struct{}
 	// allowsNoRole - if true endpoints without RoleLabel are retained
-	allowsNoRole bool
+	allowsNoRole  bool
+	layoutManager *LayoutManager
+}
+
+// WithLayoutManager enables runtime role overrides for this filter.
+func (f *RoleFilter) WithLayoutManager(manager *LayoutManager) *RoleFilter {
+	f.layoutManager = manager
+	return f
 }
 
 // newRoleFilter returns a filter typed and named after the role it selects for.
@@ -73,9 +80,17 @@ func (f *RoleFilter) WithName(name string) *RoleFilter {
 // carrying no role at all when allowsNoRole is set.
 func (f *RoleFilter) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filteredEndpoints := []scheduling.Endpoint{}
+	var dynamicRoles map[string]string
+	if f.layoutManager != nil {
+		dynamicRoles = f.layoutManager.Roles(endpoints)
+	}
 
 	for _, endpoint := range endpoints {
 		role, roleDefined := endpoint.GetMetadata().Labels[RoleLabel]
+		if f.layoutManager != nil {
+			role = dynamicRoles[endpoint.GetMetadata().ID.String()]
+			roleDefined = role != ""
+		}
 		_, roleValid := f.validRoles[role]
 
 		if (!roleDefined && f.allowsNoRole) || roleValid {

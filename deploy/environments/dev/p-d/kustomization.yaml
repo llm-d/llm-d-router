@@ -12,6 +12,38 @@ resources:
 
 patches:
 - path: patch-decode.yaml
+- target:
+    kind: Deployment
+    name: vllm-p
+  patch: |-
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1tensor-parallel-size
+      value: "1"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1role-transfer-group
+      value: "${ROLE_TRANSFER_GROUP}"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1model-identity
+      value: "${MODEL_NAME_SAFE}"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1accelerator-class
+      value: "${VLLM_ACCELERATOR_CLASS}"
+- target:
+    kind: Deployment
+    name: vllm-d
+  patch: |-
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1tensor-parallel-size
+      value: "1"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1role-transfer-group
+      value: "${ROLE_TRANSFER_GROUP}"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1model-identity
+      value: "${MODEL_NAME_SAFE}"
+    - op: add
+      path: /spec/template/metadata/labels/llm-d.ai~1accelerator-class
+      value: "${VLLM_ACCELERATOR_CLASS}"
 
 components:
 - ../../../components/overlays/simulator/
