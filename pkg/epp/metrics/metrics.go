@@ -82,6 +82,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDOverflowCounter)
+		metrics.Registry.MustRegister(llmdRequestOutcomeCounter)
 		metrics.Registry.MustRegister(llmdRequestLatencies)
 		metrics.Registry.MustRegister(llmdRequestSizes)
 		metrics.Registry.MustRegister(llmdResponseSizes)
@@ -146,6 +147,7 @@ func Reset() {
 	llmdRequestErrCounter.Reset()
 	llmdFairnessIDResolvedCounter.Reset()
 	llmdFairnessIDOverflowCounter.Reset()
+	llmdRequestOutcomeCounter.Reset()
 	llmdRequestLatencies.Reset()
 	llmdRequestSizes.Reset()
 	llmdResponseSizes.Reset()
@@ -234,6 +236,13 @@ func RecordFairnessIDResolution(inferencePool, fairnessID, source string) {
 	if overflow {
 		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool).Inc()
 	}
+}
+
+// RecordRequestOutcome records how a request ended.
+func RecordRequestOutcome(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority, outcome, reason string) {
+	modelName, targetModelName = boundModels(modelName, targetModelName)
+	fairnessID = boundFairnessID(fairnessID)
+	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), outcome, reason).Inc()
 }
 
 // RecordRequestSizes records the request sizes.
@@ -441,6 +450,7 @@ func RecordResponseProcessingLatency(apiSurface reqcommon.APISurface, duration t
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
 func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.SchedulingResult) {
+	targetModelName = boundModel(targetModelName)
 	if err != nil {
 		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
 		return

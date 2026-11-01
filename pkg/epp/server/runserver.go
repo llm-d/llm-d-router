@@ -32,6 +32,7 @@ import (
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for gRPC.
 	"google.golang.org/grpc/health"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -76,6 +77,7 @@ type ExtProcServerRunner struct {
 	PriorityBandControlPlane         contracts.PriorityBandControlPlane
 	GRPCMaxRecvMsgSize               int
 	GRPCMaxSendMsgSize               int
+	MaxRequestBodySize               int
 	EnableGRPCStreamMetrics          bool
 	EmitEndpointScores               bool
 	EnableToolCallingTelemetry       bool
@@ -88,6 +90,10 @@ type ExtProcServerRunner struct {
 	// server. Each is asked in turn before an endpoint is selected, and the first one to
 	// return a response ends the exchange.
 	Responders []fwkrc.Responder
+
+	// keepaliveTime and keepaliveTimeout are overridden only by tests.
+	keepaliveTime    time.Duration
+	keepaliveTimeout time.Duration
 }
 
 // NewExtProcServerRunner builds a runner from the runtime options plus the dependencies the
@@ -126,9 +132,12 @@ func NewExtProcServerRunner(
 		PriorityBandControlPlane:         priorityBandControlPlane,
 		GRPCMaxRecvMsgSize:               opts.GRPCMaxRecvMsgSize,
 		GRPCMaxSendMsgSize:               opts.GRPCMaxSendMsgSize,
+		MaxRequestBodySize:               opts.MaxRequestBodySize,
 		EnableGRPCStreamMetrics:          opts.EnableGRPCStreamMetrics,
 		EmitEndpointScores:               opts.EmitEndpointScores,
 		EnableToolCallingTelemetry:       opts.EnableToolCallingTelemetry,
+		keepaliveTime:                    grpcKeepaliveTime,
+		keepaliveTimeout:                 grpcKeepaliveTimeout,
 	}
 }
 
@@ -207,6 +216,24 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
+// Keepalive closes dead ext_proc connections so their streams end and release in-flight load.
+const (
+	grpcKeepaliveTime    = 30 * time.Second // ping the proxy after this long without activity
+	grpcKeepaliveTimeout = 20 * time.Second // close the connection if the ping is not acknowledged
+	grpcKeepaliveMinTime = 10 * time.Second // fastest client ping rate the server accepts
+)
+
+func keepaliveServerOptions(pingAfter, ackTimeout time.Duration) []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{Time: pingAfter, Timeout: ackTimeout}),
+		// The default policy drops clients that ping more often than every 5 minutes.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcKeepaliveMinTime,
+			PermitWithoutStream: true,
+		}),
+	}
+}
+
 // AsRunnable returns a Runnable that can be used to start the ext-proc gRPC server.
 // The runnable implements LeaderElectionRunnable with leader election disabled.
 func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
@@ -270,6 +297,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			metrics.RegisterGRPCStreamMetrics()
 			grpcOpts = append(grpcOpts, grpc.ChainStreamInterceptor(streamMetricsInterceptor))
 		}
+		grpcOpts = append(grpcOpts, keepaliveServerOptions(r.keepaliveTime, r.keepaliveTimeout)...)
 		// Note: gzip compressor is registered via blank import above.
 
 		srv = grpc.NewServer(grpcOpts...)
@@ -281,6 +309,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 		extProcServer := handlers.NewStreamingServer(r.Datastore, r.Director, r.ParserRegistry, poolCap)
 		extProcServer.SetEmitEndpointScores(r.EmitEndpointScores)
 		extProcServer.SetToolCallingTelemetryEnabled(r.EnableToolCallingTelemetry)
+		extProcServer.SetMaxRequestBodySize(r.MaxRequestBodySize)
 		extProcServer.SetResponders(r.Responders)
 		if r.EvictChannelLookup != nil {
 			extProcServer.SetEvictChannelLookup(r.EvictChannelLookup)

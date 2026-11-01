@@ -1103,6 +1103,74 @@ func TestCollectMediaParts_ResponsesCollectsEveryMediaPart(t *testing.T) {
 	}
 }
 
+func TestCollectMediaParts_UntypedChatMedia(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		part     string
+		wantType string
+		wantMod  reqcommon.Modality
+	}{
+		{"image object", `{"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image string", `{"image_url":"image"}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio object", `{"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"audio string", `{"audio_url":"audio"}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio", `{"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+		{"video object", `{"video_url":{"url":"video"}}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"video string", `{"video_url":"video"}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"null type", `{"type":null,"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image before audio", `{"audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio before inline audio", `{"input_audio":{"data":"AA==","format":"wav"},"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio before video", `{"video_url":{"url":"video"},"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, reqcommon.APITypeChatCompletions)
+			require.Len(t, parts, 1)
+			require.Equal(t, tc.wantMod, parts[0].modality)
+			require.Equal(t, tc.wantType, part[reqcommon.FieldType])
+			if tc.wantType != reqcommon.PartTypeInputAudio {
+				require.NotEmpty(t, reqcommon.MediaPartURL(part))
+			}
+		})
+	}
+}
+
+func TestCollectMediaParts_PreservesTypesAndOtherAPIs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		apiType reqcommon.APIType
+		part    string
+		wantMod reqcommon.Modality
+	}{
+		{"explicit media type", reqcommon.APITypeChatCompletions, `{"type":"audio_url","audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.ModalityAudio},
+		{"explicit text type", reqcommon.APITypeChatCompletions, `{"type":"text","text":"describe","image_url":{"url":"image"}}`, ""},
+		{"empty type", reqcommon.APITypeChatCompletions, `{"type":"","image_url":{"url":"image"}}`, ""},
+		{"invalid type", reqcommon.APITypeChatCompletions, `{"type":42,"image_url":{"url":"image"}}`, ""},
+		{"no media", reqcommon.APITypeChatCompletions, `{"text":"describe"}`, ""},
+		{"responses", reqcommon.APITypeResponses, `{"image_url":{"url":"image"}}`, ""},
+		{"messages", reqcommon.APITypeMessages, `{"image_url":{"url":"image"}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			originalType := part[reqcommon.FieldType]
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, tc.apiType)
+			require.Equal(t, originalType, part[reqcommon.FieldType])
+			if tc.wantMod == "" {
+				require.Empty(t, parts)
+			} else {
+				require.Len(t, parts, 1)
+				require.Equal(t, tc.wantMod, parts[0].modality)
+			}
+		})
+	}
+}
+
 // Every part whose type names a modality is collected, whether or not it still
 // carries usable media: replace-media-urls already rejected the unusable ones
 // (see collectMediaRefs), so filtering here would drop a part that has an entry

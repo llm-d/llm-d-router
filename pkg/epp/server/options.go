@@ -85,6 +85,8 @@ type Options struct {
 	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
 	GRPCMaxRecvMsgSizeStr string        // Raw string value from CLI flag for receive limit.
 	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
+	MaxRequestBodySize    int           // Maximum request body size in bytes; 0 means unlimited.
+	MaxRequestBodySizeStr string        // Raw string value from CLI flag for the request body limit.
 	//
 	// InferencePool.
 	//
@@ -210,6 +212,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"are not rejected.")
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
+	fs.StringVar(&opts.MaxRequestBodySizeStr, "max-request-body-size", opts.MaxRequestBodySizeStr,
+		"Maximum size of a request body (e.g., 64MiB, 100MB). A larger body is rejected with 413 as soon as the "+
+			"buffered chunks exceed it. Empty or 0 means unlimited.")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. "+
 			"Only `inference.networking.k8s.io` is currently supported.")
@@ -341,6 +346,24 @@ func (opts *Options) Complete() error {
 		}
 		opts.GRPCMaxSendMsgSize = int(val)
 	}
+	if opts.MaxRequestBodySizeStr != "" {
+		s := sanitizeSizeString(opts.MaxRequestBodySizeStr)
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			return fmt.Errorf("invalid max-request-body-size: %w", err)
+		}
+		val, ok := q.AsInt64()
+		if !ok {
+			return fmt.Errorf("max-request-body-size overflows maximum supported size: %s", s)
+		}
+		if val < 0 {
+			return fmt.Errorf("max-request-body-size must be non-negative, got %d", val)
+		}
+		if val > int64(math.MaxInt) {
+			return fmt.Errorf("max-request-body-size overflows int: %d", val)
+		}
+		opts.MaxRequestBodySize = int(val)
+	}
 
 	if opts.MetricsClientCAFile != "" {
 		if _, err := os.Stat(opts.MetricsClientCAFile); err != nil {
@@ -468,6 +491,9 @@ func (opts *Options) Validate() error {
 	}
 	if opts.GRPCMaxSendMsgSize < 0 {
 		return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", opts.GRPCMaxSendMsgSize)
+	}
+	if opts.MaxRequestBodySize < 0 {
+		return fmt.Errorf("max-request-body-size must be non-negative, got %d", opts.MaxRequestBodySize)
 	}
 	if opts.FairnessIDMetricLabelLimit < 0 {
 		return fmt.Errorf("fairness-id-metric-label-limit must be non-negative, got %d", opts.FairnessIDMetricLabelLimit)

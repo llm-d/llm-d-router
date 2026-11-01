@@ -301,23 +301,24 @@ func decodeBlockSizeField(dec *msgpack.Decoder, fields *typedEventFields) error 
 }
 
 type typedEventFields struct {
-	tag           string
-	hasTag        bool
-	blockHashes   []uint64
-	hasHashes     bool
-	parentHash    uint64
-	tokens        []uint32
-	hasTokens     bool
-	blockSize     int
-	hasBlockSize  bool
-	loraID        *int
-	medium        string
-	loraName      *string
-	extraKeys     [][]any
-	cacheSalt     string
-	groupIdx      *int
-	specKind      kvevents.KVCacheSpecKind
-	slidingWindow *int
+	tag            string
+	hasTag         bool
+	blockHashes    []uint64
+	hasHashes      bool
+	parentHash     uint64
+	tokens         []uint32
+	lookaheadToken *uint32
+	hasTokens      bool
+	blockSize      int
+	hasBlockSize   bool
+	loraID         *int
+	medium         string
+	loraName       *string
+	extraKeys      [][]any
+	cacheSalt      string
+	groupIdx       *int
+	specKind       kvevents.KVCacheSpecKind
+	slidingWindow  *int
 }
 
 type rawTypedMapField struct {
@@ -623,28 +624,11 @@ func decodeTokenIDs(dec *msgpack.Decoder) ([]uint32, error) {
 
 	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
 	for i := range count {
-		code, err := dec.PeekCode()
+		token, err := decodeTokenID(dec)
 		if err != nil {
 			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
 		}
-		if !isIntegerCode(code) {
-			return nil, fmt.Errorf("token_ids[%d]: unsupported numeric type: MessagePack code %#x", i, code)
-		}
-		var value uint64
-		if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
-			signed, decodeErr := dec.DecodeInt64()
-			err = decodeErr
-			if signed > 0 {
-				value = uint64(signed)
-			}
-		} else {
-			value, err = dec.DecodeUint64()
-		}
-		if err != nil {
-			return nil, fmt.Errorf("token_ids[%d]: %w", i, err)
-		}
-		value = min(value, uint64(math.MaxUint32))
-		tokens = append(tokens, uint32(value))
+		tokens = append(tokens, token)
 	}
 	return tokens, nil
 }
@@ -996,10 +980,4 @@ func discardBytes(dec *msgpack.Decoder, length int) error {
 		length -= chunk
 	}
 	return nil
-}
-
-func isIntegerCode(code byte) bool {
-	return msgpcode.IsFixedNum(code) || code == msgpcode.Uint8 || code == msgpcode.Uint16 ||
-		code == msgpcode.Uint32 || code == msgpcode.Uint64 || code == msgpcode.Int8 ||
-		code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
 }

@@ -211,14 +211,20 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
 	// is the admission rejection. Later failures leave the decision as admitted.
 	admitting := false
+	// untypedDenier is the type of an Admitter whose untyped denial is returned as Internal.
+	var untypedDenier string
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			if admitting && span.IsRecording() {
+				reason := admissionReason(err)
+				if untypedDenier != "" {
+					reason = "admitter:" + untypedDenier
+				}
 				span.SetAttributes(
 					semconv.LLMDEPPAdmissionDecision("rejected"),
-					semconv.LLMDEPPAdmissionReason(admissionReason(err)),
+					semconv.LLMDEPPAdmissionReason(reason),
 				)
 			}
 		}
@@ -309,7 +315,27 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 
+	// Producers may hold per-request state between Produce and PreRequest, where
+	// they normally release it. Release it here for every path that leaves
+	// HandleRequest without reaching PreRequest: screeners eliminating every
+	// candidate after RequestHandling producers ran, an Admitter denial, a scheduler
+	// error, or a prepareRequest failure.
+	reachedPreRequest := false
+	defer func() {
+		if !reachedPreRequest {
+			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
+		}
+	}()
+
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	// A producer whose RequestHandling run fails leaves its keys missing for the
+	// Scheduling phase too, so producers requiring them are skipped there.
+	missingKeys := map[string]struct{}{}
+	if err := d.runDataProducers(ctx, fwkrc.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
+		// Don't fail the request if DataProducer plugins fail.
+		logger.Error(err, "failed to prepare request handling data")
+	}
 	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if len(snapshotOfCandidatePods) == 0 {
 		return reqCtx, errcommon.Error{
@@ -319,33 +345,24 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
-	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if err != nil {
+	if err := d.runDataProducers(ctx, fwkrc.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
 
-	// Producers may hold per-request state between Produce and PreRequest, where
-	// they normally release it. Release it here for every path that leaves
-	// HandleRequest without reaching PreRequest: an Admitter denial, a scheduler
-	// error, or a prepareRequest failure.
-	reachedPreRequest := false
-	defer func() {
-		if !reachedPreRequest {
-			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
-		}
-	}()
-
 	// Run admit request plugins
-	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+	if denier, denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
 		// Preserve a typed errcommon.Error from the denying Admitter so the
 		// status code it chose (e.g. ResourceExhausted for a shed) and its
 		// headers (the x-llm-d-request-dropped-reason) reach Envoy intact.
-		// An untyped denial keeps collapsing to Internal, as before.
+		// An untyped denial keeps collapsing to Internal, as before, so the
+		// span names the Admitter to tell it apart from an internal error.
 		var e errcommon.Error
 		if errors.As(denyReason, &e) {
 			return reqCtx, e
 		}
+		untypedDenier = denier.Type
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
 	}
 	admitting = false
@@ -790,9 +807,10 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 	return nil
 }
 
-func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	plugins := d.requestControlPlugins.dataProducerPlugins
+// runDataProducers runs one phase's producers. missing holds the keys of
+// producers that failed or were skipped, across phases.
+func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrc.DataProducer,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}) error {
 	if len(plugins) == 0 {
 		return nil
 	}
@@ -802,7 +820,6 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 	// their own keys count as missing in turn. The errors are returned joined.
 	// Once the request's context is done, no further producer is started.
 	var errs []error
-	missing := map[string]struct{}{}
 	markMissing := func(p fwkrc.DataProducer) {
 		for key := range p.Produces() {
 			missing[key.String()] = struct{}{}
@@ -818,7 +835,7 @@ func (d *Director) runDataProducerPlugins(ctx context.Context,
 			markMissing(p)
 			continue
 		}
-		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+		if err := dataProducerPluginsWithTimeout(ctx, extensionPoint, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
 			errs = append(errs, err)
 			if ctx.Err() != nil {
 				break
@@ -880,7 +897,7 @@ func (d *Director) runScreeners(ctx context.Context,
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (fwkplugin.TypedName, error) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
@@ -895,13 +912,13 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 			if debugEnabled {
 				loggerDebug.Info("Admit plugin denied the request", "plugin", name, "reason", denyReason.Error())
 			}
-			return denyReason
+			return name, denyReason
 		}
 		if debugEnabled {
 			loggerDebug.Info("Completed running Admit plugin successfully", "plugin", name)
 		}
 	}
-	return nil
+	return fwkplugin.TypedName{}, nil
 }
 
 // admissionReason returns the reason for an admission rejection: the dropped-reason header
@@ -935,9 +952,11 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 }
 
 func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
-	for _, p := range d.requestControlPlugins.dataProducerPlugins {
-		if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
-			abandoner.RequestAbandoned(ctx, request)
+	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
+		for _, p := range plugins {
+			if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
+				abandoner.RequestAbandoned(ctx, request)
+			}
 		}
 	}
 }

@@ -35,7 +35,7 @@ import (
 // So, a plugin is executed only after all its dependencies have been executed.
 // If there is a cycle or any plugin fails with error, it returns an error.
 func executePluginsAsDAG(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	return runProducers(ctx, scopeProducers(ctx, plugins, request, endpoints))
+	return runProducers(ctx, fwkrc.DataProducerExtensionPoint, scopeProducers(ctx, fwkrc.DataProducerExtensionPoint, plugins, request, endpoints))
 }
 
 // producerInvocation is one DataProducer with the request and endpoints
@@ -50,23 +50,23 @@ type producerInvocation struct {
 // scopeProducers confines each producer to its declarations. Scoping copies
 // the request, so it runs on the caller's goroutine rather than on one the
 // timeout path may abandon while the director keeps writing request fields.
-func scopeProducers(ctx context.Context, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest,
+func scopeProducers(ctx context.Context, extensionPoint string, plugins []fwkrc.DataProducer, request *fwksched.InferenceRequest,
 	endpoints []fwksched.Endpoint) []producerInvocation {
 	logger := log.FromContext(ctx)
 	invocations := make([]producerInvocation, len(plugins))
 	for i, plugin := range plugins {
-		scopedRequest, scopedEndpoints, violations := datalayer.ScopeInvocation(logger, fwkrc.DataProducerExtensionPoint, plugin, request, endpoints)
+		scopedRequest, scopedEndpoints, violations := datalayer.ScopeInvocation(logger, extensionPoint, plugin, request, endpoints)
 		invocations[i] = producerInvocation{plugin: plugin, request: scopedRequest, endpoints: scopedEndpoints, violations: violations}
 	}
 	return invocations
 }
 
-func runProducers(ctx context.Context, invocations []producerInvocation) error {
+func runProducers(ctx context.Context, extensionPoint string, invocations []producerInvocation) error {
 	for _, inv := range invocations {
 		plugin := inv.plugin
 		before := time.Now()
 		err := plugin.Produce(ctx, inv.request, inv.endpoints)
-		metrics.RecordPluginProcessingLatency(fwkrc.DataProducerExtensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(extensionPoint, plugin.TypedName().Type, plugin.TypedName().Name, time.Since(before))
 		if err != nil {
 			return fmt.Errorf("DataProducer %q failed: %w", plugin.TypedName().String(), err)
 		}
@@ -91,7 +91,8 @@ func producerTimeout(p fwkrc.DataProducer) time.Duration {
 // dataProducerPluginsWithTimeout executes DataProducer plugins with a timeout.
 // The child context is cancelled when the timeout fires so plugins can observe cancellation
 // (e.g. abort outbound HTTP calls) and avoid committing state after the director has moved on.
-func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, plugins []fwkrc.DataProducer,
+// extensionPoint names the phase in latency metrics and scope violations.
+func dataProducerPluginsWithTimeout(ctx context.Context, extensionPoint string, timeout time.Duration, plugins []fwkrc.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
 	// The timeout path does not join the producer goroutine. Allocate the
 	// sync.Map before launching it so any cancellation-aware producer finishing
@@ -100,10 +101,10 @@ func dataProducerPluginsWithTimeout(ctx context.Context, timeout time.Duration, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	invocations := scopeProducers(ctx, plugins, request, endpoints)
+	invocations := scopeProducers(ctx, extensionPoint, plugins, request, endpoints)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runProducers(ctx, invocations)
+		errCh <- runProducers(ctx, extensionPoint, invocations)
 	}()
 
 	select {

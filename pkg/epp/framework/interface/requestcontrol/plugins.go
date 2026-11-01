@@ -37,6 +37,10 @@ const (
 	ResponseCompleteExtensionPoint  = "ResponseComplete"
 )
 
+// RequestHandlingDataProducerExtensionPoint names DataProducers that run in
+// DataProducerPhaseRequestHandling.
+const RequestHandlingDataProducerExtensionPoint = "RequestHandlingDataProducer"
+
 // ConditionalDecodeHandledAttributeKey is the request-attribute key a
 // PreRequest plugin sets when it has evaluated the "Prefer: if-available"
 // preference for a request. The director consults this after PreRequest
@@ -45,8 +49,9 @@ const (
 // fast fallback rather than a silent forward.
 var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
 
-// Screener performs preliminary filtering of located endpoints before data
-// production, admission, and scheduling profiles run. Every screener sees the
+// Screener performs preliminary filtering of located endpoints after
+// DataProducerPhaseRequestHandling producers and before DataProducerPhaseScheduling
+// producers, admission, and scheduling profiles run. Every screener sees the
 // same input set, and the framework intersects their results.
 type Screener interface {
 	plugin.Plugin
@@ -101,11 +106,25 @@ type ResponseBodyProcessor interface {
 }
 
 // DataProducer is implemented by data producers which produce data from different sources.
-// Produce is called by the director before scheduling requests.
+// Produce is called by the director before scheduling requests, in the phase
+// the producer is assigned to; see DataProducerPhase.
 type DataProducer interface {
 	plugin.ProducerPlugin
 	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
 }
+
+// DataProducerPhase selects when the director runs a DataProducer.
+type DataProducerPhase string
+
+const (
+	// DataProducerPhaseRequestHandling runs the producer during request
+	// handling, on the located endpoints before screeners, so screeners can
+	// consume its data.
+	DataProducerPhaseRequestHandling DataProducerPhase = "RequestHandling"
+	// DataProducerPhaseScheduling runs the producer on the screened endpoints
+	// before admission and scheduling.
+	DataProducerPhaseScheduling DataProducerPhase = "Scheduling"
+)
 
 // TimeoutAwareProducer is an optional interface a DataProducer may implement to
 // declare its own execution timeout, overriding the default. A non-positive

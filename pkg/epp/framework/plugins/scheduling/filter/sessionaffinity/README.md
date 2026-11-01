@@ -4,6 +4,8 @@
 
 Pins subsequent requests in a session to the same pod the first request was sent to, as a hard constraint. When the session pod is among the candidates the filter returns it as the sole endpoint; when there is no session or the session pod is no longer a candidate, the filter returns all candidates unchanged so downstream filters and scorers decide. The filter never returns an empty set.
 
+Place this filter after any filter that can return an empty set, such as [`utilization-filter`](../utilization/README.md) without `fallbackOnEmpty`. When such a filter runs after this one and removes the session pod, no candidates remain and the request fails with 503, even if other pods pass that filter. When it runs before and removes the session pod, this filter returns all remaining candidates and the request is routed to one of them.
+
 Supports two algorithms, selected by the `strategy` parameter:
 
 - `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the filter writes that same header on the response so the client can echo it back on the next request. When the token cannot be decoded the filter returns all candidates.

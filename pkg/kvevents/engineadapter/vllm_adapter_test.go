@@ -42,11 +42,12 @@ func TestVLLMClampsOutOfRangeTokenIDs(t *testing.T) {
 		token any
 		want  uint32
 	}{
-		"negative":       {int64(-1), 0},
-		"minimum signed": {int64(math.MinInt64), 0},
-		"overflow":       {uint64(math.MaxUint32) + 1, math.MaxUint32},
-		"maximum uint32": {uint64(math.MaxUint32), math.MaxUint32},
-		"maximum signed": {int64(math.MaxInt64), math.MaxUint32},
+		"negative":         {int64(-1), 0},
+		"minimum signed":   {int64(math.MinInt64), 0},
+		"overflow":         {uint64(math.MaxUint32) + 1, math.MaxUint32},
+		"maximum uint32":   {uint64(math.MaxUint32), math.MaxUint32},
+		"maximum signed":   {int64(math.MaxInt64), math.MaxUint32},
+		"maximum unsigned": {uint64(math.MaxUint64), math.MaxUint32},
 	} {
 		for _, encoding := range []string{"array", "map tag first", "map tag last"} {
 			t.Run(name+"/"+encoding, func(t *testing.T) {

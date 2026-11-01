@@ -16,22 +16,16 @@ limitations under the License.
 
 package preciseprefixcache
 
-import (
-	"fmt"
-
-	"k8s.io/apimachinery/pkg/util/sets"
-
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-)
+import "k8s.io/apimachinery/pkg/util/sets"
 
 // extractEndpointSet builds the "address:port" identifier set used to filter
 // kvblock.Index lookups to candidate endpoints. Endpoints without metadata
 // are skipped.
-func extractEndpointSet(endpoints []scheduling.Endpoint) sets.Set[string] {
+func extractEndpointSet(endpoints []endpointWithPodID) sets.Set[string] {
 	endpointSet := sets.New[string]()
 	for _, ep := range endpoints {
-		if m := ep.GetMetadata(); m != nil {
-			endpointSet.Insert(fmt.Sprintf("%s:%s", m.Address, m.Port))
+		if m := ep.endpoint.GetMetadata(); m != nil {
+			endpointSet.Insert(ep.podID)
 		}
 	}
 	return endpointSet

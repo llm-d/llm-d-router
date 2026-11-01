@@ -263,6 +263,12 @@ func TestBuildErrResponse(t *testing.T) {
 			wantBody:       `{"error":{"message":"revision mismatch","type":"invalid_request_error","code":412}}`,
 		},
 		{
+			name:           "PayloadTooLarge returns 413",
+			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
+			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantBody:       `{"error":{"message":"request body too large","type":"invalid_request_error","code":413}}`,
+		},
+		{
 			name:           "ResourceExhausted returns 429",
 			err:            Error{Code: ResourceExhausted, Msg: "no capacity"},
 			wantHTTPStatus: envoyTypePb.StatusCode_TooManyRequests,
@@ -312,6 +318,13 @@ func TestBuildErrResponse(t *testing.T) {
 			apiType:        reqcommon.APITypeMessages,
 			wantHTTPStatus: envoyTypePb.StatusCode_ServiceUnavailable,
 			wantBody:       `{"type":"error","error":{"type":"overloaded_error","message":"no endpoints"}}`,
+		},
+		{
+			name:           "Messages API PayloadTooLarge maps to request_too_large",
+			err:            Error{Code: PayloadTooLarge, Msg: "request body too large"},
+			apiType:        reqcommon.APITypeMessages,
+			wantHTTPStatus: envoyTypePb.StatusCode_PayloadTooLarge,
+			wantBody:       `{"type":"error","error":{"type":"request_too_large","message":"request body too large"}}`,
 		},
 		{
 			name:        "plain error returns gRPC error",

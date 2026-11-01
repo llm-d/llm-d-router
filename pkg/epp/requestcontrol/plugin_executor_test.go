@@ -131,6 +131,7 @@ func TestDataProducerPluginsWithTimeout_CancelsPluginContext(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
 		20*time.Millisecond,
 		[]fwkrc.DataProducer{plugin},
 		&fwksched.InferenceRequest{},
@@ -157,6 +158,7 @@ func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
 		20*time.Millisecond,
 		[]fwkrc.DataProducer{plugin},
 		request,
@@ -202,6 +204,7 @@ func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
 		20*time.Millisecond,
 		[]fwkrc.DataProducer{plugin},
 		request,
@@ -297,7 +300,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 			ctx, cancel := tc.ctxFn()
 			defer cancel()
 
-			err := dataProducerPluginsWithTimeout(ctx, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
+			err := dataProducerPluginsWithTimeout(ctx, fwkrc.DataProducerExtensionPoint, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
 
 			if tc.expectSuccess {
 				assert.NoError(t, err)

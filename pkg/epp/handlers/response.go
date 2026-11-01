@@ -32,7 +32,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -124,7 +123,7 @@ const maxSSELineBytes = 4 << 20
 // isEventStream reports whether a content-type header value is text/event-stream.
 func isEventStream(contentType string) bool {
 	mediaType, _, _ := strings.Cut(contentType, ";")
-	return strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream)
+	return strings.EqualFold(strings.TrimSpace(mediaType), reqcommon.MediaTypeEventStream)
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.

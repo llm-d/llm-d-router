@@ -46,6 +46,12 @@ func (m *mockTokenProcessor) BlockSize() int {
 	return 16
 }
 
+func (m *mockTokenProcessor) TokensToBigramKVBlockKeys(
+	parent kvblock.BlockHash, tokens []uint32, _ int, model string, extra []*kvblock.BlockExtraFeatures,
+) ([]kvblock.BlockHash, error) {
+	return m.TokensToKVBlockKeys(parent, tokens, model, extra)
+}
+
 const (
 	testModel = "test-model"
 	testPodA  = "pod-a"
