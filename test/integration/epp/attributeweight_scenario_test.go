@@ -27,6 +27,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
@@ -85,18 +86,18 @@ type gpuPod struct {
 	region string
 }
 
-func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
-	h.t.Helper()
+func withGPUPods(t *testing.T, h *eppharness.TestHarness, pods []gpuPod) *eppharness.TestHarness {
+	t.Helper()
 
 	metricsMap := make(map[types.NamespacedName]*fwkdl.Metrics, len(pods))
 	for _, p := range pods {
 		key := types.NamespacedName{Namespace: h.Namespace, Name: fmt.Sprintf("pod-%d-rank-0", p.index)}
 		metricsMap[key] = fwkdl.NewMetrics()
 	}
-	h.metricsBackend.SetPodMetrics(metricsMap)
+	h.SetPodMetrics(metricsMap)
 
 	for _, p := range pods {
-		labels := map[string]string{"app": testPoolName}
+		labels := map[string]string{"app": eppharness.TestPoolName}
 		if p.label != "" {
 			labels["nvidia.com/gpu.product"] = p.label
 		}
@@ -113,16 +114,16 @@ func withGPUPods(h *TestHarness, pods []gpuPod) *TestHarness {
 			ObjRef()
 
 		intendedStatus := pod.Status
-		require.NoError(h.t, k8sClient.Create(h.ctx, pod), "failed to create pod pod-%d", p.index)
+		require.NoError(t, eppharness.K8sClient().Create(t.Context(), pod), "failed to create pod pod-%d", p.index)
 		pod.Status = intendedStatus
-		require.NoError(h.t, k8sClient.Status().Update(h.ctx, pod), "failed to update status for pod pod-%d", p.index)
+		require.NoError(t, eppharness.K8sClient().Status().Update(t.Context(), pod), "failed to update status for pod pod-%d", p.index)
 	}
 	return h
 }
 
 func TestAttributeWeightScorer(t *testing.T) {
 	ctx := t.Context()
-	h := NewTestHarness(ctx, t, WithConfigText(gpuWeightScorerConfig), WithStandardMode(), WithEmitEndpointScores())
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithConfigText(gpuWeightScorerConfig), eppharness.WithStandardMode(), eppharness.WithEmitEndpointScores())
 	h = h.WithBaseResources()
 
 	pods := []gpuPod{
@@ -135,7 +136,7 @@ func TestAttributeWeightScorer(t *testing.T) {
 		{index: 6, label: "NVIDIA-H100", region: "unknown"},
 		{index: 7, label: "NVIDIA-A10", region: "region-1"},
 	}
-	withGPUPods(h, pods).WaitForSync(len(pods), modelMyModel)
+	withGPUPods(t, h, pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 
 	requests := fwkepp.ReqRaw(
