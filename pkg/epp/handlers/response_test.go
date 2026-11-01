@@ -1758,3 +1758,16 @@ func TestCapAppliesToWholeLine(t *testing.T) {
 		assert.Empty(t, got, "a line over the cap must be dropped")
 	})
 }
+
+func TestRequestContextLifecycleAccessors(t *testing.T) {
+	first := time.Unix(100, 0)
+	complete := time.Unix(105, 0)
+	reqCtx := &RequestContext{
+		firstTokenTimestamp:       first,
+		responseCompleteTimestamp: complete,
+		modelServerStreaming:      true,
+	}
+	assert.Equal(t, first, reqCtx.FirstTokenTimestamp())
+	assert.Equal(t, complete, reqCtx.ResponseCompleteTimestamp())
+	assert.True(t, reqCtx.ModelServerStreaming())
+}

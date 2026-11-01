@@ -18,6 +18,8 @@ limitations under the License.
 package requestcontrol
 
 import (
+	"time"
+
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -72,6 +74,17 @@ type Response struct {
 	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
+	// ReceivedTimestamp is when the EPP received the request. Set only at end of stream.
+	ReceivedTimestamp time.Time
+	// FirstTokenTimestamp is when the first response body bytes were received; zero if none
+	// were. Set only at end of stream.
+	FirstTokenTimestamp time.Time
+	// CompleteTimestamp is when the response completed; zero for a stream that ended without
+	// completing. Set only at end of stream.
+	CompleteTimestamp time.Time
+	// Streaming reports whether the model server answered with an event stream. Set only at
+	// end of stream.
+	Streaming bool
 	// DynamicMetadata is a map of metadata that can be passed to the Envoy. It is populated into the dynamic
 	// metadata when processing ProcessingResponse_RequestHeaders.
 	DynamicMetadata *structpb.Struct

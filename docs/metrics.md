@@ -681,6 +681,25 @@ Control alone does not emit them.
 | `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
 | `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
+### Latency by prompt bucket and path
+
+These metrics are owned by the `latency-reporter` response plugin and are registered only when it
+is configured. They add the `prompt_bucket` and prefill/decode `path` dimensions to request latency.
+The plugin holds no targets; thresholds are applied in PromQL.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `streaming`, `outcome` | `outcome` is `completed`, `evicted`, `cancelled` or `failed`, mirroring [Request outcomes](#request-outcomes) for dispatched requests. `path` is `remote` (prefill on a separate prefill pod) or `local` (prefill on the serving pod, including a declined remote prefill and deployments without P/D). |
+| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path`, `streaming` | TTFT of completed requests. For `streaming="false"`, it equals end-to-end latency. |
+| `llm_d_epp_latency_tpot_seconds` | Histogram | `priority`, `path` | Mean TPOT of completed streaming requests. |
+
+The request counter carries the same labels as the TTFT histogram, because it is the denominator
+of attainment ratios over that histogram. `streaming` has the same meaning as on
+`llm_d_epp_request_ttft_seconds`. For outcomes by tenant or model, use
+`llm_d_epp_request_outcome_total`; the plugin counts only dispatched requests, so its totals are not
+expected to match that counter's. The plugin README carries PromQL for percentiles, threshold
+fractions and failure ratios.
+
 ### Predicted latency and SLO
 
 These metrics are registered and recorded by the `predicted-latency-producer`. They are present
