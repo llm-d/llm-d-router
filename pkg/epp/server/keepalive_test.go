@@ -27,8 +27,10 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
@@ -174,13 +176,13 @@ func TestExtProcServerRunnerClosesDeadConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	conn.Connect()
+	// A round trip proves the server finished its handshake, which is when its keepalive starts.
+	// Ready is not enough: the client can reach it from the server's SETTINGS alone.
 	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer waitCancel()
-	for state := conn.GetState(); state != connectivity.Ready; state = conn.GetState() {
-		if !conn.WaitForStateChange(waitCtx, state) {
-			t.Fatal("client did not connect to the ext_proc server")
-		}
+	_, err = healthgrpc.NewHealthClient(conn).Check(waitCtx, &healthgrpc.HealthCheckRequest{}, grpc.WaitForReady(true))
+	if code := status.Code(err); code != codes.OK && code != codes.Unimplemented {
+		t.Fatalf("no round trip to the ext_proc server: %v", err)
 	}
 
 	proxy.cut.Store(true)
