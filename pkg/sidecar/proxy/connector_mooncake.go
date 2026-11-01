@@ -117,11 +117,11 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 		trace.Info("Decode request", logBodyBytesKey, len(decodeBody))
 	}
 
-	s.runConcurrentPD(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
+	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
-	}, toolFields)
+	}, toolFields, true)
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.

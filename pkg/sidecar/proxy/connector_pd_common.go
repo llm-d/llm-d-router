@@ -18,8 +18,10 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/codes"
@@ -29,6 +31,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -44,6 +48,49 @@ const (
 // successful decode returns. A variable so tests can shorten it.
 var concurrentPrefillGrace = 30 * time.Second
 
+// prefillCachedTokens holds the prompt-cache hit count a prefill response
+// reported. The decode response may be written before prefill completes, so
+// readers get false until it is known.
+type prefillCachedTokens struct {
+	// value is the count plus one, so the zero value means unknown and a
+	// measured zero stays distinguishable.
+	value atomic.Int64
+}
+
+func (p *prefillCachedTokens) set(count int) { p.value.Store(int64(count) + 1) }
+
+func (p *prefillCachedTokens) get() (int, bool) {
+	v := p.value.Load()
+	return int(v - 1), v != 0
+}
+
+// record stores the cached-token count of a completed prefill response, if it
+// carries one.
+func (p *prefillCachedTokens) record(resp *bufferedResponseWriter) {
+	if isHTTPError(resp.statusCode) {
+		return
+	}
+	var body struct {
+		Usage any `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.bodyBytes(), &body); err != nil {
+		return
+	}
+	if count, ok := usage.CachedTokens(body.Usage); ok {
+		p.set(count)
+	}
+}
+
+// requestStreams reports whether a request body asks for a streamed response.
+func requestStreams(body []byte) bool {
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	stream, _ := request[reqcommon.FieldStream].(bool)
+	return stream
+}
+
 // runConcurrentPD fires the prefill and decode requests of a concurrent-dispatch
 // P/D protocol (Mooncake, SGLang) in parallel: prefill runs in a goroutine
 // and its response is discarded (only status and duration are recorded on
@@ -55,10 +102,27 @@ func (s *Server) runConcurrentPD(
 	r *http.Request,
 	prefillBody, decodeBody []byte,
 	prefillHost, connector string,
+	prepareRequests func(prefillReq, decodeReq *http.Request),
+	toolFields *toolCallingRequest,
+) {
+	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillHost, connector, prepareRequests, toolFields, false)
+}
+
+// runConcurrentPDWithUsage is runConcurrentPD with an option to report the
+// prefill worker's cached-token count in the decode response. Decode counts the
+// KV blocks it received from prefill as its own cache hits, so without the
+// rewrite the client sees almost the whole prompt as cached. The count is applied
+// only when prefill has completed by the time decode writes its usage block.
+func (s *Server) runConcurrentPDWithUsage(
+	w http.ResponseWriter,
+	r *http.Request,
+	prefillBody, decodeBody []byte,
+	prefillHost, connector string,
 	// prepareRequests lets a connector mutate the cloned requests before dispatch,
 	// e.g. Mooncake sets a DP-rank header so prefill lands on the same rank decode reads from.
 	prepareRequests func(prefillReq, decodeReq *http.Request),
 	toolFields *toolCallingRequest,
+	rewriteCachedTokens bool,
 ) {
 	defer toolFields.report(r.Context())
 	tracer := tracing.Tracer(tracerScope)
@@ -90,6 +154,7 @@ func (s *Server) runConcurrentPD(
 		semconv.LLMDPDProxyPrefillAsync(true),
 	)
 	prefillStart := time.Now()
+	var prefillCached prefillCachedTokens
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
@@ -124,6 +189,9 @@ func (s *Server) runConcurrentPD(
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancelDecode(&prefillFailedError{response: pw})
 		}
+		if rewriteCachedTokens {
+			prefillCached.record(pw)
+		}
 		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
@@ -142,6 +210,11 @@ func (s *Server) runConcurrentPD(
 
 	decodeReq = decodeReq.WithContext(dCtx)
 	decodeWriter, decodeStatus := captureResponseStatus(w)
+	if rewriteCachedTokens {
+		var finishUsage func() error
+		decodeWriter, finishUsage = usage.NewResponseWriter(decodeWriter, usage.Options{CachedTokensFn: prefillCached.get}, requestStreams(decodeBody))
+		defer func() { _ = finishUsage() }()
+	}
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	defer func() {
