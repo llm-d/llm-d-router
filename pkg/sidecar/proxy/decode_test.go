@@ -728,6 +728,43 @@ var _ = Describe("Chunked Decode", func() {
 		)
 	})
 
+	Describe("streaming a chunk from a reasoning model", func() {
+
+		It("carries the reasoning and the logprobs into the event", func() {
+			reasoningChunk := `{"id":"test-id","object":"chat.completion","model":"test-model","created":1234567890,` +
+				`"choices":[{"index":0,"finish_reason":"stop",` +
+				`"logprobs":{"content":[{"token":"x","logprob":-0.1,"bytes":null,"top_logprobs":[]}]},` +
+				`"message":{"role":"assistant","content":"Paris.","reasoning":"the capital of France"}}],` +
+				`"usage":{"prompt_tokens":9,"completion_tokens":7,"total_tokens":16}}`
+			ti := newChunkedTestSetup(5, []string{
+				chatResponse("Let me think. ", "length", 5, 5),
+				reasoningChunk,
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"capital of France?"}],"max_tokens":20,"logprobs":true,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var events []string
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() {
+				if line := scanner.Text(); strings.HasPrefix(line, "data: ") {
+					events = append(events, line)
+				}
+			}
+			Expect(events).To(HaveLen(4))
+
+			var second map[string]any
+			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[1], reqcommon.SSEDataPrefix)), &second)).To(Succeed())
+			choice := second["choices"].([]any)[0].(map[string]any)
+			Expect(choice["logprobs"]).To(HaveKey("content"))
+			delta := choice[responseFieldDelta].(map[string]any)
+			Expect(delta[reqcommon.FieldContent]).To(Equal("Paris."))
+			Expect(delta["reasoning"]).To(Equal("the capital of France"))
+		})
+	})
+
 	Describe("helper functions", func() {
 
 		It("resolveMaxTokens prefers max_completion_tokens over max_tokens", func() {
