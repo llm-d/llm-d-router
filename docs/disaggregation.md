@@ -54,6 +54,12 @@ pre-convention name (`x-prefiller-host-port`, `x-encoder-hosts-ports`,
 `x-kv-cache-source-host-port`), so a sidecar that predates the rename still
 routes. The old names are deprecated and will be removed.
 
+For workers that serve several data-parallel ranks behind one address, EPP
+also sends the rank it selected inside the prefill and decode workers in
+`x-llm-d-prefiller-dp-rank` and `x-llm-d-decoder-dp-rank`. These two headers
+have no pre-convention names. See
+[SGLang data-parallel ranks](#sglang-data-parallel-ranks).
+
 The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
 never read from or passed to a model server.
@@ -716,6 +722,51 @@ With `DP_SIZE_LOCAL: 8` every pod binds P2P `7777-7784`, KV events
 `5557-5564`, and serving `8000-8007`. Only the socket bases are
 compensated; `data_parallel_index` and the global rank carried in KV-event
 batches are unchanged.
+
+#### SGLang data-parallel ranks
+
+An SGLang server started with `--dp-size` N > 1 serves its N ranks behind one
+HTTP port and picks a rank for each request unless the request names one. To
+let EPP select the rank, declare one file-discovery endpoint per rank, all with
+the server's address and port, each with a `dataParallelRank` attribute:
+
+```yaml
+endpoints:
+  - name: "sglang-prefill-0-rank-0"
+    address: "10.0.0.1"
+    port: "30000"
+    labels:
+      llm-d.ai/role: "prefill"
+    attributes:
+      dataParallelRank: "0"
+  - name: "sglang-prefill-0-rank-1"
+    address: "10.0.0.1"
+    port: "30000"
+    labels:
+      llm-d.ai/role: "prefill"
+    attributes:
+      dataParallelRank: "1"
+```
+
+When a P/D request runs, the disaggregation profile handler sends the selected
+prefill endpoint's rank in `x-llm-d-prefiller-dp-rank`. When the decode stage
+has a single target, it sends that endpoint's rank in
+`x-llm-d-decoder-dp-rank`. The `sglang` connector removes both headers and
+sets these top-level body fields:
+
+| Field | Prefill request | Decode request |
+|---|---|---|
+| `routed_dp_rank` | prefill rank | decode rank |
+| `disagg_prefill_dp_rank` | not set | prefill rank |
+
+A field is left out when the endpoint declares no rank or the value is not a
+non-negative integer. SGLang then picks the rank, and the decode stage finds
+the prefill rank through the bootstrap server. Requests without a prefill
+stage do not carry a rank. SGLang reads these fields on `/generate`,
+`/v1/completions` and `/v1/chat/completions`.
+
+The KV-cache index keys block ownership by endpoint address, so prefix-aware
+scorers do not distinguish ranks that share an address.
 
 ### General Sidecar Flags
 

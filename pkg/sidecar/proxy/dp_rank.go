@@ -17,10 +17,16 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"encoding/binary"
 	"math"
+	"net/http"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/blake2s"
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // pickDPRank returns a deterministic DP rank for a request as
@@ -93,4 +99,35 @@ func resolveDecodeDPRank(prefillKV any, requestID string, dpSize int) (rank int,
 		return ri, true
 	}
 	return fallback, false
+}
+
+// selectedDPRanks holds the data-parallel ranks EPP selected inside the prefill
+// and decode workers. A nil rank leaves the choice to the worker.
+type selectedDPRanks struct {
+	prefill *int
+	decode  *int
+}
+
+type selectedDPRanksKey struct{}
+
+// takeSelectedDPRanks removes the EPP rank headers from h and returns the valid
+// ranks. A missing, non-integer or negative value yields a nil rank.
+func takeSelectedDPRanks(h http.Header) selectedDPRanks {
+	return selectedDPRanks{
+		prefill: takeDPRankHeader(h, routing.PrefillDataParallelRankHeader),
+		decode:  takeDPRankHeader(h, routing.DecodeDataParallelRankHeader),
+	}
+}
+
+func takeDPRankHeader(h http.Header, name string) *int {
+	rank, err := strconv.Atoi(strings.TrimSpace(routing.TakeRoutingHeaderValue(h, name)))
+	if err != nil || rank < 0 {
+		return nil
+	}
+	return &rank
+}
+
+func selectedDPRanksFromContext(ctx context.Context) selectedDPRanks {
+	ranks, _ := ctx.Value(selectedDPRanksKey{}).(selectedDPRanks)
+	return ranks
 }

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
@@ -50,6 +51,11 @@ const (
 	defaultDecodeProfile  = "decode"
 	defaultPrefillProfile = "prefill"
 	defaultEncodeProfile  = "encode"
+
+	// DataParallelRankAttribute is the endpoint attribute that names a
+	// data-parallel rank inside a worker serving several ranks behind one
+	// address. Endpoints that share an address and port declare one rank each.
+	DataParallelRankAttribute = "dataParallelRank"
 )
 
 // StageOrder defines the execution order of stages in the disaggregation profile handler.
@@ -590,6 +596,8 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 
 	// Prefill header
 	routing.DeleteRoutingHeader(request.Headers, routing.PrefillEndpointHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.PrefillDataParallelRankHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.DecodeDataParallelRankHeader)
 	prefillProfileRunResult := schedulingResult.ProfileResults[h.prefillProfile]
 	switch {
 	case prefillProfileRunResult == nil:
@@ -606,6 +614,12 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
 		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
+		setDataParallelRankHeader(request.Headers, routing.PrefillDataParallelRankHeader, prefillProfileRunResult.TargetEndpoints[0])
+		// With several decode targets the proxy may fail over to another worker,
+		// so a rank is only meaningful for a single target.
+		if decodeRes := schedulingResult.ProfileResults[h.decodeProfile]; decodeRes != nil && len(decodeRes.TargetEndpoints) == 1 {
+			setDataParallelRankHeader(request.Headers, routing.DecodeDataParallelRankHeader, decodeRes.TargetEndpoints[0])
+		}
 		span.SetAttributes(
 			semconv.LLMDEPPPDDisaggregationUsed(true),
 			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
@@ -644,4 +658,16 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),
 	)
 	return nil
+}
+
+// setDataParallelRankHeader copies the endpoint's DataParallelRankAttribute to
+// the header when it is a non-negative integer. Without it the worker picks the rank.
+func setDataParallelRankHeader(headers map[string]string, name string, endpoint scheduling.Endpoint) {
+	value, ok := endpoint.GetMetadata().Attributes[DataParallelRankAttribute]
+	if !ok {
+		return
+	}
+	if rank, err := strconv.Atoi(value); err == nil && rank >= 0 {
+		routing.SetRoutingHeader(headers, name, strconv.Itoa(rank))
+	}
 }

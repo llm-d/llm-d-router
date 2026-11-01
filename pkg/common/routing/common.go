@@ -43,6 +43,14 @@ const (
 	// instead of recomputing them
 	KVCacheSourceHeader = "x-llm-d-kv-cache-source-host-port"
 
+	// PrefillDataParallelRankHeader carries the data-parallel rank EPP selected
+	// inside the prefill worker named by PrefillEndpointHeader.
+	PrefillDataParallelRankHeader = "x-llm-d-prefiller-dp-rank"
+
+	// DecodeDataParallelRankHeader carries the data-parallel rank EPP selected
+	// inside the decode worker the request is sent to.
+	DecodeDataParallelRankHeader = "x-llm-d-decoder-dp-rank"
+
 	// LegacyPrefillEndpointHeader is the pre-convention name of PrefillEndpointHeader.
 	LegacyPrefillEndpointHeader = "x-prefiller-host-port"
 
