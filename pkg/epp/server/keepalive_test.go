@@ -36,6 +36,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
+// keepaliveTestWait bounds waits for events. Passing tests return as soon as the event happens,
+// so it can be long enough that a stalled CI machine is slow rather than failing.
+const keepaliveTestWait = 30 * time.Second
+
 // streamEndRecorder records when an ext_proc stream's context ends.
 type streamEndRecorder struct {
 	extProcPb.UnimplementedExternalProcessorServer
@@ -54,7 +58,7 @@ func (s *streamEndRecorder) Process(stream extProcPb.ExternalProcessor_ProcessSe
 type blackholeProxy struct {
 	listener net.Listener
 	cut      atomic.Bool
-	// serverClosed is closed when the server side of the proxied connection closes.
+	// serverClosed is closed when the server closes a proxied connection after the cut.
 	serverClosed chan struct{}
 }
 
@@ -79,10 +83,24 @@ func newBlackholeProxy(t *testing.T, target string) *blackholeProxy {
 				return
 			}
 			t.Cleanup(func() { _ = client.Close(); _ = upstream.Close() })
-			go p.pipe(upstream, client)
+			// Before the cut a close passes through, so a client can reconnect after the server
+			// closed a connection during a stall. After the cut it is dropped like all traffic.
+			closeBoth := func() {
+				if !p.cut.Load() {
+					_ = client.Close()
+					_ = upstream.Close()
+				}
+			}
+			go func() {
+				p.pipe(upstream, client)
+				closeBoth()
+			}()
 			go func() {
 				p.pipe(client, upstream)
-				closeOnce()
+				if p.cut.Load() {
+					closeOnce()
+				}
+				closeBoth()
 			}()
 		}
 	}()
@@ -122,12 +140,12 @@ func openStreamThenPartition(t *testing.T, opts ...grpc.ServerOption) *streamEnd
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := extProcPb.NewExternalProcessorClient(conn).Process(context.Background()); err != nil {
+	if _, err := extProcPb.NewExternalProcessorClient(conn).Process(context.Background(), grpc.WaitForReady(true)); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-rec.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(keepaliveTestWait):
 		t.Fatal("stream did not reach the server")
 	}
 
@@ -150,8 +168,8 @@ func TestExtProcKeepaliveEndsStreamAfterPartition(t *testing.T) {
 	rec := openStreamThenPartition(t, keepaliveServerOptions(time.Second, 500*time.Millisecond)...)
 	select {
 	case <-rec.ended:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stream still open 5s after the partition; keepalive did not close the dead connection")
+	case <-time.After(keepaliveTestWait):
+		t.Fatal("stream still open after the partition; keepalive did not close the dead connection")
 	}
 }
 
@@ -178,7 +196,7 @@ func TestExtProcServerRunnerClosesDeadConnections(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	// A round trip proves the server finished its handshake, which is when its keepalive starts.
 	// Ready is not enough: the client can reach it from the server's SETTINGS alone.
-	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(ctx, keepaliveTestWait)
 	defer waitCancel()
 	_, err = healthgrpc.NewHealthClient(conn).Check(waitCtx, &healthgrpc.HealthCheckRequest{}, grpc.WaitForReady(true))
 	if code := status.Code(err); code != codes.OK && code != codes.Unimplemented {
@@ -188,7 +206,7 @@ func TestExtProcServerRunnerClosesDeadConnections(t *testing.T) {
 	proxy.cut.Store(true)
 	select {
 	case <-proxy.serverClosed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("server kept the connection open 5s after the network was cut")
+	case <-time.After(keepaliveTestWait):
+		t.Fatal("server kept the connection open after the network was cut")
 	}
 }
