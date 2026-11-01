@@ -59,15 +59,15 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	resumed := s.paused
 	s.paused = false
 	s.reservedUntil = time.Time{}
-	// At least one token, so inflightTokens is nonzero exactly while a turn
-	// is in flight.
+	// At least one token, so a lane's inflight is nonzero exactly while its
+	// turn is in flight.
 	estimate := max(estimateTokens(request.RequestSizeBytes), 1)
-	s.inflightTokens += estimate
+	index := s.charge(estimate)
 	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
 
-	request.PutAttribute(inflightEstimateKey, estimate)
+	request.PutAttribute(turnChargeKey, turnCharge{estimate: estimate, lane: index})
 
 	if resumed {
 		a.metrics.resumes.Inc()
@@ -80,8 +80,8 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 }
 
 // ResponseBody settles a completed turn: it removes the turn's own in-flight
-// estimate and replaces the session's committed tokens with the usage total.
-// Requests PreRequest did not charge are ignored.
+// estimate from its lane and replaces that lane's committed tokens with the
+// usage total. Requests PreRequest did not charge are ignored.
 func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
@@ -90,7 +90,7 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 	if id == "" {
 		return
 	}
-	estimate, ok := fwksched.ReadRequestAttribute[int64](request, inflightEstimateKey)
+	charge, ok := fwksched.ReadRequestAttribute[turnCharge](request, turnChargeKey)
 	if !ok {
 		return
 	}
@@ -103,13 +103,7 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 		m.mu.Unlock()
 		return
 	}
-	s.inflightTokens = max(s.inflightTokens-estimate, 0)
-	switch {
-	case response.Usage.TotalTokens > 0:
-		s.committedTokens = int64(response.Usage.TotalTokens)
-	case estimate > s.committedTokens:
-		s.committedTokens = estimate
-	}
+	s.settle(charge.lane, charge.estimate, int64(response.Usage.TotalTokens))
 	s.lastResponseAt = now
 	s.lastActivity = now
 	m.mu.Unlock()

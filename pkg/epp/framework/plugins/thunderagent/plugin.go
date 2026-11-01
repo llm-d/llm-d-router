@@ -48,10 +48,20 @@ import (
 // ThunderAgentPluginType is the plugin type registered with the framework.
 const ThunderAgentPluginType = "thunder-agent"
 
-// inflightEstimateKey is the request attribute under which PreRequest stashes
-// the token estimate it charged to the session, so ResponseBody removes
-// exactly what was added.
-var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
+// turnCharge is what PreRequest charged for a turn: the token estimate, so
+// ResponseBody removes exactly what was added, and the lane it landed in, so
+// the settle updates the agent's own lane rather than whichever one its turn
+// finished beside. One attribute rather than two, because a turn that read
+// back only half of it would leak its estimate and keep the session from
+// being swept.
+type turnCharge struct {
+	estimate int64
+	lane     int
+}
+
+// turnChargeKey is the request attribute under which PreRequest stashes the
+// charge for ResponseBody to settle.
+var turnChargeKey = fwkplugin.NewDataKey("turn-charge", ThunderAgentPluginType)
 
 var (
 	_ fwkrc.PreRequest            = &ThunderAgent{}
@@ -145,7 +155,7 @@ func (a *ThunderAgent) Consumes() fwkplugin.DataDependencies {
 // Produces declares the request attribute PreRequest writes for the plugin's own
 // later hooks; the data layer drops undeclared writes and fails the request.
 func (a *ThunderAgent) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{inflightEstimateKey: int64(0)}
+	return map[fwkplugin.DataKey]any{turnChargeKey: turnCharge{}}
 }
 
 // sessionID returns the session identifier published by the agent-identity
@@ -190,6 +200,7 @@ type stateDump struct {
 	RunningSessions int                     `json:"runningSessions"`
 	IdleSessions    int                     `json:"idleSessions"`
 	PausedSessions  int                     `json:"pausedSessions"`
+	Lanes           int                     `json:"lanes"`
 	Endpoints       map[string]endpointDump `json:"endpoints"`
 }
 
@@ -198,14 +209,16 @@ type endpointDump struct {
 	CapacityTokens   float64 `json:"capacityTokens"`
 }
 
-// DumpState reports session counts and each endpoint's working set and
-// capacity, the same values as the metrics.
+// DumpState reports session counts, the number of agent lanes across them,
+// and each endpoint's working set and capacity. Lanes carry no identity, so
+// the dump stays free of session ids.
 func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
 	snap := a.mgr.snapshot(time.Now())
 	dump := stateDump{
 		RunningSessions: snap.running,
 		IdleSessions:    snap.idle,
 		PausedSessions:  snap.paused,
+		Lanes:           snap.lanes,
 		Endpoints:       make(map[string]endpointDump, len(snap.endpoints)),
 	}
 	for id, e := range snap.endpoints {
