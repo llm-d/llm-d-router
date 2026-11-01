@@ -152,8 +152,15 @@ epp:
     # behavior: {}
     # metrics: [] # Optional custom metrics override. Replaces auto-generated CPU and memory metrics (percentage fields are still range-validated if defined).
 
+  nodeSelector: {}
   affinity: {}
   tolerations: []
+  # Each constraint needs a labelSelector matching the EPP pods, for example
+  # llm-d-router-standalone: <release>-epp (llm-d-router-gateway: <release>-epp in the gateway chart).
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  # Extra labels added to the EPP pod template. Chart-owned label keys are rejected.
+  podLabels: {}
 
   # Annotations added to the EPP pod template. Useful for clusters that rely on
   # annotation-based Prometheus scraping (prometheus.io/{scrape,port,path}) or

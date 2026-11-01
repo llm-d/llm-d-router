@@ -279,8 +279,12 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.clusterDomain` | Kubernetes cluster DNS domain used to build in-cluster Service FQDNs. | `cluster.local` |
 | `router.imagePullSecrets` | Secrets holding credentials for pulling images from private registries. | `[]` |
 | `router.epp.flags` | Map of command-line flags passed directly to the EPP binary. | `{}` |
+| `router.epp.nodeSelector` | Node selector for EPP pods. | `{}` |
 | `router.epp.affinity` | Affinity rules for EPP pods. | `{}` |
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
+| `router.epp.topologySpreadConstraints` | Topology spread constraints for EPP pods. Each entry needs a `labelSelector` matching the EPP pod labels. | `[]` |
+| `router.epp.priorityClassName` | PriorityClass for EPP pods. | `""` |
+| `router.epp.podLabels` | Extra labels added to the EPP pod template. | `{}` |
 | `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |
 | `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
 | `router.epp.podDisruptionBudget` | PodDisruptionBudget for EPP pods: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. Integer `minAvailable` requires at least 2 effective replicas: `replicas` (or `autoscaling.minReplicas` when autoscaled), `preferredReplicas` + `defaultReplicas` with GKE `preferredBackends`, or `primaryReplicas` + `standbyReplicas` with `priorityRouting`. A single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
@@ -743,6 +747,14 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
 | `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on the proxy pod. Applies in service mode only: in sidecar mode the proxy shares the EPP pod, so `router.epp.terminationGracePeriodSeconds` controls the grace period for both containers. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
+| `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
+| `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
+| `router.proxy.topologySpreadConstraints` | Topology spread constraints for the proxy Deployment when `mode=service`. Each entry needs a `labelSelector` matching `llm-d-router-proxy: <release>-proxy`. | `[]` |
+| `router.proxy.priorityClassName` | PriorityClass for the proxy Deployment when `mode=service`. | `""` |
+| `router.proxy.podLabels` | Extra labels added to the proxy pod template when `mode=service`. | `{}` |
+| `router.proxy.podAnnotations` | Annotations added to the proxy pod template when `mode=service`. | `{}` |
+| `router.proxy.podSecurityContext` | Pod-level `securityContext` for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
 | `router.proxy.lifecycle` | Container lifecycle for the proxy container, rendered verbatim in both sidecar and service mode. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. For preStop drains that outlast the default window, raise the grace period: `router.epp.terminationGracePeriodSeconds` in sidecar mode, `router.proxy.terminationGracePeriodSeconds` in service mode. | `null` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |

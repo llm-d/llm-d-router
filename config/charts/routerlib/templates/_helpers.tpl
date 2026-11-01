@@ -627,6 +627,7 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- include "llm-d-router.validations.epp.latencyPredictor" . }}
 {{- include "llm-d-router.validations.epp.preferredBackends" . }}
 {{- include "llm-d-router.validations.epp.autoscaling" . }}
+{{- include "llm-d-router.validations.epp.podLabels" . }}
 {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
 {{- if and $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") -}}
 {{- fail "priorityRouting is only supported when proxy mode is set to 'service' (router.proxy.mode=service)" -}}
@@ -661,6 +662,24 @@ Tokenizer validations: require modelName and valid flavor for the render sidecar
 {{- fail (printf ".Values.router.tokenizer.flavor must be one of [python, rust], got %q" (dig "flavor" "" $tokenizer)) }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/*
+podLabels validations: a key that duplicates a chart-owned pod label breaks the selector match or the mode label.
+*/}}
+{{- define "llm-d-router.validations.epp.podLabels" -}}
+{{- $eppLabels := merge (include "llm-d-router.selectorLabels" . | fromYaml) (include "llm-d-router.modeLabels" . | fromYaml) -}}
+{{- range $k, $_ := .Values.router.epp.podLabels -}}
+{{- if hasKey $eppLabels $k -}}
+{{- fail (printf ".Values.router.epp.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $proxyLabels := merge (include "llm-d-router.labels" . | fromYaml) (include "llm-d-router.proxySelectorLabels" . | fromYaml) -}}
+{{- range $k, $_ := dig "podLabels" dict (.Values.router.proxy | default dict) -}}
+{{- if hasKey $proxyLabels $k -}}
+{{- fail (printf ".Values.router.proxy.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
