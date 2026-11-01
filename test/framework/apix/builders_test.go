@@ -22,6 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -222,11 +223,247 @@ func TestInferenceObjectiveWrapper(t *testing.T) {
 	}
 }
 
+func TestV1InferenceObjectiveWrapper(t *testing.T) {
+	ts := metav1.NewTime(time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC))
+	refA := apixv1.PoolObjectReference{Group: "inference.networking.k8s.io", Kind: "InferencePool", Name: "pool-a"}
+	refB := apixv1.PoolObjectReference{Group: "other.example.io", Kind: "Other", Name: "pool-b"}
+	sel := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "llm"}}
+
+	tests := []struct {
+		name  string
+		build func() *apixv1.InferenceObjective
+		check func(t *testing.T, obj *apixv1.InferenceObjective)
+	}{
+		{
+			name:  "MakeV1InferenceObjective sets only the name",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Name != objName {
+					t.Errorf("Name = %q, want %q", obj.Name, objName)
+				}
+				if obj.Namespace != "" {
+					t.Errorf("Namespace = %q, want empty", obj.Namespace)
+				}
+				if obj.Spec.Priority != nil {
+					t.Errorf("Spec.Priority = %d, want nil", *obj.Spec.Priority)
+				}
+				if obj.Spec.PoolRefs != nil {
+					t.Errorf("Spec.PoolRefs = %+v, want nil", obj.Spec.PoolRefs)
+				}
+				if obj.Spec.PoolSelector != nil {
+					t.Errorf("Spec.PoolSelector = %+v, want nil", obj.Spec.PoolSelector)
+				}
+				if obj.DeletionTimestamp != nil {
+					t.Errorf("DeletionTimestamp = %v, want nil", obj.DeletionTimestamp)
+				}
+				if !obj.CreationTimestamp.IsZero() {
+					t.Errorf("CreationTimestamp = %v, want zero", obj.CreationTimestamp)
+				}
+			},
+		},
+		{
+			name:  "Namespace sets the namespace",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).Namespace(testNS).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Namespace != testNS {
+					t.Errorf("Namespace = %q, want %q", obj.Namespace, testNS)
+				}
+				if obj.Name != objName {
+					t.Errorf("Name = %q, want %q", obj.Name, objName)
+				}
+			},
+		},
+		{
+			name: "Namespace keeps the last value set",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).Namespace("first").Namespace(testNS).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Namespace != testNS {
+					t.Errorf("Namespace = %q, want %q", obj.Namespace, testNS)
+				}
+			},
+		},
+		{
+			// Zero is a meaningful priority and must be distinguishable from unset.
+			name:  "Priority zero is set, not left nil",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).Priority(0).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.Priority == nil {
+					t.Fatal("Spec.Priority is nil, want a pointer to 0")
+				}
+				if *obj.Spec.Priority != 0 {
+					t.Errorf("Spec.Priority = %d, want 0", *obj.Spec.Priority)
+				}
+			},
+		},
+		{
+			name:  "Priority accepts a negative value",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).Priority(-10).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.Priority == nil {
+					t.Fatal("Spec.Priority is nil, want a value")
+				}
+				if *obj.Spec.Priority != -10 {
+					t.Errorf("Spec.Priority = %d, want %d", *obj.Spec.Priority, -10)
+				}
+			},
+		},
+		{
+			name: "Priority stores the last value set",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).Priority(1).Priority(7).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.Priority == nil {
+					t.Fatal("Spec.Priority is nil, want a value")
+				}
+				if *obj.Spec.Priority != 7 {
+					t.Errorf("Spec.Priority = %d, want %d", *obj.Spec.Priority, 7)
+				}
+			},
+		},
+		{
+			// Calling PoolRefs with no arguments must not invent an empty-but-non-nil
+			// slice that a validator could mistake for "refs were provided".
+			name:  "PoolRefs with no arguments leaves the refs nil",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).PoolRefs().ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.PoolRefs != nil {
+					t.Errorf("Spec.PoolRefs = %+v, want nil", obj.Spec.PoolRefs)
+				}
+			},
+		},
+		{
+			name:  "PoolRefs stores a single reference",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).PoolRefs(refA).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if len(obj.Spec.PoolRefs) != 1 || obj.Spec.PoolRefs[0] != refA {
+					t.Errorf("Spec.PoolRefs = %+v, want [%+v]", obj.Spec.PoolRefs, refA)
+				}
+			},
+		},
+		{
+			name: "PoolRefs stores multiple references in order",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).PoolRefs(refA, refB).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if len(obj.Spec.PoolRefs) != 2 || obj.Spec.PoolRefs[0] != refA || obj.Spec.PoolRefs[1] != refB {
+					t.Errorf("Spec.PoolRefs = %+v, want [%+v %+v]", obj.Spec.PoolRefs, refA, refB)
+				}
+			},
+		},
+		{
+			name: "PoolRefs replaces earlier references instead of appending",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).PoolRefs(refA, refB).PoolRefs(refB).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if len(obj.Spec.PoolRefs) != 1 || obj.Spec.PoolRefs[0] != refB {
+					t.Errorf("Spec.PoolRefs = %+v, want [%+v]", obj.Spec.PoolRefs, refB)
+				}
+			},
+		},
+		{
+			name:  "PoolSelector stores the supplied selector pointer",
+			build: func() *apixv1.InferenceObjective { return MakeV1InferenceObjective(objName).PoolSelector(sel).ObjRef() },
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.PoolSelector != sel {
+					t.Errorf("Spec.PoolSelector = %p, want the supplied pointer %p", obj.Spec.PoolSelector, sel)
+				}
+			},
+		},
+		{
+			name: "PoolSelector accepts nil to clear the selector",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).PoolSelector(sel).PoolSelector(nil).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Spec.PoolSelector != nil {
+					t.Errorf("Spec.PoolSelector = %+v, want nil", obj.Spec.PoolSelector)
+				}
+			},
+		},
+		{
+			name: "CreationTimestamp sets the supplied time",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).CreationTimestamp(ts).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if !obj.CreationTimestamp.Time.Equal(ts.Time) {
+					t.Errorf("CreationTimestamp = %v, want %v", obj.CreationTimestamp.Time, ts.Time)
+				}
+			},
+		},
+		{
+			name: "CreationTimestamp accepts the zero time",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).CreationTimestamp(ts).CreationTimestamp(metav1.Time{}).ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if !obj.CreationTimestamp.IsZero() {
+					t.Errorf("CreationTimestamp = %v, want zero", obj.CreationTimestamp)
+				}
+			},
+		},
+		{
+			name: "full fluent chain applies every setter",
+			build: func() *apixv1.InferenceObjective {
+				return MakeV1InferenceObjective(objName).
+					Namespace(testNS).
+					Priority(5).
+					PoolRefs(refA).
+					PoolSelector(sel).
+					CreationTimestamp(ts).
+					ObjRef()
+			},
+			check: func(t *testing.T, obj *apixv1.InferenceObjective) {
+				if obj.Name != objName || obj.Namespace != testNS {
+					t.Errorf("Name/Namespace = %q/%q, want %q/%q", obj.Name, obj.Namespace, objName, testNS)
+				}
+				if obj.Spec.Priority == nil || *obj.Spec.Priority != 5 {
+					t.Errorf("Spec.Priority = %v, want 5", obj.Spec.Priority)
+				}
+				if len(obj.Spec.PoolRefs) != 1 || obj.Spec.PoolRefs[0] != refA {
+					t.Errorf("Spec.PoolRefs = %+v, want [%+v]", obj.Spec.PoolRefs, refA)
+				}
+				if obj.Spec.PoolSelector != sel {
+					t.Errorf("Spec.PoolSelector = %p, want %p", obj.Spec.PoolSelector, sel)
+				}
+				if !obj.CreationTimestamp.Time.Equal(ts.Time) {
+					t.Errorf("CreationTimestamp = %v, want %v", obj.CreationTimestamp.Time, ts.Time)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, tt.build())
+		})
+	}
+}
+
 // ObjRef must hand back the wrapper's own object, not a copy: callers pass the
 // result to fake clients and expect later builder calls to be visible.
 func TestObjRefAliasesTheWrappedObject(t *testing.T) {
 	t.Run("InferenceObjectiveWrapper", func(t *testing.T) {
 		w := MakeInferenceObjective(objName)
+		ref := w.ObjRef()
+
+		if ref != &w.InferenceObjective {
+			t.Fatalf("ObjRef() = %p, want &wrapper.InferenceObjective (%p)", ref, &w.InferenceObjective)
+		}
+
+		w.Namespace(testNS)
+		if ref.Namespace != testNS {
+			t.Errorf("Namespace via earlier ObjRef() = %q, want %q", ref.Namespace, testNS)
+		}
+	})
+
+	t.Run("V1InferenceObjectiveWrapper", func(t *testing.T) {
+		w := MakeV1InferenceObjective(objName)
 		ref := w.ObjRef()
 
 		if ref != &w.InferenceObjective {

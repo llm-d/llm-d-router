@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package gaie provides builders for GAIE and apix inference CRDs used in tests.
+// Package gaie provides builders for GAIE inference CRDs used in tests.
 package gaie
 
 import (
