@@ -373,9 +373,10 @@ const thinkingTypeDisabled = "disabled"
 // reasoning content takes the pass-through to keep them. The Messages shape folds
 // only text content blocks, so a request declaring tools or turning thinking on
 // takes the pass-through to keep its tool_use or thinking blocks (a server-side
-// block the request does not declare is caught on the frame instead). The responses
-// shape emits the upstream object verbatim (keeping those fields) and generate has
-// none, so neither is lossy.
+// block the request does not declare is caught on the frame instead). The generate
+// shape folds only token ids and finish reasons, so it is lossy when
+// sampling_params requests logprobs or prompt_logprobs. The responses shape emits
+// the upstream object verbatim, keeping those fields, so it is not lossy.
 func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if shape == sseShapeMessages {
 		if tools, ok := reqcommon.FieldValue(body, reqcommon.FieldTools); ok {
@@ -393,22 +394,19 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if shape == sseShapeGenerate {
 		// The generate fold keeps only token ids and finish reasons, so a
 		// sampling_params asking for logprobs or prompt_logprobs takes the
-		// pass-through to keep them. Both are counts where 0 (the vLLM default)
-		// requests none, so only a positive or unreadable value is lossy.
+		// pass-through to keep them. vLLM leaves both unset (null) by default;
+		// any value, including 0, requests at least the chosen token's logprob,
+		// and -1 requests the whole vocabulary.
 		if sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any); ok {
 			for _, field := range []string{reqcommon.FieldLogprobs, reqcommon.FieldPromptLogprobs} {
-				if v, set := reqcommon.FieldValue(sp, field); set {
-					if n, err := reqcommon.NonNegativeInt(v); err != nil || n > 0 {
-						return true
-					}
+				if _, set := reqcommon.FieldValue(sp, field); set {
+					return true
 				}
 			}
 		}
 		return false
 	}
 	if shape != sseShapeChat && shape != sseShapeText {
-		return false
-	}
 		return false
 	}
 	// Resolve each field through reqcommon.FieldValue, not a bare type assertion:

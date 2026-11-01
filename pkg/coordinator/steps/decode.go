@@ -119,9 +119,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	parity := s.newParityCheck(logger, reqCtx)
 	injectedUsage := parity != nil && injectIncludeUsage(reqCtx)
 
-	// Force-streaming applies only to a non-streaming request. A chat or text
-	// request whose reply may carry fields the reassembler drops (tool calls,
-	// logprobs, reasoning) takes the pass-through to keep them; forceStreamLossy
+	// Force-streaming applies only to a non-streaming request. A request whose
+	// reply may carry fields the reassembler drops (tool calls, logprobs,
+	// reasoning) takes the pass-through to keep them; forceStreamLossy
 	// catches what the request declares up front, and a server-side default is
 	// caught on the frame mid-stream (both fall back here). Every other candidate
 	// reserves budget and reassembles the whole reply; one whose estimate exceeds

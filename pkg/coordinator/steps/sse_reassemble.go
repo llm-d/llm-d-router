@@ -134,9 +134,9 @@ type sseChoice struct {
 //
 // Only the fields a non-streaming reply needs are folded: text content or token
 // ids, role, finish_reason, and usage. A chat delta's tool_calls, function_call,
-// logprobs, and reasoning_content are not reassembled. The decode step leaves
-// force-streaming off for a chat or text request that declares tools, functions,
-// logprobs, or reasoning (see forceStreamLossy); a server-side default the request
+// logprobs, and reasoning_content are not reassembled, nor are a generate
+// choice's logprobs. The decode step leaves force-streaming off for a request that
+// declares such a field (see forceStreamLossy); a server-side default the request
 // does not declare is caught on the frame instead (lossyFrame), and both take the
 // pass-through, which preserves the dropped field.
 type sseReassembler struct {
@@ -588,7 +588,7 @@ func (r *sseReassembler) writeEnvelope(out map[string]any) {
 		if r.requestID != "" {
 			out["request_id"] = r.requestID
 		}
-		out["prompt_logprobs"] = nil
+		out[reqcommon.FieldPromptLogprobs] = nil
 		out[reqcommon.FieldKVTransferParams] = nil
 		return
 	}

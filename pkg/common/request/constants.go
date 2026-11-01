@@ -96,6 +96,7 @@ const (
 	FieldOutput               = "output"
 	FieldFunctions            = "functions"
 	FieldLogprobs             = "logprobs"
+	FieldPromptLogprobs       = "prompt_logprobs"
 	FieldReasoningEffort      = "reasoning_effort"
 	FieldChatTemplateKwargs   = "chat_template_kwargs"
 	FieldEnableThinking       = "enable_thinking"

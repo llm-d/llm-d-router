@@ -174,10 +174,24 @@ func TestForceStreamLossy(t *testing.T) {
 	// Reasoning is a chat concept; the text shape has no reasoning_content to drop.
 	require.False(t, forceStreamLossy(sseShapeText, map[string]any{"reasoning_effort": "high"}))
 
-	// The responses shape emits the upstream object verbatim and generate has no
-	// such fields, so neither is ever lossy even when the request declares them.
+	// The responses shape emits the upstream object verbatim, so it is never lossy
+	// even when the request declares these fields.
 	require.False(t, forceStreamLossy(sseShapeResponses, map[string]any{"tools": []any{map[string]any{"type": "function"}}}))
+	// The generate route reads logprobs from sampling_params, not the top level.
 	require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"logprobs": true}))
+
+	// The generate fold drops logprobs, so a sampling_params that sets either
+	// count is lossy. 0 still returns the chosen token's logprob and -1 the whole
+	// vocabulary; only an absent or null value requests none.
+	for _, field := range []string{"logprobs", "prompt_logprobs"} {
+		for _, v := range []any{float64(0), float64(5), float64(-1)} {
+			require.True(t, forceStreamLossy(sseShapeGenerate, map[string]any{"sampling_params": map[string]any{field: v}}), "%s=%v", field, v)
+		}
+		require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"sampling_params": map[string]any{field: nil}}), "%s=null", field)
+	}
+	require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"sampling_params": map[string]any{"max_tokens": float64(8)}}))
+	require.True(t, forceStreamLossy(sseShapeGenerate, map[string]any{"sampling_params": map[string]any{"logprobs": json.RawMessage(`2`)}}),
+		"a raw value is resolved before the check")
 
 	// The messages shape folds only text blocks, so a request declaring tools is
 	// lossy (tool_use blocks would be dropped); logprobs/reasoning are not Messages
@@ -1645,6 +1659,54 @@ func TestForceStream_MessagesThinkingSpentHandoff_PassesThrough(t *testing.T) {
 	require.JSONEq(t, passthroughReply, string(respBody), "the thinking block reaches the client")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "nothing was reserved")
+}
+
+// TestForceStream_ForwardsPeerTopology covers the peer-topology header on the
+// forced decode request. The EPP's topology-affinity filter and scorer read it on
+// the decode leg, and the pass-through sets it, so the forced request carries it
+// too and both legs are scheduled the same way.
+func TestForceStream_ForwardsPeerTopology(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		topology string
+	}{
+		{"set", "zone=a,rack=r1"},
+		{"unset", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Values(reqcommon.PeerTopologyHeaderKey)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			}))
+			defer server.Close()
+
+			step, reg := newForceStreamStep(t, server.URL, "1GiB")
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-topology",
+				OriginalPath:     reqcommon.PathChatCompletions,
+				Model:            "m",
+				Stream:           false,
+				KVTransferParams: map[string]any{},
+				PeerTopology:     tc.topology,
+				Body: map[string]any{
+					"model": "m", "stream": false, "max_tokens": 16,
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				},
+				ResponseWriter: httptest.NewRecorder(),
+			}
+
+			require.NoError(t, step.Execute(context.Background(), reqCtx))
+			require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+			if tc.topology == "" {
+				require.Empty(t, got, "no topology header without a prefill topology")
+				return
+			}
+			require.Equal(t, []string{tc.topology}, got, "the forced decode request carries the prefill topology")
+		})
+	}
 }
 
 // TestSpendsRemoteBlocks covers the one-shot P2P handoff detector that gates the
