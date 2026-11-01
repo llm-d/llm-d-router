@@ -11,15 +11,14 @@ plugins:
       defaultTeam:
         class: batch
       teams:
+        # A 1-token daily commit is exceeded by any request.
         - id: team-a
           class: critical
-          commitTokensPerMinute: 60
-          burstSeconds: 60
+          dailyTokens: 1
           maxConcurrency: 5
         - id: team-b
           class: batch
-          commitTokensPerMinute: 60
-          burstSeconds: 60
+          dailyTokens: 1
   - type: latency-reporter
     parameters:
       priorities: [100]
