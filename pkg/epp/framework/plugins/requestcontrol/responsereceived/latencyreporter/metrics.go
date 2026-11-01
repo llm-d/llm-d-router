@@ -31,26 +31,26 @@ var (
 			Name:      "latency_requests_total",
 			Help:      metricsutil.HelpMsgWithStability("Dispatched requests by outcome, priority, prompt-length bucket and prefill/decode path.", compbasemetrics.ALPHA),
 		},
-		[]string{"priority", "prompt_bucket", "path", "outcome"},
+		[]string{"priority", "prompt_bucket", "path", "streaming", "outcome"},
 	)
 
 	latencyTTFT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "latency_ttft_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Time to first token of successful requests, by priority, prompt-length bucket and prefill/decode path.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Time to first token of completed requests, by priority, prompt-length bucket and prefill/decode path. For non-streaming requests, this equals total request duration.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.025, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2, 3, 4, 6, 8, 10, 15, 30, 60,
 			},
 		},
-		[]string{"priority", "prompt_bucket", "path"},
+		[]string{"priority", "prompt_bucket", "path", "streaming"},
 	)
 
 	latencyTPOT = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "latency_tpot_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Mean time per output token of successful streaming requests, by priority and prefill/decode path.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Mean time per output token of completed streaming requests, by priority and prefill/decode path.", compbasemetrics.ALPHA),
 			Buckets: []float64{
 				0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 1,
 			},
