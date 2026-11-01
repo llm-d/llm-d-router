@@ -200,9 +200,10 @@ func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
 	// An explicit zero is a cache miss, not a missing count: the metrics layer
 	// only records request_cached_tokens when PromptTokenDetails is set, so
 	// dropping the zero leaves the misses out of the histogram and inflates the
-	// reported hit rate. Only a block that carries the field sets it, so a later
-	// frame without it does not overwrite an earlier count.
-	if hasRead {
+	// reported hit rate. A zero is only recorded while no count is known yet,
+	// so a later frame that serializes a placeholder zero cannot replace the
+	// count an earlier frame reported.
+	if hasRead && (read != 0 || usage.PromptTokenDetails == nil) {
 		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
 	}
 }
