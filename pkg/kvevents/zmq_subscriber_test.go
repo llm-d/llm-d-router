@@ -27,11 +27,14 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
@@ -1006,6 +1009,41 @@ func TestZMQSubscriber_UnavailableSnapshotIndexesLiveEvents(t *testing.T) {
 	require.Eventually(t, func() bool { return h.indexed(100) && h.indexed(200) },
 		5*time.Second, 50*time.Millisecond, "live frames must be indexed while the snapshot is unavailable")
 	assert.Equal(t, int32(1), server.requests.Load(), "the snapshot is retried only after the cooldown")
+}
+
+// snapshotLoadSamples returns how many snapshot loads the histogram has observed.
+func snapshotLoadSamples(t *testing.T) uint64 {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	require.NoError(t, reg.Register(metrics.SnapshotLoadDuration))
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	require.Len(t, families, 1)
+	require.Len(t, families[0].GetMetric(), 1)
+	return families[0].GetMetric()[0].GetHistogram().GetSampleCount()
+}
+
+func TestZMQSubscriber_SnapshotReportsLiveOnlyAndLoadDuration(t *testing.T) {
+	before := snapshotLoadSamples(t)
+	h, _ := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+
+	// The pod reports live-only from the connection until the snapshot loads.
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 999))
+	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return snapshotLoadSamples(t) == before+1 },
+		5*time.Second, 50*time.Millisecond, "a successful snapshot load must be observed once")
+	assert.InDelta(t, 0.0, promtestutil.ToFloat64(metrics.LiveOnly.WithLabelValues("test-pod")), 1e-9,
+		"a pod that follows a snapshot is no longer indexed from live events only")
+}
+
+func TestZMQSubscriber_UnavailableSnapshotReportsLiveOnly(t *testing.T) {
+	h, _ := newSnapshotHarness(t, -2)
+
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) },
+		5*time.Second, 50*time.Millisecond, "live frames must be indexed while the snapshot is unavailable")
+	assert.InDelta(t, 1.0, promtestutil.ToFloat64(metrics.LiveOnly.WithLabelValues("test-pod")), 1e-9,
+		"a pod with a snapshot endpoint but no base must report live-only")
 }
 
 func TestZMQSubscriber_SnapshotSequenceResetReloadsPod(t *testing.T) {

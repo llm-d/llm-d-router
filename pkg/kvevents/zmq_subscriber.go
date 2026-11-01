@@ -71,6 +71,12 @@ type zmqSubscriber struct {
 	// publisherID identifies the engine process behind the live stream; it
 	// changes only when the engine restarts.
 	publisherID []byte
+
+	// liveOnlyReported and liveOnly hold the last reported live-only state so
+	// the gauge is set on transitions rather than on every live event. They are
+	// only accessed from the goroutine running runSubscriber.
+	liveOnlyReported bool
+	liveOnly         bool
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
@@ -178,6 +184,12 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "subscribe").Inc()
 		logger.Error(err, "Failed to subscribe to topic filter", "topic", z.topicFilter)
 		return
+	}
+
+	// Report a pod that reconnects without a base until a snapshot or replay
+	// establishes one.
+	if !z.hasLastSeq {
+		z.recordLiveOnly(true)
 	}
 
 	// Rebuild the index from buffered events without waiting for live traffic.
@@ -289,6 +301,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			if !rebuilt {
 				// Without a base the pod is indexed from live events alone,
 				// as it is with neither endpoint set.
+				z.recordLiveOnly(true)
 				z.addTask(ctx, topic, seq, payload)
 				continue
 			}
@@ -305,7 +318,27 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
 		z.hasLastSeq = true
+		z.recordLiveOnly(false)
 	}
+}
+
+// recordLiveOnly reports whether the subscriber has a base to index from: 0
+// once it follows a complete event sequence, 1 when it indexes live events
+// without one. Only pods that can obtain a base have a series, so pods without
+// a snapshot or replay endpoint are not reported.
+func (z *zmqSubscriber) recordLiveOnly(liveOnly bool) {
+	if z.snapshotEndpoint == "" && z.replayEndpoint == "" {
+		return
+	}
+	if z.liveOnlyReported && z.liveOnly == liveOnly {
+		return
+	}
+	z.liveOnlyReported, z.liveOnly = true, liveOnly
+	value := 0.0
+	if liveOnly {
+		value = 1
+	}
+	metrics.LiveOnly.WithLabelValues(z.podIdentifier).Set(value)
 }
 
 // addTask hands a received message to the pool, carrying the receive span's
@@ -427,6 +460,10 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 		z.lastSeq, z.hasLastSeq = uint64(cut), true
 	}
 	z.lastReplayFailure = time.Time{}
+	metrics.SnapshotLoadDuration.Observe(time.Since(started).Seconds())
+	if z.hasLastSeq {
+		z.recordLiveOnly(false)
+	}
 	logger.Info("Snapshot loaded", "cut", cut, "batches", len(batches),
 		"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
 	return true
@@ -599,6 +636,7 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				return false
 			}
 			z.lastReplayFailure = time.Time{}
+			z.recordLiveOnly(false)
 			logger.Info("Replay complete", "replayed", replayed,
 				"attempts", attempt, "startSeq", startSeq,
 				"replayEndpoint", z.replayEndpoint)
