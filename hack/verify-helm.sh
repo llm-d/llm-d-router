@@ -850,6 +850,13 @@ for header in x-llm-d-prefiller-host-port x-prefiller-host-port x-llm-d-encoder-
     exit 1
   fi
 done
+# Fail-open must not leave the ext_proc cluster in panic mode: with no healthy EPP host the
+# ext_proc stream has to fail before the body is sent, or the request loses its body.
+ext_proc_cluster=$(awk '/- name: ext_proc$/{c=1} c' "${proxy_service_render_output}" | head -40)
+if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -- 'value: 0$'; then
+  echo "Proxy service mode with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
@@ -860,6 +867,21 @@ if grep -q -- 'inference_pool_fallback\|proxy-svc-epp-model-servers' "${fail_clo
 fi
 if ! grep -q -- 'remove: x-gateway-destination-endpoint' "${fail_closed_render_output}"; then
   echo "Destination header strip missing with router.proxy.failOpen=false"
+  exit 1
+fi
+if grep -q -- 'healthy_panic_threshold' "${fail_closed_render_output}"; then
+  echo "ext_proc panic mode changed with router.proxy.failOpen=false"
+  exit 1
+fi
+priority_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-priority-failopen-render.yaml"
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 0$'; then
+  echo "Priority routing with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 --set router.proxy.failOpen=false > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 10$'; then
+  echo "Priority routing with fail-open off did not keep router.proxy.priorityRouting.healthyPanicThreshold"
   exit 1
 fi
 fallback_port_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fallback-port-render.yaml"
