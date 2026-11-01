@@ -30,6 +30,7 @@ const (
 	PathModels            = "/v1/models"
 	PathEmbeddings        = "/v1/embeddings"
 	PathAudioSpeech       = "/v1/audio/speech"
+	PathAudioGenerate     = "/v1/audio/generate"
 	PathImagesGenerations = "/v1/images/generations"
 	PathImagesEdits       = "/v1/images/edits"
 	PathMessages          = "/v1/messages"
@@ -145,6 +146,11 @@ func DetectAPIType(path string) APIType {
 func MatchAPIType(path string) (APIType, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	// vLLM Omni's /v1/audio/generate ends in SGLang's /generate but is not a
+	// generation API this classifier names.
+	if strings.HasSuffix(path, strings.TrimPrefix(PathAudioGenerate, "/v1")) {
+		return 0, false
+	}
 	for apiType := range apiTypeCount {
 		// Keep the slash boundary while allowing provider-specific prefixes.
 		suffix := strings.TrimPrefix(apiType.Path(), "/v1")
