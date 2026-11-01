@@ -27,7 +27,12 @@ const webpHeaderBytes = 30
 // ok is false unless the bytes carry the minimal complete chunk header of the
 // format they declare.
 func webpDimensions(hdr []byte) (width, height int, ok bool) {
-	if len(hdr) < 12 || string(hdr[:4]) != "RIFF" || string(hdr[8:12]) != "WEBP" {
+	// hdr[20:] below slices the chunk payload, which sits behind the RIFF
+	// tag (4) + RIFF size (4) + WEBP tag (4) + chunk id (4) + chunk size (4)
+	// fields. Peek can return fewer than webpHeaderBytes bytes when the
+	// decoded payload is short, so the length guard must cover that access;
+	// the per-format checks then cover everything beyond byte 20.
+	if len(hdr) < 20 || string(hdr[:4]) != "RIFF" || string(hdr[8:12]) != "WEBP" {
 		return 0, 0, false
 	}
 	payload := hdr[20:]

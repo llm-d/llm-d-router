@@ -167,8 +167,9 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 	br := bufio.NewReader(r)
 	// webp has no registered decoder, so its size fields are read from the
 	// peeked header. Peek does not consume, so registered decoders still
-	// receive the full stream.
-	if hdr, _ := br.Peek(webpHeaderBytes); len(hdr) >= 12 {
+	// receive the full stream. Peek may also return fewer bytes than asked
+	// for, so the guard mirrors webpDimensions' minimal chunk-header size.
+	if hdr, _ := br.Peek(webpHeaderBytes); len(hdr) >= 20 {
 		if w, h, is := webpDimensions(hdr); is {
 			return w, h, true
 		}

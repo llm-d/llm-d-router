@@ -93,9 +93,10 @@ func TestWebpDimensionsRejects(t *testing.T) {
 	copy(unknownChunk[12:16], "ANIM") // dims only live in ANMF chunks, not here
 
 	for name, hdr := range map[string][]byte{
-		"too-short":         webpHeader("VP8X", 10, 10)[:11],
-		"truncated-payload": webpHeader("VP8X", 10, 10)[:24],
-		"not-riff":          append([]byte("GIF8"), webpHeader("VP8X", 10, 10)[4:]...),
+		"too-short":              webpHeader("VP8X", 10, 10)[:11],
+		"truncated-chunk-header": webpHeader("VP8 ", 10, 10)[:16], // RIFF+size+WEBP+chunk id only: no chunk size/payload
+		"truncated-payload":      webpHeader("VP8X", 10, 10)[:24],
+		"not-riff":               append([]byte("GIF8"), webpHeader("VP8X", 10, 10)[4:]...),
 		"not-webp-container": func() []byte {
 			h := webpHeader("VP8X", 10, 10)
 			copy(h[8:12], "WAVE")
@@ -111,6 +112,24 @@ func TestWebpDimensionsRejects(t *testing.T) {
 			assert.Zero(t, w)
 			assert.Zero(t, h)
 		})
+	}
+}
+
+// TestWebpDimensionsHandlesEveryTruncation asserts that every truncation of
+// a header is rejected without panicking: Peek can return fewer bytes than
+// asked for, so any length below the complete header must be safe to hand
+// over. A 12..19-byte prefix passes the RIFF/WEBP magic check but leaves the
+// chunk payload out of bounds, which crashed via hdr[20:] before the length
+// guard was raised.
+func TestWebpDimensionsHandlesEveryTruncation(t *testing.T) {
+	for _, format := range []string{"VP8X", "VP8 ", "VP8L"} {
+		full := webpHeader(format, 10, 10)
+		for i := 0; i < len(full); i++ {
+			w, h, ok := webpDimensions(full[:i])
+			assert.False(t, ok, "format %s truncated to %d bytes", format, i)
+			assert.Zero(t, w)
+			assert.Zero(t, h)
+		}
 	}
 }
 
