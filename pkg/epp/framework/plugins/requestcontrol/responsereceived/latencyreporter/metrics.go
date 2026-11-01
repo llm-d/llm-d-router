@@ -29,9 +29,9 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "latency_requests_total",
-			Help:      metricsutil.HelpMsgWithStability("Completed requests by outcome (success or failed), priority, prompt-length bucket and prefill/decode path.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Dispatched requests by outcome, priority, prompt-length bucket and prefill/decode path.", compbasemetrics.ALPHA),
 		},
-		[]string{"target_model_name", "fairness_id", "priority", "prompt_bucket", "path", "outcome"},
+		[]string{"priority", "prompt_bucket", "path", "outcome"},
 	)
 
 	latencyTTFT = prometheus.NewHistogramVec(

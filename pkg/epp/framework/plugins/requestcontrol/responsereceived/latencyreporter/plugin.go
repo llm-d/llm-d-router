@@ -31,7 +31,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
@@ -48,8 +47,12 @@ const (
 	pathLocal      = "local"
 	pathAggregated = "aggregated"
 
-	outcomeSuccess = "success"
-	outcomeFailed  = "failed"
+	// Outcome values match llm_d_epp_request_outcome_total. A request rejected before dispatch
+	// produces no response, so "rejected" never reaches this plugin.
+	outcomeCompleted = "completed"
+	outcomeEvicted   = "evicted"
+	outcomeCancelled = "cancelled"
+	outcomeFailed    = "failed"
 )
 
 var (
@@ -167,11 +170,10 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	bucket := p.bucket(promptTokens(request, response))
 	path := p.path(request)
 	prio := strconv.Itoa(priority)
-	fairness := metricsutil.BoundFairnessID(request.FairnessID)
 
-	success := (status == "" || status == "200") && response.TerminationCause == requestcontrol.TerminationCauseNatural
-	if !success {
-		latencyRequests.WithLabelValues(request.TargetModel, fairness, prio, bucket, path, outcomeFailed).Inc()
+	result := outcome(status, response.TerminationCause)
+	latencyRequests.WithLabelValues(prio, bucket, path, result).Inc()
+	if result != outcomeCompleted {
 		return
 	}
 	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() {
@@ -180,7 +182,24 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	if tpot, ok := meanTPOT(response); ok {
 		latencyTPOT.WithLabelValues(prio, path).Observe(tpot.Seconds())
 	}
-	latencyRequests.WithLabelValues(request.TargetModel, fairness, prio, bucket, path, outcomeSuccess).Inc()
+}
+
+// outcome classifies a dispatched request with the values and precedence of
+// llm_d_epp_request_outcome_total: an eviction wins over the error that ends the stream, and a
+// non-200 status wins over a cancel. It sees only the response status and termination cause.
+func outcome(status string, cause requestcontrol.TerminationCause) string {
+	switch {
+	case cause == requestcontrol.TerminationCauseEvicted:
+		return outcomeEvicted
+	case status != "" && status != "200":
+		return outcomeFailed
+	case cause == requestcontrol.TerminationCauseNatural:
+		return outcomeCompleted
+	case cause == requestcontrol.TerminationCauseClientDisconnect:
+		return outcomeCancelled
+	default:
+		return outcomeFailed
+	}
 }
 
 // meanTPOT is the per-request mean gap between output tokens. It needs a streamed response with

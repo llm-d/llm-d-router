@@ -19,6 +19,7 @@ package latencyreporter
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -44,7 +45,6 @@ func newTestPlugin(t *testing.T, raw string) *Plugin {
 
 type reqSpec struct {
 	priority   int
-	fairness   string
 	prompt     int
 	completion int
 	ttft       time.Duration
@@ -59,7 +59,6 @@ func run(p *Plugin, id string, s reqSpec) {
 	req := &fwksched.InferenceRequest{
 		RequestID:        id,
 		TargetModel:      "m",
-		FairnessID:       s.fairness,
 		Headers:          map[string]string{},
 		Objectives:       fwksched.RequestObjectives{Priority: s.priority},
 		SchedulingResult: s.scheduling,
@@ -88,8 +87,8 @@ func run(p *Plugin, id string, s reqSpec) {
 	p.ResponseBody(context.Background(), req, resp, nil)
 }
 
-func count(fairness, prio, bucket, path, outcome string) float64 {
-	return promtestutil.ToFloat64(latencyRequests.WithLabelValues("m", fairness, prio, bucket, path, outcome))
+func count(prio, bucket, path, outcome string) float64 {
+	return promtestutil.ToFloat64(latencyRequests.WithLabelValues(prio, bucket, path, outcome))
 }
 
 // histogram returns the sample count and sum of one histogram series.
@@ -141,18 +140,18 @@ func TestOutcomeAndPath(t *testing.T) {
 		wantOutcome string
 	}{
 		{
-			name:        "completed stream is success",
+			name:        "completed stream",
 			spec:        reqSpec{prompt: 100, completion: 101, ttft: 200 * time.Millisecond, decode: 2 * time.Second, streaming: true},
 			bucket:      "le1024",
 			path:        pathAggregated,
-			wantOutcome: outcomeSuccess,
+			wantOutcome: outcomeCompleted,
 		},
 		{
 			name:        "long prompt lands in the top bucket",
 			spec:        reqSpec{prompt: 20000, completion: 2, ttft: 3 * time.Second, streaming: true},
 			bucket:      "gt8192",
 			path:        pathAggregated,
-			wantOutcome: outcomeSuccess,
+			wantOutcome: outcomeCompleted,
 		},
 		{
 			name:        "server error is failed",
@@ -162,8 +161,29 @@ func TestOutcomeAndPath(t *testing.T) {
 			wantOutcome: outcomeFailed,
 		},
 		{
-			name:        "client disconnect is failed",
+			name:        "client disconnect is cancelled",
 			spec:        reqSpec{prompt: 100, cause: fwkrc.TerminationCauseClientDisconnect},
+			bucket:      "le1024",
+			path:        pathAggregated,
+			wantOutcome: outcomeCancelled,
+		},
+		{
+			name:        "non-200 status wins over a disconnect",
+			spec:        reqSpec{prompt: 100, status: "500", cause: fwkrc.TerminationCauseClientDisconnect},
+			bucket:      "le1024",
+			path:        pathAggregated,
+			wantOutcome: outcomeFailed,
+		},
+		{
+			name:        "eviction wins over the status",
+			spec:        reqSpec{prompt: 100, status: "500", cause: fwkrc.TerminationCauseEvicted},
+			bucket:      "le1024",
+			path:        pathAggregated,
+			wantOutcome: outcomeEvicted,
+		},
+		{
+			name:        "stream error is failed",
+			spec:        reqSpec{prompt: 100, cause: fwkrc.TerminationCauseError},
 			bucket:      "le1024",
 			path:        pathAggregated,
 			wantOutcome: outcomeFailed,
@@ -176,7 +196,7 @@ func TestOutcomeAndPath(t *testing.T) {
 			}}},
 			bucket:      "le1024",
 			path:        pathRemote,
-			wantOutcome: outcomeSuccess,
+			wantOutcome: outcomeCompleted,
 		},
 		{
 			name: "declined prefill is the local path",
@@ -186,17 +206,17 @@ func TestOutcomeAndPath(t *testing.T) {
 			}}},
 			bucket:      "le1024",
 			path:        pathLocal,
-			wantOutcome: outcomeSuccess,
+			wantOutcome: outcomeCompleted,
 		},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fairness := "o" + string(rune('a'+i))
-			tc.spec.priority = 100
-			tc.spec.fairness = fairness
-			before := count(fairness, "100", tc.bucket, tc.path, tc.wantOutcome)
-			run(p, "req-"+fairness, tc.spec)
-			assert.Equal(t, before+1, count(fairness, "100", tc.bucket, tc.path, tc.wantOutcome))
+			// A distinct priority per case keeps the counter series isolated.
+			prio := 200 + i
+			tc.spec.priority = prio
+			before := count(strconv.Itoa(prio), tc.bucket, tc.path, tc.wantOutcome)
+			run(p, "req-"+strconv.Itoa(prio), tc.spec)
+			assert.Equal(t, before+1, count(strconv.Itoa(prio), tc.bucket, tc.path, tc.wantOutcome))
 		})
 	}
 }
@@ -235,25 +255,32 @@ func TestLatencyObservations(t *testing.T) {
 		n1, _ := histogram(t, latencyTTFT, "73", "le1024", pathAggregated)
 		assert.Equal(t, n0, n1)
 	})
+
+	t.Run("cancelled request records no latency", func(t *testing.T) {
+		n0, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated)
+		run(p, "obs-cancelled", reqSpec{priority: 74, prompt: 100, ttft: 100 * time.Millisecond, cause: fwkrc.TerminationCauseClientDisconnect})
+		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathAggregated)
+		assert.Equal(t, n0, n1)
+	})
 }
 
 func TestPriorityFilter(t *testing.T) {
 	p := newTestPlugin(t, `{"priorities": [100]}`)
 
-	before := count("filtered", "10", "all", pathAggregated, outcomeSuccess)
-	run(p, "req-filtered", reqSpec{priority: 10, fairness: "filtered", prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before, count("filtered", "10", "all", pathAggregated, outcomeSuccess), "an unlisted priority is not recorded")
+	before := count("10", "all", pathAggregated, outcomeCompleted)
+	run(p, "req-filtered", reqSpec{priority: 10, prompt: 100, ttft: time.Millisecond})
+	assert.Equal(t, before, count("10", "all", pathAggregated, outcomeCompleted), "an unlisted priority is not recorded")
 	_, held := p.statuses.Load("req-filtered")
 	assert.False(t, held, "per-request status is released at end of stream")
 
-	before = count("listed", "100", "all", pathAggregated, outcomeSuccess)
-	run(p, "req-listed", reqSpec{priority: 100, fairness: "listed", prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("listed", "100", "all", pathAggregated, outcomeSuccess))
+	before = count("100", "all", pathAggregated, outcomeCompleted)
+	run(p, "req-listed", reqSpec{priority: 100, prompt: 100, ttft: time.Millisecond})
+	assert.Equal(t, before+1, count("100", "all", pathAggregated, outcomeCompleted))
 }
 
 func TestNoPriorityFilterRecordsEveryPriority(t *testing.T) {
 	p := newTestPlugin(t, testConfig)
-	before := count("anyprio", "-5", "le1024", pathAggregated, outcomeSuccess)
-	run(p, "req-anyprio", reqSpec{priority: -5, fairness: "anyprio", prompt: 100, ttft: time.Millisecond})
-	assert.Equal(t, before+1, count("anyprio", "-5", "le1024", pathAggregated, outcomeSuccess))
+	before := count("-5", "le1024", pathAggregated, outcomeCompleted)
+	run(p, "req-anyprio", reqSpec{priority: -5, prompt: 100, ttft: time.Millisecond})
+	assert.Equal(t, before+1, count("-5", "le1024", pathAggregated, outcomeCompleted))
 }
