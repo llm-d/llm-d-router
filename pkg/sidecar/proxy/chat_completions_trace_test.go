@@ -822,7 +822,7 @@ func TestConcurrentPDStageSpansDoNotWaitForPrefill(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.runConcurrentPD(httptest.NewRecorder(), r, []byte(`{"tools":[]}`), []byte(original), "prefill:8000", constants.KVConnectorSGLang, nil, request)
+		s.runConcurrentPD(httptest.NewRecorder(), r, []byte(`{"tools":[]}`), []byte(original), "prefill:8000", constants.KVConnectorSGLang, request)
 	}()
 	select {
 	case <-done:
