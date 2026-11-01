@@ -357,6 +357,95 @@ func TestMatchBlockKeysSpeculativeVsOrdinalZeroRun(t *testing.T) {
 	}
 }
 
+type orderedLookupIndex struct {
+	kvblock.Index
+	entries map[kvblock.BlockHash][]kvblock.PodEntry
+}
+
+func (o orderedLookupIndex) Lookup(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[kvblock.BlockHash][]kvblock.PodEntry, error) {
+	return o.entries, nil
+}
+
+// Materialized prefix reuse preserves cached ordinals on the matching prefix
+// and re-resolves ordinals from the first entry that diverges by pod, tier, or
+// speculative flag.
+func TestMatchBlockKeysMaterializedPrefixOrdinalReuse(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	_, baseIdx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	entries := map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {
+			{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-b", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-c", DeviceTier: "cpu"},
+		},
+		20: {
+			{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-b", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-c", DeviceTier: "cpu"},
+		},
+		30: {
+			{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-c", DeviceTier: "cpu"},
+		},
+		40: {
+			{PodIdentifier: "pod-a", DeviceTier: "gpu"},
+			{PodIdentifier: "pod-c", Speculative: true},
+		},
+		50: {
+			{PodIdentifier: "pod-a", DeviceTier: "cpu"},
+		},
+	}
+	indexer := kvcache.NewIndexerForTest(&mockTokenProcessor{}, orderedLookupIndex{Index: baseIdx, entries: entries}, kvcache.DefaultKVCacheBackendConfig())
+
+	got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30, 40, 50}, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		"pod-a": {WeightedScore: 4.8, MatchedBlocks: 5, ConfirmedBlocks: 5, BlocksByTier: map[string]int{"gpu": 4}},
+		"pod-b": {WeightedScore: 2.0, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+		"pod-c": {WeightedScore: 3.4, MatchedBlocks: 4, ConfirmedBlocks: 3, BlocksByTier: map[string]int{"cpu": 3}},
+	}, got)
+}
+
+// Reusing pooled materialized scratch across calls with disjoint pods, tiers,
+// and backend weights must not leak ordinals or weights between calls.
+func TestMatchBlockKeysMaterializedPooledScratchIsolation(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+
+	_, idxA := newMatcher(t, nil)
+	populateIndex(t, idxA, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "alpha-1", DeviceTier: "tier-x"}, {PodIdentifier: "alpha-2", DeviceTier: "tier-y"}},
+		20: {{PodIdentifier: "alpha-1", DeviceTier: "tier-x"}},
+	})
+	matcherA := newMaterializedMatcher(idxA, []*kvcache.KVCacheBackendConfig{
+		{Name: "tier-x", Weight: 0.7},
+		{Name: "tier-y", Weight: 0.3},
+	})
+
+	_, idxB := newMatcher(t, nil)
+	populateIndex(t, idxB, map[kvblock.BlockHash][]kvblock.PodEntry{
+		10: {{PodIdentifier: "beta-1", DeviceTier: "tier-y"}},
+		20: {{PodIdentifier: "beta-1", DeviceTier: "tier-y"}},
+	})
+	matcherB := newMaterializedMatcher(idxB, []*kvcache.KVCacheBackendConfig{
+		{Name: "tier-y", Weight: 0.9},
+	})
+
+	for range 5 {
+		gotA, err := matcherA.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20}, nil)
+		require.NoError(t, err)
+		assertPodMatches(t, map[string]kvcache.PodMatch{
+			"alpha-1": {WeightedScore: 1.4, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"tier-x": 2}},
+			"alpha-2": {WeightedScore: 0.3, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"tier-y": 1}},
+		}, gotA)
+
+		gotB, err := matcherB.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20}, nil)
+		require.NoError(t, err)
+		assertPodMatches(t, map[string]kvcache.PodMatch{
+			"beta-1": {WeightedScore: 1.8, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"tier-y": 2}},
+		}, gotB)
+	}
+}
+
 func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
 	tests := []struct {
 		name     string
