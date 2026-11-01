@@ -20,6 +20,7 @@ GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
 GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
+YQ="${YQ:-${SCRIPT_ROOT}/bin/yq}"
 TEMP_DIR=$(mktemp -d)
 
 make kubectl-validate
@@ -560,6 +561,51 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   verify_metrics_auth_rbac "${chart}" false false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false
   verify_metrics_auth_rbac "${chart}" true false --set router.monitoring.prometheus.enabled=true --set router.monitoring.provider.name=gmp
   echo "Metrics authentication RBAC checks passed for ${chart}."
+done
+
+echo "Verifying cluster RBAC names..."
+render_cluster_rbac_name() {
+  local chart="$1" release="$2" namespace="$3"
+  local output="${TEMP_DIR}/${chart}-cluster-rbac-name.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace "${namespace}" --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.auth.enabled=true "${args[@]}" > "${output}"; then
+    echo "Cluster RBAC rendering failed for ${chart}: ${release}/${namespace}"
+    exit 1
+  fi
+  cluster_rbac_name=$("${YQ}" 'select(.kind == "ClusterRole" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  local binding_name role_ref
+  binding_name=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  role_ref=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .roleRef.name' "${output}")
+  if [ -z "${cluster_rbac_name}" ] || [ "${binding_name}" != "${cluster_rbac_name}" ] || [ "${role_ref}" != "${cluster_rbac_name}" ]; then
+    echo "${chart}: ClusterRole '${cluster_rbac_name}', binding '${binding_name}' and roleRef '${role_ref}' must match for ${release}/${namespace}"
+    exit 1
+  fi
+}
+
+long_release=$(printf 'r%.0s' {1..40})
+long_namespace=$(printf 'n%.0s' {1..40})
+shared_prefix=llm-d-nightly-tiered-prefix-cache-gke-gpu
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_cluster_rbac_name "${chart}" short default
+  if [ "${cluster_rbac_name}" != "short-default-epp" ]; then
+    echo "${chart}: expected short-default-epp, got ${cluster_rbac_name}"
+    exit 1
+  fi
+
+  render_cluster_rbac_name "${chart}" "${long_release}" "${long_namespace}"
+
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}"
+  first_name="${cluster_rbac_name}"
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}-sglang"
+  if [ "${cluster_rbac_name}" == "${first_name}" ]; then
+    echo "${chart}: namespaces sharing their first 40 characters got the same ClusterRole name ${first_name}"
+    exit 1
+  fi
 done
 
 echo "Running llm-d-router-standalone negative validation tests..."
