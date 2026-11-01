@@ -464,6 +464,10 @@ type ResponsesRequest struct {
 	Tools any `json:"tools,omitempty"`
 	// CacheSalt isolates prefix caches for security
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// PreviousResponseID and Conversation reference server-side state holding
+	// earlier turns, which Input then omits.
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
+	Conversation       any    `json:"conversation,omitempty"`
 }
 
 func (r *ResponsesRequest) String() string {
