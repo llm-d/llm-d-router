@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -275,4 +276,92 @@ var _ = Describe("Mooncake Connector", func() {
 		testInfo.cancelFn()
 		<-testInfo.stoppedCh
 	})
+
+	Describe("prefill cached tokens in decode usage", func() {
+		const decodeUsage = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		const prefillUsage = `{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
+
+		// serveWithDelays replaces the prefill and decode backends with ones that
+		// wait before responding, and rebuilds the proxy against the new decode.
+		serveWithDelays := func(prefillDelay, decodeDelay time.Duration) {
+			testInfo.prefillBackend.Close()
+			testInfo.decodeBackend.Close()
+			testInfo.prefillBackend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				time.Sleep(prefillDelay)
+				testInfo.prefillHandler.ServeHTTP(w, r)
+			}))
+			testInfo.decodeBackend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				time.Sleep(decodeDelay)
+				testInfo.decodeHandler.ServeHTTP(w, r)
+			}))
+			testInfo.decodeURL, _ = url.Parse(testInfo.decodeBackend.URL)
+			testInfo.proxy = NewProxy(Config{
+				Port:                  "0",
+				DecoderURL:            testInfo.decodeURL,
+				KVConnector:           constants.KVConnectorMooncake,
+				MooncakeBootstrapPort: testInfo.proxy.config.MooncakeBootstrapPort,
+			})
+		}
+
+		cachedTokens := func(body []byte) float64 {
+			var response map[string]any
+			Expect(json.Unmarshal(body, &response)).To(Succeed())
+			details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+			return details["cached_tokens"].(float64)
+		}
+
+		post := func(proxyBaseAddr, body string) []byte {
+			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+			Expect(err).ToNot(HaveOccurred())
+			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+			resp, err := http.DefaultClient.Do(req)
+			Expect(err).ToNot(HaveOccurred())
+			defer resp.Body.Close()
+			responseBody, err := io.ReadAll(resp.Body)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.StatusCode).To(Equal(http.StatusOK), string(responseBody))
+			return responseBody
+		}
+
+		It("should report the prefill count when prefill finishes before the decode response", func() {
+			serveWithDelays(0, 300*time.Millisecond)
+			testInfo.prefillHandler.RawResponse = prefillUsage
+			testInfo.decodeHandler.RawResponse = decodeUsage
+			proxyBaseAddr := testInfo.startProxy()
+
+			Expect(cachedTokens(post(proxyBaseAddr, chatCompletionsRequestBody))).To(BeNumerically("==", 7))
+		})
+
+		It("should report the prefill count in the streamed usage frame", func() {
+			serveWithDelays(0, 300*time.Millisecond)
+			testInfo.prefillHandler.RawResponse = prefillUsage
+			testInfo.decodeHandler.RawResponseType = "text/event-stream"
+			testInfo.decodeHandler.RawResponse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\n" +
+				"data: [DONE]\n"
+			proxyBaseAddr := testInfo.startProxy()
+
+			streamed := string(post(proxyBaseAddr, `{"model":"Qwen/Qwen2-0.5B","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"stream":true,"stream_options":{"include_usage":true}}`))
+			Expect(streamed).To(ContainSubstring(`"cached_tokens":7`))
+			Expect(streamed).ToNot(ContainSubstring(`"cached_tokens":49`))
+		})
+
+		It("should keep the decode count when prefill has not finished", func() {
+			serveWithDelays(time.Second, 0)
+			testInfo.prefillHandler.RawResponse = prefillUsage
+			testInfo.decodeHandler.RawResponse = decodeUsage
+			proxyBaseAddr := testInfo.startProxy()
+
+			Expect(cachedTokens(post(proxyBaseAddr, chatCompletionsRequestBody))).To(BeNumerically("==", 49))
+		})
+
+		It("should keep the decode count when the prefill response carries no usage", func() {
+			testInfo.prefillHandler.RawResponse = `{}`
+			testInfo.decodeHandler.RawResponse = decodeUsage
+			proxyBaseAddr := testInfo.startProxy()
+
+			Expect(cachedTokens(post(proxyBaseAddr, chatCompletionsRequestBody))).To(BeNumerically("==", 49))
+		})
+	})
+
 })

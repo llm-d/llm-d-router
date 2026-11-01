@@ -30,14 +30,15 @@ import (
 )
 
 type cachedTokensUsageRewriter struct {
-	header        http.Header
-	cachedTokens  *int
-	onUsage       func(block map[string]any)
-	dropUsageOnly bool
-	wroteHeader   bool
-	streaming     bool
-	streamBuffer  []byte
-	jsonBuffer    []byte
+	header         http.Header
+	cachedTokens   *int
+	cachedTokensFn func() (int, bool)
+	onUsage        func(block map[string]any)
+	dropUsageOnly  bool
+	wroteHeader    bool
+	streaming      bool
+	streamBuffer   []byte
+	jsonBuffer     []byte
 }
 
 // Options selects what the response writer does with the usage blocks it sees.
@@ -45,6 +46,10 @@ type Options struct {
 	// CachedTokens, when set, is written into every usage block as its
 	// cached-token count (see NewCachedTokensResponseWriter).
 	CachedTokens *int
+	// CachedTokensFn is consulted for each usage block when CachedTokens is nil.
+	// It reports false while the count is not yet known, in which case the block
+	// is forwarded unchanged.
+	CachedTokensFn func() (int, bool)
 	// OnUsage is called with each usage block the response carries, decoded,
 	// before any rewrite. Streamed responses can carry more than one.
 	OnUsage func(block map[string]any)
@@ -82,11 +87,12 @@ func NewResponseWriter(
 	w http.ResponseWriter, opts Options, streaming bool,
 ) (http.ResponseWriter, func() error) {
 	rewriter := &cachedTokensUsageRewriter{
-		header:        w.Header(),
-		cachedTokens:  opts.CachedTokens,
-		onUsage:       opts.OnUsage,
-		dropUsageOnly: opts.DropUsageOnlyFrame,
-		streaming:     streaming,
+		header:         w.Header(),
+		cachedTokens:   opts.CachedTokens,
+		cachedTokensFn: opts.CachedTokensFn,
+		onUsage:        opts.OnUsage,
+		dropUsageOnly:  opts.DropUsageOnlyFrame,
+		streaming:      streaming,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
 	// http.Flusher, http.Hijacker, http.Pusher, and io.ReaderFrom.
@@ -282,6 +288,18 @@ func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
 
 // process applies the rewriter to a complete body: a JSON document first,
 // otherwise SSE lines.
+// cachedTokensToApply returns the count to write into a usage block, and false
+// when there is none to apply.
+func (r *cachedTokensUsageRewriter) cachedTokensToApply() (int, bool) {
+	if r.cachedTokens != nil {
+		return *r.cachedTokens, true
+	}
+	if r.cachedTokensFn != nil {
+		return r.cachedTokensFn()
+	}
+	return 0, false
+}
+
 func (r *cachedTokensUsageRewriter) process(body []byte) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
@@ -306,7 +324,7 @@ func (r *cachedTokensUsageRewriter) processJSON(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	block, wrapper := r.observe(response)
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if cached, ok := r.cachedTokensToApply(); !ok || !rewritable(wrapper) || !setCachedTokens(block, cached) {
 		return body, true
 	}
 	return marshalWithUsage(response, wrapper, block, body), true
@@ -374,7 +392,7 @@ func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isD
 	if r.dropUsageOnly && block != nil && wrapper == "" && hasEmptyChoices(response) {
 		return nil, true, true
 	}
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if cached, ok := r.cachedTokensToApply(); !ok || !rewritable(wrapper) || !setCachedTokens(block, cached) {
 		return line, true, false
 	}
 	updated := make([]byte, 0, len(line))

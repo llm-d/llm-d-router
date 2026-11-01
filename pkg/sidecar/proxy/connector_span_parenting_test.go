@@ -191,7 +191,7 @@ func TestConcurrentPDStagesAreSiblingSpans(t *testing.T) {
 
 	body := []byte(`{"input_ids":[1]}`)
 	req, forward := requestWithForwardSpan(t, reqcommon.PathSGLangGenerate, body)
-	s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+	s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 	forward.End()
 
 	// Prefill runs in a goroutine; wait for its span and its backend span.
