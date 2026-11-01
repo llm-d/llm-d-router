@@ -351,12 +351,16 @@ func (r *sseReassembler) captureMeta(frame map[string]any) {
 	}
 }
 
+// choice returns the accumulator for index, creating it on first use. A new
+// choice is charged its envelope overhead, the share the reservation sets aside
+// per choice, so an upstream streaming many empty choices trips the ceiling.
 func (r *sseReassembler) choice(index int) *sseChoice {
 	c, ok := r.choices[index]
 	if !ok {
 		c = &sseChoice{index: index}
 		r.choices[index] = c
 		r.order = append(r.order, index)
+		r.contentBytes += forceStreamPerChoiceOverheadBytes
 	}
 	return c
 }
@@ -480,7 +484,8 @@ func encodedSize(v any) int64 {
 // bufferedBytes is the running size estimate the per-request ceiling bounds: the
 // decoded text held so far for the chat, text, and responses shapes, the
 // per-token estimate (len(ids) * forceStreamBytesPerToken) for the generate
-// shape, and the retained usage fields (see mergeUsage). The envelope the final
+// shape, the per-choice envelope overhead of each choice kept (see choice), and
+// the retained usage fields (see mergeUsage). The top-level envelope the final
 // marshal adds is covered by the reservation's fixed overhead, so it is not
 // counted here.
 func (r *sseReassembler) bufferedBytes() int64 {

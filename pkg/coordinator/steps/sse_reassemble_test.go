@@ -121,6 +121,26 @@ func TestSSEReassemble_IgnoresMalformedFrameParts(t *testing.T) {
 	require.Equal(t, "hi", msg["content"])
 }
 
+// TestSSEReassemble_ChoicesChargedToCeiling verifies each choice the reassembler
+// keeps is charged its per-choice envelope overhead, so an upstream that streams
+// many empty choices trips the per-request ceiling instead of growing the choice
+// map past the reservation. A choice index seen again is not charged twice.
+func TestSSEReassemble_ChoicesChargedToCeiling(t *testing.T) {
+	r := newSSEReassembler(sseShapeText, 0)
+	r.add(frame(t, `{"choices":[{"index":0,"text":""}]}`))
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes, r.bufferedBytes(), "a new choice is charged its overhead")
+	r.add(frame(t, `{"choices":[{"index":0,"text":"hi"}]}`))
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+len("hi"), r.bufferedBytes(), "a repeated index is not charged again")
+
+	var sb strings.Builder
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&sb, "data: {\"choices\":[{\"index\":%d,\"text\":\"\",\"finish_reason\":\"stop\"}]}\n\n", i)
+	}
+	sb.WriteString("data: [DONE]\n\n")
+	err := scanForcedResponse(strings.NewReader(sb.String()), newSSEReassembler(sseShapeText, 100000000), 64<<10, 0)
+	require.ErrorIs(t, err, errForceStreamCeiling, "empty choices past the reservation trip the ceiling")
+}
+
 // TestSSEReassemble_UsageChargedToCeiling verifies the retained usage block counts
 // toward bufferedBytes, so usage-only frames that add new fields, or grow an
 // existing one, trip the per-request ceiling instead of growing the heap past the
@@ -239,9 +259,10 @@ func TestSSEReassemble_BufferedBytesTracksContent(t *testing.T) {
 	r := newSSEReassembler(sseShapeText, 0)
 	require.Zero(t, r.bufferedBytes())
 	r.add(frame(t, `{"choices":[{"index":0,"text":"hello"}]}`))
-	require.EqualValues(t, 5, r.bufferedBytes())
+	// The new choice's envelope overhead plus its text.
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+5, r.bufferedBytes())
 	r.add(frame(t, `{"choices":[{"index":0,"text":"!"}]}`))
-	require.EqualValues(t, 6, r.bufferedBytes())
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+6, r.bufferedBytes())
 }
 
 func TestShapeForAPIType(t *testing.T) {
@@ -277,8 +298,9 @@ func TestSSEReassemble_DropsChoicesBeyondN(t *testing.T) {
 	require.Len(t, choices, 1)
 	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
 	require.Equal(t, "keep", choices[0].(map[string]any)["text"])
-	// The dropped choice's content is not charged to the ceiling.
-	require.EqualValues(t, len("keep"), r.bufferedBytes())
+	// The dropped choice is not charged to the ceiling: only the kept choice's
+	// overhead and text are.
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+len("keep"), r.bufferedBytes())
 }
 
 // TestSSEReassemble_DropsNegativeChoiceIndex verifies a choice with a negative
@@ -293,7 +315,7 @@ func TestSSEReassemble_DropsNegativeChoiceIndex(t *testing.T) {
 	require.Len(t, choices, 1)
 	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
 	require.Equal(t, "keep", choices[0].(map[string]any)["text"])
-	require.EqualValues(t, len("keep"), r.bufferedBytes())
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+len("keep"), r.bufferedBytes())
 }
 
 // TestSSEReassemble_ChoiceIndex verifies how a choice's index selects its
@@ -570,5 +592,5 @@ func TestSSEReassemble_GenerateBufferedBytesCountsTokens(t *testing.T) {
 	r := newSSEReassembler(sseShapeGenerate, 0)
 	require.Zero(t, r.bufferedBytes())
 	r.add(frame(t, `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`))
-	require.EqualValues(t, 3*forceStreamBytesPerToken, r.bufferedBytes())
+	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+3*forceStreamBytesPerToken, r.bufferedBytes())
 }

@@ -448,6 +448,40 @@ func TestForceStream_PerRequestCap_FallsBack(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 }
 
+// TestForceStream_HugeNNoTokenLimit_FallsBack covers the request the reviewer
+// described end to end: stream:false, a huge n, and no max_tokens. With no token
+// limit the request would reserve the flat per-request cap, so the n guard sends
+// it down the pass-through instead, before any forced attempt.
+func TestForceStream_HugeNNoTokenLimit_FallsBack(t *testing.T) {
+	var streams []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		streams = append(streams, parsed["stream"])
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"index": 0, "text": "ok"}}})
+	}))
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-huge-n",
+		OriginalPath:     reqcommon.PathCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body:             map[string]any{"model": "llama-3", "stream": false, "prompt": "hi", "n": float64(100000000)},
+		ResponseWriter:   recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{false}, streams, "no forced attempt; the pass-through serves the request once")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnbounded), 1e-9)
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "nothing was reserved")
+}
+
 // TestForceStream_OversizedFrame_CeilingAbort verifies that a single SSE frame
 // larger than the request's reservation trips the scanner's buffer limit, is
 // counted error_ceiling, and falls back to the pass-through (not a generic read
@@ -1048,6 +1082,38 @@ func TestForceStream_NoTokenLimit_Forced(t *testing.T) {
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnbounded), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the reply")
+}
+
+// TestEstimateReservation_NoTokenLimitGuardsN verifies a request with no declared
+// token limit is still refused when its n would exceed what the per-request cap
+// can hold at the per-choice envelope overhead. Each choice the reassembler keeps
+// costs that overhead, so a huge n with no max_tokens must take the pass-through
+// rather than reserve the flat cap.
+func TestEstimateReservation_NoTokenLimitGuardsN(t *testing.T) {
+	s := &DecodeStep{budget: newForceStreamBudget(1<<30, 256<<10)}
+	limit := (int64(256<<10) - forceStreamBaseOverheadBytes) / forceStreamPerChoiceOverheadBytes
+	for _, tc := range []struct {
+		name   string
+		n      any
+		wantOK bool
+	}{
+		{"n absent", nil, true},
+		{"n at the limit", float64(limit), true},
+		{"n past the limit", float64(limit + 1), false},
+		{"huge n", float64(100000000), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"prompt": "hi"}
+			if tc.n != nil {
+				body["n"] = tc.n
+			}
+			reserved, ok := s.estimateReservation(&pipeline.RequestContext{OriginalPath: reqcommon.PathCompletions, Body: body})
+			require.Equal(t, tc.wantOK, ok)
+			if ok {
+				require.EqualValues(t, 256<<10, reserved, "a request with no token limit reserves the whole cap")
+			}
+		})
+	}
 }
 
 // TestForceStream_LossyRequest_PassThrough verifies that a chat or text request

@@ -246,10 +246,11 @@ func parseForceStreamPerRequest(params map[string]any, budgetMax int64) (int64, 
 // whether force-streaming it is safe. A request with no declared output token
 // limit reserves the whole per-request cap: most chat clients send none, so
 // refusing them would leave the common case unforced, and the cap bounds the
-// reservation either way. ok is false only when a declared limit's estimate
-// exceeds the per-request cap, so one request never claims more than its share of
-// the shared budget. The estimate reserves n completions, each tokenLimit tokens,
-// plus the reply envelope; over-reserving only sends more requests to the
+// reservation either way. ok is false when the estimate exceeds the per-request
+// cap, so one request never claims more than its share of the shared budget: a
+// declared limit's n completions, or with no limit an n whose per-choice envelopes
+// alone would not fit. The estimate reserves n completions, each tokenLimit
+// tokens, plus the reply envelope; over-reserving only sends more requests to the
 // pass-through, never past the budget.
 func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64, bool) {
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
@@ -259,13 +260,18 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 	// so contentBudget is always positive once the step is built.
 	contentBudget := maxBytes - forceStreamBaseOverheadBytes
 
+	n := reqcommon.OutputChoiceCount(reqCtx.Body, apiType)
 	tokenLimit, ok := reqcommon.OutputTokenLimit(reqCtx.Body, apiType)
 	if !ok {
 		// No declared limit, so reserve the whole per-request budget and let the
-		// ceiling abort a reply that runs past it.
+		// ceiling abort a reply that runs past it. The choice count is still
+		// guarded: each choice the reassembler keeps is charged its envelope
+		// overhead, so an n the cap cannot hold at that rate is refused.
+		if int64(n) > contentBudget/forceStreamPerChoiceOverheadBytes {
+			return 0, false
+		}
 		return maxBytes, true
 	}
-	n := reqcommon.OutputChoiceCount(reqCtx.Body, apiType)
 
 	// Each guard below both enforces the budget ceiling and keeps the following
 	// multiplication inside int64: a client-supplied tokenLimit or n large
