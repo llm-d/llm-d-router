@@ -54,6 +54,9 @@ const (
 	// Requests are multipart/form-data.
 	imagesEditsAPI = "images/edits"
 	audioSpeechAPI = "audio/speech"
+	// audioGenerateAPI is the vLLM Omni text-to-audio generation endpoint (e.g.
+	// Stable Audio), distinct from audioSpeechAPI's text-to-speech.
+	audioGenerateAPI = "audio/generate"
 
 	octetStreamType = "application/octet-stream"
 
@@ -105,6 +108,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			imagesGenerationsAPI,
 			imagesEditsAPI,
 			audioSpeechAPI,
+			request.DecisionsPathSuffix,
+			audioGenerateAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -128,6 +133,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	apiType := determineAPITypeFromPath(path)
 	if apiType == imagesEditsAPI {
 		return parseImagesEditsRequest(body, headers)
+	}
+	if apiType == request.DecisionsPathSuffix {
+		return parseDecisionsRequest(body)
 	}
 	extractedBody, err := extractRequestBody(apiType, body)
 	if err != nil {
@@ -204,7 +212,11 @@ func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model 
 // OpenAI-compatible request payload and writes the resolved EPP priority. The
 // director only calls this when priority propagation is enabled; see
 // parsers.RewritePriority for the cross-backend priority semantics.
+// Decisions requests are left unchanged: the Decisions schema declares no priority and rejects unknown fields.
 func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+	if determineAPITypeFromPath(ctx.RequestPath) == request.DecisionsPathSuffix {
+		return payload, false, nil
+	}
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
@@ -350,8 +362,14 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/images/edits") {
 		return imagesEditsAPI
 	}
+	if request.MatchPathSuffix(path, "/audio/generate") {
+		return audioGenerateAPI
+	}
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
+	}
+	if request.MatchPathSuffix(path, request.DecisionsPathSuffix) {
+		return request.DecisionsPathSuffix
 	}
 
 	// Default to completions API for backward compatibility with existing clients and integration tests
@@ -397,6 +415,21 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 		}
 		return &fwkrh.InferenceRequestBody{
 			TextToSpeech: &fwkrh.TextToSpeechRequest{Input: *speechRequest.Input},
+		}, nil
+
+	case audioGenerateAPI:
+		var generateRequest struct {
+			Input          *string `json:"input"`
+			NegativePrompt string  `json:"negative_prompt,omitempty"`
+		}
+		if err := json.Unmarshal(rawBody, &generateRequest); err != nil {
+			return nil, requestBodyDecodeError(err, errors.New("invalid audio generate request: input and negative_prompt must be strings"))
+		}
+		if generateRequest.Input == nil {
+			return nil, errors.New("invalid audio generate request: must have string input field")
+		}
+		return &fwkrh.InferenceRequestBody{
+			AudioGenerate: &fwkrh.AudioGenerateRequest{Input: *generateRequest.Input, NegativePrompt: generateRequest.NegativePrompt},
 		}, nil
 
 	case chatCompletionsAPI:
@@ -447,6 +480,28 @@ func extractRequestBody(apiType string, rawBody []byte) (*fwkrh.InferenceRequest
 	}
 }
 
+// parseDecisionsRequest reads the routing envelope of a /v1/decisions request.
+func parseDecisionsRequest(body []byte) (*fwkrh.ParseResult, error) {
+	bodyMap, err := parserutil.UnmarshalEnvelope(body, reqcommon.FieldInput)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
+	}
+	questions, ok := bodyMap["questions"].(json.RawMessage)
+	if !ok || len(questions) == 0 || questions[0] != '[' {
+		return nil, errors.New("invalid decisions request: questions must be a JSON array")
+	}
+	result := &fwkrh.InferenceRequestBody{
+		Payload: fwkrh.PayloadMap(bodyMap),
+		RawBody: body,
+		// The engine renders one prompt per question, which the router cannot reproduce.
+		RenderRequest: true,
+	}
+	if model, ok := bodyMap["model"].(string); ok {
+		result.Model = model
+	}
+	return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: false}, nil
+}
+
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	contentTypeValue, _ := headerValue(headers, reqcommon.HeaderContentType)
@@ -487,6 +542,8 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 			images.Prompt = string(value)
 		case "size":
 			images.Size = string(value)
+		case "negative_prompt":
+			images.NegativePrompt = string(value)
 		case "n":
 			n, err := strconv.ParseInt(string(value), 10, 64)
 			if err != nil {
@@ -612,13 +669,18 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 // If include_usage is not included in the request, `data: [DONE]` is returned separately, which
 // indicates end of streaming.
 //
-// For ResponsesAPI streaming, usage is nested in the response object:
+// For ResponsesAPI streaming, usage is nested in the response object of the
+// terminal event, which is response.completed, response.incomplete (for example
+// max_output_tokens reached) or response.failed:
 //
 //	event: response.completed
 //	data: {"response":{"usage":{"input_tokens":31,..},...},"type":"response.completed"}
 //
-// It extracts usage from events with type="response.completed" or "speech.audio.done".
+// It extracts usage from those three events and from "speech.audio.done".
 func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
+	// Keep the last usage event: a stream with continuous usage stats reports cumulative usage
+	// on every chunk, so a later event in the same body supersedes an earlier one.
+	var result *fwkrh.Usage
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
@@ -649,17 +711,29 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 			}
 			var usage *fwkrh.Usage
 			if err := json.Unmarshal(streamResponse.Usage, &usage); err == nil && usage != nil {
-				return usage
+				result = usage
 			}
 		}
 		// Responses API streaming format
-		if len(streamResponse.Response.Usage) > 0 && streamResponse.Type == "response.completed" {
+		if len(streamResponse.Response.Usage) > 0 && isResponsesTerminalEvent(streamResponse.Type) {
 			if usage := extractRawUsage(streamResponse.Response.Usage); usage != nil {
-				return usage
+				result = usage
 			}
 		}
 	}
-	return nil
+	return result
+}
+
+// isResponsesTerminalEvent reports whether a Responses API stream event ends
+// the stream and carries the final response. The in-progress snapshots carry a
+// usage field too, with no final counts.
+func isResponsesTerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractRawUsage(raw json.RawMessage) *fwkrh.Usage {

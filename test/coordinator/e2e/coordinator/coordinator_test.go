@@ -148,6 +148,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 
 	encodeReplicas, prefillReplicas, decodeReplicas := 1, 1, 1
 	createModelServers(nsName, encodeReplicas, prefillReplicas, decodeReplicas)
+	waitForPhaseRoutesReady()
 
 	encodePods := getPodNames(encodeSelector)
 	prefillPods := getPodNames(prefillSelector)

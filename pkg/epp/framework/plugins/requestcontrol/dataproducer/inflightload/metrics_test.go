@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -298,28 +300,80 @@ llm_d_epp_inflight_requests{endpoint_name="ep2",fairness_id="flow-2",namespace="
 	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequestsAfterComplete), "llm_d_epp_inflight_requests"))
 }
 
+func TestInflightGauges_ReleaseAfterEndpointDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recreate bool
+		response requestcontrol.Response
+	}{
+		{name: "completion", response: requestcontrol.Response{EndOfStream: true}},
+		{name: "first chunk", response: requestcontrol.Response{StartOfStream: true}},
+		{name: "completion after re-add", recreate: true, response: requestcontrol.Response{EndOfStream: true}},
+		{name: "first chunk after re-add", recreate: true, response: requestcontrol.Response{StartOfStream: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inflightRequests.Reset()
+			inflightTokens.Reset()
+			t.Cleanup(func() {
+				inflightRequests.Reset()
+				inflightTokens.Reset()
+			})
+			producer := newTestProducer(t)
+			producer.addEstimatedOutputTokens = false
+			ctx := context.Background()
+			const endpointName = "late-release-endpoint"
+			endpoint := newStubSchedulingEndpoint(endpointName)
+			require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+			request := makeTokenRequest("old-request", 4)
+			request.SchedulingResult = makeSchedulingResult(endpointName)
+			require.NoError(t, producer.PreRequest(ctx, request, request.SchedulingResult))
+			require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
+
+			var requests, tokens prometheus.Gauge
+			if tc.recreate {
+				replacement := newStubSchedulingEndpoint(endpointName)
+				require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: replacement}))
+				current := makeTokenRequest("current-request", 8)
+				require.NoError(t, producer.PreRequest(ctx, current, makeSchedulingResult(endpointName)))
+				requests = inflightRequests.WithLabelValues(endpointName, "default", producer.typedName.Name, "", "0")
+				tokens = inflightTokens.WithLabelValues(endpointName, "default", producer.typedName.Name, "", "0")
+			}
+
+			producer.ResponseBody(ctx, request, &tc.response, nil)
+			if tc.recreate {
+				require.Equal(t, float64(1), promtestutil.ToFloat64(requests))
+				require.Equal(t, float64(8), promtestutil.ToFloat64(tokens))
+			} else {
+				require.Zero(t, promtestutil.CollectAndCount(inflightRequests))
+				require.Zero(t, promtestutil.CollectAndCount(inflightTokens))
+			}
+		})
+	}
+}
+
 func TestAddedTokensEntry_Clone(t *testing.T) {
 	var nilEntry *addedTokensEntry
 	require.Nil(t, nilEntry.Clone())
 
 	entry := &addedTokensEntry{
-		endpointName: "ep1",
-		namespace:    "default",
-		producerName: "prod",
-		fairnessID:   "flow",
-		priority:     "1",
+		tokenCounter:   &atomic.Int64{},
+		requestCounter: &atomic.Int64{},
+		tokenGauge:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "clone_tokens"}),
+		requestGauge:   prometheus.NewGauge(prometheus.GaugeOpts{Name: "clone_requests"}),
 	}
 	entry.tokens.Store(15)
 	entry.requests.Store(1)
 
 	cloned := entry.Clone().(*addedTokensEntry)
-	require.Equal(t, entry.endpointName, cloned.endpointName)
-	require.Equal(t, entry.namespace, cloned.namespace)
-	require.Equal(t, entry.producerName, cloned.producerName)
-	require.Equal(t, entry.fairnessID, cloned.fairnessID)
-	require.Equal(t, entry.priority, cloned.priority)
+	require.Same(t, entry.tokenCounter, cloned.tokenCounter)
+	require.Same(t, entry.requestCounter, cloned.requestCounter)
+	require.Same(t, entry.tokenGauge, cloned.tokenGauge)
+	require.Same(t, entry.requestGauge, cloned.requestGauge)
 	require.Equal(t, int64(15), cloned.tokens.Load())
 	require.Equal(t, int32(1), cloned.requests.Load())
+
+	cloned.tokens.Store(0)
+	require.Equal(t, int64(15), entry.tokens.Load())
 }
 
 // The plugin's fairness_id label shares the cardinality cap, so a flood of distinct client IDs

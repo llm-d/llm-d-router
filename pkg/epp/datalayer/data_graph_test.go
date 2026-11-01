@@ -552,6 +552,104 @@ func TestCreateMissingDataProducers_Transitive(t *testing.T) {
 	assert.NotNil(t, handle.Plugin(typeInner), "transitive dependency should be auto-created in the same call")
 }
 
+// TestCreateMissingDataProducers_UnresolvedRequiredKey verifies that a Required key which
+// resolution cannot satisfy is reported, both when the default producer's name is already
+// taken by a plugin that does not produce the key, and when the factory registers its
+// plugin under a name other than the one it was asked for.
+func TestCreateMissingDataProducers_UnresolvedRequiredKey(t *testing.T) {
+	const (
+		producerType  = "producer-a"
+		consumerName  = "MockSchedulingPlugin"
+		otherKeyName  = "keyOther"
+		otherProducer = "elsewhere"
+	)
+	keyA := fwkplugin.NewDataKey("keyA", producerType)
+	keyOther := fwkplugin.NewDataKey(otherKeyName, producerType)
+
+	// A factory that ignores the name it is given, so the plugin is registered under
+	// a name the resolution loop does not look up.
+	misnamedFactory := fwkplugin.FactoryFunc(func(_ string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{name: otherProducer, produces: map[fwkplugin.DataKey]any{keyOther: nil}}, nil
+	})
+
+	testCases := []struct {
+		name            string
+		existingPlugins []fwkplugin.Plugin
+		factoryRegistry map[string]fwkplugin.FactoryFunc
+	}{
+		{
+			name: "default producer name is taken by a plugin that does not produce the key",
+			existingPlugins: []fwkplugin.Plugin{
+				&mockDataProducerP{name: producerType, produces: map[fwkplugin.DataKey]any{keyOther: nil}},
+			},
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{},
+		},
+		{
+			name:            "factory registers the producer under a different name",
+			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerType: misnamedFactory},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+			handle.AddPlugin(consumerName, &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}})
+			for _, p := range tc.existingPlugins {
+				handle.AddPlugin(p.TypedName().Name, p)
+			}
+
+			err := CreateMissingDataProducers(context.Background(),
+				map[string]string{keyA.String(): producerType}, tc.factoryRegistry, handle)
+
+			assert.ErrorIs(t, err, ErrUnresolvedDataKeys)
+			assert.ErrorContains(t, err, keyA.String())
+			assert.ErrorContains(t, err, consumerName)
+			assert.ErrorContains(t, err, producerType)
+		})
+	}
+}
+
+// TestCreateMissingDataProducers_MutualDefaults verifies that default producers which
+// require each other are both created without looping, and that the cycle they form is
+// reported by ValidateAndOrderDataDependencies.
+func TestCreateMissingDataProducers_MutualDefaults(t *testing.T) {
+	const (
+		typeFirst  = "producer-first"
+		typeSecond = "producer-second"
+	)
+	keyFirst := fwkplugin.NewDataKey("keyFirst", typeFirst)
+	keySecond := fwkplugin.NewDataKey("keySecond", typeSecond)
+
+	firstFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:     name,
+			produces: map[fwkplugin.DataKey]any{keyFirst: nil},
+			consumes: map[fwkplugin.DataKey]any{keySecond: nil},
+		}, nil
+	})
+	secondFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDataProducerP{
+			name:     name,
+			produces: map[fwkplugin.DataKey]any{keySecond: nil},
+			consumes: map[fwkplugin.DataKey]any{keyFirst: nil},
+		}, nil
+	})
+
+	handle := fwkplugin.NewEppHandle(context.Background(), func() []k8stypes.NamespacedName { return nil })
+	handle.AddPlugin("consumer", &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyFirst: nil}})
+
+	err := CreateMissingDataProducers(context.Background(),
+		map[string]string{keyFirst.String(): typeFirst, keySecond.String(): typeSecond},
+		map[string]fwkplugin.FactoryFunc{typeFirst: firstFactory, typeSecond: secondFactory},
+		handle)
+	assert.NoError(t, err)
+	assert.NotNil(t, handle.Plugin(typeFirst))
+	assert.NotNil(t, handle.Plugin(typeSecond))
+
+	_, err = ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	assert.ErrorContains(t, err, "cycle detected")
+}
+
 // mockMayConsumerPlugin is a plugin that only optionally consumes certain data keys.
 type mockMayConsumerPlugin struct {
 	name             string

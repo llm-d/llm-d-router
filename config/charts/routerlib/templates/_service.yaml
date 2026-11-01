@@ -3,8 +3,7 @@
 {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
 {{- if $gkePB.enabled }}
 {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
-{{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
-{{- $totalReplicas := add $preferredReplicas $defaultReplicas }}
+{{- $totalReplicas := include "llm-d-router.gkePreferredBackends.totalReplicas" . | int }}
 {{- range $i := untilStep 0 (int $totalReplicas) 1 }}
 {{- $serviceName := printf "%s-preferred-%d" (include "llm-d-router.name" $) (int $i) }}
 {{- if eq (int $i) 0 }}

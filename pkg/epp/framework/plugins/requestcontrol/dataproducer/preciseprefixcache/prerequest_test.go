@@ -99,7 +99,9 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 
 	blockKeys := []kvblock.BlockHash{0xAA, 0xBB}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-1"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {blockKeys}},
+	})
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
@@ -111,9 +113,8 @@ func TestPreRequest_SeedsSpeculativeForPrimary(t *testing.T) {
 
 	cached := p.speculativeCache.Get(req.RequestID)
 	require.NotNil(t, cached)
-	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPromptKeys)
-	require.Len(t, cached.Value().podEntries, 1)
-	assert.Equal(t, "10.0.0.1:8080", cached.Value().podEntries[0].PodIdentifier)
+	require.Len(t, cached.Value().perPodKeys, 1)
+	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.1:8080"])
 }
 
 // speculativeEnabled=true with empty blockKeys: PreRequest must not call
@@ -130,7 +131,7 @@ func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
 	p := newProducerForPreRequest(ctx, true, idx)
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-empty"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: nil})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{})
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
@@ -153,7 +154,9 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 
 	blockKeys := []kvblock.BlockHash{0xCC}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-pd"}
-	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{perPromptKeys: [][]kvblock.BlockHash{blockKeys}})
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {blockKeys}},
+	})
 
 	result := &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -170,9 +173,9 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 
 	cached := p.speculativeCache.Get(req.RequestID)
 	require.NotNil(t, cached)
-	require.Len(t, cached.Value().podEntries, 2)
-	assert.Equal(t, "10.0.0.1:8080", cached.Value().podEntries[0].PodIdentifier)
-	assert.Equal(t, "10.0.0.2:8080", cached.Value().podEntries[1].PodIdentifier)
+	require.Len(t, cached.Value().perPodKeys, 2)
+	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.1:8080"])
+	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.2:8080"])
 }
 
 // speculativeEnabled=false: early return — no index writes, no cache entry,
@@ -190,7 +193,9 @@ func TestPreRequest_SpeculativeDisabled_NoOp(t *testing.T) {
 
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-off"}
 	p.pluginState.Write(req.RequestID, blockKeysStateKey,
-		&blockKeysState{perPromptKeys: [][]kvblock.BlockHash{{0xDD}}})
+		&blockKeysState{perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{
+			{BlockSize: testBlockSize}: {{0xDD}},
+		}})
 
 	_ = p.PreRequest(ctx, req, primaryOnly("default", testEndpoints[0]))
 
@@ -1024,18 +1029,45 @@ func TestSpeculativeTTLExpiry_EvictsAllPromptKeys(t *testing.T) {
 
 	perPrompt := [][]kvblock.BlockHash{{0xA1, 0xA2}, {0xB1}}
 	pods := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8080", Speculative: true}}
-	cache.Set("req-ttl", &speculativeEntries{perPromptKeys: perPrompt, podEntries: pods}, ttl)
+	cache.Set("req-ttl", &speculativeEntries{
+		perPodKeys: map[string][][]kvblock.BlockHash{
+			"10.0.0.1:8080": perPrompt,
+			"10.0.0.2:8080": {{0xC1}},
+		},
+	}, ttl)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(evictions) == 1
+		return len(evictions) == 2
 	}, 2*time.Second, time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, evictions, 1)
-	assert.Equal(t, []kvblock.BlockHash{0xA1, 0xA2, 0xB1}, evictions[0].keys)
-	assert.Equal(t, kvblock.RequestKey, evictions[0].keyType)
-	assert.Equal(t, pods, evictions[0].entries)
+	require.Len(t, evictions, 2)
+	for _, eviction := range evictions {
+		assert.Equal(t, kvblock.RequestKey, eviction.keyType)
+		require.Len(t, eviction.entries, 1)
+		assert.True(t, eviction.entries[0].Speculative)
+		if eviction.entries[0].PodIdentifier == pods[0].PodIdentifier {
+			assert.Equal(t, []kvblock.BlockHash{0xA1, 0xA2, 0xB1}, eviction.keys)
+		} else {
+			assert.Equal(t, "10.0.0.2:8080", eviction.entries[0].PodIdentifier)
+			assert.Equal(t, []kvblock.BlockHash{0xC1}, eviction.keys)
+		}
+	}
+}
+
+func TestBlockKeysStateClone(t *testing.T) {
+	plain := kvblock.CacheFormat{BlockSize: 2}
+	bigram := kvblock.CacheFormat{Bigram: true, BlockSize: 4}
+	state := &blockKeysState{perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{
+		plain: {{1, 2}}, bigram: {{3}},
+	}}
+	cloned, ok := state.Clone().(*blockKeysState)
+	require.True(t, ok)
+	state.perFormatKeys[plain][0][0] = 99
+	delete(state.perFormatKeys, bigram)
+	require.Equal(t, [][]kvblock.BlockHash{{1, 2}}, cloned.perFormatKeys[plain])
+	require.Equal(t, [][]kvblock.BlockHash{{3}}, cloned.perFormatKeys[bigram])
 }

@@ -191,6 +191,31 @@ func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T)
 	}
 }
 
+func TestSessionIDHeader_PreRequest_StaleAbsenceDoesNotMoveMigratedBinding(t *testing.T) {
+	s := newTestSessionIDHeader(t, nil)
+	endpointA := newTestEndpoint("pod-a")
+	endpointB := newTestEndpoint("pod-b")
+	endpointC := newTestEndpoint("pod-c")
+
+	// Bind s1 to pod-a.
+	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
+
+	// Two concurrent requests of s1 both run Choose while pod-a is absent.
+	req1 := requestWithSession("s1")
+	req2 := &scheduling.InferenceRequest{RequestID: "req-s1-2", Headers: req1.Headers}
+	s.Choose(context.Background(), req1, []scheduling.Endpoint{endpointB, endpointC})
+	s.Choose(context.Background(), req2, []scheduling.Endpoint{endpointB, endpointC})
+
+	// req1 migrates the session to pod-c. req2's absence record is about pod-a,
+	// so it must not move the binding off pod-c.
+	s.PreRequest(context.Background(), req1, schedulingResultFor(endpointC))
+	s.PreRequest(context.Background(), req2, schedulingResultFor(endpointB))
+
+	if got, want := s.boundPod("s1"), podKey("pod-c"); got != want {
+		t.Errorf("boundPod(s1) = %q, want %q (binding should stay where it migrated)", got, want)
+	}
+}
+
 func TestSessionIDHeader_PreRequest_FirstBindRaceKeepsSingleBinding(t *testing.T) {
 	// Two concurrent requests for the same never-before-seen session ID, each
 	// picking a DIFFERENT pod. Neither had Choose() write a presence record

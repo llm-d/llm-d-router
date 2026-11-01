@@ -30,6 +30,7 @@ import (
 	"strconv"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -105,7 +106,7 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	// continue_final_message, thinking_budget, and vendor-specific DeepSeek/Nemotron
 	// signals are only carried on the chat-completions shape (vLLM populates them from
 	// the client's chat_template_kwargs / extra_body). Responses API carries tools
-	// on the typed body, and reasoning.effort on the raw payload.
+	// on the typed body, and thinking signals on the raw payload.
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
@@ -133,13 +134,18 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		hasTools = hasResponsesTools(body.Responses.Tools)
 	}
 
-	// tool_choice is read from the raw payload for all shapes; reasoning.effort is
-	// scoped to /v1/responses.
+	// tool_choice and API-specific reasoning effort are read from the raw payload.
 	var toolChoice string
 	if payload, ok := payloadMap(body); ok {
-		toolChoice = toolChoiceKind(payload["tool_choice"])
+		toolChoice = toolChoiceKind(body, payload["tool_choice"])
 		if body.Responses != nil {
-			enableThinking = responsesThinking(payload["reasoning"])
+			kwArgs := mapFromAny(payload["chat_template_kwargs"])
+			enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+			if enableThinking == nil {
+				enableThinking = responsesThinking(payload["reasoning"])
+			}
+		} else if body.ChatCompletions != nil && enableThinking == nil {
+			enableThinking = reasoningEffortThinking(payload["reasoning_effort"])
 		}
 	}
 
@@ -281,28 +287,17 @@ func stringFromAny(v any) string {
 	return ""
 }
 
-// toolChoiceKind normalizes the OpenAI tool_choice field. It is either a string
-// ("none" | "auto" | "required") or an object forcing a specific function
-// ({"type":"function","function":{"name":...}}), which we report as "named".
-// Anything else yields "" ("not set").
-func toolChoiceKind(v any) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case map[string]any:
-		// A specific tool is forced -> a short tool-call JSON response.
-		return string(toolcalling.ToolChoiceNamed)
-	case json.RawMessage:
-		// UnmarshalEnvelope stores objects as json.RawMessage; object = named tool.
-		if len(t) > 0 && t[0] == '{' {
-			return string(toolcalling.ToolChoiceNamed)
-		}
-		var s string
-		if err := json.Unmarshal(t, &s); err == nil {
-			return s
-		}
+// toolChoiceKind classifies tool_choice; only /v1/responses puts a function name at the top level.
+func toolChoiceKind(body *fwkrh.InferenceRequestBody, v any) string {
+	surface := reqcommon.APITypeChatCompletions
+	if body.Responses != nil {
+		surface = reqcommon.APITypeResponses
 	}
-	return ""
+	if raw, ok := v.(json.RawMessage); ok { // UnmarshalEnvelope keeps objects as raw JSON
+		v = nil
+		_ = json.Unmarshal(raw, &v)
+	}
+	return string(toolcalling.NormalizeToolChoice(surface, v))
 }
 
 // toJSONNumber normalizes float64 (from json.Unmarshal without UseNumber) and
@@ -369,18 +364,25 @@ func hasResponsesTools(v any) bool {
 	return ok && len(t) > 0
 }
 
+func mapFromAny(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	if raw, ok := v.(json.RawMessage); ok {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil
+		}
+	}
+	return m
+}
+
 // responsesThinking maps the Responses API's reasoning.effort to an enable_thinking
 // boolean pointer. vLLM treats reasoning.effort != "none" as enable_thinking=true,
 // and "none" as enable_thinking=false.
 func responsesThinking(v any) *bool {
-	m, ok := v.(map[string]any)
-	if raw, isRaw := v.(json.RawMessage); isRaw {
-		ok = json.Unmarshal(raw, &m) == nil && m != nil
-	}
-	if !ok {
-		return nil
-	}
-	effort := stringFromAny(m["effort"])
+	return reasoningEffortThinking(mapFromAny(v)["effort"])
+}
+
+func reasoningEffortThinking(v any) *bool {
+	effort := stringFromAny(v)
 	if effort == "" {
 		return nil
 	}

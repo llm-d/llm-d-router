@@ -566,6 +566,7 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 
 // evictPodsFromRequestKey removes the given pod entries from a single request key's cache.
 // If the cache becomes empty, the request key is removed from the index.
+// The caller holds m.mu.
 func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash, entries []PodEntry, traceLogger logr.Logger) {
 	podCache, found := m.data.Peek(requestKey)
 	if !found || podCache == nil {
@@ -581,25 +582,30 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 		return
 	}
 
-	// Remove key from main cache if empty.
-	// Re-fetch and hold the lock through removal to prevent racing with Add.
-	currentCache, stillExists := m.data.Peek(requestKey)
-	if !stillExists || currentCache == nil {
-		return
-	}
-
-	currentCache.mu.Lock()
-	if len(currentCache.entries) == 0 {
-		m.data.Remove(requestKey)
+	if m.removeIfEmptyLocked(requestKey) && traceLogger.Enabled() {
 		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
 	}
-	currentCache.mu.Unlock()
+}
+
+// removeIfEmptyLocked removes an empty request key. The caller holds m.mu.
+func (m *InMemoryIndex) removeIfEmptyLocked(requestKey BlockHash) bool {
+	podCache, found := m.data.Peek(requestKey)
+	if !found || podCache == nil {
+		return false
+	}
+	podCache.mu.Lock()
+	defer podCache.mu.Unlock()
+	if len(podCache.entries) != 0 {
+		return false
+	}
+	m.data.Remove(requestKey)
+	return true
 }
 
 // Clear removes every entry for the pod from the index, across all device tiers.
 // O(N) over the index for a pod it has held, and O(1) for a pod it never held.
-// Clear serializes ownership cleanup with Add and Evict; Lookup does not acquire
-// the ownership lock.
+// Clear serializes ownership cleanup with Add and Evict in chunks of keys.
+// Lookup does not acquire the ownership lock.
 //
 // Context cancellation does not interrupt Clear.
 //
@@ -618,26 +624,26 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, requestKey := range m.data.Keys() {
-		// Peek so a clear does not promote LRU recency on keys it scans.
-		podCache, found := m.data.Peek(requestKey)
-		if !found || podCache == nil {
-			continue
-		}
-
-		matched := podCache.matching(podIdentifier)
-
-		if len(matched) > 0 {
+	const clearChunkSize = 1024
+	for chunk := range slices.Chunk(m.data.Keys(), clearChunkSize) {
+		m.mu.Lock()
+		for _, requestKey := range chunk {
+			// Peek so a clear does not promote LRU recency on keys it scans.
+			podCache, found := m.data.Peek(requestKey)
+			if !found || podCache == nil {
+				continue
+			}
+			matched := podCache.matching(podIdentifier)
 			for _, entry := range matched {
 				for engine := range m.owners[requestKey][entry] {
 					m.removeOwner(engine, requestKey, entry)
 				}
 			}
-			m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
+			if len(matched) > 0 {
+				m.evictPodsFromRequestKey(requestKey, EmptyBlockHash, matched, traceLogger)
+			}
 		}
+		m.mu.Unlock()
 	}
 
 	traceLogger.Info("cleared pod from index", "pod", podIdentifier)

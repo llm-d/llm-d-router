@@ -1,0 +1,33 @@
+# Recording rules that count distinct fairness IDs per inference pool from
+# llm_d_epp_fairness_id_resolved_total. See docs/metrics.md#fairness-id-resolution.
+# Test: promtool test rules hack/testdata/fairness-id-rules-test.yaml
+groups:
+  - name: fairness-identities
+    rules:
+      # Distinct named (header) fairness IDs seen in the last 5m, per pool, across replicas.
+      - record: llm_d:epp_named_fairness_ids:count5m
+        expr: |
+          count by (namespace, inference_pool) (
+            count by (namespace, inference_pool, fairness_id) (
+                (increase(llm_d_epp_fairness_id_resolved_total{source="header",fairness_id!~"other|default-flow"}[5m]) > 0)
+              or
+                (present_over_time(llm_d_epp_fairness_id_resolved_total{source="header",fairness_id!~"other|default-flow"}[5m])
+                  unless present_over_time(llm_d_epp_fairness_id_resolved_total[1h] offset 5m))
+            )
+          )
+      # 1 when the label cap folded header IDs in the last 5m (count above is a lower bound), else 0.
+      # Relies on EPP pre-creating overflow_total{source} at 0 on startup.
+      - record: llm_d:epp_named_fairness_ids:incomplete5m
+        expr: |
+          max by (namespace, inference_pool) (increase(llm_d_epp_fairness_id_overflow_total{source="header"}[5m]) > bool 0)
+      # Distinct agent sessions seen in the last 5m, per pool. Folded IDs are excluded.
+      - record: llm_d:epp_agent_sessions:count5m
+        expr: |
+          count by (namespace, inference_pool) (
+            count by (namespace, inference_pool, fairness_id) (
+                (increase(llm_d_epp_fairness_id_resolved_total{source="agent_identity",fairness_id!="other"}[5m]) > 0)
+              or
+                (present_over_time(llm_d_epp_fairness_id_resolved_total{source="agent_identity",fairness_id!="other"}[5m])
+                  unless present_over_time(llm_d_epp_fairness_id_resolved_total[1h] offset 5m))
+            )
+          )

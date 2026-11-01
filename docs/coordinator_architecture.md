@@ -279,8 +279,9 @@ steps read and mutate. The load-bearing fields:
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
-`Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
+`Host`, `Content-Length`, `Content-Type`, and `Accept-Encoding` removed, normalized to
+lowercase. Steps use it as the base header set, then stamp the request ID and
+`x-llm-d-epp-profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
 request. Client-provided values of the coordinator-owned headers are discarded: EPP
 routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
@@ -817,7 +818,7 @@ only the request carrier differs.
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. | `kv_connector` |
+| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

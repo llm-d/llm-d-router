@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -35,17 +36,18 @@ import (
 // there was no multimodal input to encode, so callers can tell a genuine
 // no-op apart from an encoder invocation.
 func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[string]any, encoderHostPorts []string, requestID string, apiType reqcommon.APIType) (int, error) {
-	items := s.mmItemsForFanout(originalRequest, requestID, apiType)
+	items := s.mmItemsForFanout(ctx, originalRequest, requestID, apiType)
 	if len(items) == 0 {
-		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
+		log.FromContext(ctx).V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return 0, nil
 	}
-	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil)
+	return len(items), s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil, nil)
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
-func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, kvCacheSource string, apiType reqcommon.APIType) {
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -58,7 +60,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -70,9 +72,9 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
+			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+				logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
@@ -81,5 +83,5 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, kvCacheSource, requestID, apiType)
 }

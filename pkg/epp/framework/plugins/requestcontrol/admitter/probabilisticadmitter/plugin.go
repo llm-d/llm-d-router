@@ -145,18 +145,22 @@ func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.Infer
 	return nil
 }
 
-// computeSaturation calculates avg(max(QD/qdThreshold, KV/kvThreshold)) across all pods.
+// computeSaturation calculates avg(max(QD/qdThreshold, KV/kvThreshold)) across pods with collected metrics.
 func (p *ProbabilisticAdmitter) computeSaturation(pods []fwksched.Endpoint) float64 {
 	var total float64
+	collected := 0
 	for _, pod := range pods {
 		m := pod.GetMetrics()
-		if m == nil {
-			total += 1.0
+		if !m.Updated() {
 			continue
 		}
 		qRatio := float64(m.WaitingQueueSize) / p.queueDepthThreshold
 		kvRatio := m.KVCacheUsagePercent / p.kvCacheUtilThreshold
 		total += math.Max(qRatio, kvRatio)
+		collected++
 	}
-	return total / float64(len(pods))
+	if collected == 0 {
+		return 0
+	}
+	return total / float64(collected)
 }

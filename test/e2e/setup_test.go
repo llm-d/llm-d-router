@@ -37,15 +37,17 @@ import (
 // router helpers.
 func standaloneConfig() standalone.Config {
 	return standalone.Config{
-		TestConfig:    testConfig,
-		Namespace:     getNamespace(),
-		EPPImage:      eppImage,
-		HTTPPort:      getPort(),
-		MetricsPort:   getMetricsPort(),
-		K8sContext:    k8sContext,
-		PodSelector:   podSelector,
-		ReleaseName:   poolName,
-		KeepOnFailure: keepClusterOnFailure,
+		TestConfig:      testConfig,
+		Namespace:       getNamespace(),
+		EPPImage:        eppImage,
+		HTTPPort:        getPort(),
+		MetricsPort:     getMetricsPort(),
+		HTTPNodePort:    getNodePort(),
+		MetricsNodePort: getMetricsNodePort(),
+		K8sContext:      k8sContext,
+		PodSelector:     podSelector,
+		ReleaseName:     poolName,
+		KeepOnFailure:   keepClusterOnFailure,
 	}
 }
 

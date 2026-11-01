@@ -41,7 +41,7 @@ func TestDirector_ModelRewriteIfNeeded_SGLangGenerate(t *testing.T) {
 
 	mockDs := &mockDatastore{}
 	endpointCandidates := NewDatastoreEndpointCandidates(mockDs)
-	director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig())
+	director := NewDirectorWithConfig(mockDs, &mockScheduler{}, &mockAdmissionController{}, endpointCandidates, NewConfig(), "")
 
 	// HandleRequest seeds IncomingModelName from the parsed body before resolving
 	// the target.

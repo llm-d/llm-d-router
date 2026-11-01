@@ -89,8 +89,9 @@ latter carrying its URL as a bare string rather than chat completions'
 nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
 cannot represent this way fails the conversion rather than tokenizing a
 prompt shorter than the one vLLM serves: `input_audio` parts, `reasoning`
-items with `encrypted_content`, namespaced `function_call` items, and item
-types such as `web_search_call`. The forwarded request is unchanged.
+items with `encrypted_content` or without text, namespaced `function_call`
+items, and item types such as `web_search_call`. The forwarded request is
+unchanged.
 
 The compatibility implementation and tests are contained in `responses.go`
 and `responses_test.go`. Its integration points are the

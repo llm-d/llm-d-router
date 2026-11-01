@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -44,9 +45,10 @@ func (s *Server) fanoutEncoderCollect(
 	requestID string,
 	apiType reqcommon.APIType,
 ) (map[string]any, int, int, error) {
-	items := s.mmItemsForFanout(originalRequest, requestID, apiType)
+	logger := log.FromContext(ctx)
+	items := s.mmItemsForFanout(ctx, originalRequest, requestID, apiType)
 	if len(items) == 0 {
-		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
+		logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, 0, 0, nil
 	}
 
@@ -55,12 +57,12 @@ func (s *Server) fanoutEncoderCollect(
 		paramsMu    sync.Mutex
 		contributed int
 	)
-	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, func(idx int, pw *bufferedResponseWriter) error {
+	err := s.fanoutEncoder(ctx, originalRequest, items, encoderHostPorts, requestID, apiType, nil, func(idx int, pw *bufferedResponseWriter) error {
 		var encoderResponse map[string]any
 		if err := json.Unmarshal(pw.bodyBytes(), &encoderResponse); err != nil {
 			return fmt.Errorf("failed to parse encoder response for item %d: %w", idx, err)
 		}
-		if v := s.logger.V(logging.DEBUG); v.Enabled() {
+		if v := logger.V(logging.DEBUG); v.Enabled() {
 			v.Info("encoder response",
 				"item", idx,
 				"requestID", requestID,
@@ -68,18 +70,18 @@ func (s *Server) fanoutEncoderCollect(
 		}
 		ec, ok := encoderResponse[reqcommon.FieldECTransferParams]
 		if !ok || ec == nil {
-			s.logger.V(logging.DEBUG).Info("missing ec_transfer_params field in encoder response",
+			logger.V(logging.DEBUG).Info("missing ec_transfer_params field in encoder response",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
 		ecMap, ok := ec.(map[string]any)
 		if !ok {
-			s.logger.V(logging.DEBUG).Info("ec_transfer_params is not a JSON object; skipping",
+			logger.V(logging.DEBUG).Info("ec_transfer_params is not a JSON object; skipping",
 				"item", idx, "requestID", requestID, "type", fmt.Sprintf("%T", ec))
 			return nil
 		}
 		if len(ecMap) == 0 {
-			s.logger.V(logging.DEBUG).Info("ec_transfer_params is empty",
+			logger.V(logging.DEBUG).Info("ec_transfer_params is empty",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
@@ -87,7 +89,7 @@ func (s *Server) fanoutEncoderCollect(
 		defer paramsMu.Unlock()
 		for k, v := range ecMap {
 			if _, exists := params[k]; exists {
-				s.logger.V(logging.DEBUG).Info("duplicate ec_transfer_params key across encoder responses; overwriting",
+				logger.V(logging.DEBUG).Info("duplicate ec_transfer_params key across encoder responses; overwriting",
 					"item", idx, "requestID", requestID)
 			}
 			params[k] = v
@@ -104,8 +106,9 @@ func (s *Server) fanoutEncoderCollect(
 // handleECNIXL fans out per-image encoder requests, aggregates each
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
-func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, kvCacheSource string, apiType reqcommon.APIType) {
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	original, body, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -117,7 +120,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
 		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -129,9 +132,9 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
 			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
+			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+				logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
@@ -142,17 +145,17 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.
 			if contributed == 0 {
-				s.logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
+				logger.Info("warning: no encoder response carried ec_transfer_params; forwarding prefill request without it",
 					"requestID", requestID, "items", total)
 			} else {
 				body[reqcommon.FieldECTransferParams] = params
 				if contributed < total {
-					s.logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
+					logger.Info("warning: ec_transfer_params partially populated; some items missing transfer metadata",
 						"requestID", requestID, "contributed", contributed, "items", total)
 				}
 			}
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, kvCacheSource, requestID, apiType)
 }

@@ -58,7 +58,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 	"github.com/llm-d/llm-d-router/test/integration"
 )
@@ -375,6 +375,9 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 			KVCacheUsagePercent: p.kvCacheUsage,
 			ActiveModels:        activeModelsMap,
 			WaitingModels:       make(map[string]int),
+			// A pod that lists adapters has reported max_lora. Model it at
+			// capacity, so a pod without the requested adapter scores as full.
+			MaxActiveModels: len(activeModelsMap),
 		}
 	}
 	h.metricsBackend.SetPodMetrics(metricsMap)
@@ -383,7 +386,7 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	for _, p := range pods {
 		name := fmt.Sprintf("pod-%d", p.index)
 
-		pod := testutil.MakePod(name).
+		pod := fwkk8s.MakePod(name).
 			Namespace(h.Namespace).
 			ReadyCondition(). // Sets Status.Conditions.
 			Labels(map[string]string{"app": testPoolName}).

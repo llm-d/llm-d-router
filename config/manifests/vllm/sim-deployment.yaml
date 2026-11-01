@@ -15,7 +15,7 @@ spec:
     spec:
       initContainers:
       - name: vllm-render
-        image: vllm/vllm-openai-cpu:v0.21.0
+        image: vllm/vllm-openai-cpu:v0.31.0
         imagePullPolicy: IfNotPresent
         # Native sidecars require Kubernetes 1.29 or newer.
         restartPolicy: Always

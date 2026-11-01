@@ -17,6 +17,7 @@ limitations under the License.
 package steps
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -443,6 +444,52 @@ func TestCachedTokens_SharedStorageWithoutTransferParamsStillRewrites(t *testing
 		t.Fatalf("decode failed: %v", err)
 	}
 
+	if got := clientCachedTokens(t, recorder.Body.String()); got != prefillCachedTokens {
+		t.Errorf("client cached_tokens = %d, want the prefill worker's %d", got, prefillCachedTokens)
+	}
+}
+
+// TestAcceptEncoding_UpstreamGzipIsDecodedByTheCoordinator runs prefill and
+// decode against a gateway that gzips its responses. http.Transport decompresses
+// only the gzip it negotiated itself, so the client's Accept-Encoding must stay
+// off the upstream requests.
+func TestAcceptEncoding_UpstreamGzipIsDecodedByTheCoordinator(t *testing.T) {
+	const (
+		prefillCachedTokens = 11
+		decodeCachedTokens  = 500
+	)
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cachedTokens := decodeCachedTokens
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhasePrefill {
+			cachedTokens = prefillCachedTokens
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_ = json.NewEncoder(gz).Encode(map[string]any{"usage": usageBlock(cachedTokens)})
+		_ = gz.Close()
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	reqCtx := cachedTokensRequestContext(false)
+	reqCtx.OriginalHeaders = http.Header{"Accept-Encoding": {"gzip, deflate, br"}}
+
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.SharedStorage})
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.SharedStorage})
+	recorder := httptest.NewRecorder()
+	reqCtx.ResponseWriter = recorder
+	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	if got := recorder.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("client Content-Encoding = %q, want none", got)
+	}
 	if got := clientCachedTokens(t, recorder.Body.String()); got != prefillCachedTokens {
 		t.Errorf("client cached_tokens = %d, want the prefill worker's %d", got, prefillCachedTokens)
 	}

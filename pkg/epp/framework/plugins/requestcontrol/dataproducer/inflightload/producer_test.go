@@ -1214,6 +1214,26 @@ func TestUncachedInputTokens_Overestimate(t *testing.T) {
 	require.Equal(t, int64(4), uncached, "should trust the prefix cache's uncached count (indexed-matched) over the smaller estimate")
 }
 
+func TestUncachedInputTokens_UsesCachedBlockCount(t *testing.T) {
+	t.Run("tier-weighted precise match", func(t *testing.T) {
+		// MatchBlocks is tier-weighted (1), CachedBlockCount is the literal count (4):
+		// 32 indexed tokens minus 4 cached blocks of 4.
+		endpoint := newStubSchedulingEndpoint("test-ep")
+		endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 8, 4).WithCachedBlockCount(4))
+
+		require.Equal(t, int64(16), uncachedInputTokens(endpoint, 32, attrprefix.PrefixCacheMatchInfoDataKey))
+	})
+
+	t.Run("match without a separate cached count", func(t *testing.T) {
+		// Approximate and burst prefix producers set only MatchBlocks, which
+		// CachedBlockCount defaults to, so their discount is unchanged.
+		endpoint := newStubSchedulingEndpoint("test-ep")
+		endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(2, 8, 4))
+
+		require.Equal(t, int64(24), uncachedInputTokens(endpoint, 32, attrprefix.PrefixCacheMatchInfoDataKey))
+	})
+}
+
 func TestInFlightLoadProducer_PanicSafety(t *testing.T) {
 	producer := newTestProducer(t)
 	ctx := context.Background()

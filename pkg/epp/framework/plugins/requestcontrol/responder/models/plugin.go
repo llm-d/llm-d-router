@@ -175,7 +175,7 @@ func (p *Responder) Respond(ctx context.Context, request *fwkrc.RequestLine, end
 	if request == nil || request.Method != http.MethodGet {
 		return nil, nil //nolint:nilnil
 	}
-	if strings.TrimSuffix(request.Path, "/") != attrmodels.OpenAIModelsPath {
+	if strings.TrimSuffix(request.Path, "/") != reqcommon.PathModels {
 		return nil, nil //nolint:nilnil
 	}
 

@@ -164,6 +164,22 @@ func TestContent_UnmarshalJSON(t *testing.T) {
 			}},
 		},
 		{
+			name:  "untyped media parts take their type from the media field",
+			input: `[{"image_url":"https://example.com/a.jpg"},{"image_url":{"url":"https://example.com/b.jpg"}},{"audio_url":"https://example.com/c.wav"},{"video_url":{"url":"https://example.com/d.mp4"}},{"input_audio":{"data":"AAAA","format":"wav"}}]`,
+			want: Content{Structured: []ContentBlock{
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/a.jpg"}},
+				{Type: "image_url", ImageURL: ImageBlock{URL: "https://example.com/b.jpg"}},
+				{Type: "audio_url", AudioURL: AudioURLBlock{URL: "https://example.com/c.wav"}},
+				{Type: "video_url", VideoURL: VideoBlock{URL: "https://example.com/d.mp4"}},
+				{Type: "input_audio", InputAudio: AudioBlock{Data: "AAAA", Format: "wav"}},
+			}},
+		},
+		{
+			name:    "content block with mistyped media URL is rejected",
+			input:   `[{"image_url":1}]`,
+			wantErr: true,
+		},
+		{
 			name:  "empty content blocks",
 			input: `[]`,
 			want:  Content{Structured: []ContentBlock{}},
@@ -607,6 +623,12 @@ func TestPrompt_MarshalJSON(t *testing.T) {
 func TestTextToSpeechRequest_String(t *testing.T) {
 	assert.Equal(t, "{InputLength: 5}", (&TextToSpeechRequest{Input: "hello"}).String())
 	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
+}
+
+func TestAudioGenerateRequest_String(t *testing.T) {
+	assert.Equal(t, "{InputLength: 5, NegativePromptLength: 0}", (&AudioGenerateRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, NegativePromptLength: 6}", (&AudioGenerateRequest{Input: "hello", NegativePrompt: "silent"}).String())
+	assert.Equal(t, nilStr, (*AudioGenerateRequest)(nil).String())
 }
 
 func TestGenerateRequest_UnmarshalJSON(t *testing.T) {

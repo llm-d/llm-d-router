@@ -59,13 +59,14 @@ The `step` and `upstream` labels carry the same values, but measure different bo
 
 ## Error classes
 
-The `error_code` label on `request_error_total` and `step_errors_total` uses five values:
+The `error_code` label on `request_error_total` and `step_errors_total` uses six values:
 
 - **`bad_request`**: Client-side errors (e.g., malformed body).
 - **`upstream_4xx`**: 4xx errors from upstream (e.g., render, prefill, encode).
 - **`upstream_5xx`**: 5xx errors from upstream.
 - **`upstream_transport`**: The round trip failed before a response arrived (connection refused, timeout, TCP reset), so no status code was received.
 - **`internal`**: All other coordinator-internal faults. Not used for reachability failures, which are `upstream_transport`.
+- **`prompt_token_mismatch`**: Recorded on `step_errors_total` only, by the decode step with `prompt_token_parity: error`, when the worker's prompt token count differed from the rendered one. The request itself succeeds; see `prompt_token_mismatch_total`.
 
 **Key behaviors:**
 - The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
@@ -103,7 +104,7 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 
 | Name | Type | Notes |
 |---|---|---|
-| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). |
+| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). Carries a trace exemplar; see [Exemplars](metrics.md#exemplars). |
 | `step_errors_total` | Counter | Step failures; adds label `error_code`. |
 | `step_running` | Gauge | Requests currently executing the step. Saturation rather than latency: `decode` stays in flight for the whole stream, so its value is the number of active streams. |
 
@@ -141,6 +142,10 @@ Recorded by every step that calls out: render to the renderer service, replace-m
     *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
 *   A probe the client abandons before the worker answers records no result.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
+
+#### `prompt_token_mismatch_total` (Counter)
+*   **Labels:** `model_name`, `api_type` (`chat_completions`, `completions`, `responses`, `messages`, `generate`), `ids_forwarded` (`true` when the decode leg carried the rendered token IDs, `false` when it forwarded the client's text)
+*   **Description:** Decode responses whose `usage` prompt token count (`prompt_tokens`; `input_tokens` on Responses; on Messages `input_tokens` plus `cache_read_input_tokens` and `cache_creation_input_tokens`, since vLLM reports the cached part separately there) differed from the number of token IDs the render step produced and prefill ran on. With `ids_forwarded=true` the worker ignored the IDs; with `false` the render service and the worker rendered the prompt differently. Either way prefill's KV cache did not match and decode recomputed the prompt. Recorded by the decode step when its `prompt_token_parity` parameter is `warn` (default) or `error`; `error` also records `step_errors_total{step="decode", error_code="prompt_token_mismatch"}`. Divide by `upstream_request_total{upstream="decode"}` for a rate.
 
 ## Relationship to EPP metrics
 

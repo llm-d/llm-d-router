@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	otelsemconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -484,7 +485,17 @@ func TestRenderMetrics_FailureLogIsRateLimited(t *testing.T) {
 	}
 
 	assert.Equal(t, float64(calls), renderFailures(r.pluginName, renderReasonStatus))
-	assert.Len(t, logs.snapshot(), 1)
+	lines := logs.snapshot()
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], `"suppressed"=0`)
+
+	// A fresh limiter stands in for the interval elapsing.
+	r.failureLog = rate.Sometimes{Interval: renderFailureLogInterval}
+	require.Error(t, renderPath(ctx, r, chatRenderPath))
+
+	lines = logs.snapshot()
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[1], fmt.Sprintf(`"suppressed"=%d`, calls-1))
 }
 
 func TestRenderMetrics_WarmupIsNotObserved(t *testing.T) {

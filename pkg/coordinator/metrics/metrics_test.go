@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestStepFamily_Records(t *testing.T) {
 	DecStepRunning("render")
 	require.InDelta(t, 0.0, promtestutil.ToFloat64(stepRunning.WithLabelValues("render")), 1e-9)
 
-	RecordStepDuration("render", 50*time.Millisecond)
+	RecordStepDuration(context.Background(), "render", 50*time.Millisecond)
 	IncStepErrorTotal("prefill", ErrorCodeUpstream5xx)
 
 	require.InDelta(t, 1.0,

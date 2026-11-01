@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"io"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	attrmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/models"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
 )
@@ -65,7 +65,7 @@ func NewHTTPModelsDataSource(scheme, path, name string) (*http.HTTPDataSource[*e
 
 // NewDefaultHTTPModelsDataSource constructs the default source used by models-responder.
 func NewDefaultHTTPModelsDataSource(name string) (*http.HTTPDataSource[*extmodels.ModelResponse], error) {
-	return NewHTTPModelsDataSource(defaultModelsScheme, attrmodels.OpenAIModelsPath, name)
+	return NewHTTPModelsDataSource(defaultModelsScheme, reqcommon.PathModels, name)
 }
 
 // ModelDataSourceFactory is a factory function used to instantiate data layer's
@@ -103,7 +103,7 @@ func ModelDataSourceFactory(name string, parameters *json.Decoder, _ plugin.Hand
 func defaultDataSourceConfigParams() *modelsDatasourceParams {
 	return &modelsDatasourceParams{
 		Scheme:             defaultModelsScheme,
-		Path:               attrmodels.OpenAIModelsPath,
+		Path:               reqcommon.PathModels,
 		InsecureSkipVerify: defaultModelsInsecureSkipVerify,
 	}
 }

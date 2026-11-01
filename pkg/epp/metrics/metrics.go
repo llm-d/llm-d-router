@@ -30,6 +30,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -79,6 +80,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		// Register other metrics
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
+		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
+		metrics.Registry.MustRegister(llmdFairnessIDOverflowCounter)
+		metrics.Registry.MustRegister(llmdRequestOutcomeCounter)
 		metrics.Registry.MustRegister(llmdRequestLatencies)
 		metrics.Registry.MustRegister(llmdRequestSizes)
 		metrics.Registry.MustRegister(llmdResponseSizes)
@@ -141,6 +145,9 @@ func Reset() {
 	// Reset other metrics
 	llmdRequestCounter.Reset()
 	llmdRequestErrCounter.Reset()
+	llmdFairnessIDResolvedCounter.Reset()
+	llmdFairnessIDOverflowCounter.Reset()
+	llmdRequestOutcomeCounter.Reset()
 	llmdRequestLatencies.Reset()
 	llmdRequestSizes.Reset()
 	llmdResponseSizes.Reset()
@@ -200,13 +207,42 @@ func RecordRequestCounter(modelName, targetModelName string, apiSurface reqcommo
 	llmdRequestCounter.WithLabelValues(modelName, targetModelName, fairnessID, prioStr, apiSurface.String()).Inc()
 }
 
-// RecordRequestErrCounter records the number of error requests.
-func RecordRequestErrCounter(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, code string) {
+// RecordRequestErrCounter records the number of error requests. The request's
+// trace is attached as an exemplar, so an error-rate spike links to a failing
+// request.
+func RecordRequestErrCounter(ctx context.Context, modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority string, code string) {
 	modelName, targetModelName = boundModels(modelName, targetModelName)
 	fairnessID = boundFairnessID(fairnessID)
 	if code != "" {
-		llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code).Inc()
+		metricsutil.AddWithTraceExemplar(ctx,
+			llmdRequestErrCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), code),
+			1)
 	}
+}
+
+// InitFairnessIDResolutionMetrics creates the overflow series at 0 for every source, so a
+// rate or increase over the first overflow is not lost.
+func InitFairnessIDResolutionMetrics(inferencePool string) {
+	for _, source := range []string{tracing.AttributionSourceHeader, tracing.AttributionSourceAgentIdentity, tracing.AttributionSourceDefault} {
+		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool)
+	}
+}
+
+// RecordFairnessIDResolution counts a request under its bounded fairness ID and source, and
+// counts an overflow when the label cap folded the ID.
+func RecordFairnessIDResolution(inferencePool, fairnessID, source string) {
+	fairnessID, overflow := metricsutil.BoundFairnessIDWithOverflow(fairnessID)
+	llmdFairnessIDResolvedCounter.WithLabelValues(fairnessID, source, inferencePool).Inc()
+	if overflow {
+		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool).Inc()
+	}
+}
+
+// RecordRequestOutcome records how a request ended.
+func RecordRequestOutcome(modelName, targetModelName string, apiSurface reqcommon.APISurface, fairnessID, priority, outcome, reason string) {
+	modelName, targetModelName = boundModels(modelName, targetModelName)
+	fairnessID = boundFairnessID(fairnessID)
+	llmdRequestOutcomeCounter.WithLabelValues(modelName, targetModelName, fairnessID, priority, apiSurface.String(), outcome, reason).Inc()
 }
 
 // RecordRequestSizes records the request sizes.

@@ -14,7 +14,7 @@ A **plugin** is a component that:
 - **Can be enabled, disabled, or swapped** by a user through the YAML
   configuration (EndpointPickerConfig).
 - **Lives under** `pkg/epp/framework/plugins/` (or in an external plugin
-  repository).
+  repository; see [Registering out-of-tree plugins](#registering-out-of-tree-plugins)).
 - **Implements `plugin.Plugin`** (specifically the `TypedName()` method),
   allowing the framework to identify and instantiate it from config.
 - **Is registered** via `plugin.Register(type, stability, factory)` (with stability level `plugin.StabilityAlpha`, `plugin.StabilityBeta`, or `plugin.StabilityStable`) so the config parser can look it up by type name.
@@ -89,4 +89,112 @@ pkg/epp/
 │   └── eviction/           #   RequestEvictor (builtin), queue, registry
 ├── requestcontrol/         # Builtin request-control infrastructure
 └── scheduling/             # Builtin scheduler infrastructure
+```
+
+## Registering out-of-tree plugins
+
+An out-of-tree plugin lives in its own Go module and is compiled into a custom
+EPP binary. Fork the current `main` (`cmd/epp/main.go`), import the plugin
+framework (`github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin`,
+imported as `fwkplugin`), and register the custom plugin before running the
+runner.
+
+### Registration functions
+
+`pkg/epp/framework/interface/plugin/registry.go` provides four functions. Each
+takes a plugin type name, a stability level, and a `FactoryFunc`.
+
+| Function | Use it when |
+|---|---|
+| `Register` | The plugin needs no extra wiring. |
+| `RegisterAsDefaultProducer` | The plugin produces a `DataKey`. The EPP creates an instance automatically when a configured plugin consumes that key and no producer for it is configured. |
+| `RegisterWithPluginDependencies` | The plugin's parameters name other plugin instances. The `ConfigParserFunc` returns the parsed parameters, and the loader instantiates the referenced plugins first. |
+| `RegisterDeprecated` | The plugin type is scheduled for removal. The loader logs a deprecation warning for each configured instance. |
+
+Use a type name that no in-tree plugin uses, because a later registration of
+the same type name replaces the earlier factory.
+
+### Example
+
+The binary below registers a scorer that gives every endpoint the same score:
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/llm-d/llm-d-router/cmd/epp/runner"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
+
+const ConstantScorerType = "constant-scorer"
+
+type constantScorerParams struct {
+	Score float64 `json:"score"`
+}
+
+type ConstantScorer struct {
+	typedName fwkplugin.TypedName
+	score     float64
+}
+
+func (s *ConstantScorer) TypedName() fwkplugin.TypedName { return s.typedName }
+
+func (s *ConstantScorer) Category() fwksched.ScorerCategory { return fwksched.Balance }
+
+func (s *ConstantScorer) Score(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
+	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
+	for _, ep := range endpoints {
+		scores[ep] = s.score
+	}
+	return scores
+}
+
+func ConstantScorerFactory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	params := constantScorerParams{Score: 0.5}
+	if parameters != nil {
+		if err := parameters.Decode(&params); err != nil {
+			return nil, fmt.Errorf("failed to parse parameters of %s plugin: %w", ConstantScorerType, err)
+		}
+	}
+	return &ConstantScorer{
+		typedName: fwkplugin.TypedName{Type: ConstantScorerType, Name: name},
+		score:     params.Score,
+	}, nil
+}
+
+func main() {
+	// Register custom plugins before starting the runner. If registered as
+	// fwkplugin.StabilityAlpha, pass --allow-experimental-plugins at startup.
+	fwkplugin.Register(ConstantScorerType, fwkplugin.StabilityBeta, ConstantScorerFactory)
+
+	// In-tree plugins are registered as part of the runner.
+	if err := runner.NewRunner().WithExecutableName("my-epp").Run(ctrl.SetupSignalHandler()); err != nil {
+		os.Exit(1)
+	}
+}
+```
+
+Reference the plugin type in the EPP config:
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: constant
+  type: constant-scorer
+  parameters:
+    score: 0.8
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: constant
+    weight: 10
 ```

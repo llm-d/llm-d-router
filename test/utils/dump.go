@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -109,6 +110,8 @@ func DumpPodsAndLogs(cfg *TestConfig, nsName string, opts ...DumpOption) {
 	}
 	ginkgo.GinkgoWriter.Println()
 
+	dumpEvents(ctx, cfg, nsName)
+
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		ginkgo.GinkgoWriter.Printf("--- Pod: %s | Phase: %s | Node: %s ---\n",
@@ -157,7 +160,45 @@ func printContainerStatus(kind string, cs corev1.ContainerStatus) {
 	if cs.State.Terminated != nil {
 		status += fmt.Sprintf(" | Terminated: %s (exit %d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
 	}
+	// A container killed by a failed probe or the OOM killer leaves no log line
+	// saying so; the reason survives only on the previous instance's state.
+	if t := cs.LastTerminationState.Terminated; t != nil {
+		status += fmt.Sprintf(" | LastTerminated: %s (exit %d, signal %d) at %s",
+			t.Reason, t.ExitCode, t.Signal, t.FinishedAt.UTC().Format(time.RFC3339))
+	}
 	ginkgo.GinkgoWriter.Println(status)
+}
+
+// dumpEvents prints the namespace's events, which carry the probe failures,
+// kills, and back-offs behind container restarts.
+func dumpEvents(ctx context.Context, cfg *TestConfig, nsName string) {
+	events, err := cfg.KubeCli.CoreV1().Events(nsName).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		ginkgo.GinkgoWriter.Printf("Failed to list events: %v\n", err)
+		return
+	}
+	items := events.Items
+	sort.Slice(items, func(i, j int) bool { return eventTime(&items[i]).Before(eventTime(&items[j])) })
+	ginkgo.GinkgoWriter.Printf("--- Events (%d) ---\n", len(items))
+	for i := range items {
+		e := &items[i]
+		ginkgo.GinkgoWriter.Printf("  %s %-7s %-20s %s/%s x%d: %s\n",
+			eventTime(e).UTC().Format(time.RFC3339), e.Type, e.Reason,
+			e.InvolvedObject.Kind, e.InvolvedObject.Name, max(e.Count, 1), e.Message)
+	}
+	ginkgo.GinkgoWriter.Println()
+}
+
+// eventTime returns when an event last occurred; events.k8s.io writers set only
+// EventTime, core writers set LastTimestamp.
+func eventTime(e *corev1.Event) time.Time {
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp.Time
+	}
+	if !e.EventTime.IsZero() {
+		return e.EventTime.Time
+	}
+	return e.CreationTimestamp.Time
 }
 
 func dumpContainerLogs(ctx context.Context, cfg *TestConfig, nsName, podName, containerName string, previous bool, dc dumpConfig) {

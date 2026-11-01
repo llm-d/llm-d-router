@@ -39,6 +39,14 @@ upstream. No-op otherwise.
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
 
+SGLang EAGLE/MTP events describe cached positions as overlapping token pairs.
+The index preserves their trailing lookahead and learns each pod's page size.
+Request matching hashes complete bigram pages using the same format.
+A page of `P` cached positions requires `P+1` matching request tokens.
+Bigram endpoints report `PrefixCacheMatchInfo` in token-sized blocks.
+This preserves cache-tier weights and exact cached-token counts across page sizes.
+Plain-token workers use `tokenProcessorConfig.blockSizeTokens`.
+
 Set `kvEventsConfig.tracing` to `true` to emit OpenTelemetry spans for the
 KV-event pipeline (`events_receive`, `events_process`, `events_decode`). It
 defaults to `false`: KV events arrive at many times the inference request rate,

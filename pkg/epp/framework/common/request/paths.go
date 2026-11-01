@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The llm-d Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,18 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e
+package request
 
-import (
-	"fmt"
-	"testing"
-
-	. "github.com/onsi/ginkgo/v2" //nolint:revive
-	. "github.com/onsi/gomega"    //nolint:revive
+// Path suffixes, for MatchPathSuffix, that parsers claim and request-control
+// plugins also match on.
+const (
+	// SystemOnePathSuffix identifies the System One decisions API.
+	SystemOnePathSuffix = "systemone"
+	// DecisionsPathSuffix identifies the Decisions API.
+	DecisionsPathSuffix = "decisions"
 )
-
-func TestE2E(t *testing.T) {
-	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting vllmdsidecar e2e test suite\n")
-	RunSpecs(t, "e2e suite")
-}

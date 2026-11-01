@@ -249,7 +249,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
 | `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
 | `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
@@ -257,7 +257,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.crossReplica.publishTimeout` | Timeout shared by contributors for one endpoint publication or deletion. Must be positive. | `1s` |
 | `router.epp.crossReplica.redis.address` | External Redis `host:port`; required when synchronization is enabled. | `""` |
 | `router.epp.crossReplica.redis.db` | Redis database number. Use a separate database or server for unrelated routing pools. | `0` |
-| `router.epp.crossReplica.redis.stateTTL` | Endpoint state and cached peer aggregate expiration. Must exceed the observed successful per-endpoint refresh interval with margin for Redis latency; minimum `1ms`. | `2s` |
+| `router.epp.crossReplica.redis.stateTTL` | Expiration of each replica's endpoint state in Redis. Must exceed the observed successful per-endpoint refresh interval with margin for Redis latency; minimum `1ms`. | `2s` |
 | `router.epp.crossReplica.redis.coordinationTTL` | Request-level coordination value expiration; minimum `1ms`. | `180s` |
 | `router.epp.crossReplica.redis.passwordSecretRef` | Existing Secret reference with `name` and `key`, exposed through the plugin's `passwordEnv`. | `{}` |
 | `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. Defaults to `RollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1` for `haMode: all-active`, cross-replica sync, or autoscaling; otherwise `{type: Recreate}`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | Mode-dependent |
@@ -283,7 +283,8 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.tolerations` | Tolerations for EPP pods. | `[]` |
 | `router.epp.podSecurityContext` | Pod-level `securityContext` for EPP pods, inherited by the EPP, proxy sidecar, and sidecar-mode latency predictor containers. | `{}` |
 | `router.epp.securityContext` | Container-level `securityContext` for the EPP container. | `{}` |
-| `router.epp.podDisruptionBudget` | PodDisruptionBudget for the EPP Deployment: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. `minAvailable` requires at least 2 effective replicas (`replicas`, or `autoscaling.minReplicas` when autoscaled) — a single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
+| `router.epp.podDisruptionBudget` | PodDisruptionBudget for EPP pods: `{enabled, minAvailable | maxUnavailable}` (exactly one disruption field). Disabled while unset. Integer `minAvailable` requires at least 2 effective replicas: `replicas` (or `autoscaling.minReplicas` when autoscaled), `preferredReplicas` + `defaultReplicas` with GKE `preferredBackends`, or `primaryReplicas` + `standbyReplicas` with `priorityRouting`. A single-replica budget blocks all voluntary disruptions, including node drains. In sidecar proxy mode this budget governs the shared pod. | `{}` |
+| `router.epp.lifecycle` | Container lifecycle for the EPP container, rendered verbatim. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. | `null` |
 | `router.epp.resources` | EPP container resource requests and limits. | `requests.cpu: "8"`, `requests.memory: 8Gi`, `limits.memory: 16Gi` |
 | `router.epp.pluginsConfigFile` | EPP plugins configuration file name. | `default-plugins.yaml` |
 | `router.epp.pluginsConfig` | Structured EPP configuration rendered into `pluginsConfigFile`. | `{}` |
@@ -505,6 +506,15 @@ metric-label cardinality cap. On sampled traces the EPP also hands the pair to t
 sidecar, so sidecar spans carry it too; see
 [Sidecar Tracing](../../docs/disaggregation.md#sidecar-tracing).
 
+The `request_orchestration` span also records the admission decision. Admission runs from the
+admission controller (Flow Control when enabled) through endpoint candidate lookup, screening
+and the Admitter plugins. `llm_d.epp.admission.decision` is `admitted` or `rejected`, absent when
+the request failed before admission, and not changed by a later scheduling failure or eviction.
+A rejection adds `llm_d.epp.admission.reason`: the `x-llm-d-request-dropped-reason` value, such
+as `rejected-ttl-expired`, or the EPP error code when none is set. When Flow Control dispatched
+the request, `llm_d.epp.admission.queue_duration_ms` holds the time behind the
+`x-llm-d-flow-queue-duration-ms` response header, in fractional milliseconds.
+
 #### Complete Monitoring & Tracing Example
 
 ```yaml
@@ -544,7 +554,7 @@ The sidecar runs vLLM's `vllm launch render <modelName>` (Python) or `vllm-rs re
 | `router.tokenizer.modelName` | **REQUIRED** when enabled. Model name passed as the first positional arg to the sidecar's render command. | `""` |
 | `router.tokenizer.image.registry` | Tokenizer container image registry. | `docker.io` |
 | `router.tokenizer.image.repository` | Tokenizer container image repository. | `vllm/vllm-openai-cpu` |
-| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.19.1` |
+| `router.tokenizer.image.tag` | Tokenizer container image tag. | `v0.31.0` |
 | `router.tokenizer.image.pullPolicy` | Tokenizer container image pull policy. | `IfNotPresent` |
 | `router.tokenizer.port` | Container port the sidecar listens on. | `8000` |
 | `router.tokenizer.command` | Override container command. Empty renders `["vllm", "launch", "render"]` for `"python"` flavor or `["vllm-rs", "render"]` for `"rust"` flavor. | `[]` |
@@ -572,7 +582,7 @@ router:
     image:
       registry: docker.io
       repository: vllm/vllm-openai-cpu
-      tag: v0.19.1
+      tag: v0.31.0
     env:
       - name: HF_TOKEN
         valueFrom:
@@ -730,8 +740,9 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.proxyType` | Type of proxy. Options: `[envoy, agentgateway]`. | `envoy` |
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
-| `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on proxy pod teardown. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on the proxy pod. Applies in service mode only: in sidecar mode the proxy shares the EPP pod, so `router.epp.terminationGracePeriodSeconds` controls the grace period for both containers. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
 | `router.proxy.podDisruptionBudget` | PodDisruptionBudget for the service-mode proxy Deployment: `{enabled, minAvailable | maxUnavailable}`. Ignored in sidecar mode (the EPP budget governs the shared pod). Same single-replica rule as `router.epp.podDisruptionBudget`. | `{}` |
+| `router.proxy.lifecycle` | Container lifecycle for the proxy container, rendered verbatim in both sidecar and service mode. Unset or null keeps the default preStop sleep of 5 seconds rendered on Kubernetes >= 1.30; an empty map (`{}`) disables the hook and renders no lifecycle. For preStop drains that outlast the default window, raise the grace period: `router.epp.terminationGracePeriodSeconds` in sidecar mode, `router.proxy.terminationGracePeriodSeconds` in service mode. | `null` |
 | `router.proxy.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the proxy Deployment when `mode=service`. See [Standalone Proxy Autoscaling (Service Mode)](../../docs/operations.md#standalone-proxy-autoscaling-service-mode). | `false` |
 | `router.proxy.autoscaling.minReplicas` | Minimum number of proxy replicas for the HPA. | `1` |
 | `router.proxy.autoscaling.maxReplicas` | Maximum number of proxy replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |
@@ -740,6 +751,10 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
 | `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.tracing.enabled` | Enable OpenTelemetry tracing in Envoy. Envoy creates a span per request on the main listener and propagates the trace context on the ext_proc gRPC stream to EPP, so EPP spans (`router.tracing.enabled`) join the request trace. Applies to `proxyType=envoy` only. | `false` |
+| `router.proxy.tracing.collectorEndpoint` | OTLP gRPC collector endpoint (`host:port`, scheme optional, port defaults to `4317`) for Envoy spans. Falls back to `router.tracing.otelExporterEndpoint` when empty. | `""` |
+| `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |
+| `router.proxy.tracing.samplingPercentage` | Percentage of requests without an incoming sampling decision that Envoy traces (`random_sampling`). | `10` |
 | `router.proxy.name` | Name of the sidecar container. | `""` |
 | `router.proxy.image` | Sidecar container image. | `""` |
 | `router.proxy.imagePullPolicy` | Sidecar container image pull policy. | `IfNotPresent` |

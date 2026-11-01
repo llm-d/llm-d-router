@@ -682,6 +682,31 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 	}
 }
 
+func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
+	assert.Equal(t, errcommon.Error{
+		Code:    errcommon.ServiceUnavailable,
+		Msg:     "no pods available in datastore",
+		Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	}, err)
+}
+
+type emptyPoolDirector struct {
+	Director
+}
+
+func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
 type mockDirectorRequest struct {
 	Director
 	endpoint *datalayer.EndpointMetadata

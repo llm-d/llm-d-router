@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -82,11 +84,27 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 // that are consumed (Required) but not produced, and auto-instantiates the
 // default DataProducer for each using nil parameters. Resolution is transitive:
 // a producer created here may itself consume keys with registered defaults, so
-// creation repeats until no required key is missing or no further producer can
-// be added. defaultProducerRegistry maps a data key to its default producer type;
+// creation repeats until no required key is missing.
+//
+// Each round instantiates at least one default producer this call has not tried
+// before, so the number of rounds is bounded by the number of distinct producers
+// in defaultProducerRegistry. If a round resolves nothing while Required keys are
+// still unproduced, the function returns ErrUnresolvedDataKeys naming those keys.
+//
+// Dependency cycles between the resulting plugins are rejected by
+// ValidateAndOrderDataDependencies, which topologically sorts the full plugin set
+// after this call. A cycle among default producers resolves here and fails there.
+//
+// defaultProducerRegistry maps a data key to its default producer type;
 // factoryRegistry maps a plugin type to its factory function.
 func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map[string]string, factoryRegistry map[string]plugin.FactoryFunc, handle plugin.Handle) error {
 	logger := log.FromContext(ctx)
+
+	// Default producers this call has already instantiated. handle.Plugin() alone is
+	// not a sufficient guard: a factory may register its plugin under a name other
+	// than the registry type it was asked for, leaving the lookup below nil and the
+	// same producer created on every round.
+	attempted := make(map[string]bool)
 
 	for {
 		producedKeys := producedKeySet(handle)
@@ -112,10 +130,11 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 			if !ok {
 				return fmt.Errorf("%w %v, consumed by %v", ErrNoDefaultProducer, key, consumerName)
 			}
-			if handle.Plugin(defaultProducerNameOrType) != nil {
+			if handle.Plugin(defaultProducerNameOrType) != nil || attempted[defaultProducerNameOrType] {
 				// Already created. This can happen when a producer produces multiple data keys.
 				continue
 			}
+			attempted[defaultProducerNameOrType] = true
 			factory, ok := factoryRegistry[defaultProducerNameOrType]
 			if !ok {
 				return fmt.Errorf("factory not found for default producer: %v, this is required by datakey: %v, which is consumed by: %v", defaultProducerNameOrType, key, consumerName)
@@ -135,10 +154,17 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 				"consumer", consumerName)
 			created++
 		}
-		// No progress despite missing keys (every default already present): stop
-		// to avoid looping on a producer-name mismatch.
+		// Nothing was created while required keys remain: every default still needed is
+		// already registered or was tried earlier in this call, so further rounds would
+		// repeat this one.
 		if created == 0 {
-			break
+			unresolved := make([]string, 0, len(missingKeys))
+			for key, consumerName := range missingKeys {
+				unresolved = append(unresolved, fmt.Sprintf("%v (required by %v, default producer %q)",
+					key, consumerName, defaultProducerRegistry[key]))
+			}
+			slices.Sort(unresolved) // map iteration order is random; keep the message stable
+			return fmt.Errorf("%w: %v", ErrUnresolvedDataKeys, strings.Join(unresolved, "; "))
 		}
 	}
 

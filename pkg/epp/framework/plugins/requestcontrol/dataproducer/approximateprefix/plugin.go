@@ -777,3 +777,9 @@ func ApproxPrefixCacheFactory(name string, rawParameters *json.Decoder, handle p
 
 	return p, nil
 }
+
+// RequestAbandoned releases the per-request state when the request is abandoned
+// before reaching PreRequest.
+func (p *dataProducer) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
+	p.pluginState.Delete(request.RequestID)
+}

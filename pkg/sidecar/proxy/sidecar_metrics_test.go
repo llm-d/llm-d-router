@@ -39,6 +39,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -242,7 +243,7 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 					allowedTargets: set.New(tt.allowed...),
 				}
 			}
-			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {}
+			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {}
 			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {}
 			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				if tt.want != "" {
@@ -272,13 +273,16 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 func TestHandleECEncodeMetrics(t *testing.T) {
 	connectors := []struct {
 		name   string
-		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
 	}{
-		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
 			return s.handleECNIXL
 		}},
-		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType) {
+		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
 			return s.handleECSharedStorage
+		}},
+		{name: "ec-mooncake", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
+			return s.handleECMooncake
 		}},
 	}
 	imageBody := func() map[string]any {
@@ -339,7 +343,8 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				encoderURL, err := url.Parse(encoder.URL)
 				require.NoError(t, err)
 
-				s := NewProxy(Config{Port: "0", DecoderURL: encoderURL})
+				// ECMooncakePodIP names the local decoder as the ec-mooncake consumer.
+				s := NewProxy(Config{Port: "0", DecoderURL: encoderURL, ECMooncakePodIP: "10.0.0.9"})
 				s.logger = log.Log
 				decoderCalled := false
 				s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -351,7 +356,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				rw := httptest.NewRecorder()
 				req := chatRequest(t, o.body())
 				// Empty prefill endpoint routes straight to decoderProxy after encode.
-				c.handle(s)(rw, req, "", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+				c.handle(s)(rw, req, "", []string{encoderURL.Host}, "", reqcommon.APITypeChatCompletions)
 
 				assert.Equal(t, o.wantCode, rw.Code)
 				assert.Equal(t, o.wantDecoder, decoderCalled)
@@ -363,7 +368,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 
 func TestECToolCallingMetrics(t *testing.T) {
 	const fields = `"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}`
-	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType){
 		"ec-nixl": (*Server).handleECNIXL, "ec-shared-storage": (*Server).handleECSharedStorage,
 	}
 	for name, handle := range handlers {
@@ -372,6 +377,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 			api          reqcommon.APIType
 			route        string
 			fields       string
+			source       string
 			textOnly     bool
 			noEncoder    bool
 			encoderError bool
@@ -380,6 +386,10 @@ func TestECToolCallingMetrics(t *testing.T) {
 			wantCode     int
 		}{
 			{name: "chat direct", fields: fields, wantCode: 200},
+			{name: "chat direct P2P", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
+			{name: "messages direct P2P", api: reqcommon.APITypeMessages, fields: fields, source: "10.9.9.9:8000", wantCode: 200},
+			{name: "P2P decode error", fields: fields, source: "10.9.9.9:8000", decodeError: true, wantCode: 503},
+			{name: "P2P data parallel", route: "dp", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
 			{name: "messages direct", api: reqcommon.APITypeMessages, fields: fields, wantCode: 200},
 			{name: "chat PD", route: "pd", fields: fields, wantCode: 200},
 			{name: "messages PD", api: reqcommon.APITypeMessages, route: "pd", fields: fields, wantCode: 200},
@@ -487,7 +497,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 				}
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
-				handle(s, rw, r, target, encoders, tt.api)
+				handle(s, rw, r, target, encoders, tt.source, tt.api)
 				require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 				wantDecode := !tt.encoderError && tt.route != "missing"
 				require.Equal(t, wantDecode, len(decodeBodies) == 1)
@@ -579,7 +589,7 @@ func TestECPipelineToolCallingOutcomes(t *testing.T) {
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
 				dispatch := func() {
-					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "request", api)
+					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "", "request", api)
 				}
 				if tt.abort {
 					require.PanicsWithValue(t, http.ErrAbortHandler, dispatch)
@@ -643,7 +653,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 					}
 					statusHandler(http.StatusOK, chatResponse(responseSecret, reason, 8, 3)).ServeHTTP(w, r)
 				})
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				switch connector {
 				case "nixl", "parallel":
@@ -660,7 +670,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 				case "shared":
 					s.handleSharedStorage(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, "", reqcommon.APITypeChatCompletions)
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				}
@@ -714,7 +724,7 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 					statusHandler(http.StatusOK, `{"choices":[]}`).ServeHTTP(w, r)
 				})
 				body := `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.jpg"}}]}],"tools":[],"tool_choice":"auto","cache_hit_threshold":0.5}`
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				wantCode := http.StatusBadRequest
 				switch connector {
@@ -724,10 +734,10 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 					s.handleSharedStorage(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusInternalServerError
 				case "encoder-nixl":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "encoder-example":
-					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
@@ -764,7 +774,7 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 			s.prefillerProxies.Add("prefill:8000", http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(value) }))
 			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
 			rw := httptest.NewRecorder()
-			s.runConcurrentPD(rw, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil),
+			s.runConcurrentPD(rw, withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)),
 				[]byte(`{}`), []byte(`{}`), "prefill:8000", constants.KVConnectorSGLang, nil, nil)
 			select {
 			case <-panicLogged:
@@ -850,7 +860,7 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 					}
 					statusHandler(http.StatusOK, badResponse).ServeHTTP(w, r)
 				})
-				r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+				r := withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
 				rw := httptest.NewRecorder()
 				wantCode := http.StatusInternalServerError
 				switch stage {
@@ -866,7 +876,7 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "bootstrap":
 					s.handleMooncake(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
@@ -1532,6 +1542,248 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 	}
 }
 
+func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
+	const secret = "private_prefill_body_fixture"
+	tests := []struct {
+		name    string
+		prefill http.Handler
+	}{
+		{
+			name:    "empty body",
+			prefill: statusHandler(http.StatusOK, ""),
+		},
+		{
+			name:    "body that is not JSON",
+			prefill: statusHandler(http.StatusOK, "<html>"+secret+"</html>"),
+		},
+		{
+			name: "connection closed mid-body",
+			prefill: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// Declaring more than is written makes the server close the
+				// connection after the partial body.
+				w.Header().Set("Content-Length", "400")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"kv_transfer_params":{"remote_engine_id":"`+secret)
+			}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+			prefill := httptest.NewServer(tt.prefill)
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+			var logged []string
+			s.logger = funcr.New(func(prefix, args string) {
+				logged = append(logged, prefix+" "+args)
+			}, funcr.Options{Verbosity: logging.TRACE})
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after a prefill failure")
+			})
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			// Under a server context the reverse proxy panics with
+			// http.ErrAbortHandler when the body copy fails.
+			req = withContextLogger(s, req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})))
+			rw := httptest.NewRecorder()
+			require.NotPanics(t, func() {
+				s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			})
+
+			assert.Equal(t, http.StatusBadGateway, rw.Code)
+			var errBody errorResponse
+			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
+			assert.Equal(t, "BadGateway", errBody.Type)
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+
+			failureLogged := false
+			for _, entry := range logged {
+				assert.NotContains(t, entry, secret)
+				failureLogged = failureLogged || strings.Contains(entry, "prefill request failed")
+			}
+			assert.True(t, failureLogged, "the prefill failure must be logged")
+
+			var prefillSpan sdktrace.ReadOnlySpan
+			for _, span := range spans.Ended() {
+				if span.Name() == "prefill" {
+					prefillSpan = span
+				}
+			}
+			require.NotNil(t, prefillSpan, "the prefill span must end")
+			assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+		})
+	}
+}
+
+func TestHandleNIXLV2SerialInterruptedPrefillErrorRetry(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		cutAttempts  int32
+		wantCode     int
+		wantAttempts int32
+		wantDelta    stageMetrics
+	}{
+		{
+			name:   "cut-off 503 is retried",
+			status: http.StatusServiceUnavailable, cutAttempts: 1,
+			wantCode: http.StatusOK, wantAttempts: 2,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			name:   "cut-off 503 on every attempt exhausts the retries",
+			status: http.StatusServiceUnavailable, cutAttempts: 3,
+			wantCode: http.StatusBadGateway, wantAttempts: 3,
+			wantDelta: stageMetrics{prefillCount: 1, prefillErrors: 1},
+		},
+		{
+			name:   "cut-off 400 is not retried",
+			status: http.StatusBadRequest, cutAttempts: 3,
+			wantCode: http.StatusBadGateway, wantAttempts: 1,
+			wantDelta: stageMetrics{prefillCount: 1, prefillErrors: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if attempts.Add(1) > tt.cutAttempts {
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+					return
+				}
+				// Declaring more than is written makes the server close the
+				// connection after the partial body.
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, `{"error":`)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Millisecond})
+			s.logger = log.Log
+			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
+			rw := httptest.NewRecorder()
+			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+			assert.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			assert.Equal(t, tt.wantAttempts, attempts.Load())
+			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
+// A client that disconnects while the prefill body is copied makes the reverse
+// proxy abort the same way a dropped prefill connection does.
+func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+	release := make(chan struct{})
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"kv_transfer_params":`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer prefill.Close()
+	defer close(release)
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+	var logged []string
+	s.logger = funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: logging.TRACE})
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("decode must not run after the client disconnected")
+	})
+	// The client is cancelled only once the reverse proxy has the prefill
+	// status; an earlier cancel fails the request before the headers instead.
+	prefillProxy, err := s.prefillerProxyHandler(prefillURL.Host)
+	require.NoError(t, err)
+	copying := make(chan struct{})
+	s.prefillerProxies.Add(prefillURL.Host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefillProxy.ServeHTTP(&writeHeaderSignal{ResponseWriter: w, written: copying}, r)
+	}))
+	handled := make(chan struct{})
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handled)
+		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	}))
+	defer sidecar.Close()
+
+	before := snapshotStageMetrics(t)
+	raw, err := json.Marshal(textChatBody())
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions, bytes.NewReader(raw))
+	require.NoError(t, err)
+	go func() {
+		if resp, err := sidecar.Client().Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-copying:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reverse proxy did not receive the prefill status")
+	}
+	cancel()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sidecar handler did not return after the client disconnected")
+	}
+
+	assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
+	for _, entry := range logged {
+		assert.NotContains(t, entry, "prefill request failed")
+	}
+	var prefillSpan sdktrace.ReadOnlySpan
+	for _, span := range spans.Ended() {
+		if span.Name() == "prefill" {
+			prefillSpan = span
+		}
+	}
+	require.NotNil(t, prefillSpan, "the prefill span must end")
+	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+}
+
+// writeHeaderSignal closes written once the final status is written through it.
+type writeHeaderSignal struct {
+	http.ResponseWriter
+	written chan struct{}
+}
+
+func (w *writeHeaderSignal) WriteHeader(statusCode int) {
+	w.ResponseWriter.WriteHeader(statusCode)
+	// The reverse proxy forwards 1xx responses through WriteHeader too.
+	if statusCode >= http.StatusOK {
+		close(w.written)
+	}
+}
+
 func TestChunkedDecodeToolCallingMetrics(t *testing.T) {
 	const fields = `"tools":[{"function":{"parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"none","parallel_tool_calls":false,"response_format":null`
 	for _, route := range []string{"direct", "nixl", "peer", "self", "encoder"} {
@@ -1919,7 +2171,7 @@ func TestHandleNIXLV2SerialToolCallingMetrics(t *testing.T) {
 		{name: "retry success counts fields once", body: chatBody, failPrefill: 2, prefillStatus: 503, wantCode: 200, wantPrefill: 3, wantDecode: 1, wantFields: chatFields},
 		{name: "exhausted retries do not imply field rejection", body: chatBody, failPrefill: 3, prefillStatus: 503, wantCode: 503, wantPrefill: 3, wantFields: chatFields},
 		{name: "generic upstream 400 does not imply field rejection", body: chatBody, failPrefill: 1, prefillStatus: 400, wantCode: 400, wantPrefill: 1, wantFields: chatFields},
-		{name: "invalid prefill response skips decode", body: chatBody, prefillResponse: `not-json`, wantCode: 400, wantPrefill: 1, wantFields: chatFields},
+		{name: "invalid prefill response skips decode", body: chatBody, prefillResponse: `not-json`, wantCode: 502, wantPrefill: 1, wantFields: chatFields},
 		{name: "decode failure does not imply field rejection", body: chatBody, decodeStatus: 500, wantCode: 500, wantPrefill: 1, wantDecode: 1, wantFields: chatFields},
 		{name: "request ID failure sends no request", body: chatBody, requestIDError: true, wantCode: 502},
 		{name: "SSRF denial sends no request", body: chatBody, denyTarget: true, wantCode: 403},
@@ -2436,10 +2688,12 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prefillBodies, decodeBodies := make(chan []byte, 1), make(chan []byte, 1)
 			decodeStarted := make(chan struct{})
+			prefillStarted := make(chan struct{})
 			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, err := io.ReadAll(r.Body)
 				assert.NoError(t, err)
 				prefillBodies <- raw
+				close(prefillStarted)
 				if tt.waitForDecode {
 					select {
 					case <-decodeStarted:
@@ -2474,6 +2728,13 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 				code := tt.decodeCode
 				if code == 0 {
 					code = http.StatusOK
+				}
+				if isHTTPError(code) {
+					select {
+					case <-prefillStarted:
+					case <-r.Context().Done():
+						return
+					}
 				}
 				statusHandler(code, `{"choices":[]}`).ServeHTTP(w, r)
 			})
@@ -2517,6 +2778,11 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 				want[[2]string{string(field), string(status)}] = 1
 			}
 			require.Equal(t, want, delta)
+			if tt.missingReplica {
+				// Prefill can be cancelled before its request reaches the backend.
+				require.Empty(t, decodeBodies)
+				return
+			}
 			if tt.requestIDError || tt.invalidTarget || tt.wantCode == http.StatusBadRequest && tt.prefillCode == 0 && !tt.missingReplica {
 				require.Empty(t, prefillBodies)
 				require.Empty(t, decodeBodies)
@@ -2525,10 +2791,6 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 			var original map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(tt.body), &original))
 			for i, bodies := range []chan []byte{prefillBodies, decodeBodies} {
-				if i == 1 && tt.missingReplica {
-					require.Empty(t, bodies)
-					continue
-				}
 				require.Len(t, bodies, 1)
 				var actual map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(<-bodies, &actual))
@@ -2661,6 +2923,250 @@ func TestHandleNIXLV2SerialFinalizeFailureMetrics(t *testing.T) {
 	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
 
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
+}
+
+func TestHandleNIXLV2ParallelWriteDecodeFailureCancelsPrefill(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		decodeAbort bool
+		wantCode    int
+	}{
+		{name: "decode rejects request", status: http.StatusBadRequest, wantCode: http.StatusBadRequest},
+		{name: "decode rate limits request", status: http.StatusTooManyRequests, wantCode: http.StatusTooManyRequests},
+		{name: "decode unavailable", status: http.StatusServiceUnavailable, wantCode: http.StatusServiceUnavailable},
+		{name: "decode aborts", decodeAbort: true, wantCode: http.StatusBadGateway},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+			prefill := newHeldPrefill(t)
+			prefillURL, err := url.Parse(prefill.server.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{
+				Port:                            "0",
+				DecoderURL:                      prefillURL,
+				KVConnector:                     constants.KVConnectorNIXLV2,
+				MoRIIOWriteMode:                 true,
+				MoRIIOParallelDispatch:          true,
+				MoRIIOParallelDecodeWaitTimeout: 200 * time.Millisecond,
+				MoRIIODecodePodIP:               "127.0.0.1",
+				MoRIIODecodeNotifyPort:          61005,
+				MoRIIODecodeHandshakePort:       6301,
+				MoRIIOPrefillNotifyPort:         61006,
+				MoRIIOPrefillHandshakePort:      6302,
+				MoRIIOTPSize:                    1,
+				MoRIIODPSize:                    1,
+			})
+			var prefillErrorLogged atomic.Bool
+			s.logger = funcr.New(func(_, args string) {
+				if strings.Contains(args, "concurrent-dispatch prefill returned error status") {
+					prefillErrorLogged.Store(true)
+				}
+			}, funcr.Options{})
+			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-prefill.started:
+				case <-r.Context().Done():
+					return
+				}
+				if tt.decodeAbort {
+					panic(http.ErrAbortHandler)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, `{"error":"decode failed"}`)
+			})
+
+			before := snapshotStageMetrics(t)
+			rw := httptest.NewRecorder()
+			req := withContextLogger(s, chatRequest(t, textChatBody()))
+			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+			prefill.requireCancelled(t)
+			assert.False(t, prefillErrorLogged.Load(), "a cancelled prefill must not be logged as a prefill failure")
+			var prefillSpan sdktrace.ReadOnlySpan
+			for _, span := range spans.Ended() {
+				if span.Name() == "prefill" {
+					prefillSpan = span
+				}
+			}
+			require.NotNil(t, prefillSpan, "the prefill span must end")
+			assert.NotEqual(t, codes.Error, prefillSpan.Status().Code, "a cancelled prefill must not be marked as a prefill failure")
+			assert.Equal(t, tt.wantCode, rw.Code)
+			if tt.decodeAbort {
+				assert.Contains(t, rw.Body.String(), "decode aborted")
+			} else {
+				assert.Equal(t, "application/json", rw.Header().Get("Content-Type"))
+				assert.Equal(t, "1", rw.Header().Get("Retry-After"))
+				assert.JSONEq(t, `{"error":"decode failed"}`, rw.Body.String())
+			}
+			assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
+func TestHandleNIXLV2ParallelWritePrefillBodyCopyAbort(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		decodeFails bool
+		wantCode    int
+	}{
+		{name: "decode failure cancels prefill", decodeFails: true, wantCode: http.StatusServiceUnavailable},
+		{name: "prefill disconnects", wantCode: http.StatusBadGateway},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+			release := make(chan struct{})
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"kv_transfer_params":`)
+				w.(http.Flusher).Flush()
+				if tt.decodeFails {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+				}
+			}))
+			defer prefill.Close()
+			defer close(release)
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{
+				Port:                            "0",
+				DecoderURL:                      prefillURL,
+				KVConnector:                     constants.KVConnectorNIXLV2,
+				MoRIIOWriteMode:                 true,
+				MoRIIOParallelDispatch:          true,
+				MoRIIOParallelDecodeWaitTimeout: 5 * time.Second,
+				MoRIIODecodePodIP:               "127.0.0.1",
+			})
+			var prefillAbortLogged atomic.Bool
+			s.logger = funcr.New(func(_, args string) {
+				if strings.Contains(args, "concurrent-dispatch prefill handler aborted") {
+					prefillAbortLogged.Store(true)
+				}
+			}, funcr.Options{})
+			prefillProxy, err := s.prefillerProxyHandler(prefillURL.Host)
+			require.NoError(t, err)
+			copying := make(chan struct{})
+			s.prefillerProxies.Add(prefillURL.Host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				prefillProxy.ServeHTTP(&writeHeaderSignal{ResponseWriter: w, written: copying}, r)
+			}))
+			s.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-copying:
+				case <-r.Context().Done():
+					return
+				}
+				if !tt.decodeFails {
+					<-r.Context().Done()
+					return
+				}
+				statusHandler(http.StatusServiceUnavailable, `{"error":"decode failed"}`).ServeHTTP(w, r)
+			})
+
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			ctx = context.WithValue(ctx, http.ServerContextKey, &http.Server{})
+			req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
+			rw := httptest.NewRecorder()
+			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+			assert.Equal(t, tt.wantCode, rw.Code)
+			assert.Equal(t, !tt.decodeFails, prefillAbortLogged.Load())
+			var prefillSpan sdktrace.ReadOnlySpan
+			for _, span := range spans.Ended() {
+				if span.Name() == "prefill" {
+					prefillSpan = span
+				}
+			}
+			require.NotNil(t, prefillSpan, "the prefill span must end")
+			if tt.decodeFails {
+				assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+				assert.JSONEq(t, `{"error":"decode failed"}`, rw.Body.String())
+			} else {
+				assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+			}
+		})
+	}
+}
+
+func TestHandleNIXLV2ParallelWritePrefillFailureCancelsDecode(t *testing.T) {
+	decodeStarted := make(chan struct{})
+	decode := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(decodeStarted)
+		<-r.Context().Done()
+	}))
+	defer decode.Close()
+	decodeURL, err := url.Parse(decode.URL)
+	require.NoError(t, err)
+
+	prefillBody := `{"error":"prefill overloaded"}`
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-decodeStarted:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		statusHandler(http.StatusTooManyRequests, prefillBody).ServeHTTP(w, r)
+	}))
+	defer prefill.Close()
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{
+		Port:                            "0",
+		DecoderURL:                      decodeURL,
+		KVConnector:                     constants.KVConnectorNIXLV2,
+		MoRIIOWriteMode:                 true,
+		MoRIIOParallelDispatch:          true,
+		MoRIIOParallelDecodeWaitTimeout: time.Second,
+		MoRIIODecodePodIP:               "127.0.0.1",
+		MoRIIODecodeNotifyPort:          61005,
+		MoRIIODecodeHandshakePort:       6301,
+		MoRIIOPrefillNotifyPort:         61006,
+		MoRIIOPrefillHandshakePort:      6302,
+		MoRIIOTPSize:                    1,
+		MoRIIODPSize:                    1,
+	})
+	var held atomic.Bool
+	s.logger = funcr.New(func(_, args string) {
+		if strings.Contains(args, "concurrent-dispatch prefill returned error status") {
+			held.Store(true)
+			// Keep prefillDone open while the cancelled decode finishes.
+			time.Sleep(100 * time.Millisecond)
+		}
+	}, funcr.Options{})
+	s.decoderProxy = s.createDecoderProxyHandler(decodeURL, false)
+
+	before := snapshotStageMetrics(t)
+	rw := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
+	s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+
+	require.True(t, held.Load(), "prefill error log hook never ran; the dispatchCtx guard is not exercised")
+	assert.Equal(t, http.StatusTooManyRequests, rw.Code)
+	assert.Equal(t, "application/json", rw.Header().Get("Content-Type"))
+	assert.Equal(t, "1", rw.Header().Get("Retry-After"))
+	assert.Equal(t, prefillBody, rw.Body.String())
+	assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
 }
 
 func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
