@@ -134,7 +134,7 @@ type sseChoice struct {
 //
 // Only the fields a non-streaming reply needs are folded: text content or token
 // ids, role, finish_reason, and usage. A chat delta's tool_calls, function_call,
-// logprobs, and reasoning_content are not reassembled, nor are a generate
+// logprobs, and reasoning are not reassembled, nor are a generate
 // choice's logprobs. The decode step leaves force-streaming off for a request that
 // declares such a field (see forceStreamLossy); a server-side default the request
 // does not declare is caught on the frame instead (lossyFrame), and both take the
@@ -390,7 +390,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 				acc.content.WriteString(content)
 				r.contentBytes += int64(len(content))
 			}
-			// The fold keeps only role and content. Any other key (reasoning_content,
+			// The fold keeps only role and content. Any other key (reasoning,
 			// tool_calls, refusal, audio, annotations) would be dropped, so flag the
 			// reply lossy and let the scan fall back to the pass-through, which keeps
 			// it. This catches a server-side default forceStreamLossy cannot see in
@@ -422,7 +422,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 
 // deltaHasUnfoldableField reports whether a chat delta carries a field the fold
 // drops. Only role and content are folded, so any other key with a non-null value
-// is unfoldable (reasoning_content, tool_calls, refusal, audio, annotations). A
+// is unfoldable (reasoning, tool_calls, refusal, audio, annotations). A
 // null-valued key is ignored, since SDKs serialize an absent optional that way and
 // it carries no data to lose.
 func deltaHasUnfoldableField(delta map[string]any) bool {

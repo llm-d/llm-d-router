@@ -78,7 +78,8 @@ func TestDeltaHasUnfoldableField(t *testing.T) {
 		{"content only", map[string]any{"content": "hi"}, false},
 		{"role and content", map[string]any{"role": "assistant", "content": "hi"}, false},
 		{"null tool_calls ignored", map[string]any{"content": "hi", "tool_calls": nil}, false},
-		{"reasoning_content", map[string]any{"reasoning_content": "let me think"}, true},
+		{"reasoning", map[string]any{"reasoning": "let me think"}, true},
+		{"reasoning_content (older vLLM)", map[string]any{"reasoning_content": "let me think"}, true},
 		{"tool_calls", map[string]any{"content": "", "tool_calls": []any{map[string]any{}}}, true},
 		{"refusal", map[string]any{"refusal": "no"}, true},
 		{"annotations", map[string]any{"content": "x", "annotations": []any{}}, true},
@@ -91,15 +92,15 @@ func TestDeltaHasUnfoldableField(t *testing.T) {
 }
 
 // TestSSEReassemble_FlagsLossyDelta verifies the reassembler flags a chat delta
-// carrying a field beyond role and content (here reasoning_content, a server-side
+// carrying a field beyond role and content (here reasoning, a server-side
 // default), so the scan can fall back rather than drop it.
 func TestSSEReassemble_FlagsLossyDelta(t *testing.T) {
 	r := newSSEReassembler(sseShapeChat, 0)
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{"role":"assistant"}}]}`))
 	require.False(t, r.lossyFrame, "a role-only delta is not lossy")
 
-	r.add(frame(t, `{"choices":[{"index":0,"delta":{"reasoning_content":"let me think"}}]}`))
-	require.True(t, r.lossyFrame, "a reasoning_content delta must flag the reply lossy")
+	r.add(frame(t, `{"choices":[{"index":0,"delta":{"reasoning":"let me think"}}]}`))
+	require.True(t, r.lossyFrame, "a reasoning delta must flag the reply lossy")
 }
 
 // TestSSEReassemble_IgnoresMalformedFrameParts verifies the reassembler skips a

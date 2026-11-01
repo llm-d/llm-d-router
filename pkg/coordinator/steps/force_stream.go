@@ -113,7 +113,7 @@ var errForceStreamUnreadable = errors.New("force-stream: upstream stream unreada
 var errForceStreamTruncated = errors.New("force-stream: upstream stream ended before a terminal marker")
 
 // errForceStreamLossyFrame marks a chat or text stream whose delta carried a field
-// the reassembler does not fold (anything beyond role and content: reasoning_content,
+// the reassembler does not fold (anything beyond role and content: reasoning,
 // tool_calls, refusal, audio, annotations). forceStreamLossy diverts a request that
 // declares such a feature up front, but a server-side default (a reasoning parser, a
 // template) emits these with no request-side signal. Detecting it on the frame falls
@@ -435,8 +435,8 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 			return true
 		}
 	}
-	// vLLM emits chat reasoning as delta.reasoning_content, folded into
-	// message.reasoning_content, which the reassembler drops. The mode is
+	// vLLM emits chat reasoning as delta.reasoning, folded into
+	// message.reasoning, which the reassembler drops. The mode is
 	// activated by chat_template_kwargs.enable_thinking or by reasoning_effort, so
 	// a chat request carrying either keeps its reasoning via the pass-through.
 	if shape == sseShapeChat {

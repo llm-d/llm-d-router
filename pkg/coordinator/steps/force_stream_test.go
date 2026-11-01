@@ -159,7 +159,7 @@ func TestForceStreamLossy(t *testing.T) {
 	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": 0}))
 	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": float64(0)}))
 
-	// vLLM chat reasoning (delta.reasoning_content) is not folded, so a chat
+	// vLLM chat reasoning (delta.reasoning) is not folded, so a chat
 	// request that activates thinking via chat_template_kwargs.enable_thinking or
 	// reasoning_effort is lossy and takes the pass-through.
 	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": true}}))
@@ -171,7 +171,7 @@ func TestForceStreamLossy(t *testing.T) {
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"logprobs": false}))
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}))
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"reasoning_effort": ""}))
-	// Reasoning is a chat concept; the text shape has no reasoning_content to drop.
+	// Reasoning is a chat concept; the text shape has no reasoning to drop.
 	require.False(t, forceStreamLossy(sseShapeText, map[string]any{"reasoning_effort": "high"}))
 
 	// The responses shape emits the upstream object verbatim, so it is never lossy
@@ -1107,11 +1107,11 @@ func TestForceStream_LossyRequest_PassThrough(t *testing.T) {
 
 // TestForceStream_ServerDefaultReasoning_FallsBack covers the frame-level lossy
 // gate: a plain chat request (no tools, no reasoning signal) whose pod streams
-// reasoning_content by default. forceStreamLossy cannot see this in the request, so
+// reasoning by default. forceStreamLossy cannot see this in the request, so
 // the forced attempt starts, detects the unfoldable delta mid-stream, and falls back
-// to the pass-through, which preserves reasoning_content. Counted fallback_unsupported.
+// to the pass-through, which preserves reasoning. Counted fallback_unsupported.
 func TestForceStream_ServerDefaultReasoning_FallsBack(t *testing.T) {
-	passthroughReply := `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Paris","reasoning_content":"let me think"}}]}`
+	passthroughReply := `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Paris","reasoning":"let me think"}}]}`
 	var streams []any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -1125,7 +1125,7 @@ func TestForceStream_ServerDefaultReasoning_FallsBack(t *testing.T) {
 			// vLLM emits reasoning before content; the first reasoning delta flags the
 			// reply lossy before anything is written to the client.
 			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n")
-			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"let me think\"}}]}\n\n")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"let me think\"}}]}\n\n")
 			flusher.Flush()
 			return
 		}
@@ -1153,7 +1153,7 @@ func TestForceStream_ServerDefaultReasoning_FallsBack(t *testing.T) {
 	result := recorder.Result()
 	require.Equal(t, http.StatusOK, result.StatusCode)
 	body, _ := io.ReadAll(result.Body)
-	require.JSONEq(t, passthroughReply, string(body), "the pass-through reply keeps reasoning_content")
+	require.JSONEq(t, passthroughReply, string(body), "the pass-through reply keeps reasoning")
 	require.Equal(t, []any{true, false}, streams, "a forced attempt (stream:true) then a pass-through (stream:false)")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
@@ -1546,7 +1546,7 @@ func TestForceStream_SpentHandoff_SuppressesFallback(t *testing.T) {
 
 // TestForceStream_LossyFrameSpentHandoff_SuppressesFallback covers the intersection
 // of the frame-level lossy gate and the spent-handoff suppression: a plain chat
-// request whose pod streams reasoning_content by default, on a NIXL path whose block
+// request whose pod streams reasoning by default, on a NIXL path whose block
 // handoff the forced attempt already consumed. The lossy field is detected
 // mid-stream, but the fallback cannot replay the spent handoff, so the request fails
 // cleanly (single upstream call) rather than replaying or dropping reasoning.
@@ -1557,12 +1557,12 @@ func TestForceStream_LossyFrameSpentHandoff_SuppressesFallback(t *testing.T) {
 		var parsed map[string]any
 		_ = json.Unmarshal(raw, &parsed)
 		streams = append(streams, parsed["stream"])
-		// The forced attempt streams a reasoning_content delta (a server-side default);
+		// The forced attempt streams a reasoning delta (a server-side default);
 		// there must be no second call, since the handoff is spent.
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"let me think\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"let me think\"}}]}\n\n")
 		flusher.Flush()
 	}))
 	defer server.Close()
