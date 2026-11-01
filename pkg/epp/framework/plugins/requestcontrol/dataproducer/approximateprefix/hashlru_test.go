@@ -20,6 +20,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"strconv"
 	"testing"
 	"unsafe"
@@ -265,5 +266,65 @@ func BenchmarkHashLRURetainedHeap(b *testing.B) {
 				})
 			})
 		})
+	}
+}
+
+// keysByRecency returns the cached hashes from most to least recent.
+func keysByRecency(c *hashLRU) []blockHash {
+	var keys []blockHash
+	for i := c.head; i != nodeNil; i = c.nodes[i].next {
+		keys = append(keys, c.nodes[i].key)
+	}
+	return keys
+}
+
+func TestHashLRUResizeGrowKeepsEntries(t *testing.T) {
+	c := newHashLRU(3)
+	for k := range blockHash(5) {
+		c.Add(k) // 2, 3, 4 remain
+	}
+	c.Resize(5)
+	c.Add(5)
+	c.Add(6)
+	if got, want := keysByRecency(c), []blockHash{6, 5, 4, 3, 2}; !slices.Equal(got, want) {
+		t.Fatalf("after grow: %v, want %v", got, want)
+	}
+	c.Add(7)
+	if c.Contains(2) || c.Len() != 5 {
+		t.Fatalf("grown cache should evict its oldest entry at the new capacity: len %d contains(2) %v", c.Len(), c.Contains(2))
+	}
+}
+
+func TestHashLRUResizeShrinkKeepsMostRecent(t *testing.T) {
+	c := newHashLRU(5)
+	for k := range blockHash(5) {
+		c.Add(k)
+	}
+	c.Add(1) // refresh: recency is 1, 4, 3, 2, 0
+	c.Resize(3)
+	if got, want := keysByRecency(c), []blockHash{1, 4, 3}; !slices.Equal(got, want) {
+		t.Fatalf("after shrink: %v, want %v", got, want)
+	}
+	if len(c.nodes) != 3 {
+		t.Fatalf("shrink should compact nodes: %d, want 3", len(c.nodes))
+	}
+	c.Add(9)
+	if got, want := keysByRecency(c), []blockHash{9, 1, 4}; !slices.Equal(got, want) {
+		t.Fatalf("add after shrink: %v, want %v", got, want)
+	}
+}
+
+func TestHashLRUResizeShrinkAboveLenOnlyLowersLimit(t *testing.T) {
+	c := newHashLRU(100)
+	c.Add(1)
+	c.Add(2)
+	c.Resize(3)
+	if c.Cap() != 3 || c.Len() != 2 {
+		t.Fatalf("cap %d len %d, want 3 and 2", c.Cap(), c.Len())
+	}
+	c.Add(3)
+	c.Add(4)
+	if got, want := keysByRecency(c), []blockHash{4, 3, 2}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }
