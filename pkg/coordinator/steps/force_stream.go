@@ -390,7 +390,25 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 		}
 		return false
 	}
+	if shape == sseShapeGenerate {
+		// The generate fold keeps only token ids and finish reasons, so a
+		// sampling_params asking for logprobs or prompt_logprobs takes the
+		// pass-through to keep them. Both are counts where 0 (the vLLM default)
+		// requests none, so only a positive or unreadable value is lossy.
+		if sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any); ok {
+			for _, field := range []string{reqcommon.FieldLogprobs, reqcommon.FieldPromptLogprobs} {
+				if v, set := reqcommon.FieldValue(sp, field); set {
+					if n, err := reqcommon.NonNegativeInt(v); err != nil || n > 0 {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
 	if shape != sseShapeChat && shape != sseShapeText {
+		return false
+	}
 		return false
 	}
 	// Resolve each field through reqcommon.FieldValue, not a bare type assertion:
@@ -448,6 +466,9 @@ func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([
 		return nil, nil, fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
 	}
 	headers := gatewayHeaders(reqCtx, gateway.PhaseDecode)
+	if reqCtx.PeerTopology != "" {
+		headers[reqcommon.PeerTopologyHeaderKey] = reqCtx.PeerTopology
+	}
 	return bodyBytes, headers, nil
 }
 
