@@ -232,10 +232,10 @@ type PrefillDrain struct {
 	release func()
 	cancel  func()
 
-	outcomeOnce  sync.Once
-	completeOnce sync.Once
+	outcomeOnce sync.Once
 }
 
+// NewPrefillDrain requires non-nil release and cancel callbacks.
 func NewPrefillDrain(release, cancel func()) *PrefillDrain {
 	return &PrefillDrain{done: make(chan struct{}), release: release, cancel: cancel}
 }
@@ -243,34 +243,21 @@ func NewPrefillDrain(release, cancel func()) *PrefillDrain {
 // Done is closed when the drain ends.
 func (d *PrefillDrain) Done() <-chan struct{} { return d.done }
 
-// Err blocks until the drain ends and returns its result.
-func (d *PrefillDrain) Err() error {
-	<-d.done
-	return d.err
-}
+// Err returns the drain result. Callers must first receive from Done.
+func (d *PrefillDrain) Err() error { return d.err }
 
 func (d *PrefillDrain) Release() {
-	d.outcomeOnce.Do(func() {
-		if d.release != nil {
-			d.release()
-		}
-	})
+	d.outcomeOnce.Do(d.release)
 }
 
 func (d *PrefillDrain) Cancel() {
-	d.outcomeOnce.Do(func() {
-		if d.cancel != nil {
-			d.cancel()
-		}
-	})
+	d.outcomeOnce.Do(d.cancel)
 }
 
-// Complete records the drain result. The first call wins.
+// Complete records the drain result. The drain worker must call it exactly once.
 func (d *PrefillDrain) Complete(err error) {
-	d.completeOnce.Do(func() {
-		d.err = err
-		close(d.done)
-	})
+	d.err = err
+	close(d.done)
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it
