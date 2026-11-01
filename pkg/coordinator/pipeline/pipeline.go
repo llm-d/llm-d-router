@@ -218,7 +218,12 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		name := step.Name()
 		started[name] = true
 		logger.V(logutil.TRACE).Info("step starting", "step", name)
-		if err := p.runStep(ctx, reqCtx, step, idx, timings); err != nil {
+		err := p.runStep(ctx, reqCtx, step, idx, timings)
+		if name == "prefill" && reqCtx.PrefillDrain != nil {
+			defer func() { reqCtx.PrefillDrain = nil }()
+			defer reqCtx.PrefillDrain.Cancel()
+		}
+		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
 				// Clean early exit (e.g. conditional-decode cache hit); not an error.
 				executed[name] = true

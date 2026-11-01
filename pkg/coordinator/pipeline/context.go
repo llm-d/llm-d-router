@@ -19,6 +19,7 @@ package pipeline
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -46,6 +47,7 @@ var internalForwardingHeaders = map[string]bool{
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
+	routing.PrefillEndpointHeader:         true,
 	routing.PreferHeader:                  true,
 }
 
@@ -178,9 +180,12 @@ type RequestContext struct {
 	// ec-shared-storage.
 	ECTransferParams []map[string]any
 	// KVTransferParams carries the prefill pod's KV-cache transfer hints to the
-	// decode step. Populated by PrefillStep from the prefill response; consumed
-	// by the KV connector when building the decode request.
+	// decode step. Populated by PrefillStep; consumed by the KV connector when
+	// building the decode request.
 	KVTransferParams map[string]any
+	// PrefillDrain tracks the background drain of a streaming prefill
+	// response that overlaps later steps. Populated by PrefillStep.
+	PrefillDrain *PrefillDrain
 	// PrefillCachedTokens is the prompt-cache hit count the prefill worker
 	// reported, read from the details object its route documents:
 	// usage.prompt_tokens_details.cached_tokens, or
@@ -213,6 +218,41 @@ type RequestContext struct {
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+}
+
+// PrefillDrain tracks a streaming prefill response until its reader finishes.
+type PrefillDrain struct {
+	done    chan struct{}
+	err     error
+	release func()
+	cancel  func()
+
+	outcomeOnce sync.Once
+}
+
+// NewPrefillDrain requires non-nil release and cancel callbacks.
+func NewPrefillDrain(release, cancel func()) *PrefillDrain {
+	return &PrefillDrain{done: make(chan struct{}), release: release, cancel: cancel}
+}
+
+// Done is closed when the drain ends.
+func (d *PrefillDrain) Done() <-chan struct{} { return d.done }
+
+// Err returns the drain result. Callers must first receive from Done.
+func (d *PrefillDrain) Err() error { return d.err }
+
+func (d *PrefillDrain) Release() {
+	d.outcomeOnce.Do(d.release)
+}
+
+func (d *PrefillDrain) Cancel() {
+	d.outcomeOnce.Do(d.cancel)
+}
+
+// Complete records the drain result. The drain worker must call it exactly once.
+func (d *PrefillDrain) Complete(err error) {
+	d.err = err
+	close(d.done)
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

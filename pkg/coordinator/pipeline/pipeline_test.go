@@ -182,8 +182,19 @@ func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
 
 func TestPipeline_AbortsOnError(t *testing.T) {
 	executed := map[string]bool{}
+	released := false
+	cancelled := false
+	reqCtx := &RequestContext{}
 	steps := []Step{
+		&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
+			rc.PrefillDrain = NewPrefillDrain(
+				func() { released = true },
+				func() { cancelled = true },
+			)
+			return nil
+		}},
 		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
+			require.False(t, cancelled)
 			executed["a"] = true
 			return errors.New("step a failed")
 		}},
@@ -194,7 +205,10 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	}
 
 	p := New(steps)
-	err := p.Execute(context.Background(), &RequestContext{})
+	err := p.Execute(context.Background(), reqCtx)
+	require.False(t, released)
+	require.True(t, cancelled)
+	require.Nil(t, reqCtx.PrefillDrain)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -204,6 +218,67 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	if executed["b"] {
 		t.Fatal("step b should NOT have executed")
 	}
+}
+
+func TestPipeline_PrefillDrainOutcome(t *testing.T) {
+	for _, outcome := range []string{"panic", "early exit", "release"} {
+		t.Run(outcome, func(t *testing.T) {
+			cancelled := false
+			released := false
+			reqCtx := &RequestContext{}
+			p := New([]Step{
+				&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
+					rc.PrefillDrain = NewPrefillDrain(
+						func() { released = true },
+						func() { cancelled = true },
+					)
+					return nil
+				}},
+				&mockStep{name: "decode", fn: func(_ context.Context, rc *RequestContext) error {
+					require.False(t, cancelled)
+					switch outcome {
+					case "panic":
+						panic(http.ErrAbortHandler)
+					case "early exit":
+						return ErrPipelineDone
+					default:
+						rc.PrefillDrain.Release()
+						rc.PrefillDrain = nil
+						return nil
+					}
+				}},
+			})
+			if outcome == "panic" {
+				require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+					_ = p.Execute(context.Background(), reqCtx)
+				})
+			} else {
+				require.NoError(t, p.Execute(context.Background(), reqCtx))
+			}
+			require.Equal(t, outcome == "release", released)
+			require.Equal(t, outcome != "release", cancelled)
+			require.Nil(t, reqCtx.PrefillDrain)
+		})
+	}
+}
+
+func TestPrefillDrain_OutcomeRunsOnce(t *testing.T) {
+	released := 0
+	cancelled := 0
+	drain := NewPrefillDrain(
+		func() { released++ },
+		func() { cancelled++ },
+	)
+	drain.Release()
+	drain.Cancel()
+	drain.Release()
+	require.Equal(t, 1, released)
+	require.Equal(t, 0, cancelled)
+
+	want := errors.New("prefill drain failed")
+	drain.Complete(want)
+	<-drain.Done()
+	require.ErrorIs(t, drain.Err(), want)
 }
 
 func TestPipeline_StopsOnErrPipelineDone(t *testing.T) {
