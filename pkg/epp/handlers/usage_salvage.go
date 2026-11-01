@@ -68,8 +68,9 @@ func scanDroppedSSEUsage(data []byte) *fwkrh.Usage {
 // usageSalvager scans the byte stream of one dropped SSE line as it arrives,
 // collecting the value of every "usage" key that maps to a JSON object. Only
 // state that spans chunks is retained: a partial string being read (as a
-// key candidate) and a usage object being collected. Everything else is
-// processed byte by byte, so the memory overhead stays flat.
+// key candidate) and a usage object being collected. A usage value over
+// maxSalvageObjectBytes is discarded and skipped to its closing brace.
+// Everything else is processed byte by byte, so the memory overhead stays flat.
 type usageSalvager struct {
 	state       int // one of the states below
 	escape      bool
@@ -85,8 +86,9 @@ const (
 	scanOutsideString = iota // outside a JSON string
 	scanInString             // inside a string, accumulating it
 	scanAfterUsageKey        // a "usage" key just closed, expecting ':'
-	scanAfterColon           // the colon was seen, expecting '{'
+	scanAfterColon           // the colon was seen, expecting '{' or a non-object value
 	scanCollect              // inside the usage object
+	scanSkipObject           // usage value exceeded the cap; skip to its closing brace
 )
 
 // feed advances the scan by the given bytes of the dropped line.
@@ -136,6 +138,14 @@ func (s *usageSalvager) step(c byte) {
 			s.obj = append(s.obj, c)
 			s.objInString, s.objEscape, s.objDepth = false, false, 1
 			s.state = scanCollect
+		case '"':
+			// A string-valued "usage" key is not the token block. Enter the
+			// string so its closing quote stays in phase; otherwise that quote
+			// is read as the start of the next string and the real usage object
+			// later in the line is missed.
+			s.str = s.str[:0]
+			s.escape = false
+			s.state = scanInString
 		case ' ', '\t', '\n', '\r':
 			// keep waiting for the object
 		default:
@@ -143,28 +153,43 @@ func (s *usageSalvager) step(c byte) {
 		}
 	case scanCollect:
 		s.obj = append(s.obj, c)
-		switch {
-		case s.objEscape:
-			s.objEscape = false
-		case s.objInString && c == '\\':
-			s.objEscape = true
-		case c == '"':
-			s.objInString = !s.objInString
-		case !s.objInString && c == '{':
-			s.objDepth++
-		case !s.objInString && c == '}':
-			s.objDepth--
-			if s.objDepth == 0 {
-				if usage := parseSalvagedUsage(s.obj); usage != nil {
-					s.last = usage
-				}
-				s.state = scanOutsideString
+		s.trackUsageValue(c)
+		if s.objDepth == 0 {
+			if usage := parseSalvagedUsage(s.obj); usage != nil {
+				s.last = usage
 			}
+			s.state = scanOutsideString
+		} else if len(s.obj) > maxSalvageObjectBytes {
+			// Not a token block. Drop the buffer and skip the rest of this
+			// value with string and depth tracking still in phase, so a later
+			// usage object on the same line can still match.
+			s.obj = nil
+			s.state = scanSkipObject
 		}
-		if s.state == scanCollect && len(s.obj) > maxSalvageObjectBytes {
-			// Not a token block; stop collecting and keep scanning.
+	case scanSkipObject:
+		s.trackUsageValue(c)
+		if s.objDepth == 0 {
+			s.objInString = false
+			s.objEscape = false
 			s.state = scanOutsideString
 		}
+	}
+}
+
+// trackUsageValue updates string and brace depth for one byte inside a usage
+// value. The caller owns when the value ends.
+func (s *usageSalvager) trackUsageValue(c byte) {
+	switch {
+	case s.objEscape:
+		s.objEscape = false
+	case s.objInString && c == '\\':
+		s.objEscape = true
+	case c == '"':
+		s.objInString = !s.objInString
+	case !s.objInString && c == '{':
+		s.objDepth++
+	case !s.objInString && c == '}':
+		s.objDepth--
 	}
 }
 
@@ -220,6 +245,13 @@ func parseSalvagedUsage(obj []byte) *fwkrh.Usage {
 	}
 	if f, ok := details["cached_tokens"].(float64); ok {
 		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: int(f)}
+	}
+	// Anthropic reports the cache read at the root of the usage object.
+	// CachedTokens counts that read inside PromptTokens, matching applyInputTokens.
+	if usage.PromptTokenDetails == nil {
+		if f, ok := fields["cache_read_input_tokens"].(float64); ok && int(f) != 0 {
+			usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: int(f)}
+		}
 	}
 	return usage
 }
