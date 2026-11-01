@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -357,4 +358,24 @@ func isRetryableStatus(statusCode int) bool {
 // headers and status, so there is no recovery action for a write failure.
 func WriteAll(w io.Writer, b []byte) {
 	_, _ = w.Write(b)
+}
+
+// redirectEncodedInferencePath answers a POST whose percent-encoded path
+// decodes to an inference API path with a 307 to the decoded path. EPP picks its
+// request parser from the encoded path and ServeMux matches it segment by
+// segment, so the two can classify such a request differently. The redirect
+// brings the client back through EPP with the clean path, as ServeMux does for
+// repeated slashes and dot segments. Only POST is served on these paths, so
+// other methods pass through.
+func redirectEncodedInferencePath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.RawPath != "" {
+			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
