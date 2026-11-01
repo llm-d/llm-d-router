@@ -754,6 +754,22 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name: "message_delta placeholder zero keeps the earlier cache read",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":2000}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     30,
+					CompletionTokens: 15,
+					TotalTokens:      45,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 2000,
+					},
+				},
+				StreamedEvents: 2,
+			},
+		},
+		{
 			name:  "message_delta cache tokens",
 			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":50,\"cache_read_input_tokens\":100000,\"cache_creation_input_tokens\":248,\"output_tokens\":10}}"),
 			want: &fwkrh.ParsedResponse{
