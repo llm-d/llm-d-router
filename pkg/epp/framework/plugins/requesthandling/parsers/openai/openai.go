@@ -219,13 +219,12 @@ func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 
 // RewriteModelName writes the resolved model into the request payload map.
 func (p *OpenAIParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	switch m := payload.(type) {
-	case fwkrh.PayloadMap:
-		m[reqcommon.FieldModel] = model
-		return m, nil
-	default:
+	m, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
 		return payload, nil
 	}
+	m[reqcommon.FieldModel] = model
+	return m, nil
 }
 
 // RewritePriority removes any client-supplied priority from the
