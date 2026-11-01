@@ -101,23 +101,21 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	}
 }
 
-func TestCompletionTokenBatchesUseRenderedTokens(t *testing.T) {
+func TestCompletionTokenBatchesUseClientTokens(t *testing.T) {
 	const raw = ` {"model":"m","prompt":[[1,2,3],[4,5,6]],"truncate_prompt_tokens":2,"cache_salt":"tenant-a"} `
 	parsed, err := openai.NewOpenAIParser().ParseRequest(context.Background(), []byte(raw), map[string]string{":path": "/v1/completions"})
 	require.NoError(t, err)
 	require.Nil(t, parsed.Body.TokenizedRequest)
+	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/completions/render", r.URL.Path)
-		body, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		require.Equal(t, raw, string(body))
-		_, _ = io.WriteString(w, `[{"token_ids":[2,3]},{"token_ids":[5,6]}]`)
+		calls++
 	}))
 	defer srv.Close()
 	req := &scheduling.InferenceRequest{Body: parsed.Body}
 	require.NoError(t, newTestPlugin(newHTTPRenderer(t, srv)).Produce(context.Background(), req, nil))
+	require.Zero(t, calls)
 	require.Equal(t, &fwkrh.TokenizedRequest{
-		Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{2, 3}}, {TokenIDs: []uint32{5, 6}}},
+		Prompts:   []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}, {TokenIDs: []uint32{4, 5, 6}}},
 		CacheSalt: "tenant-a",
 	}, req.Body.TokenizedRequest)
 	require.Equal(t, fwkrh.RawPayload(raw), req.Body.WirePayload())
