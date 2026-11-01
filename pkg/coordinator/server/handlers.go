@@ -132,9 +132,22 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
-	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
+	}
+	if v, present := parsed[reqcommon.FieldStream]; present {
+		s, isBool := v.(bool)
+		if !isBool {
+			// A non-bool stream is re-marshalled into the worker body unchanged,
+			// and a worker that coerces it to true would stream while the
+			// coordinator ran the request as non-streaming (write deadline kept,
+			// whole-document usage rewrite). Reject it like the other field
+			// parse failures.
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "stream must be a boolean")
+			return
+		}
+		stream = s
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
