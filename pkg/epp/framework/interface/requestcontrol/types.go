@@ -72,6 +72,8 @@ type Response struct {
 	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
+	// Completion is set only on the end-of-stream call; see requesthandling.ParsedResponse.
+	Completion *requesthandling.Completion
 	// DynamicMetadata is a map of metadata that can be passed to the Envoy. It is populated into the dynamic
 	// metadata when processing ProcessingResponse_RequestHeaders.
 	DynamicMetadata *structpb.Struct

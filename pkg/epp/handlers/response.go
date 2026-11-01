@@ -98,6 +98,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
 	}
+	if endOfStream && parsedResp != nil && reqCtx.responseStatusCode == "" {
+		reqCtx.Completion = parsedResp.Completion
+	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
 		// usage on more than one chunk would otherwise be observed once per chunk.

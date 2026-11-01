@@ -2540,3 +2540,39 @@ func TestOpenAIParser_ParseDecisionsResponse(t *testing.T) {
 		t.Errorf("Usage mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestOpenAIParser_ParseResponse_Completion(t *testing.T) {
+	parser := NewOpenAIParser()
+	body := func(choices string) []byte {
+		return []byte(`{"object":"text_completion","choices":` + choices + `,"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	}
+	tests := []struct {
+		name string
+		body []byte
+		want *fwkrh.Completion
+	}{
+		{name: "stop", body: body(`[{"index":0,"text":"hello","finish_reason":"stop"}]`), want: &fwkrh.Completion{Text: "hello", FinishReason: "stop"}},
+		{name: "length", body: body(`[{"index":0,"text":"partial","finish_reason":"length"}]`), want: &fwkrh.Completion{Text: "partial", FinishReason: "length"}},
+		{name: "several choices", body: body(`[{"index":0,"text":"a","finish_reason":"stop"},{"index":1,"text":"b","finish_reason":"stop"}]`)},
+		{name: "unfinished choice", body: body(`[{"index":0,"text":"a","finish_reason":null}]`)},
+		{name: "aborted choice", body: body(`[{"index":0,"text":"a","finish_reason":"abort"}]`)},
+		{name: "no text", body: body(`[{"index":0,"finish_reason":"stop"}]`)},
+		{name: "chat completion", body: []byte(`{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"text_completion"},"finish_reason":"stop"}]}`)},
+		{name: "error body", body: []byte(`{"object":"error","message":"text_completion failed"}`)},
+		{
+			name: "body over the size limit",
+			body: body(`[{"index":0,"text":"` + strings.Repeat("a", maxCompletionResponseBytes) + `","finish_reason":"stop"}]`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), tt.body, nil, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got.Completion); diff != "" {
+				t.Errorf("Completion mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

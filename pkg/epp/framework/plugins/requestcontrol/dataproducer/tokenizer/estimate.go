@@ -210,13 +210,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           fwkrh.PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
-		tokens := packBytes(raw)
+		tokens := fwkrh.PackBytes(raw)
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
 			"messageCount", len(body.Messages.Messages),
 			"rawBytes", len(raw),
@@ -232,7 +232,7 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if body.Responses != nil {
 		raw, features := b.responsesBytes(body.Responses)
 		return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           fwkrh.PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
@@ -245,13 +245,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrh.InferenceReque
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
+	return &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: fwkrh.PackBytes(raw)}}}, nil
 }
 
 func estimateMultiStringCompletions(req *fwkrh.CompletionsRequest) (*fwkrh.TokenizedRequest, error) {
 	prompts := make([]fwkrh.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
-		ids := packBytes([]byte(s))
+		ids := fwkrh.PackBytes([]byte(s))
 		prompts = append(prompts, fwkrh.PromptTokens{TokenIDs: ids})
 	}
 	return &fwkrh.TokenizedRequest{Prompts: prompts}, nil
@@ -592,20 +592,6 @@ func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality reqc
 		Length:   count,
 	})
 	return out, features
-}
-
-// packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
-// Reinterpreting them reproduces the input, so locality keys are unchanged.
-func packBytes(raw []byte) []uint32 {
-	if len(raw) == 0 {
-		return nil
-	}
-	raw = align(raw)
-	out := make([]uint32, len(raw)/fwkrh.BytesPerToken)
-	for i := range out {
-		out[i] = binary.LittleEndian.Uint32(raw[i*fwkrh.BytesPerToken:])
-	}
-	return out
 }
 
 // align zero-pads b up to a fwkrh.BytesPerToken boundary.

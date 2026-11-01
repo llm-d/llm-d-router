@@ -60,6 +60,13 @@ const (
 
 	octetStreamType = "application/octet-stream"
 
+	textCompletionObject = "text_completion"
+	finishReasonStop     = "stop"
+	finishReasonLength   = "length"
+	// maxCompletionResponseBytes bounds the non-streamed completions body whose text is
+	// returned in ParsedResponse.Completion. Larger bodies are not decoded for text.
+	maxCompletionResponseBytes = 1 << 20
+
 	// Text to speech api response format:
 	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
 	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"  //#nosec G101 -- HTTP header name, not a credential
@@ -258,7 +265,30 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{Usage: usage, Completion: extractCompletion(body)}, nil
+}
+
+// extractCompletion returns the text of a completions response with exactly one choice
+// that finished with "stop" or "length", or nil.
+func extractCompletion(body []byte) *fwkrh.Completion {
+	if len(body) > maxCompletionResponseBytes || !bytes.Contains(body, []byte(textCompletionObject)) {
+		return nil
+	}
+	var resp struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Text         *string `json:"text"`
+			FinishReason string  `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Object != textCompletionObject || len(resp.Choices) != 1 {
+		return nil
+	}
+	choice := resp.Choices[0]
+	if choice.Text == nil || (choice.FinishReason != finishReasonStop && choice.FinishReason != finishReasonLength) {
+		return nil
+	}
+	return &fwkrh.Completion{Text: *choice.Text, FinishReason: choice.FinishReason}
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {

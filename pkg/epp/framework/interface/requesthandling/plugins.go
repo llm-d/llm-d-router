@@ -130,4 +130,14 @@ type ParsedResponse struct {
 	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
 	// and keep-alive data lines skew it further).
 	StreamedEvents int
+	// Completion is the generated text of a non-streamed /v1/completions response with
+	// exactly one choice that finished with "stop" or "length". Nil otherwise, including
+	// when the response body exceeds the parser's size limit.
+	Completion *Completion
+}
+
+// Completion is the text generated for a single-choice completions response.
+type Completion struct {
+	Text         string
+	FinishReason string
 }

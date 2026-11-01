@@ -37,6 +37,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,7 @@ import (
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
@@ -2846,6 +2848,82 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 	}
 }
 
+// TestDirector_ApproxPrefixContinuationStateOnPreRequestFailure runs the
+// approximate prefix producer, which keeps continuation state past its own
+// PreRequest, ahead of a PreRequest plugin that fails.
+func TestDirector_ApproxPrefixContinuationStateOnPreRequestFailure(t *testing.T) {
+	scheduleResult := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				Address: "192.168.1.100",
+				Port:    "8000",
+				ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+			}, fwkdl.NewMetrics(), fwkdl.NewAttributes())}},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		preRequestErr error
+		wantTracked   bool
+	}{
+		{name: "later PreRequest plugin fails", preRequestErr: errors.New("pre request failed")},
+		{name: "PreRequest succeeds", wantTracked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, ctx := newSinglePodDirector(t, scheduleResult)
+			handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
+			tp, err := tokenizer.PluginFactory(tokenizer.PluginType, fwkplugin.StrictDecoder(json.RawMessage(`{}`)), handle)
+			require.NoError(t, err)
+			approx, err := approximateprefix.ApproxPrefixCacheFactory("approx", nil, handle)
+			require.NoError(t, err)
+			dag, err := datalayer.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{tp, approx})
+			require.NoError(t, err)
+
+			preRequest := []fwkrc.PreRequest{approx.(fwkrc.PreRequest)}
+			if tt.preRequestErr != nil {
+				preRequest = append(preRequest, &mockPreRequestPlugin{name: "fail-pre-request", err: tt.preRequestErr})
+			}
+			cfg := NewConfig().
+				WithAdmissionPlugins(newMockAdmissionPlugin("admit", nil)).
+				WithDataProducerPlugins(tp.(fwkrc.DataProducer), approx.(fwkrc.DataProducer)).
+				WithPreRequestPlugins(preRequest...)
+			cfg.OrderPlugins(dag)
+			dir.requestControlPlugins = *cfg
+
+			const requestID = "continuation-request"
+			body, err := json.Marshal(map[string]any{"model": "m", "prompt": strings.Repeat("The quick brown fox. ", 20)})
+			require.NoError(t, err)
+			reqCtx := &handlers.RequestContext{
+				Request: &handlers.Request{
+					ID: requestID,
+					Headers: map[string]string{
+						reqcommon.RequestIDHeaderKey: requestID,
+						":path":                      "/v1/completions",
+					},
+					RawBody: body,
+				},
+				Parser: openai.NewOpenAIParser(),
+			}
+			parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
+			require.NoError(t, err)
+
+			_, handleErr := dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+			if tt.preRequestErr != nil {
+				require.Error(t, handleErr)
+			} else {
+				require.NoError(t, handleErr)
+			}
+
+			state := approx.(interface{ PluginState() *fwkplugin.PluginState }).PluginState()
+			_, tracked := state.LastAccessTime(requestID)
+			assert.Equal(t, tt.wantTracked, tracked, "continuation state after HandleRequest")
+		})
+	}
+}
+
 // TestDirector_SharedRequestIDHeaderReleasesInFlightLoad verifies that two
 // overlapping requests sharing an x-request-id each release their in-flight
 // load in the inflight-load-producer when they complete.
@@ -3088,6 +3166,35 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 	defer ps.mu.Unlock()
 	assert.Empty(t, ps.respsOnStreaming[0].TerminationCause,
 		"mid-stream chunks carry no cause: the stream has not ended")
+}
+
+func TestDirector_HandleResponseBody_CompletionAtEndOfStream(t *testing.T) {
+	for _, endOfStream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("endOfStream=%v", endOfStream), func(t *testing.T) {
+			ps := newTestResponseStreaming("ps")
+			ctx := logutil.NewTestLoggerIntoContext(context.Background())
+			director := NewDirectorWithConfig(nil, &mockScheduler{}, nil, nil,
+				NewConfig().WithResponseStreamingPlugins(ps), "")
+
+			reqCtx := newResponseBodyTestRequestContext("test-req-id")
+			reqCtx.Completion = &fwkrh.Completion{Text: "hello", FinishReason: "stop"}
+
+			director.HandleResponseBody(ctx, reqCtx, endOfStream)
+
+			require.Eventually(t, func() bool {
+				ps.mu.Lock()
+				defer ps.mu.Unlock()
+				return len(ps.respsOnStreaming) == 1
+			}, time.Second, 10*time.Millisecond)
+			ps.mu.Lock()
+			defer ps.mu.Unlock()
+			if endOfStream {
+				assert.Equal(t, reqCtx.Completion, ps.respsOnStreaming[0].Completion)
+			} else {
+				assert.Nil(t, ps.respsOnStreaming[0].Completion)
+			}
+		})
+	}
 }
 
 // TestPrepareRequest_ConditionalDecodeDefaultDeny pins the director's
