@@ -33,10 +33,17 @@ import (
 type mockScreener struct {
 	name   string
 	screen func([]fwksched.Endpoint) []fwksched.Endpoint
+	// consumes declares the endpoint attributes screen reads, so the scope the
+	// director applies at Screener lets them through.
+	consumes map[fwkplugin.DataKey]any
 }
 
 func (f *mockScreener) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "mock-screener", Name: f.name}
+}
+
+func (f *mockScreener) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: f.consumes}
 }
 
 func (f *mockScreener) Screen(

@@ -137,8 +137,8 @@ func TestDirector_RunsRequestHandlingProducersBeforeScreeners(t *testing.T) {
 		recorder.order = append(recorder.order, "screener")
 		_, sawPreData = endpoints[0].Get(preKey)
 		return endpoints
-	}}
-	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{pre, sched})
+	}, consumes: map[fwkplugin.DataKey]any{preKey: 0}}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{pre, sched, screener})
 
 	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
 	dir.requestControlPlugins = *NewConfig().
