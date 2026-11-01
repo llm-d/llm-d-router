@@ -195,7 +195,7 @@ sequenceDiagram
             end
         end
 
-        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang) transfer KV differently - see KV and EC transfer protocols.
+        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang, kv-offloading) transfer KV differently - see KV and EC transfer protocols.
         Coordinator->>Gateway: Call (x-llm-d-epp-profile: prefill)
         Gateway->>EPP: ext_proc: pick pod (profile=prefill)
         EPP-->>Gateway: Chosen prefill pod
@@ -290,6 +290,10 @@ routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
+A client-provided `kv_transfer_params` body field is dropped on the inference routes,
+which parse the body, because it names the pod a model server pulls KV from and
+`p2p-source-producer` treats a request that carries `remote_prefiller` as a decode request.
+The passthrough forwards the body verbatim, so the field reaches EPP on every other path.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -425,11 +429,34 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-nixl` | `nixlv2` | NIXL P2P RDMA: prefill stores KV for remote decode; decode pulls it via `remote_engine_id` / `remote_block_ids` / `remote_host` / `remote_port`. |
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
+| `kv-offloading` | `offloading` | vLLM `OffloadingConnector` P2P tier: prefill stores KV in its P2P tier under `remote_decoder.kv_request_id`; decode pulls it with `remote_prefiller` (`kv_request_id`, `remote_host`, `remote_port`). |
 
 The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
+
+`kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
+its `p2p-source-producer` sets the prefill pod's P2P tier address on the
+`x-llm-d-kv-cache-prefill-p2p-host-port` request header, and its
+`request-header-copy-handler` copies it onto the prefill response, which needs
+`response_header_mode: SEND` on the EPP `ext_proc` filter. The `prefill` step reads it,
+and the decode request names the prefill pod with it. A prefill response without the
+header, or with a value that is not a `host:port` with a TCP port, fails the request
+before decode is sent.
+
+`p2p-source-producer` writes the prefill pod's P2P address only when its
+`prefillProfileName` parameter (default `prefill`) names the profile the prefill EPP ran,
+which `header-profile-handler` picks from `x-llm-d-epp-profile: prefill`. See
+[Prefill profile name](../pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/README.md#prefill-profile-name).
+
+A cached-prefix pull from a third pod is written by the same EPP plugin into
+the prefill request body, so the coordinator never handles it; on a decode request it
+writes nothing next to `remote_prefiller`. A pipeline without a `prefill` step sends an
+empty `kv_transfer_params`, which the plugin may fill with a cached-prefix source on the
+decode request. See the
+[plugin README](../pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/README.md)
+and the [header copy README](../pkg/epp/framework/plugins/requestcontrol/responsereceived/headercopy/README.md).
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -738,7 +765,7 @@ connector. They must agree with the connector configured on the vLLM pods.
 
 | Key | Values | Default |
 | :---- | :---- | :---- |
-| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang` | `kv-shared-storage` |
+| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang`, `kv-offloading` | `kv-shared-storage` |
 | `ec_connector` | `ec-nixl`, `ec-shared-storage` | `ec-shared-storage` |
 
 KV and EC are independent: `ec-nixl` can pair with `kv-shared-storage`, and so on. A
