@@ -3,7 +3,7 @@
 Please access the
 [llm-d organization contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md) for overall contributing guidelines. This document covers only what is different or specific to this repository.
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for how to build, run, and test the codebase.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for how to build, run, and test the codebase, and [docs/review_playbook.md](docs/review_playbook.md) for review standards.
 
 ## Claiming an issue
 
