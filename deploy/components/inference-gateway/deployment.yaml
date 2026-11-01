@@ -52,6 +52,7 @@ spec:
             service: liveness
           periodSeconds: 5
           failureThreshold: 60
+          timeoutSeconds: 5
         livenessProbe:
           grpc:
             port: 9003

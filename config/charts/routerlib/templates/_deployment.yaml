@@ -163,6 +163,15 @@
         {{- if .Values.router.epp.extraContainerPorts }}
             {{- toYaml .Values.router.epp.extraContainerPorts | nindent 12 }}
         {{- end }}
+          # Startup gets its own budget so liveness cannot restart the
+          # container while it is still initializing.
+          startupProbe:
+            grpc:
+              port: {{ $grpcHealthPort }}
+              service: liveness
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 5
           livenessProbe:
             grpc:
               port: {{ $grpcHealthPort }}
